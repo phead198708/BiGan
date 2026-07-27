@@ -19,6 +19,15 @@ DEVELOPMENT_REGISTRY_SCHEMA_VERSION = (
 SUCCESS_STANDARD_SCHEMA_VERSION = (
     "bigan-v8-challenge-historical-development-success-standard-v1"
 )
+SUCCESS_STANDARD_V2_SCHEMA_VERSION = (
+    "bigan-v8-challenge-historical-development-success-standard-v2"
+)
+SCALE_INVARIANCE_GOVERNANCE_SCHEMA_VERSION = (
+    "bigan-v8-challenge-historical-development-scale-invariance-governance-v1"
+)
+ATTEMPT_002_SUPERSESSION_SCHEMA_VERSION = (
+    "bigan-v8-challenge-attempt-002-execution-manifest-supersession-v1"
+)
 ITERATION_LEDGER_SCHEMA_VERSION = (
     "bigan-v8-challenge-historical-development-iteration-ledger-v1"
 )
@@ -345,12 +354,154 @@ def validate_historical_development_registry(
     _raise_failed_checks("historical development registry", checks)
 
 
+def validate_scale_invariance_governance(
+    governance: Mapping[str, Any],
+) -> None:
+    """Validate the additive record that invalidates iteration 3's old pass."""
+
+    affected = dict(governance.get("affected_historical_result") or {})
+    audit = dict(governance.get("audit") or {})
+    alpha = dict(governance.get("alpha_spending_ledger_update") or {})
+    paired = dict(governance.get("paired_gate_diagnostic") or {})
+    conclusion = dict(governance.get("conclusion") or {})
+    metrics = dict(governance.get("candidate_only_metric_comparison") or {})
+    expected_ratios = {
+        "absolute_bootstrap_lcb",
+        "first_half_bootstrap_ucb",
+        "first_half_total_after_cost_pnl",
+        "largest_winner_after_cost_pnl",
+        "largest_winner_removed_after_cost_pnl",
+        "second_half_bootstrap_ucb",
+        "second_half_total_after_cost_pnl",
+        "total_after_cost_pnl",
+    }
+    checks = {
+        "schema": governance.get("schema_version")
+        == SCALE_INVARIANCE_GOVERNANCE_SCHEMA_VERSION,
+        "issue": governance.get("issue") == 262,
+        "affected_result": affected.get(
+            "iteration_003_result_sha256"
+        )
+        == "997cd1ad280cdb6ad1125d9c2629d283f47e2765317f04557f4fdfc7eb972790"
+        and affected.get("historical_success_claim_valid_after_review") is False
+        and affected.get("recorded_iteration_artifacts_rewritten") is False
+        and affected.get("superseded_success_standard_sha256")
+        == "07609f09692723dd1e650080cfdd29466a7ee8a0f8c30d8378045a8ee3523114",
+        "same_trade_set": audit.get("selected_market_action_pairs_identical")
+        is True
+        and audit.get("selected_market_count_iteration_001") == 5
+        and audit.get("selected_market_count_iteration_003") == 5
+        and audit.get("baseline_after_cost_pnl_identical_row_by_row") is True,
+        "candidate_scale": audit.get("candidate_position_size_iteration_001")
+        == 0.2
+        and audit.get("candidate_position_size_iteration_003") == 1.0
+        and audit.get("candidate_only_metric_scale_factor") == 5.0
+        and set(metrics) == expected_ratios
+        and all(
+            _float_equal(dict(metrics[name]).get("ratio"), 5.0)
+            for name in expected_ratios
+        ),
+        "paired_not_five_times": audit.get(
+            "paired_metrics_are_exactly_five_times_iteration_001"
+        )
+        is False
+        and paired.get("baseline_total_after_cost_pnl_both_iterations")
+        == -1.09565
+        and paired.get("iteration_001_paired_lcb") == -0.1514512500000002
+        and paired.get("iteration_003_paired_lcb") == 0.6115974999999999
+        and paired.get("paired_lcb_flipped_positive") is True,
+        "conclusion": conclusion.get(
+            "iteration_003_constitutes_historical_success"
+        )
+        is False
+        and conclusion.get("attempt_002_may_rely_on_iteration_003") is False
+        and conclusion.get("pure_sizing_change_can_be_a_future_candidate")
+        is False
+        and conclusion.get("required_remediation")
+        == (
+            "evaluate_candidate_and_baseline_at_unit_sizing_for_every_"
+            "statistical_gate"
+        ),
+        "slots": alpha.get("maximum_development_iterations") == 5
+        and alpha.get("development_iteration_budget_increased") is False
+        and alpha.get("remaining_iteration_slots") == [4, 5]
+        and all(alpha.get(f"slot_{slot}_consumed") is True for slot in (1, 2, 3)),
+        "safety": governance.get("safety") == SAFE_FALSES,
+    }
+    _raise_failed_checks("scale-invariance governance", checks)
+
+
+def validate_attempt_002_supersession(
+    supersession: Mapping[str, Any],
+) -> None:
+    """Validate the additive attempt-002 supersession before any external use."""
+
+    disposition = dict(supersession.get("disposition") or {})
+    lineage = dict(supersession.get("lineage") or {})
+    policy = dict(supersession.get("frozen_artifact_policy") or {})
+    reason = dict(supersession.get("reason") or {})
+    checks = {
+        "schema": supersession.get("schema_version")
+        == ATTEMPT_002_SUPERSESSION_SCHEMA_VERSION,
+        "identity": supersession.get("issue") == 262
+        and supersession.get("attempt_id")
+        == "v8-1-challenger-future-attempt-002",
+        "lineage": lineage.get("attempt_002_preregistration_sha256")
+        == "0fa091610966a3a3470872a7e1b5832c8a32985fc312235366ad41aa891f249f"
+        and lineage.get("attempt_002_execution_manifest_sha256")
+        == "f58e53f317ecdc7de467570b93094034a201a545d50efd48abc54194ea47eabf"
+        and lineage.get("scale_invariance_governance_record_sha256")
+        == "e8898ef5aa1c4b796109c0d03920d794842472bdfb271f9db7221a100bc8590f",
+        "superseded": disposition.get("status")
+        == "superseded_before_collection_or_target_access"
+        and disposition.get("historical_eligibility_valid_after_governance_review")
+        is False
+        and disposition.get("promotion_evidence_eligible") is False,
+        "nothing_started": all(
+            disposition.get(field) is False
+            for field in (
+                "attempt_consumed_by_target_access",
+                "collection_authorized",
+                "collection_started",
+                "outcomes_resolution_labels_or_pnl_opened",
+                "service_root_created",
+                "target_access_claim_created",
+                "target_access_occurred",
+            )
+        ),
+        "additive": policy.get("additive_supersession_companion") is True
+        and policy.get("original_attempt_002_artifacts_rewritten") is False
+        and policy.get(
+            "supersession_marker_must_be_checked_before_authorization_"
+            "collection_target_access_or_promotion"
+        )
+        is True,
+        "reason": reason.get("code")
+        == "historical_success_invalidated_by_scale_invariance_gate_defect"
+        and reason.get("iteration_003_constitutes_historical_success") is False
+        and reason.get(
+            "replacement_future_attempt_may_be_preregistered_only_after_"
+            "revised_historical_standard_passes"
+        )
+        is True,
+        "safety": supersession.get("safety") == SAFE_FALSES,
+    }
+    _raise_failed_checks("attempt-002 supersession", checks)
+
+
 def validate_historical_development_success_standard(
     standard: Mapping[str, Any],
     *,
     expected_registry_sha256: str,
 ) -> None:
     """Validate exact preregistered historical success semantics."""
+
+    if standard.get("schema_version") == SUCCESS_STANDARD_V2_SCHEMA_VERSION:
+        _validate_historical_development_success_standard_v2(
+            standard,
+            expected_registry_sha256=expected_registry_sha256,
+        )
+        return
 
     corpus = dict(standard.get("development_corpus") or {})
     paired = dict(standard.get("full_window_paired_gate") or {})
@@ -501,6 +652,227 @@ def validate_historical_development_success_standard(
     _raise_failed_checks("historical development success standard", checks)
 
 
+def _validate_historical_development_success_standard_v2(
+    standard: Mapping[str, Any],
+    *,
+    expected_registry_sha256: str,
+) -> None:
+    """Validate the strictly tighter, scale-invariant iteration-4/5 standard."""
+
+    corpus = dict(standard.get("development_corpus") or {})
+    sizing = dict(standard.get("statistical_sizing_policy") or {})
+    paired = dict(standard.get("full_window_paired_gate") or {})
+    paired_bootstrap = dict(paired.get("bootstrap") or {})
+    absolute = dict(standard.get("absolute_candidate_gate") or {})
+    absolute_bootstrap = dict(absolute.get("bootstrap") or {})
+    robustness = dict(standard.get("robustness_gates") or {})
+    split = dict(robustness.get("chronological_split") or {})
+    half = dict(robustness.get("half_window_not_significantly_negative") or {})
+    half_bootstrap = dict(half.get("bootstrap") or {})
+    support = dict(standard.get("support_consistency_gate") or {})
+    future = dict(standard.get("future_protocol_alignment") or {})
+    concentration = dict(standard.get("concentration_diagnostics") or {})
+    discipline = dict(standard.get("iteration_discipline") or {})
+    promotion = dict(standard.get("promotion_evidence_policy") or {})
+    lineage = dict(standard.get("lineage") or {})
+    tightening = dict(standard.get("strict_tightening") or {})
+    checks = {
+        "schema": standard.get("schema_version")
+        == SUCCESS_STANDARD_V2_SCHEMA_VERSION,
+        "issue": standard.get("issue") == 262,
+        "frozen": standard.get("frozen") is True
+        and standard.get("frozen_before_iteration_004_replay") is True,
+        "registry": corpus.get("registry_sha256") == expected_registry_sha256,
+        "exact_195": corpus.get("exact_market_count") == 195
+        and corpus.get("chronological_order_required") is True
+        and corpus.get("market_id_unique_required") is True
+        and corpus.get("market_id_sequence_sha256")
+        == "fef9eda7b8dac138b88c75f96b010bd40953795b2bcf7424debf77a004e06883"
+        and corpus.get("market_id_sequence_sha256_method")
+        == "sha256_of_utf8_market_ids_one_per_line_with_final_newline",
+        "scale_invariant_sizing": sizing
+        == {
+            "baseline_declared_sizing_is_report_only": True,
+            "baseline_unit_pnl_definition": (
+                "baseline_after_cost_pnl_divided_by_"
+                "baseline_declared_position_size"
+            ),
+            "candidate_declared_sizing_is_report_only": True,
+            "candidate_unit_pnl_definition": (
+                "candidate_after_cost_pnl_divided_by_"
+                "candidate_declared_position_size"
+            ),
+            "comparison_rows_must_declare_candidate_and_baseline_position_size": True,
+            "declared_size_must_be_finite_and_strictly_positive": True,
+            "no_trade_unit_pnl": 0.0,
+            "statistical_gate_position_size": 1.0,
+            "unit_sizing_applies_to": [
+                "full_window_paired_lcb",
+                "absolute_candidate_lcb",
+                "largest_winner_removed",
+                "chronological_half_window_checks",
+            ],
+        },
+        "paired_scope": paired.get("comparison_scope") == "all_195_markets"
+        and paired.get("no_trade_after_cost_unit_sizing_pnl") == 0.0
+        and paired.get("baseline_id") == "matched_frozen_v6_7"
+        and paired.get("candidate_id_role")
+        == "preregistered_development_candidate",
+        "paired_lcb": paired.get(
+            "candidate_minus_baseline_after_cost_unit_sizing_pnl_"
+            "bootstrap_lcb_minimum_exclusive"
+        )
+        == 0.0
+        and paired_bootstrap
+        == {
+            "confidence_level": 0.975,
+            "lower_confidence_bound_quantile": 0.025,
+            "method": "paired_market_percentile_bootstrap",
+            "resample_count": 10000,
+            "seed": 26219501,
+            "unit": "market_id",
+        },
+        "absolute_lcb": absolute.get(
+            "candidate_total_after_cost_unit_sizing_pnl_bootstrap_"
+            "lcb_minimum_exclusive"
+        )
+        == 0.0
+        and absolute.get("no_trade_after_cost_unit_sizing_pnl") == 0.0
+        and absolute_bootstrap
+        == {
+            "confidence_level": 0.975,
+            "lower_confidence_bound_quantile": 0.025,
+            "method": "market_percentile_bootstrap",
+            "resample_count": 10000,
+            "seed": 26219502,
+            "unit": "market_id",
+        },
+        "largest_winner": robustness.get(
+            "candidate_largest_winner_removed_total_after_cost_unit_sizing_"
+            "pnl_minimum_exclusive"
+        )
+        == 0.0,
+        "split": split
+        == {
+            "first_half_market_count": 97,
+            "method": "first_floor_n_over_2_then_remaining",
+            "second_half_market_count": 98,
+        },
+        "half_window_gate": half.get("gate_definition")
+        == (
+            "one_sided_bootstrap_upper_confidence_bound_"
+            "greater_than_or_equal_to_zero_at_unit_sizing"
+        )
+        and half.get("first_half_seed") == 26219503
+        and half.get("second_half_seed") == 26219504
+        and half.get("upper_confidence_bound_minimum_inclusive") == 0.0
+        and half_bootstrap
+        == {
+            "confidence_level": 0.975,
+            "method": "market_percentile_bootstrap",
+            "resample_count": 10000,
+            "unit": "market_id",
+            "upper_confidence_bound_quantile": 0.975,
+        },
+        "support": support
+        == {
+            "accepted_market_count_minimum_inclusive": 39,
+            "accepted_market_rate_minimum_inclusive": 0.2,
+            "expected_future_market_count": 120,
+            "future_minimum_accepted_support": 24,
+            "future_support_mode": (
+                "full_window_paired_with_minimum_20_percent_accepted_support"
+            ),
+            "gate_definition": (
+                "accepted_market_count_must_be_at_least_39_of_195"
+            ),
+            "hard_gate": True,
+            "report_expected_future_accepted_market_count": True,
+        },
+        "future_isomorphic": future.get("full_window_paired_gate_required") is True
+        and future.get("absolute_candidate_lcb_gate_required") is True
+        and future.get("minimum_accepted_support") == 24
+        and future.get("statistical_gate_position_size") == 1.0
+        and future.get(
+            "replacement_future_attempt_may_be_preregistered_only_after_"
+            "all_revised_historical_gates_pass"
+        )
+        is True
+        and future.get(
+            "historical_and_future_success_standard_must_be_"
+            "structurally_isomorphic"
+        )
+        is True
+        and future.get("superseded_attempt_002_may_be_started") is False,
+        "concentration_diagnostic_only": concentration.get("hard_gate") is False
+        and concentration.get("report_selected_side_distribution") is True
+        and concentration.get(
+            "report_largest_absolute_single_market_pnl_share"
+        )
+        is True
+        and concentration.get("report_selected_action_distribution") is True
+        and concentration.get("report_largest_winner_share_of_positive_pnl")
+        is True
+        and concentration.get("required_side_labels")
+        == ["UP", "DOWN", "NONE"],
+        "discipline": discipline.get("maximum_development_iterations") == 5
+        and discipline.get("consumed_iteration_slots") == [1, 2, 3]
+        and discipline.get("remaining_iteration_slots") == [4, 5]
+        and discipline.get("development_iteration_budget_increased") is False
+        and discipline.get("pure_sizing_change_allowed_as_candidate") is False
+        and discipline.get(
+            "candidate_change_preregistration_required_before_evaluation"
+        )
+        is True
+        and discipline.get("alpha_ledger_entry_required_for_every_evaluation")
+        is True
+        and discipline.get("multiple_candidates_per_iteration_allowed") is False
+        and discipline.get("unpreregistered_grid_search_allowed") is False
+        and discipline.get("comprehensive_review_required_after_limit") is True,
+        "lineage": lineage
+        == {
+            "attempt_002_execution_manifest_supersession_sha256": (
+                "fdd9b03d3a77343a4310218da2955061d664f0c914c7d979b5ec92a280e32033"
+            ),
+            "ledger_genesis_frozen_success_standard_sha256": (
+                "07609f09692723dd1e650080cfdd29466a7ee8a0f8c30d8378045a8ee3523114"
+            ),
+            "permitted_previous_iteration_entry_semantic_sha256": (
+                "abe1eb3b6e03530c15cb51326801e783454a0be4d5885edd7dcca8dab22779ae"
+            ),
+            "scale_invariance_governance_record_sha256": (
+                "e8898ef5aa1c4b796109c0d03920d794842472bdfb271f9db7221a100bc8590f"
+            ),
+            "strictly_tightens_success_standard_sha256": (
+                "07609f09692723dd1e650080cfdd29466a7ee8a0f8c30d8378045a8ee3523114"
+            ),
+        },
+        "strict_tightening": tightening
+        == {
+            "prior_frozen_artifacts_rewritten": False,
+            "scale_invariance_defect_removed": True,
+            "support_gate_added": True,
+            "weakened_or_removed_prior_gate": False,
+        },
+        "historical_never_promotes": promotion.get(
+            "historical_development_results_are_promotion_evidence"
+        )
+        is False
+        and promotion.get(
+            "historical_pass_can_unlock_replacement_future_attempt_"
+            "preregistration_only"
+        )
+        is True
+        and promotion.get("promotion_evidence_source")
+        == "not_yet_collected_replacement_future_window_only",
+        "safety": standard.get("safety") == SAFE_FALSES,
+    }
+    _raise_failed_checks(
+        "historical development success standard v2",
+        checks,
+    )
+
+
 def validate_historical_development_ledger_root(
     ledger: Mapping[str, Any],
     *,
@@ -590,11 +962,17 @@ def validate_iteration_preregistration(
     expected_ledger_root_sha256: str,
     expected_previous_entry_sha256: str,
     expected_implementation_base_commit: str,
+    success_standard: Mapping[str, Any] | None = None,
 ) -> None:
     """Require a concrete, one-candidate rationale before outcome-aware replay."""
 
     changed = list(preregistration.get("changed_components") or [])
     inputs = dict(preregistration.get("input_artifact_sha256s") or {})
+    scale_invariant_standard = (
+        success_standard is not None
+        and success_standard.get("schema_version")
+        == SUCCESS_STANDARD_V2_SCHEMA_VERSION
+    )
     checks = {
         "schema": preregistration.get("schema_version")
         == ITERATION_PREREGISTRATION_SCHEMA_VERSION,
@@ -613,6 +991,7 @@ def validate_iteration_preregistration(
         "changed_components": bool(changed)
         and len(changed) == len(set(changed))
         and set(changed) <= {"controller", "threshold", "feature", "sizing"},
+        "not_pure_sizing": not scale_invariant_standard or changed != ["sizing"],
         "rationale": all(
             isinstance(preregistration.get(field), str)
             and bool(str(preregistration.get(field)).strip())
@@ -661,7 +1040,18 @@ def evaluate_historical_development_candidate(
         success_standard,
         expected_registry_sha256=registry_sha,
     )
-    normalized = [_normalize_comparison_row(row, index) for index, row in enumerate(comparison_rows)]
+    scale_invariant_standard = (
+        success_standard.get("schema_version")
+        == SUCCESS_STANDARD_V2_SCHEMA_VERSION
+    )
+    normalized = [
+        _normalize_comparison_row(
+            row,
+            index,
+            require_position_sizes=scale_invariant_standard,
+        )
+        for index, row in enumerate(comparison_rows)
+    ]
     expected_count = int(success_standard["development_corpus"]["exact_market_count"])
     if len(normalized) != expected_count:
         raise ChallengeHistoricalDevelopmentError(
@@ -679,8 +1069,28 @@ def evaluate_historical_development_candidate(
             "comparison market_id sequence does not match the frozen exact-195 corpus"
         )
 
-    candidate_pnl = [row["candidate_after_cost_pnl"] for row in normalized]
-    baseline_pnl = [row["baseline_after_cost_pnl"] for row in normalized]
+    candidate_declared_pnl = [
+        row["candidate_after_cost_pnl"] for row in normalized
+    ]
+    baseline_declared_pnl = [
+        row["baseline_after_cost_pnl"] for row in normalized
+    ]
+    candidate_pnl = [
+        (
+            row["candidate_unit_after_cost_pnl"]
+            if scale_invariant_standard
+            else row["candidate_after_cost_pnl"]
+        )
+        for row in normalized
+    ]
+    baseline_pnl = [
+        (
+            row["baseline_unit_after_cost_pnl"]
+            if scale_invariant_standard
+            else row["baseline_after_cost_pnl"]
+        )
+        for row in normalized
+    ]
     paired_delta = [
         candidate - baseline
         for candidate, baseline in zip(candidate_pnl, baseline_pnl, strict=True)
@@ -736,7 +1146,24 @@ def evaluate_historical_development_candidate(
     future_count = int(support_spec["expected_future_market_count"])
     expected_future_support = acceptance_rate * future_count
     future_minimum = support_spec["future_minimum_accepted_support"]
-    support_passed = future_minimum is None or expected_future_support >= float(future_minimum)
+    if scale_invariant_standard:
+        minimum_accepted = int(
+            support_spec["accepted_market_count_minimum_inclusive"]
+        )
+        minimum_rate = float(
+            support_spec["accepted_market_rate_minimum_inclusive"]
+        )
+        support_passed = (
+            len(accepted) >= minimum_accepted
+            and acceptance_rate >= minimum_rate
+            and expected_future_support >= float(future_minimum)
+        )
+    else:
+        minimum_accepted = None
+        support_passed = (
+            future_minimum is None
+            or expected_future_support >= float(future_minimum)
+        )
     side_distribution = Counter(row["candidate_side"] for row in normalized)
     action_distribution = Counter(row["candidate_action"] for row in normalized)
     absolute_pnl_sum = sum(abs(value) for value in candidate_pnl)
@@ -759,6 +1186,14 @@ def evaluate_historical_development_candidate(
         "first_half_not_significantly_negative": first_ucb >= 0.0,
         "second_half_not_significantly_negative": second_ucb >= 0.0,
         "support_consistent_with_future_protocol": support_passed,
+        "accepted_market_count_at_least_39": (
+            len(accepted) >= minimum_accepted
+            if minimum_accepted is not None
+            else True
+        ),
+        "statistical_gates_use_unit_sizing": scale_invariant_standard
+        or success_standard.get("schema_version")
+        == SUCCESS_STANDARD_SCHEMA_VERSION,
         "historical_results_not_promotion_evidence": True,
         "all_safety_unlocks_remain_false": True,
     }
@@ -775,9 +1210,24 @@ def evaluate_historical_development_candidate(
             "accepted_market_count": len(accepted),
             "acceptance_rate": acceptance_rate,
             "expected_accepted_markets_in_120": expected_future_support,
-            "candidate_total_after_cost_pnl": sum(candidate_pnl),
-            "baseline_total_after_cost_pnl": sum(baseline_pnl),
-            "candidate_minus_baseline_total_after_cost_pnl": sum(paired_delta),
+            "statistical_gate_position_size": (
+                1.0 if scale_invariant_standard else None
+            ),
+            "candidate_total_after_cost_pnl": sum(candidate_declared_pnl),
+            "baseline_total_after_cost_pnl": sum(baseline_declared_pnl),
+            "candidate_minus_baseline_total_after_cost_pnl": sum(
+                candidate - baseline
+                for candidate, baseline in zip(
+                    candidate_declared_pnl,
+                    baseline_declared_pnl,
+                    strict=True,
+                )
+            ),
+            "candidate_unit_sizing_total_after_cost_pnl": sum(candidate_pnl),
+            "baseline_unit_sizing_total_after_cost_pnl": sum(baseline_pnl),
+            "candidate_minus_baseline_unit_sizing_total_after_cost_pnl": sum(
+                paired_delta
+            ),
             "candidate_largest_winner_after_cost_pnl": largest_winner,
             "candidate_largest_winner_removed_after_cost_pnl": largest_winner_removed,
             "first_half_candidate_total_after_cost_pnl": sum(first_pnl),
@@ -798,7 +1248,12 @@ def evaluate_historical_development_candidate(
         },
         "checks": checks,
         "all_historical_success_criteria_passed": all_passed,
-        "attempt_002_preregistration_allowed": all_passed,
+        "attempt_002_preregistration_allowed": (
+            all_passed if not scale_invariant_standard else False
+        ),
+        "replacement_future_attempt_preregistration_allowed": (
+            all_passed if scale_invariant_standard else False
+        ),
         "historical_development_only": True,
         "promotion_evidence_eligible": False,
         "safety": SAFE_FALSES,
@@ -857,7 +1312,16 @@ def run_historical_development_evaluation(
         ledger,
         expected_attempt_closure_sha256=config.expected_attempt_closure_sha256,
         expected_registry_sha256=config.expected_registry_sha256,
-        expected_success_standard_sha256=config.expected_success_standard_sha256,
+        expected_success_standard_sha256=(
+            str(
+                (standard.get("lineage") or {}).get(
+                    "ledger_genesis_frozen_success_standard_sha256"
+                )
+            )
+            if standard.get("schema_version")
+            == SUCCESS_STANDARD_V2_SCHEMA_VERSION
+            else config.expected_success_standard_sha256
+        ),
     )
     validate_iteration_preregistration(
         preregistration,
@@ -868,8 +1332,12 @@ def run_historical_development_evaluation(
         expected_ledger_root_sha256=config.expected_ledger_root_sha256,
         expected_previous_entry_sha256=config.previous_iteration_entry_sha256,
         expected_implementation_base_commit=config.implementation_base_commit,
+        success_standard=standard,
     )
-    previous_entry = _validate_previous_iteration_entry(config)
+    previous_entry = _validate_previous_iteration_entry(
+        config,
+        success_standard=standard,
+    )
     _verify_sha256(
         config.comparison_rows_path,
         config.expected_comparison_rows_sha256,
@@ -952,6 +1420,9 @@ def run_historical_development_evaluation(
         "attempt_002_preregistration_allowed": report[
             "attempt_002_preregistration_allowed"
         ],
+        "replacement_future_attempt_preregistration_allowed": report[
+            "replacement_future_attempt_preregistration_allowed"
+        ],
         "safety": SAFE_FALSES,
     }
     manifest_path = run_dir / "challenge_historical_development_manifest.json"
@@ -973,6 +1444,8 @@ def run_historical_development_evaluation(
 def _normalize_comparison_row(
     row: Mapping[str, Any],
     chronological_index: int,
+    *,
+    require_position_sizes: bool = False,
 ) -> dict[str, Any]:
     market_id = str(row.get("market_id") or "")
     if not market_id:
@@ -1022,6 +1495,49 @@ def _normalize_comparison_row(
         candidate - baseline,
     ):
         raise ChallengeHistoricalDevelopmentError("paired market PnL delta does not reconcile")
+    candidate_size_value = row.get("candidate_declared_position_size")
+    baseline_size_value = row.get("baseline_declared_position_size")
+    if require_position_sizes and (
+        candidate_size_value is None or baseline_size_value is None
+    ):
+        raise ChallengeHistoricalDevelopmentError(
+            "scale-invariant comparison rows must declare candidate and "
+            "baseline position size"
+        )
+    candidate_size = (
+        _positive_finite_float(
+            candidate_size_value,
+            field="candidate_declared_position_size",
+        )
+        if candidate_size_value is not None
+        else 1.0
+    )
+    baseline_size = (
+        _positive_finite_float(
+            baseline_size_value,
+            field="baseline_declared_position_size",
+        )
+        if baseline_size_value is not None
+        else 1.0
+    )
+    candidate_unit_pnl = candidate / candidate_size
+    baseline_unit_pnl = baseline / baseline_size
+    supplied_candidate_unit = row.get("candidate_unit_after_cost_pnl")
+    supplied_baseline_unit = row.get("baseline_unit_after_cost_pnl")
+    if supplied_candidate_unit is not None and not _float_equal(
+        supplied_candidate_unit,
+        candidate_unit_pnl,
+    ):
+        raise ChallengeHistoricalDevelopmentError(
+            "candidate unit-sizing PnL does not reconcile"
+        )
+    if supplied_baseline_unit is not None and not _float_equal(
+        supplied_baseline_unit,
+        baseline_unit_pnl,
+    ):
+        raise ChallengeHistoricalDevelopmentError(
+            "baseline unit-sizing PnL does not reconcile"
+        )
     return {
         "chronological_index": chronological_index,
         "market_id": market_id,
@@ -1031,6 +1547,10 @@ def _normalize_comparison_row(
         "baseline_after_cost_pnl": baseline,
         "baseline_action": baseline_action,
         "baseline_side": baseline_side,
+        "candidate_declared_position_size": candidate_size,
+        "baseline_declared_position_size": baseline_size,
+        "candidate_unit_after_cost_pnl": candidate_unit_pnl,
+        "baseline_unit_after_cost_pnl": baseline_unit_pnl,
     }
 
 
@@ -1046,6 +1566,8 @@ def _side_for_action(action: str) -> str:
 
 def _validate_previous_iteration_entry(
     config: HistoricalDevelopmentEvaluationConfig,
+    *,
+    success_standard: Mapping[str, Any],
 ) -> dict[str, Any] | None:
     if config.iteration_number == 1:
         return None
@@ -1060,6 +1582,23 @@ def _validate_previous_iteration_entry(
             "previous iteration entry must be a JSON object"
         )
     expected = config.previous_iteration_entry_sha256
+    same_standard = (
+        payload.get("success_standard_sha256")
+        == config.expected_success_standard_sha256
+    )
+    v2_bridge = (
+        config.iteration_number == 4
+        and success_standard.get("schema_version")
+        == SUCCESS_STANDARD_V2_SCHEMA_VERSION
+        and payload.get("entry_sha256")
+        == (success_standard.get("lineage") or {}).get(
+            "permitted_previous_iteration_entry_semantic_sha256"
+        )
+        and payload.get("success_standard_sha256")
+        == (success_standard.get("lineage") or {}).get(
+            "strictly_tightens_success_standard_sha256"
+        )
+    )
     checks = {
         "schema": payload.get("schema_version") == ITERATION_ENTRY_SCHEMA_VERSION,
         "semantic_hash": payload.get("entry_sha256") == expected
@@ -1069,8 +1608,7 @@ def _validate_previous_iteration_entry(
         == config.expected_ledger_root_sha256,
         "registry": payload.get("development_registry_sha256")
         == config.expected_registry_sha256,
-        "standard": payload.get("success_standard_sha256")
-        == config.expected_success_standard_sha256,
+        "standard": same_standard or v2_bridge,
         "slot_consumed": payload.get("consumes_development_iteration_slot") is True,
         "historical_only": payload.get("historical_result_is_promotion_evidence")
         is False
@@ -1197,6 +1735,15 @@ def _finite_float(value: Any, *, field: str) -> float:
     return number
 
 
+def _positive_finite_float(value: Any, *, field: str) -> float:
+    number = _finite_float(value, field=field)
+    if number <= 0.0:
+        raise ChallengeHistoricalDevelopmentError(
+            f"{field} must be strictly positive"
+        )
+    return number
+
+
 def _float_equal(left: Any, right: Any, *, tolerance: float = 1e-12) -> bool:
     try:
         return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=tolerance)
@@ -1226,6 +1773,7 @@ def _require_sha256(value: Any, *, field: str) -> None:
 
 
 __all__ = [
+    "ATTEMPT_002_SUPERSESSION_SCHEMA_VERSION",
     "ATTEMPT_CLOSURE_SCHEMA_VERSION",
     "ChallengeHistoricalDevelopmentError",
     "DEVELOPMENT_REGISTRY_SCHEMA_VERSION",
@@ -1237,12 +1785,16 @@ __all__ = [
     "ITERATION_PREREGISTRATION_SCHEMA_VERSION",
     "ITERATION_RESULT_SCHEMA_VERSION",
     "SUCCESS_STANDARD_SCHEMA_VERSION",
+    "SUCCESS_STANDARD_V2_SCHEMA_VERSION",
+    "SCALE_INVARIANCE_GOVERNANCE_SCHEMA_VERSION",
     "ZERO_SHA256",
     "evaluate_historical_development_candidate",
     "run_historical_development_evaluation",
     "validate_attempt_001_closure",
+    "validate_attempt_002_supersession",
     "validate_historical_development_ledger_root",
     "validate_historical_development_registry",
     "validate_historical_development_success_standard",
     "validate_iteration_preregistration",
+    "validate_scale_invariance_governance",
 ]

@@ -1,0 +1,46 @@
+{
+  "attempt_id": "v8-1-challenger-future-attempt-002",
+  "disposition": {
+    "attempt_consumed_by_target_access": false,
+    "collection_authorized": false,
+    "collection_started": false,
+    "historical_eligibility_valid_after_governance_review": false,
+    "outcomes_resolution_labels_or_pnl_opened": false,
+    "promotion_evidence_eligible": false,
+    "service_root_created": false,
+    "status": "superseded_before_collection_or_target_access",
+    "target_access_claim_created": false,
+    "target_access_occurred": false
+  },
+  "frozen_artifact_policy": {
+    "additive_supersession_companion": true,
+    "original_attempt_002_artifacts_rewritten": false,
+    "supersession_marker_must_be_checked_before_authorization_collection_target_access_or_promotion": true
+  },
+  "issue": 262,
+  "lineage": {
+    "attempt_002_collection_execution_manifest_sha256": "6864cb2845c456aea1d65dd401a493aeaaaac432b803170125deeb0fb9ef2d5e",
+    "attempt_002_execution_manifest_sha256": "f58e53f317ecdc7de467570b93094034a201a545d50efd48abc54194ea47eabf",
+    "attempt_002_preregistration_sha256": "0fa091610966a3a3470872a7e1b5832c8a32985fc312235366ad41aa891f249f",
+    "attempt_002_promotion_execution_manifest_sha256": "cc731de845a0edb37ed2038e82acfd216535f4a4288e92f5135c2e87eca9d200",
+    "attempt_002_target_freeze_execution_manifest_sha256": "0a252c000f0a5160b04552fba91652d94e886c154ddbdaf5d85a9764487384bb",
+    "scale_invariance_governance_record_sha256": "e8898ef5aa1c4b796109c0d03920d794842472bdfb271f9db7221a100bc8590f"
+  },
+  "recorded_at": "2026-07-27T04:24:58Z",
+  "reason": {
+    "code": "historical_success_invalidated_by_scale_invariance_gate_defect",
+    "iteration_003_constitutes_historical_success": false,
+    "replacement_future_attempt_may_be_preregistered_only_after_revised_historical_standard_passes": true
+  },
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-attempt-002-execution-manifest-supersession-v1"
+}

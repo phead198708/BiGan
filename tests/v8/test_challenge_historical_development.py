@@ -15,10 +15,12 @@ from bigan.v8.polymarket.challenge_historical_development import (
     evaluate_historical_development_candidate,
     run_historical_development_evaluation,
     validate_attempt_001_closure,
+    validate_attempt_002_supersession,
     validate_historical_development_ledger_root,
     validate_historical_development_registry,
     validate_historical_development_success_standard,
     validate_iteration_preregistration,
+    validate_scale_invariance_governance,
 )
 from examples.v8 import run_challenge_historical_development as runner
 
@@ -75,6 +77,26 @@ def _passing_rows() -> list[dict]:
                 "candidate_minus_baseline_pnl": 0.1,
             }
         )
+    return rows
+
+
+def _v2_rows(*, accepted_count: int = 195, declared_size: float = 0.2) -> list[dict]:
+    rows = _passing_rows()
+    for index, row in enumerate(rows):
+        row["candidate_declared_position_size"] = declared_size
+        row["baseline_declared_position_size"] = 0.2
+        if index >= accepted_count:
+            row.update(
+                {
+                    "candidate_action": "NO_TRADE",
+                    "candidate_side": "NONE",
+                    "candidate_after_cost_pnl": 0.0,
+                    "candidate_minus_baseline_pnl": 0.0,
+                }
+            )
+        else:
+            row["candidate_after_cost_pnl"] = 0.1 * declared_size
+            row["candidate_minus_baseline_pnl"] = 0.1 * declared_size
     return rows
 
 
@@ -170,6 +192,89 @@ def test_frozen_artifacts_validate_and_sidecars_match() -> None:
     )
     assert len(_market_ids()) == 195
     assert len(set(_market_ids())) == 195
+
+
+def test_scale_invariance_governance_supersession_and_v2_standard_validate() -> None:
+    for stem in (
+        "challenge_historical_development_scale_invariance_governance",
+        "challenge_attempt_002_execution_manifest_supersession",
+        "challenge_historical_development_success_standard_v2",
+    ):
+        assert _sha256(CONFIG_DIR / f"{stem}.json") == _sidecar(
+            f"{stem}.sha256"
+        )
+
+    validate_scale_invariance_governance(
+        _json(
+            "challenge_historical_development_scale_invariance_governance.json"
+        )
+    )
+    validate_attempt_002_supersession(
+        _json("challenge_attempt_002_execution_manifest_supersession.json")
+    )
+    validate_historical_development_success_standard(
+        _json("challenge_historical_development_success_standard_v2.json"),
+        expected_registry_sha256=_sidecar(
+            "challenge_historical_development_data_registry.sha256"
+        ),
+    )
+
+
+def test_v2_statistical_gates_are_scale_invariant() -> None:
+    standard = _json(
+        "challenge_historical_development_success_standard_v2.json"
+    )
+    small = evaluate_historical_development_candidate(
+        _v2_rows(declared_size=0.2),
+        success_standard=standard,
+        candidate_id="scale-invariance-small",
+        iteration_number=4,
+    )
+    large = evaluate_historical_development_candidate(
+        _v2_rows(declared_size=1.0),
+        success_standard=standard,
+        candidate_id="scale-invariance-large",
+        iteration_number=4,
+    )
+
+    assert small["bootstrap"] == pytest.approx(large["bootstrap"])
+    assert small["metrics"][
+        "candidate_unit_sizing_total_after_cost_pnl"
+    ] == pytest.approx(
+        large["metrics"]["candidate_unit_sizing_total_after_cost_pnl"]
+    )
+    assert (
+        small["metrics"]["candidate_total_after_cost_pnl"]
+        != large["metrics"]["candidate_total_after_cost_pnl"]
+    )
+
+
+def test_v2_support_hard_gate_requires_39_of_195() -> None:
+    standard = _json(
+        "challenge_historical_development_success_standard_v2.json"
+    )
+    below = evaluate_historical_development_candidate(
+        _v2_rows(accepted_count=38),
+        success_standard=standard,
+        candidate_id="support-38",
+        iteration_number=4,
+    )
+    boundary = evaluate_historical_development_candidate(
+        _v2_rows(accepted_count=39),
+        success_standard=standard,
+        candidate_id="support-39",
+        iteration_number=4,
+    )
+
+    assert below["checks"]["accepted_market_count_at_least_39"] is False
+    assert below["all_historical_success_criteria_passed"] is False
+    assert boundary["checks"]["accepted_market_count_at_least_39"] is True
+    assert boundary["all_historical_success_criteria_passed"] is True
+    assert boundary["attempt_002_preregistration_allowed"] is False
+    assert (
+        boundary["replacement_future_attempt_preregistration_allowed"]
+        is True
+    )
 
 
 @pytest.mark.parametrize(

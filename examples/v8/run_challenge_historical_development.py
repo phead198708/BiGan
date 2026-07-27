@@ -25,7 +25,7 @@ DEFAULT_REGISTRY = (
     CONFIG_DIR / "challenge_historical_development_data_registry.json"
 )
 DEFAULT_STANDARD = (
-    CONFIG_DIR / "challenge_historical_development_success_standard.json"
+    CONFIG_DIR / "challenge_historical_development_success_standard_v2.json"
 )
 DEFAULT_LEDGER = (
     CONFIG_DIR / "challenge_historical_development_iteration_ledger.json"
@@ -216,6 +216,9 @@ def main(argv: list[str] | None = None) -> int:
         ],
         "attempt_002_preregistration_allowed": result["report"][
             "attempt_002_preregistration_allowed"
+        ],
+        "replacement_future_attempt_preregistration_allowed": result["report"][
+            "replacement_future_attempt_preregistration_allowed"
         ],
         "promotion_evidence_eligible": False,
         "collection_started": False,
