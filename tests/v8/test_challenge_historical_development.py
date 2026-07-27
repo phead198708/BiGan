@@ -731,3 +731,55 @@ def test_iteration_003_success_is_immutably_recorded() -> None:
     )
     assert result["promotion_evidence_eligible"] is False
     assert result["safety"] == SAFETY
+
+
+def test_iteration_004_failure_is_immutably_recorded() -> None:
+    stems = (
+        "challenge_historical_development_iteration_004_entry",
+        "challenge_historical_development_iteration_004_result",
+        "challenge_historical_development_iteration_004_target_free_manifest",
+        "challenge_historical_development_iteration_004_manifest",
+    )
+    for stem in stems:
+        path = CONFIG_DIR / f"{stem}.json"
+        assert _sha256(path) == _sidecar(f"{stem}.sha256")
+
+    entry = _json("challenge_historical_development_iteration_004_entry.json")
+    result = _json("challenge_historical_development_iteration_004_result.json")
+    semantic_payload = {
+        key: value for key, value in entry.items() if key != "entry_sha256"
+    }
+    semantic_sha256 = hashlib.sha256(
+        json.dumps(
+            semantic_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    assert entry["entry_sha256"] == (
+        "3c1ce6fcddf650ff9bd30bd46c3761b5df7fe785c88b06fa0b07ec9084a265b1"
+    )
+    assert semantic_sha256 == entry["entry_sha256"]
+    assert entry["previous_entry_sha256"] == (
+        "abe1eb3b6e03530c15cb51326801e783454a0be4d5885edd7dcca8dab22779ae"
+    )
+    assert entry["consumes_development_iteration_slot"] is True
+    assert result["metrics"]["accepted_market_count"] == 76
+    assert result["checks"]["accepted_market_count_at_least_39"] is True
+    assert result["checks"][
+        "full_window_paired_bootstrap_97_5_lcb_positive"
+    ] is False
+    assert result["checks"][
+        "candidate_absolute_bootstrap_97_5_lcb_positive"
+    ] is False
+    assert result["checks"][
+        "candidate_largest_winner_removed_pnl_positive"
+    ] is False
+    assert result["all_historical_success_criteria_passed"] is False
+    assert (
+        result["replacement_future_attempt_preregistration_allowed"]
+        is False
+    )
+    assert result["promotion_evidence_eligible"] is False
+    assert result["safety"] == SAFETY

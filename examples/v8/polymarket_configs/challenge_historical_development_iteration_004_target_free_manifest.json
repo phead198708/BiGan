@@ -1,0 +1,48 @@
+{
+  "base_guard_rows": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-exact195-23-bet-diagnostic-20260726T163817Z/challenge_v8_1_exact195_guard_replay.jsonl",
+    "sha256": "7534b07c41d1a1f2afe3519e7eef9146c9b84bdda72f88a22b9d0351baa9ce2d",
+    "size_bytes": 1338671
+  },
+  "candidate_decisions": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-fixed-edge-support-recovery-0-025-development-iteration-004-20260727T044600Z/candidate_target_free_decisions.jsonl",
+    "sha256": "a40e626c6ec70fe98e15e18765fa4c84e7e4b1b585d5f0aaa92c5fef7c4c6071",
+    "size_bytes": 332731
+  },
+  "candidate_id": "v8_1_fixed_edge_support_recovery_0_025",
+  "collection_started": false,
+  "frozen_market_ids": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_historical_development_exact_195_market_ids.txt",
+    "sha256": "fef9eda7b8dac138b88c75f96b010bd40953795b2bcf7424debf77a004e06883",
+    "size_bytes": 13065
+  },
+  "historical_development_only": true,
+  "implementation_base_commit": "8d238e095a33b6b5ab4ad3c0e0b73dc16afdb4b7",
+  "implementation_commit": "2873bf0a05c72cd9f9a15dc2c35797373e74d2eb",
+  "outcomes_labels_settlement_or_pnl_opened": false,
+  "preregistration": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_historical_development_iteration_004_preregistration.json",
+    "sha256": "315865ab003f03c7abe98fb8126758dadcdb44e400a42f71ec419de3cc2cec12",
+    "size_bytes": 4458
+  },
+  "preregistration_commit": "f9ccb562596d72c2f466b503a588aa682ad43fc6",
+  "profile": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_v8_1_fixed_edge_support_recovery_0_025_profile.json",
+    "sha256": "aaf1b22f6c2b372ca48122ae672fe45b019998048934e611219f088d26746ab2",
+    "size_bytes": 2373
+  },
+  "promotion_evidence_eligible": false,
+  "run_id": "challenge-v8-1-fixed-edge-support-recovery-0-025-development-iteration-004-20260727T044600Z",
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-fixed-edge-support-recovery-target-free-manifest-v1",
+  "target_free_accepted_market_count": 76
+}
