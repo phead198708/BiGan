@@ -1,0 +1,120 @@
+{
+  "schema_version": "bigan-challenge-model-layer-diagnostic-inputs-v1",
+  "diagnostic_role": "outcome_aware_development_only_not_promotion_evidence",
+  "derivation": {
+    "historical_15m_evaluator_git_commit": "12d18d714bbe236dc2111032b76d822d11b081e0",
+    "historical_15m_policy": {
+      "buy_slippage": 0.02,
+      "fee_bps": 0.0,
+      "min_confidence": 0.75,
+      "min_expected_edge": 0.04,
+      "name": "v7_selected_by_pnl_stability"
+    },
+    "historical_15m_selected_trade_count": 119,
+    "historical_15m_selection_splits": [
+      "train",
+      "val"
+    ],
+    "note": "The tracked selected-trade derivation preserves the historical evaluator's exact rows and adds a conservative full-source-spread correction to opposite-side complement quote proxies."
+  },
+  "artifacts": {
+    "exact_195_five_action_rows": {
+      "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue192/examples/v8/polymarket_runs/v6-7-paper-readiness-ws-hardened-outcome-blind-service-20260725T184000Z/powered_gate_runs/v6-7-powered-target-free-freeze-20260726T155926Z/powered_v6_7_five_action_rows.jsonl",
+      "sha256": "134425d9f38ffdebbf72043a8b802e95bbb87eebbe7e8d39bfa5d6f8b98828f7",
+      "size_bytes": 11510972
+    },
+    "exact_195_market_ids": {
+      "path": "examples/v8/polymarket_configs/challenge_historical_development_exact_195_market_ids.txt",
+      "sha256": "fef9eda7b8dac138b88c75f96b010bd40953795b2bcf7424debf77a004e06883",
+      "size_bytes": 13065
+    },
+    "exact_195_settled_corpus_index": {
+      "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue192/examples/v8/polymarket_runs/v6-7-paper-readiness-ws-hardened-outcome-blind-service-20260725T184000Z/powered_gate_runs/v6-7-powered-read-only-settlement-20260726T160035Z/powered_v6_7_settled_corpus_index.json",
+      "sha256": "2512d19f402aa74522ed7290b9f80701a72ab95e1b9da9837a3b4a9a3b920dcf",
+      "size_bytes": 823799
+    },
+    "exact_195_v6_7_runtime_targets": {
+      "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue192/examples/v8/polymarket_runs/v6-7-paper-readiness-ws-hardened-outcome-blind-service-20260725T184000Z/powered_gate_runs/v6-7-powered-pnl-gate-20260726T160251Z/powered_v6_7_runtime_targets.jsonl",
+      "sha256": "97fae198149b1d941992e21b7b606f9c12e4cc6c9d10243036becf8dd3639131",
+      "size_bytes": 361989
+    },
+    "historical_15m_dataset_manifest": {
+      "path": "/Users/tcscoder/Workspaces/BiGan.pre-reclone-20260726/data/model-runs/xgboost-v6-issue93-94-15m-only-volatility-20260602T135044Z/dataset/manifest.json",
+      "sha256": "93b0f2fbe3dd552c6577a0ea1a82b61cffb0b6166eaf60d613905cbffb37494c",
+      "size_bytes": 14836
+    },
+    "historical_15m_dataset_test": {
+      "path": "/Users/tcscoder/Workspaces/BiGan.pre-reclone-20260726/data/model-runs/xgboost-v6-issue93-94-15m-only-volatility-20260602T135044Z/dataset/test.parquet",
+      "sha256": "5c3cd5ca9a6069897596837d3cc72c7a6ba8d34768f0f77d619a80a605ced654",
+      "size_bytes": 853423
+    },
+    "historical_15m_dataset_train": {
+      "path": "/Users/tcscoder/Workspaces/BiGan.pre-reclone-20260726/data/model-runs/xgboost-v6-issue93-94-15m-only-volatility-20260602T135044Z/dataset/train.parquet",
+      "sha256": "014448fed83ab5cee766a7d63802cbd9b0c668709c2c85f2974ecb8cefaeb7bc",
+      "size_bytes": 3025665
+    },
+    "historical_15m_dataset_val": {
+      "path": "/Users/tcscoder/Workspaces/BiGan.pre-reclone-20260726/data/model-runs/xgboost-v6-issue93-94-15m-only-volatility-20260602T135044Z/dataset/val.parquet",
+      "sha256": "c4719d4b663e71aeb5a3e9c5fc0749793f1b5e8c360f55439786f32f9d66a90b",
+      "size_bytes": 580010
+    },
+    "historical_15m_settlement_model": {
+      "path": "/Users/tcscoder/Workspaces/BiGan.pre-reclone-20260726/data/model-runs/xgboost-v7/20260606T132859Z-stable-gate/settlement_model.json",
+      "sha256": "e01dffd1bf35cf6dbe6e994bdefca3db7c1da7146cf98f75ff6d4907c636b1f5",
+      "size_bytes": 556706
+    },
+    "historical_15m_settlement_residual_model": {
+      "path": "/Users/tcscoder/Workspaces/BiGan.pre-reclone-20260726/data/model-runs/xgboost-v7/20260606T132859Z-stable-gate/settlement_residual_model.json",
+      "sha256": "c75cf7ce5f33a72192a0cb33686dd81206ca2470d8c061c2a70223af5ab8922b",
+      "size_bytes": 173941
+    },
+    "historical_15m_v7_evaluation_report": {
+      "path": "docs/reports/xgboost_v7_pnl_eval_20260606T134754Z.json",
+      "sha256": "8a5125a6f35519b70700d39b74ebc708b69871b3dd4dfcf8ca585d96d92a96f4",
+      "size_bytes": 303876
+    },
+    "historical_15m_v7_model": {
+      "path": "/Users/tcscoder/Workspaces/BiGan.pre-reclone-20260726/data/model-runs/xgboost-v7/20260606T132859Z-stable-gate/model.json",
+      "sha256": "9e171d5eb848b7a78faa2ce9b32b0359832e146a3cc67074aa6f3233e7bf4e99",
+      "size_bytes": 2576
+    },
+    "historical_15m_v7_selected_trades": {
+      "path": "examples/v8/polymarket_configs/challenge_model_layer_15m_v7_selected_trades.jsonl",
+      "sha256": "aca08a0f13f6c286ead58db36e2558f5c10a6b8bb3e3fe5b90d49059cdf7b56c",
+      "size_bytes": 105035
+    },
+    "variant_23_bet_comparison": {
+      "path": "examples/v8/polymarket_runs/challenge-v8-1-exact195-23-bet-diagnostic-20260726T163817Z/challenge_v8_1_exact195_market_comparison.jsonl",
+      "sha256": "fce95987a10b160d7a7e6cdfd3842cc3e3b34dd138eb27093fb9f86b0a790eae",
+      "size_bytes": 65585
+    },
+    "variant_iteration_1_comparison": {
+      "path": "examples/v8/polymarket_runs/challenge-v8-1-entry-price-floor-0-30-development-iteration-001-20260726T172800Z/candidate_market_comparison.jsonl",
+      "sha256": "50c9055efc86cf6f0c5ed4f03f5109f0e7aac55bc93d8f5858b630ab34aa5fc5",
+      "size_bytes": 153459
+    },
+    "variant_iteration_3_comparison": {
+      "path": "examples/v8/polymarket_runs/challenge-v8-1-entry-price-floor-0-30-sized-1-0-development-iteration-003-20260726T175000Z/candidate_market_comparison.jsonl",
+      "sha256": "20f66bdcc8ab74283370f9d607061c0aeacfbcc521a2e13c24481c86ae0ff174",
+      "size_bytes": 188532
+    },
+    "variant_iteration_4_comparison": {
+      "path": "examples/v8/polymarket_runs/challenge-v8-1-fixed-edge-support-recovery-0-025-development-iteration-004-20260727T044600Z/candidate_market_comparison.jsonl",
+      "sha256": "1bbfd6984de9feb41e882ae1783589bf5ee78747b32d710d21cb2c28972939a8",
+      "size_bytes": 200252
+    },
+    "variant_iteration_5_comparison": {
+      "path": "examples/v8/polymarket_runs/challenge-v8-1-fixed-edge-0-025-price-floor-0-30-development-iteration-005-20260727T045100Z/candidate_market_comparison.jsonl",
+      "sha256": "3091d5e84194b0fd576df3155072c5f9d257732d0ee68e9488681fe2e6d6081e",
+      "size_bytes": 199828
+    }
+  },
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  }
+}
