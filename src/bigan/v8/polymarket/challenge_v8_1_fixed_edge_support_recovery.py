@@ -149,11 +149,10 @@ def materialize_fixed_edge_support_recovery_decisions(
             raise ChallengeFixedEdgeSupportRecoveryError(
                 "v6.7 baseline input follows decision"
             )
-        score = _finite_float(
-            guard.get("point_selected_predicted_return"),
-            field="point-selected predicted return",
+        score = _optional_finite_float(
+            guard.get("point_selected_predicted_return")
         )
-        passed = score >= FIXED_EDGE_THRESHOLD
+        passed = score is not None and score >= FIXED_EDGE_THRESHOLD
         selected_action = baseline_action if passed else "NO_TRADE"
         selected_side = baseline_side if passed else "NONE"
         decisions.append(
@@ -257,7 +256,7 @@ def _decision(
     baseline_side: str,
     selected_action: str,
     selected_side: str,
-    score: float,
+    score: float | None,
     threshold_passed: bool,
 ) -> dict[str, Any]:
     decision = {
@@ -284,9 +283,13 @@ def _decision(
             else "fixed_edge_veto"
         ),
         "selection_reason": (
-            "point_selected_predicted_return_at_or_above_0_025"
-            if threshold_passed
-            else "point_selected_predicted_return_below_0_025"
+            "point_selected_predicted_return_missing_or_nonfinite"
+            if score is None
+            else (
+                "point_selected_predicted_return_at_or_above_0_025"
+                if threshold_passed
+                else "point_selected_predicted_return_below_0_025"
+            )
         ),
         "source_guard_replay_row_id": guard.get("guard_replay_row_id"),
         "base_controller_state_before_id": guard.get(
@@ -378,6 +381,14 @@ def _finite_float(value: Any, *, field: str) -> float:
             f"{field} is not finite"
         )
     return number
+
+
+def _optional_finite_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _float_equal(left: Any, right: Any, *, tolerance: float = 1e-12) -> bool:

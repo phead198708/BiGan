@@ -168,16 +168,17 @@ def test_comparison_declares_sizes_and_reconciles_unit_pnl() -> None:
     assert all(row["candidate_id"] == CANDIDATE_ID for row in comparison)
 
 
-def test_nonfinite_score_and_frozen_order_fail_closed() -> None:
-    with pytest.raises(
-        ChallengeFixedEdgeSupportRecoveryError,
-        match="not finite",
-    ):
-        materialize_fixed_edge_support_recovery_decisions(
-            base_guard_rows=[_guard("market", score=float("nan"))],
-            frozen_market_ids=["market"],
-            profile=_profile(),
-        )
+def test_nonfinite_score_vetoes_and_frozen_order_fails_closed() -> None:
+    decisions = materialize_fixed_edge_support_recovery_decisions(
+        base_guard_rows=[_guard("market", score=float("nan"))],
+        frozen_market_ids=["market"],
+        profile=_profile(),
+    )
+    assert decisions[0]["selected_action"] == "NO_TRADE"
+    assert decisions[0]["point_selected_predicted_return"] is None
+    assert decisions[0]["selection_reason"] == (
+        "point_selected_predicted_return_missing_or_nonfinite"
+    )
 
     with pytest.raises(
         ChallengeFixedEdgeSupportRecoveryError,
