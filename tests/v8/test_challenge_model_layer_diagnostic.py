@@ -81,6 +81,26 @@ def test_development_lane_protocol_binds_15m_diagnostic() -> None:
     assert validated["maximum_capture_attempts_before_additional_permission"] == 119
 
 
+def test_development_lane_start_record_preserves_safety_and_authorization() -> None:
+    start_path = ROOT / (
+        "examples/v8/polymarket_configs/"
+        "challenge_model_development_lane_15m_start_record.json"
+    )
+    start = json.loads(start_path.read_text(encoding="utf-8"))
+    assert start["market_family"] == "btc_updown_15m"
+    assert start["collector"]["commit"] == "7d3a4d7ebe072910bca44647c25d9a7710181dce"
+    assert start["collector"]["pid"] > 0
+    assert start["post_close_development_finalizer"]["pid"] > 0
+    assert start["data_governance"]["development_only_forever"] is True
+    assert start["data_governance"]["promotion_evidence_eligible"] is False
+    assert start["authorization_checkpoint"] == {
+        "collector_stops_before_attempt_120": True,
+        "explicit_120_round_authorization_recorded": False,
+        "maximum_capture_attempts_before_pause": 119,
+    }
+    assert not any(start["safety"].values())
+
+
 def test_outcome_blind_batch_index_and_daily_summary(tmp_path: Path) -> None:
     summary = _batch_summary()
     summary_path = tmp_path / "batch_summary.json"
