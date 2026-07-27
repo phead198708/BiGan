@@ -116,13 +116,6 @@ def materialize_fixed_edge_support_recovery_decisions(
     decisions = []
     for guard in base_guard_rows:
         _validate_base_decision(guard)
-        if not _float_equal(
-            guard.get("fixed_edge_buffer"),
-            FIXED_EDGE_THRESHOLD,
-        ):
-            raise ChallengeFixedEdgeSupportRecoveryError(
-                "base guard fixed edge buffer does not match preregistration"
-            )
         market_id = str(guard["market_id"])
         baseline_action = str(
             guard.get("v6_7_baseline_action")
@@ -132,6 +125,13 @@ def materialize_fixed_edge_support_recovery_decisions(
         if not baseline_action or baseline_action == "NO_TRADE":
             decisions.append(_no_action_decision(guard))
             continue
+        if not _float_equal(
+            guard.get("fixed_edge_buffer"),
+            FIXED_EDGE_THRESHOLD,
+        ):
+            raise ChallengeFixedEdgeSupportRecoveryError(
+                "base guard fixed edge buffer does not match preregistration"
+            )
         baseline_side = str(guard.get("baseline_side") or "")
         if baseline_side != _side_for_action(baseline_action):
             raise ChallengeFixedEdgeSupportRecoveryError(

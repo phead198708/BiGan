@@ -192,3 +192,35 @@ def test_nonfinite_score_vetoes_and_frozen_order_fails_closed() -> None:
             frozen_market_ids=["second", "first"],
             profile=_profile(),
         )
+
+
+def test_no_source_action_stays_no_trade_without_threshold_fields() -> None:
+    guard = _guard(
+        "no-action",
+        score=0.1,
+        baseline_action="NO_TRADE",
+        baseline_side="NONE",
+    )
+    guard.update(
+        {
+            "decision_ts": 0,
+            "market_close_ts": None,
+            "max_input_ts": None,
+            "baseline_decision_ts": None,
+            "baseline_max_input_ts": None,
+            "fixed_edge_buffer": None,
+            "point_selected_predicted_return": None,
+            "selection_reason_codes": [
+                "v6_7_no_positive_guard_compatible_action"
+            ],
+            "target_used_as_decision_time_input": None,
+        }
+    )
+    decisions = materialize_fixed_edge_support_recovery_decisions(
+        base_guard_rows=[guard],
+        frozen_market_ids=["no-action"],
+        profile=_profile(),
+    )
+
+    assert decisions[0]["selected_action"] == "NO_TRADE"
+    assert decisions[0]["selection_reason"] == "base_v6_7_no_action"
