@@ -1,0 +1,113 @@
+{
+  "calibration": {
+    "family_temperatures": {
+      "BTC-15M": 1.0,
+      "ETH-15M": 1.25
+    },
+    "global_temperature": 1.0,
+    "method": "family-aware temperature scaling with global fallback"
+  },
+  "compatibility": {
+    "executor": "use model_version dispatch; v7 settlement gate consumes expected_edge_* plus executor-only safety gates",
+    "volatility": "not implemented in v7 settlement-EV artifact"
+  },
+  "feature_columns": [
+    "spread",
+    "market_implied_prob",
+    "mid_price",
+    "microprice",
+    "obi_l1",
+    "obi_l5",
+    "obi_l10",
+    "signed_volume_1m",
+    "trade_imbalance_1m",
+    "trade_count_1m",
+    "trade_volume_1m",
+    "ret_1m",
+    "ret_5m",
+    "ret_15m",
+    "rv_1m",
+    "rv_5m",
+    "rv_15m",
+    "minute_of_day",
+    "day_of_week",
+    "underlying_id",
+    "horizon_minutes",
+    "liquidity_bucket",
+    "ret_30m",
+    "rv_30m",
+    "aggressor_buy_ratio_1m",
+    "avg_trade_size_1m",
+    "tick_spread",
+    "tick_obi_l1",
+    "tick_obi_l3",
+    "tick_mid_price",
+    "tick_price_velocity",
+    "tick_trade_arrival_rate"
+  ],
+  "model_version": "xgboost-v7",
+  "schema_version": "xgboost_v7_settlement_ev_v1",
+  "serving_config": {
+    "buy_slippage": 0.02,
+    "ev_margin": 0.01,
+    "fee_bps": 0.0
+  },
+  "serving_payload": [
+    "p_up",
+    "p_down",
+    "p_neutral",
+    "settlement_residual",
+    "market_implied_prob",
+    "entry_worst_price_up",
+    "entry_worst_price_down",
+    "expected_edge_up",
+    "expected_edge_down",
+    "residual_expected_edge_up",
+    "residual_expected_edge_down",
+    "selected_side",
+    "selected_expected_edge",
+    "should_enter_settlement",
+    "model_version"
+  ],
+  "settlement": {
+    "classes": [
+      "UP",
+      "DOWN",
+      "NEUTRAL"
+    ],
+    "params": {
+      "colsample_bytree": 0.8,
+      "eta": 0.05,
+      "eval_metric": "mlogloss",
+      "lambda": 10.0,
+      "max_depth": 3,
+      "min_child_weight": 2.0,
+      "nthread": 1,
+      "num_class": 3,
+      "objective": "multi:softprob",
+      "rounds": 150,
+      "seed": 0,
+      "subsample": 1.0,
+      "tree_method": "hist"
+    },
+    "path": "settlement_model.json"
+  },
+  "settlement_residual": {
+    "params": {
+      "colsample_bytree": 0.8,
+      "eta": 0.03,
+      "eval_metric": "rmse",
+      "lambda": 5.0,
+      "max_depth": 3,
+      "min_child_weight": 5.0,
+      "nthread": 1,
+      "objective": "reg:squarederror",
+      "rounds": 150,
+      "seed": 0,
+      "subsample": 1.0,
+      "tree_method": "hist"
+    },
+    "path": "settlement_residual_model.json",
+    "target": "win - market_implied_prob"
+  }
+}

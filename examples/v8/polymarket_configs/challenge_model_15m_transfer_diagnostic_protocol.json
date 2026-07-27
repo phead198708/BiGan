@@ -20,15 +20,15 @@
   },
   "legacy_v7_selected": {
     "model_artifact": {
-      "path": "/Users/tcscoder/Workspaces/BiGan.pre-reclone-20260726/data/model-runs/xgboost-v7/20260606T132859Z-stable-gate/model.json",
+      "path": "examples/v8/polymarket_artifacts/sha256/9e171d5eb848b7a78faa2ce9b32b0359832e146a3cc67074aa6f3233e7bf4e99/model.json",
       "sha256": "9e171d5eb848b7a78faa2ce9b32b0359832e146a3cc67074aa6f3233e7bf4e99"
     },
     "settlement_model": {
-      "path": "/Users/tcscoder/Workspaces/BiGan.pre-reclone-20260726/data/model-runs/xgboost-v7/20260606T132859Z-stable-gate/settlement_model.json",
+      "path": "examples/v8/polymarket_artifacts/sha256/e01dffd1bf35cf6dbe6e994bdefca3db7c1da7146cf98f75ff6d4907c636b1f5/settlement_model.json",
       "sha256": "e01dffd1bf35cf6dbe6e994bdefca3db7c1da7146cf98f75ff6d4907c636b1f5"
     },
     "settlement_residual_model": {
-      "path": "/Users/tcscoder/Workspaces/BiGan.pre-reclone-20260726/data/model-runs/xgboost-v7/20260606T132859Z-stable-gate/settlement_residual_model.json",
+      "path": "examples/v8/polymarket_artifacts/sha256/c75cf7ce5f33a72192a0cb33686dd81206ca2470d8c061c2a70223af5ab8922b/settlement_residual_model.json",
       "sha256": "c75cf7ce5f33a72192a0cb33686dd81206ca2470d8c061c2a70223af5ab8922b"
     },
     "historical_evaluator_commit": "12d18d714bbe236dc2111032b76d822d11b081e0",
@@ -49,7 +49,7 @@
   },
   "v8_1_unit_controller": {
     "model_artifact": {
-      "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/v8-1-adaptive-support-controller-historical-20260723T134500Z/v8_1_adaptive_support_controller_model.json",
+      "path": "examples/v8/polymarket_artifacts/sha256/b92d2c087de20fbc6e6a142f13e0e48e14ecc25915cf318b485dc2927f958772/v8_1_adaptive_support_controller_model.json",
       "sha256": "b92d2c087de20fbc6e6a142f13e0e48e14ecc25915cf318b485dc2927f958772"
     },
     "booster_sha256": "cdadca3758ff84638464e0953479f062805658d31fb5543379b762d1c4ac8918",
@@ -57,14 +57,18 @@
     "position_size": 1.0,
     "decision_rule": "earliest_causal_decision_only_score_both_sides_then_apply_frozen_rolling_controller",
     "source_action_score_available": false,
-    "source_action_score_missing_replacement": 0.0,
+    "source_action_score_missing_representation": "xgboost_missing_nan_with_availability_flag_false",
+    "transfer_status": "bridge_handicapped_not_native",
+    "native_feature_coverage_must_be_reported": true,
     "selected_side_probability_bridge": "causal_side_mid_price_for_value_conditioning_only",
+    "late_window_pressure_denominator": "market_horizon_seconds",
+    "expected_market_horizon_seconds": 900,
     "side_selection": "higher_predicted_after_cost_return",
     "controller_state_updates": "strictly_prior_scores_and_guard_acceptance_only",
     "threshold_or_feature_search_allowed": false
   },
   "reporting": {
-    "required_policy_metrics": [
+    "legacy_v7_hold_to_settlement_panel_metrics": [
       "acceptance_rate",
       "accepted_up_count",
       "accepted_down_count",
@@ -76,15 +80,27 @@
       "unit_net_pnl",
       "cost_signal_ratio"
     ],
-    "required_judgements": [
-      "legacy_v7_positive_edge_survives_true_paired_book",
-      "v8_1_has_transferable_signal_or_full_retrain_required"
+    "v8_1_sell_before_close_bridge_panel_metrics": [
+      "acceptance_rate",
+      "accepted_up_count",
+      "accepted_down_count",
+      "native_feature_coverage",
+      "mean_unit_net_pnl",
+      "mean_unit_net_pnl_bootstrap_lcb",
+      "cost_signal_ratio"
     ],
-    "judgement_rules": {
-      "legacy_v7_positive_edge_survives_true_paired_book": "accepted_market_count_gt_0_and_total_unit_net_pnl_gt_0",
-      "v8_1_has_transferable_signal": "accepted_market_count_gt_0_and_total_unit_net_pnl_gt_0",
-      "otherwise": "full_retrain_required"
+    "v8_1_weak_signal_rule": {
+      "minimum_accepted_market_count": 5,
+      "metric": "mean_unit_net_pnl_per_accepted_market",
+      "bootstrap_resamples": 10000,
+      "bootstrap_seed": 0,
+      "one_sided_confidence": 0.95,
+      "pass_condition": "accepted_market_count_gte_5_and_bootstrap_lcb_gt_0",
+      "promotion_claim_allowed": false,
+      "full_retrain_conclusion_allowed": false
     },
+    "cross_policy_superiority_claim_allowed": false,
+    "hold_to_settlement_and_sell_before_close_must_use_separate_panels": true,
     "old_15m_plus_12_39_allowed_as_gate": false
   },
   "safety": {

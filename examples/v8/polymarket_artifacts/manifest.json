@@ -1,0 +1,27 @@
+{
+  "schema_version": "bigan-repository-pinned-model-artifacts-v1",
+  "artifacts": [
+    {
+      "path": "examples/v8/polymarket_artifacts/sha256/9e171d5eb848b7a78faa2ce9b32b0359832e146a3cc67074aa6f3233e7bf4e99/model.json",
+      "sha256": "9e171d5eb848b7a78faa2ce9b32b0359832e146a3cc67074aa6f3233e7bf4e99",
+      "role": "legacy_v7_model_metadata"
+    },
+    {
+      "path": "examples/v8/polymarket_artifacts/sha256/e01dffd1bf35cf6dbe6e994bdefca3db7c1da7146cf98f75ff6d4907c636b1f5/settlement_model.json",
+      "sha256": "e01dffd1bf35cf6dbe6e994bdefca3db7c1da7146cf98f75ff6d4907c636b1f5",
+      "role": "legacy_v7_settlement_model"
+    },
+    {
+      "path": "examples/v8/polymarket_artifacts/sha256/c75cf7ce5f33a72192a0cb33686dd81206ca2470d8c061c2a70223af5ab8922b/settlement_residual_model.json",
+      "sha256": "c75cf7ce5f33a72192a0cb33686dd81206ca2470d8c061c2a70223af5ab8922b",
+      "role": "legacy_v7_settlement_residual_model"
+    },
+    {
+      "path": "examples/v8/polymarket_artifacts/sha256/b92d2c087de20fbc6e6a142f13e0e48e14ecc25915cf318b485dc2927f958772/v8_1_adaptive_support_controller_model.json",
+      "sha256": "b92d2c087de20fbc6e6a142f13e0e48e14ecc25915cf318b485dc2927f958772",
+      "role": "v8_1_adaptive_support_controller"
+    }
+  ],
+  "development_only_forever": true,
+  "promotion_evidence_eligible": false
+}

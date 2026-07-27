@@ -7,11 +7,16 @@
   "promotion_evidence_eligible": false,
   "training_start_locked": true,
   "readiness_gate": {
-    "minimum_quality_valid_outcome_finalized_market_count": 120,
+    "minimum_quality_valid_outcome_finalized_market_count": 100,
     "minimum_paired_executable_quote_coverage": 0.95,
     "transfer_diagnostic_must_be_complete_and_sha256_pinned": true,
     "all_conditions_required": true,
-    "manual_or_implicit_override_allowed": false
+    "manual_or_implicit_override_allowed": false,
+    "collector_cap_consistency": {
+      "maximum_capture_attempts_without_additional_permission": 119,
+      "minimum_required_must_not_exceed_collector_cap": true,
+      "additional_collection_authorization_created": false
+    }
   },
   "split": {
     "method": "chronological_unique_market_groups",

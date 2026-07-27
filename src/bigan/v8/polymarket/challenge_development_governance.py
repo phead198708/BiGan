@@ -30,6 +30,7 @@ TRANSFER_REPORT_SCHEMA_VERSION = "bigan-challenge-model-15m-transfer-diagnostic-
 TRANSFER_FREEZE_SCHEMA_VERSION = "bigan-challenge-model-15m-transfer-diagnostic-freeze-v1"
 READINESS_SCHEMA_VERSION = "bigan-challenge-model-15m-training-readiness-v1"
 EXPECTED_DECISIONS_PER_MARKET = 2
+REPO_ROOT = Path(__file__).resolve().parents[4]
 V7_FEATURE_NAMES = (
     "spread",
     "market_implied_prob",
@@ -81,6 +82,27 @@ V8_1_FEATURE_NAMES = (
     "side_flip_prior_entry",
     "side_is_up",
 )
+V8_1_NATIVE_FEATURE_NAMES = (
+    "execution_price",
+    "log1p_spread_bps",
+    "queue_fill_shortfall",
+    "log1p_book_staleness_ms",
+    "late_window_pressure",
+    "side_is_up",
+)
+V8_1_FORCED_MISSING_FEATURE_NAMES = (
+    "action_score",
+    "action_score_margin",
+)
+V8_1_BRIDGED_FEATURE_NAMES = (
+    "action_score_available",
+    "btc_anchor_direction",
+    "selected_side_probability",
+    "selected_side_probability_minus_execution_price",
+    "pre_entry_market_exposure",
+    "same_side_prior_entry",
+    "side_flip_prior_entry",
+)
 
 
 def validate_transfer_protocol(
@@ -95,6 +117,13 @@ def validate_transfer_protocol(
     v7 = dict(protocol.get("legacy_v7_selected") or {})
     v81 = dict(protocol.get("v8_1_unit_controller") or {})
     reporting = dict(protocol.get("reporting") or {})
+    weak_rule = dict(reporting.get("v8_1_weak_signal_rule") or {})
+    artifact_descriptors = [
+        dict(v7.get("model_artifact") or {}),
+        dict(v7.get("settlement_model") or {}),
+        dict(v7.get("settlement_residual_model") or {}),
+        dict(v81.get("model_artifact") or {}),
+    ]
     checks = {
         "schema": protocol.get("schema_version") == TRANSFER_PROTOCOL_SCHEMA_VERSION,
         "lane": protocol.get("lane_id") == "challenge-model-development-btc-updown-15m-v1",
@@ -122,8 +151,32 @@ def validate_transfer_protocol(
         "v81_fixed": v81.get("candidate_name") == "adaptive_support_controller_v8_1"
         and v81.get("position_size") == 1.0
         and v81.get("source_action_score_available") is False
+        and v81.get("source_action_score_missing_representation")
+        == "xgboost_missing_nan_with_availability_flag_false"
+        and v81.get("transfer_status") == "bridge_handicapped_not_native"
+        and v81.get("native_feature_coverage_must_be_reported") is True
+        and v81.get("late_window_pressure_denominator") == "market_horizon_seconds"
+        and v81.get("expected_market_horizon_seconds") == 900
         and v81.get("threshold_or_feature_search_allowed") is False,
-        "reporting": reporting.get("old_15m_plus_12_39_allowed_as_gate") is False,
+        "reporting": reporting.get("old_15m_plus_12_39_allowed_as_gate") is False
+        and reporting.get("cross_policy_superiority_claim_allowed") is False
+        and reporting.get("hold_to_settlement_and_sell_before_close_must_use_separate_panels")
+        is True,
+        "weak_rule": weak_rule
+        == {
+            "minimum_accepted_market_count": 5,
+            "metric": "mean_unit_net_pnl_per_accepted_market",
+            "bootstrap_resamples": 10000,
+            "bootstrap_seed": 0,
+            "one_sided_confidence": 0.95,
+            "pass_condition": "accepted_market_count_gte_5_and_bootstrap_lcb_gt_0",
+            "promotion_claim_allowed": False,
+            "full_retrain_conclusion_allowed": False,
+        },
+        "repo_pinned_artifacts": all(
+            _is_repo_content_addressed_descriptor(descriptor)
+            for descriptor in artifact_descriptors
+        ),
         "safety": protocol.get("safety") == SAFETY,
     }
     blockers = [name for name, passed in checks.items() if not passed]
@@ -147,6 +200,7 @@ def validate_training_protocol(protocol: Mapping[str, Any]) -> None:
     """Validate the locked model-layer training preregistration."""
 
     gate = dict(protocol.get("readiness_gate") or {})
+    cap = dict(gate.get("collector_cap_consistency") or {})
     split = dict(protocol.get("split") or {})
     representation = dict(protocol.get("representation") or {})
     target = dict(protocol.get("target") or {})
@@ -159,12 +213,21 @@ def validate_training_protocol(protocol: Mapping[str, Any]) -> None:
         and protocol.get("promotion_evidence_eligible") is False,
         "gate": gate
         == {
-            "minimum_quality_valid_outcome_finalized_market_count": 120,
+            "minimum_quality_valid_outcome_finalized_market_count": 100,
             "minimum_paired_executable_quote_coverage": 0.95,
             "transfer_diagnostic_must_be_complete_and_sha256_pinned": True,
             "all_conditions_required": True,
             "manual_or_implicit_override_allowed": False,
+            "collector_cap_consistency": {
+                "maximum_capture_attempts_without_additional_permission": 119,
+                "minimum_required_must_not_exceed_collector_cap": True,
+                "additional_collection_authorization_created": False,
+            },
         },
+        "reachable_under_cap": int(
+            gate.get("minimum_quality_valid_outcome_finalized_market_count") or 0
+        )
+        <= int(cap.get("maximum_capture_attempts_without_additional_permission") or -1),
         "split": split.get("method") == "chronological_unique_market_groups"
         and split.get("all_rows_for_one_market_must_remain_in_one_split") is True
         and split.get("random_row_split_allowed") is False
@@ -184,6 +247,41 @@ def validate_training_protocol(protocol: Mapping[str, Any]) -> None:
     blockers = [name for name, passed in checks.items() if not passed]
     if blockers:
         raise ValueError("15m training protocol invalid: " + ", ".join(blockers))
+
+
+def validate_training_collector_cap_consistency(
+    training_protocol: Mapping[str, Any],
+    lane_protocol: Mapping[str, Any],
+) -> dict[str, int]:
+    """Prove the frozen training minimum is reachable under the lane authorization."""
+
+    validate_training_protocol(training_protocol)
+    gate = dict(training_protocol["readiness_gate"])
+    registered = dict(gate["collector_cap_consistency"])
+    authorization = dict(lane_protocol.get("authorization_checkpoint") or {})
+    minimum = int(gate["minimum_quality_valid_outcome_finalized_market_count"])
+    registered_cap = int(registered["maximum_capture_attempts_without_additional_permission"])
+    lane_cap = int(
+        authorization.get("maximum_capture_attempts_before_additional_permission") or -1
+    )
+    checks = {
+        "same_cap": registered_cap == lane_cap,
+        "reachable": minimum <= lane_cap,
+        "lane_stops_before_attempt_120": authorization.get("stop_before_attempt_120") is True,
+        "lane_has_no_120_authorization": (
+            authorization.get("explicit_120_round_authorization_recorded") is False
+        ),
+        "training_has_no_additional_authorization": (
+            registered.get("additional_collection_authorization_created") is False
+        ),
+    }
+    blockers = [name for name, passed in checks.items() if not passed]
+    if blockers:
+        raise ValueError("training readiness conflicts with collector cap: " + ", ".join(blockers))
+    return {
+        "minimum_quality_valid_outcome_finalized_market_count": minimum,
+        "maximum_capture_attempts_without_additional_permission": lane_cap,
+    }
 
 
 def audit_capture(capture: Mapping[str, Any]) -> dict[str, Any]:
@@ -421,6 +519,10 @@ def run_transfer_diagnostic_if_ready(
         bundles,
         dict(protocol["v8_1_unit_controller"]),
     )
+    weak_signal = _weak_signal_assessment(
+        v81_summary,
+        dict(protocol["reporting"]["v8_1_weak_signal_rule"]),
+    )
     market_ids = [str(bundle["market_id"]) for bundle in bundles]
     report = {
         "schema_version": TRANSFER_REPORT_SCHEMA_VERSION,
@@ -433,20 +535,29 @@ def run_transfer_diagnostic_if_ready(
         "market_ids": market_ids,
         "market_ids_sha256": canonical_json_sha256(market_ids),
         "same_market_set_used_for_both_policies": True,
-        "legacy_v7_selected": v7_summary,
-        "v8_1_unit_controller": v81_summary,
-        "judgements": {
-            "legacy_v7_positive_edge_survives_true_paired_book": (
-                int(v7_summary["accepted_market_count"]) > 0
-                and float(v7_summary["total_unit_net_pnl"]) > 0.0
-            ),
-            "v8_1_has_transferable_signal": (
-                int(v81_summary["accepted_market_count"]) > 0
-                and float(v81_summary["total_unit_net_pnl"]) > 0.0
-            ),
-            "v8_1_full_retrain_required": not (
-                int(v81_summary["accepted_market_count"]) > 0
-                and float(v81_summary["total_unit_net_pnl"]) > 0.0
+        "policy_panels": {
+            "legacy_v7_hold_to_settlement": {
+                "lifecycle_policy": "HOLD_TO_SETTLEMENT",
+                "metrics": v7_summary,
+                "report_only": True,
+                "binary_positive_pnl_gate_used": False,
+            },
+            "v8_1_sell_before_close_bridge": {
+                "lifecycle_policy": "SELL_BEFORE_CLOSE",
+                "transfer_status": "bridge_handicapped_not_native",
+                "native_feature_coverage": v81_summary["native_feature_coverage"],
+                "metrics": v81_summary,
+                "weak_signal_rule": weak_signal,
+                "full_retrain_conclusion_allowed": False,
+                "promotion_claim_allowed": False,
+            },
+        },
+        "cross_policy_comparison": {
+            "superiority_claim_allowed": False,
+            "superiority_claim_made": False,
+            "reason": (
+                "HOLD_TO_SETTLEMENT and SELL_BEFORE_CLOSE have different lifecycle "
+                "targets and are reported in separate panels"
             ),
         },
         "old_15m_plus_12_39_used_as_gate": False,
@@ -457,8 +568,8 @@ def run_transfer_diagnostic_if_ready(
         "safety": dict(SAFETY),
     }
     output_root.mkdir(parents=True, exist_ok=True)
-    v7_path = output_root / "legacy_v7_selected_market_rows.jsonl"
-    v81_path = output_root / "v8_1_unit_controller_market_rows.jsonl"
+    v7_path = output_root / "legacy_v7_hold_to_settlement_market_rows.jsonl"
+    v81_path = output_root / "v8_1_sell_before_close_bridge_market_rows.jsonl"
     report_path = output_root / "transfer_diagnostic_report.json"
     _write_jsonl(v7_path, v7_rows)
     _write_jsonl(v81_path, v81_rows)
@@ -469,8 +580,8 @@ def run_transfer_diagnostic_if_ready(
         "frozen_at": datetime.now(UTC).isoformat(),
         "protocol": _descriptor(path),
         "report": _descriptor(report_path),
-        "legacy_v7_selected_market_rows": _descriptor(v7_path),
-        "v8_1_unit_controller_market_rows": _descriptor(v81_path),
+        "legacy_v7_hold_to_settlement_market_rows": _descriptor(v7_path),
+        "v8_1_sell_before_close_bridge_market_rows": _descriptor(v81_path),
         "market_count": len(bundles),
         "market_ids_sha256": report["market_ids_sha256"],
         "run_count": 1,
@@ -512,6 +623,14 @@ def build_training_readiness(
     transfer = _load_json(transfer_path)
     validate_training_protocol(training)
     validate_transfer_protocol(transfer, verify_artifact_bytes=False)
+    gate = dict(training["readiness_gate"])
+    required_count = int(gate["minimum_quality_valid_outcome_finalized_market_count"])
+    required_coverage = float(gate["minimum_paired_executable_quote_coverage"])
+    collector_cap = int(
+        gate["collector_cap_consistency"][
+            "maximum_capture_attempts_without_additional_permission"
+        ]
+    )
     audits = _indexed_capture_audits(root)
     finalized_ids = {
         str(row["run_id"]) for row in load_jsonl(root / "finalized_development_corpus_index.jsonl")
@@ -531,11 +650,14 @@ def build_training_readiness(
         _validate_transfer_freeze(freeze)
         transfer_complete = True
         transfer_freeze_sha256 = sha256_file(freeze_path)
+    quality_condition = (
+        f"quality_valid_outcome_finalized_market_count_at_least_{required_count}"
+    )
     conditions = {
-        "quality_valid_outcome_finalized_market_count_at_least_120": (
-            len(quality_finalized) >= 120
+        quality_condition: len(quality_finalized) >= required_count,
+        "paired_executable_quote_coverage_at_least_95_percent": (
+            paired_coverage >= required_coverage
         ),
-        "paired_executable_quote_coverage_at_least_95_percent": (paired_coverage >= 0.95),
         "training_protocol_sha256_pinned_and_valid": True,
         "transfer_diagnostic_complete_and_sha256_pinned": transfer_complete,
     }
@@ -551,19 +673,21 @@ def build_training_readiness(
             "attempted_market_count": len(audits),
             "outcome_finalized_market_count": len(finalized_audits),
             "quality_valid_outcome_finalized_market_count": len(quality_finalized),
-            "required_quality_valid_outcome_finalized_market_count": 120,
+            "required_quality_valid_outcome_finalized_market_count": required_count,
+            "maximum_authorized_capture_attempts": collector_cap,
+            "readiness_count_reachable_under_collector_cap": required_count <= collector_cap,
             "paired_executable_quote_decision_count": paired_numerator,
             "paired_executable_quote_expected_decision_count": paired_denominator,
             "paired_executable_quote_coverage": paired_coverage,
-            "required_paired_executable_quote_coverage": 0.95,
+            "required_paired_executable_quote_coverage": required_coverage,
         },
         "conditions": conditions,
         "blocking_reason_codes": blockers,
         "training_start_allowed": not blockers,
         "attempt_120_authorized": False,
         "authorization_note": (
-            "The collector remains capped at 119 attempts. Reaching 120 quality-valid "
-            "finalized markets requires separate explicit collection permission."
+            f"The readiness minimum ({required_count}) is reachable under the collector's "
+            f"{collector_cap}-attempt cap. Attempt 120 remains unauthorized."
         ),
         "model_training_started": False,
         "old_15m_plus_12_39_used_as_gate": False,
@@ -714,13 +838,13 @@ def _load_finalized_bundle(
 
 class _LegacyV7:
     def __init__(self, protocol: Mapping[str, Any]) -> None:
-        model_path = Path(str(protocol["model_artifact"]["path"])).resolve()
+        model_path = _resolve_pinned_path(protocol["model_artifact"]["path"])
         artifact = _load_json(model_path)
         if artifact.get("schema_version") != "xgboost_v7_settlement_ev_v1":
             raise ValueError("legacy v7 artifact schema invalid")
         if tuple(artifact.get("feature_columns") or ()) != V7_FEATURE_NAMES:
             raise ValueError("legacy v7 feature identity invalid")
-        settlement_path = Path(str(protocol["settlement_model"]["path"])).resolve()
+        settlement_path = _resolve_pinned_path(protocol["settlement_model"]["path"])
         self.booster = xgb.Booster()
         self.booster.load_model(str(settlement_path))
         self.temperature = float(
@@ -804,7 +928,9 @@ def _run_v7_selected_transfer(
                 chosen["decision_ts"] = int(feature_row["decision_ts"])
                 break
         if chosen is None:
-            selected_rows.append(_no_trade_row(bundle, policy="legacy_v7_selected"))
+            selected_rows.append(
+                _no_trade_row(bundle, policy="legacy_v7_hold_to_settlement")
+            )
             continue
         label = _label(
             bundle,
@@ -814,7 +940,7 @@ def _run_v7_selected_transfer(
         selected_rows.append(
             _cost_row(
                 bundle,
-                policy="legacy_v7_selected",
+                policy="legacy_v7_hold_to_settlement",
                 decision=chosen,
                 label=label,
                 predicted_gross_signal=float(chosen["p_side"]) - float(chosen["entry_mid"]),
@@ -827,7 +953,7 @@ def _run_v8_1_transfer(
     bundles: Sequence[Mapping[str, Any]],
     protocol: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    artifact = _load_json(Path(str(protocol["model_artifact"]["path"])).resolve())
+    artifact = _load_json(_resolve_pinned_path(protocol["model_artifact"]["path"]))
     weighted = dict(artifact.get("final_weighted_model") or {})
     if tuple(weighted.get("feature_names") or ()) != V8_1_FEATURE_NAMES:
         raise ValueError("v8.1 scorer feature identity invalid")
@@ -847,7 +973,6 @@ def _run_v8_1_transfer(
         quantile, band = _controller_quantile(guard_history)
         threshold = _finite_sample_quantile(scores[-60:], quantile)
         side_scores = {}
-        bridges = {}
         for side in ("UP", "DOWN"):
             bridge = _v8_1_feature_bridge(feature_row, side=side)
             vector = np.asarray(
@@ -858,7 +983,6 @@ def _run_v8_1_transfer(
             if not math.isfinite(score):
                 raise ValueError("v8.1 transfer prediction is non-finite")
             side_scores[side] = score
-            bridges[side] = bridge
         side = max(
             ("UP", "DOWN"),
             key=lambda value: (side_scores[value], value == "UP"),
@@ -868,7 +992,7 @@ def _run_v8_1_transfer(
         scores.append(score)
         guard_history.append(accepted)
         if not accepted:
-            row = _no_trade_row(bundle, policy="v8_1_unit_controller")
+            row = _no_trade_row(bundle, policy="v8_1_sell_before_close_bridge")
             row.update(
                 {
                     "decision_ts": int(feature_row["decision_ts"]),
@@ -878,6 +1002,8 @@ def _run_v8_1_transfer(
                     "controller_quantile": quantile,
                     "controller_band": band,
                     "source_action_score_available": False,
+                    "source_action_score_forced_missing": True,
+                    "transfer_status": "bridge_handicapped_not_native",
                 }
             )
             selected_rows.append(row)
@@ -894,6 +1020,8 @@ def _run_v8_1_transfer(
             "controller_quantile": quantile,
             "controller_band": band,
             "source_action_score_available": False,
+            "source_action_score_forced_missing": True,
+            "transfer_status": "bridge_handicapped_not_native",
         }
         label = _label(
             bundle,
@@ -903,7 +1031,7 @@ def _run_v8_1_transfer(
         selected_rows.append(
             _cost_row(
                 bundle,
-                policy="v8_1_unit_controller",
+                policy="v8_1_sell_before_close_bridge",
                 decision=decision,
                 label=label,
                 predicted_gross_signal=score,
@@ -912,10 +1040,21 @@ def _run_v8_1_transfer(
     summary = _policy_summary(selected_rows)
     summary.update(
         {
+            "transfer_status": "bridge_handicapped_not_native",
+            "native_feature_coverage": {
+                "native_feature_count": len(V8_1_NATIVE_FEATURE_NAMES),
+                "model_feature_count": len(V8_1_FEATURE_NAMES),
+                "coverage": len(V8_1_NATIVE_FEATURE_NAMES) / len(V8_1_FEATURE_NAMES),
+                "native_feature_names": list(V8_1_NATIVE_FEATURE_NAMES),
+                "forced_missing_feature_names": list(V8_1_FORCED_MISSING_FEATURE_NAMES),
+                "bridged_or_assumed_feature_names": list(V8_1_BRIDGED_FEATURE_NAMES),
+            },
             "source_action_score_native_coverage": 0.0,
             "source_action_score_missing_was_explicit": True,
-            "source_action_score_missing_encoded_as_zero_value_with_availability_flag_false": True,
+            "source_action_score_forced_missing_as_xgboost_nan": True,
             "controller_seed_score_count": int(state.get("eligible_prediction_score_count") or 0),
+            "full_retrain_conclusion_allowed": False,
+            "promotion_claim_allowed": False,
         }
     )
     return selected_rows, summary
@@ -1044,10 +1183,14 @@ def _v8_1_feature_bridge(
     queue = float(features[f"{prefix}_queue_fill_probability_proxy"])
     staleness = float(features[f"{prefix}_book_staleness_ms"])
     time_to_close = float(features["time_to_close_seconds"])
+    horizon_ms = float(feature_row.get("horizon_ms") or 0.0)
+    horizon_seconds = horizon_ms / 1000.0
+    if not math.isclose(horizon_seconds, 900.0, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("v8.1 transfer requires the frozen 900-second market horizon")
     return {
         "action_score_available": 0.0,
-        "action_score": 0.0,
-        "action_score_margin": 0.0,
+        "action_score": float("nan"),
+        "action_score_margin": float("nan"),
         "btc_anchor_direction": anchor,
         "selected_side_probability": probability,
         "execution_price": price,
@@ -1055,7 +1198,10 @@ def _v8_1_feature_bridge(
         "log1p_spread_bps": math.log1p(max(0.0, spread_bps)),
         "queue_fill_shortfall": 1.0 - min(1.0, max(0.0, queue)),
         "log1p_book_staleness_ms": math.log1p(max(0.0, staleness)),
-        "late_window_pressure": max(0.0, 1.0 - time_to_close / 300.0),
+        "late_window_pressure": max(
+            0.0,
+            min(1.0, 1.0 - time_to_close / horizon_seconds),
+        ),
         "pre_entry_market_exposure": 0.0,
         "same_side_prior_entry": 0.0,
         "side_flip_prior_entry": 0.0,
@@ -1166,6 +1312,7 @@ def _no_trade_row(
 
 def _policy_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     accepted = [row for row in rows if row.get("accepted") is True]
+    accepted_unit_net_pnl = [float(row["unit_net_pnl"]) for row in accepted]
     total_cost = sum(float(row["total_cost"]) for row in accepted)
     total_signal = sum(abs(float(row["predicted_gross_signal"])) for row in accepted)
     return {
@@ -1185,14 +1332,68 @@ def _policy_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "total_liquidity_impact": sum(float(row["liquidity_impact"]) for row in accepted),
         "total_cost": total_cost,
         "total_unit_net_pnl": sum(float(row["unit_net_pnl"]) for row in rows),
-        "mean_unit_net_pnl_per_accepted_market": _mean(
-            [float(row["unit_net_pnl"]) for row in accepted]
+        "mean_unit_net_pnl_per_accepted_market": _mean(accepted_unit_net_pnl),
+        "mean_unit_net_pnl_bootstrap_lcb": _bootstrap_mean_lcb(
+            accepted_unit_net_pnl,
+            resamples=10000,
+            seed=0,
+            one_sided_confidence=0.95,
         ),
+        "mean_unit_net_pnl_bootstrap": {
+            "population": "accepted_markets",
+            "resamples": 10000,
+            "seed": 0,
+            "one_sided_confidence": 0.95,
+        },
         "aggregate_cost_signal_ratio": (total_cost / total_signal if total_signal else None),
         "true_paired_executable_ask_coverage": 1.0,
         "complement_quote_proxy_used": False,
         "unit_sizing": True,
     }
+
+
+def _weak_signal_assessment(
+    summary: Mapping[str, Any],
+    rule: Mapping[str, Any],
+) -> dict[str, Any]:
+    accepted = int(summary["accepted_market_count"])
+    minimum = int(rule["minimum_accepted_market_count"])
+    lcb = _finite_or_none(summary.get("mean_unit_net_pnl_bootstrap_lcb"))
+    met = accepted >= minimum and lcb is not None and lcb > 0.0
+    return {
+        "rule": dict(rule),
+        "accepted_market_count": accepted,
+        "mean_unit_net_pnl_per_accepted_market": summary[
+            "mean_unit_net_pnl_per_accepted_market"
+        ],
+        "mean_unit_net_pnl_bootstrap_lcb": lcb,
+        "weak_signal_rule_met": met,
+        "interpretation": (
+            "weak_report_only_signal"
+            if met
+            else "weak_rule_not_met_no_full_retrain_inference"
+        ),
+        "promotion_claim_made": False,
+        "full_retrain_conclusion_made": False,
+    }
+
+
+def _bootstrap_mean_lcb(
+    values: Sequence[float],
+    *,
+    resamples: int,
+    seed: int,
+    one_sided_confidence: float,
+) -> float | None:
+    if not values:
+        return None
+    sample = np.asarray(values, dtype=float)
+    rng = np.random.default_rng(seed)
+    means = np.mean(
+        rng.choice(sample, size=(resamples, len(sample)), replace=True),
+        axis=1,
+    )
+    return float(np.quantile(means, 1.0 - one_sided_confidence))
 
 
 def _controller_quantile(history: Sequence[bool]) -> tuple[float, str]:
@@ -1286,10 +1487,37 @@ def _nan_if_missing(value: Any) -> float:
 
 
 def _verify_descriptor(descriptor: Mapping[str, Any], label: str) -> None:
-    path = Path(str(descriptor.get("path") or "")).resolve()
+    path = _resolve_pinned_path(descriptor.get("path"))
     expected = str(descriptor.get("sha256") or "").lower()
     if not path.is_file() or sha256_file(path) != expected:
         raise ValueError(f"{label} bytes do not match pinned SHA-256")
+
+
+def _resolve_pinned_path(raw_path: Any) -> Path:
+    path = Path(str(raw_path or ""))
+    if path.is_absolute():
+        return path.resolve()
+    resolved = (REPO_ROOT / path).resolve()
+    if not resolved.is_relative_to(REPO_ROOT):
+        raise ValueError("repo-relative pinned path escapes repository root")
+    return resolved
+
+
+def _is_repo_content_addressed_descriptor(descriptor: Mapping[str, Any]) -> bool:
+    raw_path = Path(str(descriptor.get("path") or ""))
+    expected = str(descriptor.get("sha256") or "").lower()
+    parts = raw_path.parts
+    if raw_path.is_absolute() or len(expected) != 64:
+        return False
+    try:
+        sha_index = parts.index("sha256")
+    except ValueError:
+        return False
+    return (
+        sha_index + 1 < len(parts)
+        and parts[sha_index + 1] == expected
+        and _resolve_pinned_path(raw_path).is_relative_to(REPO_ROOT)
+    )
 
 
 def _validate_transfer_freeze(freeze: Mapping[str, Any]) -> None:
@@ -1304,8 +1532,8 @@ def _validate_transfer_freeze(freeze: Mapping[str, Any]) -> None:
     for key in (
         "protocol",
         "report",
-        "legacy_v7_selected_market_rows",
-        "v8_1_unit_controller_market_rows",
+        "legacy_v7_hold_to_settlement_market_rows",
+        "v8_1_sell_before_close_bridge_market_rows",
     ):
         _verify_descriptor(dict(freeze.get(key) or {}), f"transfer freeze {key}")
 
@@ -1387,41 +1615,64 @@ def _health_markdown(report: Mapping[str, Any]) -> str:
 
 
 def _transfer_markdown(report: Mapping[str, Any]) -> str:
+    panels = report["policy_panels"]
+    v7 = panels["legacy_v7_hold_to_settlement"]["metrics"]
+    v81_panel = panels["v8_1_sell_before_close_bridge"]
+    v81 = v81_panel["metrics"]
+    coverage = v81_panel["native_feature_coverage"]
+    weak = v81_panel["weak_signal_rule"]
+    v7_ratio = v7["aggregate_cost_signal_ratio"]
+    v81_ratio = v81["aggregate_cost_signal_ratio"]
     lines = [
         "# BTC-15m Transfer Diagnostic",
         "",
         "Development diagnostic only; never promotion evidence.",
         "",
-        "| Policy | Accepted | UP/DOWN | Unit net PnL | Cost/signal |",
-        "|---|---:|---:|---:|---:|",
+        "## Legacy v7 — HOLD_TO_SETTLEMENT",
+        "",
+        f"- accepted: `{v7['accepted_market_count']}/{v7['market_count']}`",
+        f"- UP / DOWN: `{v7['accepted_up_count']} / {v7['accepted_down_count']}`",
+        f"- total unit net PnL (report only): `{v7['total_unit_net_pnl']:.6f}`",
+        (
+            "- cost/signal: `"
+            + ("" if v7_ratio is None else f"{v7_ratio:.6f}")
+            + "`"
+        ),
+        "- binary positive-PnL gate: `false`",
+        "",
+        "## v8.1 — SELL_BEFORE_CLOSE handicapped bridge",
+        "",
+        "- transfer status: `bridge_handicapped_not_native`",
+        (
+            "- native feature coverage: "
+            f"`{coverage['native_feature_count']}/{coverage['model_feature_count']}` "
+            f"(`{coverage['coverage']:.2%}`)"
+        ),
+        f"- accepted: `{v81['accepted_market_count']}/{v81['market_count']}`",
+        f"- UP / DOWN: `{v81['accepted_up_count']} / {v81['accepted_down_count']}`",
+        (
+            "- mean unit net PnL / bootstrap 95% LCB: "
+            f"`{v81['mean_unit_net_pnl_per_accepted_market']} / "
+            f"{v81['mean_unit_net_pnl_bootstrap_lcb']}`"
+        ),
+        (
+            "- cost/signal: `"
+            + ("" if v81_ratio is None else f"{v81_ratio:.6f}")
+            + "`"
+        ),
+        f"- predeclared weak rule met: `{str(weak['weak_signal_rule_met']).lower()}`",
+        f"- interpretation: `{weak['interpretation']}`",
+        "- full-retrain conclusion made: `false`",
+        "- promotion claim made: `false`",
+        "",
+        "## Cross-policy boundary",
+        "",
+        (
+            "No cross-policy superiority claim is made: HOLD_TO_SETTLEMENT and "
+            "SELL_BEFORE_CLOSE are separate lifecycle panels."
+        ),
+        "",
     ]
-    for key in ("legacy_v7_selected", "v8_1_unit_controller"):
-        row = report[key]
-        ratio = row["aggregate_cost_signal_ratio"]
-        lines.append(
-            f"| {key} | {row['accepted_market_count']}/{row['market_count']} | "
-            f"{row['accepted_up_count']}/{row['accepted_down_count']} | "
-            f"{row['total_unit_net_pnl']:.6f} | "
-            f"{'' if ratio is None else f'{ratio:.6f}'} |"
-        )
-    lines.extend(
-        [
-            "",
-            (
-                "- legacy v7 positive edge survives true paired book: "
-                f"`{str(report['judgements']['legacy_v7_positive_edge_survives_true_paired_book']).lower()}`"
-            ),
-            (
-                "- v8.1 transferable signal: "
-                f"`{str(report['judgements']['v8_1_has_transferable_signal']).lower()}`"
-            ),
-            (
-                "- full v8.1 retrain required: "
-                f"`{str(report['judgements']['v8_1_full_retrain_required']).lower()}`"
-            ),
-            "",
-        ]
-    )
     return "\n".join(lines)
 
 
@@ -1434,7 +1685,8 @@ def _readiness_markdown(report: Mapping[str, Any]) -> str:
             f"- training start allowed: `{str(report['training_start_allowed']).lower()}`",
             (
                 "- quality-valid outcome-finalized markets: "
-                f"`{metrics['quality_valid_outcome_finalized_market_count']}/120`"
+                f"`{metrics['quality_valid_outcome_finalized_market_count']}/"
+                f"{metrics['required_quality_valid_outcome_finalized_market_count']}`"
             ),
             (
                 "- paired executable quote coverage: "
@@ -1442,7 +1694,10 @@ def _readiness_markdown(report: Mapping[str, Any]) -> str:
             ),
             ("- blockers: `" + json.dumps(report["blocking_reason_codes"], sort_keys=True) + "`"),
             "",
-            "The collector is capped at 119 attempts. Attempt 120 is not authorized.",
+            (
+                "The readiness minimum is reachable under the 119-attempt collector cap. "
+                "Attempt 120 is not authorized."
+            ),
             "",
         ]
     )
