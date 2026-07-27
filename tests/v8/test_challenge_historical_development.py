@@ -783,3 +783,74 @@ def test_iteration_004_failure_is_immutably_recorded() -> None:
     )
     assert result["promotion_evidence_eligible"] is False
     assert result["safety"] == SAFETY
+
+
+def test_iteration_005_failure_and_terminal_review_are_immutable() -> None:
+    stems = (
+        "challenge_historical_development_iteration_005_entry",
+        "challenge_historical_development_iteration_005_result",
+        "challenge_historical_development_iteration_005_target_free_manifest",
+        "challenge_historical_development_iteration_005_manifest",
+        "challenge_historical_development_threshold_layer_terminal_review",
+    )
+    for stem in stems:
+        path = CONFIG_DIR / f"{stem}.json"
+        assert _sha256(path) == _sidecar(f"{stem}.sha256")
+
+    entry = _json("challenge_historical_development_iteration_005_entry.json")
+    result = _json("challenge_historical_development_iteration_005_result.json")
+    review = _json(
+        "challenge_historical_development_threshold_layer_terminal_review.json"
+    )
+    semantic_payload = {
+        key: value for key, value in entry.items() if key != "entry_sha256"
+    }
+    semantic_sha256 = hashlib.sha256(
+        json.dumps(
+            semantic_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    assert entry["entry_sha256"] == (
+        "4cfe9b4f715968ae634280fd4974ef200643b16de77c48c2e0219d75aaea8764"
+    )
+    assert semantic_sha256 == entry["entry_sha256"]
+    assert entry["previous_entry_sha256"] == (
+        "3c1ce6fcddf650ff9bd30bd46c3761b5df7fe785c88b06fa0b07ec9084a265b1"
+    )
+    assert result["metrics"]["accepted_market_count"] == 53
+    assert result["checks"]["accepted_market_count_at_least_39"] is True
+    assert result["checks"][
+        "full_window_paired_bootstrap_97_5_lcb_positive"
+    ] is False
+    assert result["checks"][
+        "candidate_absolute_bootstrap_97_5_lcb_positive"
+    ] is False
+    assert result["checks"][
+        "candidate_largest_winner_removed_pnl_positive"
+    ] is False
+    assert result["all_historical_success_criteria_passed"] is False
+    assert review["alpha_spending_review"]["slots_remaining"] == []
+    assert review["alpha_spending_review"]["slots_consumed"] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
+    assert review["conclusion"] == {
+        "collection_may_start": False,
+        "historical_success_achieved": False,
+        "replacement_future_attempt_may_be_preregistered": False,
+        "required_next_development_layer": (
+            "model_layer_new_features_or_retraining"
+        ),
+        "statement": (
+            "v8.1 scorer family lacks broad positive edge under the "
+            "current feature set"
+        ),
+        "threshold_layer_development_stopped": True,
+    }
+    assert review["safety"] == SAFETY

@@ -1,0 +1,65 @@
+{
+  "alpha_spending_review": {
+    "confirmatory_type_i_error_claim_allowed": false,
+    "development_corpus_already_outcome_opened": true,
+    "development_iteration_budget_increased": false,
+    "fresh_promotion_alpha_consumed": false,
+    "maximum_development_iterations": 5,
+    "nominal_one_sided_alpha_per_iteration": 0.025,
+    "slots_consumed": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "slots_remaining": []
+  },
+  "conclusion": {
+    "collection_may_start": false,
+    "historical_success_achieved": false,
+    "replacement_future_attempt_may_be_preregistered": false,
+    "required_next_development_layer": "model_layer_new_features_or_retraining",
+    "statement": "v8.1 scorer family lacks broad positive edge under the current feature set",
+    "threshold_layer_development_stopped": true
+  },
+  "issue": 262,
+  "revised_standard": {
+    "hard_support_minimum": 39,
+    "sha256": "01b6d0c80cd9f54cf78523e556788788dd3ac6324dc1865d385f6f4cf2dcb9bb",
+    "statistical_gate_position_size": 1.0
+  },
+  "reviewed_iterations": {
+    "iteration_004": {
+      "accepted_market_count": 76,
+      "absolute_lcb": -5.35191875,
+      "all_historical_success_criteria_passed": false,
+      "entry_semantic_sha256": "3c1ce6fcddf650ff9bd30bd46c3761b5df7fe785c88b06fa0b07ec9084a265b1",
+      "largest_winner_removed_unit_sizing_pnl": -1.1337499999999998,
+      "paired_lcb": -0.7208250000000004,
+      "result_sha256": "c58755f516c853fc0ab16cf5acb507b023dca52130c841c714e5058c3ddceda8",
+      "support_gate_passed": true
+    },
+    "iteration_005": {
+      "accepted_market_count": 53,
+      "absolute_lcb": -4.19653125,
+      "all_historical_success_criteria_passed": false,
+      "entry_semantic_sha256": "4cfe9b4f715968ae634280fd4974ef200643b16de77c48c2e0219d75aaea8764",
+      "largest_winner_removed_unit_sizing_pnl": -0.6479999999999998,
+      "paired_lcb": -1.217268749999999,
+      "result_sha256": "2e77c923e116fedb1c6fb102d3adf55b2d7b9c913b6fee39cc57b5856cd5e9d5",
+      "support_gate_passed": true
+    }
+  },
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-historical-development-threshold-layer-terminal-review-v1"
+}
