@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import math
 from pathlib import Path
@@ -10,11 +11,15 @@ from bigan.v8.polymarket.challenge_development_lane import (
     append_outcome_blind_batch,
     build_daily_capture_summary,
     load_jsonl,
+    sha256_file,
     validate_development_lane_protocol,
     validate_outcome_blind_batch_summary,
 )
 from bigan.v8.polymarket.challenge_model_layer_diagnostic import (
     canonical_json_sha256,
+)
+from examples.v8.run_challenge_development_lane_collector import (
+    install_authorized_protocol,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -78,7 +83,20 @@ def test_development_lane_protocol_binds_15m_diagnostic() -> None:
     validated = validate_development_lane_protocol(protocol, repo_root=ROOT)
     assert validated["market_family"] == "btc_updown_15m"
     assert validated["batch_round_count"] == 4
-    assert validated["maximum_capture_attempts_before_additional_permission"] == 119
+    assert validated["maximum_capture_attempts_before_additional_permission"] == 120
+    assert validated["attempt_120_authorized"] is True
+    assert validated["attempt_121_authorized"] is False
+    assert (
+        validated["authorization_extension_sha256"]
+        == "a40e962c6f5da521726061d66298746900d8fea4a07ae0fa78909c2baff06b0a"
+    )
+    extension_path = Path(validated["authorization_extension_path"])
+    assert sha256_file(extension_path) == validated["authorization_extension_sha256"]
+
+    attempt_121 = copy.deepcopy(protocol)
+    attempt_121["authorization_checkpoint"]["attempt_121_authorized"] = True
+    with pytest.raises(ValueError, match="authorization_checkpoint"):
+        validate_development_lane_protocol(attempt_121, repo_root=ROOT)
 
 
 def test_development_lane_start_record_preserves_safety_and_authorization() -> None:
@@ -99,6 +117,43 @@ def test_development_lane_start_record_preserves_safety_and_authorization() -> N
         "maximum_capture_attempts_before_pause": 119,
     }
     assert not any(start["safety"].values())
+
+
+def test_attempt_120_protocol_supersession_requires_exact_predecessor(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "service"
+    root.mkdir()
+    frozen = root / "development_lane_protocol.json"
+    frozen.write_text('{"cap":119}\n', encoding="utf-8")
+    predecessor_sha256 = sha256_file(frozen)
+    successor = tmp_path / "successor.json"
+    successor.write_text('{"cap":120}\n', encoding="utf-8")
+    successor_sha256 = sha256_file(successor)
+
+    install_authorized_protocol(
+        root=root,
+        protocol_path=successor,
+        expected_protocol_sha256=successor_sha256,
+        validated={"previous_protocol_sha256": predecessor_sha256},
+    )
+    assert sha256_file(frozen) == successor_sha256
+    archived = root / f"development_lane_protocol.superseded-{predecessor_sha256}.json"
+    assert sha256_file(archived) == predecessor_sha256
+
+    wrong_root = tmp_path / "wrong-service"
+    wrong_root.mkdir()
+    (wrong_root / "development_lane_protocol.json").write_text(
+        '{"cap":118}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="authorized predecessor"):
+        install_authorized_protocol(
+            root=wrong_root,
+            protocol_path=successor,
+            expected_protocol_sha256=successor_sha256,
+            validated={"previous_protocol_sha256": predecessor_sha256},
+        )
 
 
 def test_outcome_blind_batch_index_and_daily_summary(tmp_path: Path) -> None:

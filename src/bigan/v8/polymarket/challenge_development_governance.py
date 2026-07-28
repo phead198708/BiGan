@@ -464,12 +464,21 @@ def validate_training_protocol(protocol: Mapping[str, Any]) -> None:
             "all_conditions_required": True,
             "manual_or_implicit_override_allowed": False,
             "collector_cap_consistency": {
-                "maximum_capture_attempts_without_additional_permission": 119,
+                "maximum_capture_attempts_without_additional_permission": 120,
                 "readiness_count_unit": "quality_valid_outcome_finalized_markets",
                 "collection_capacity_unit": "single_market_capture_attempts",
                 "maximum_quality_valid_market_count_per_attempt": 1,
                 "minimum_required_must_not_exceed_collector_cap": True,
-                "additional_collection_authorization_created": False,
+                "additional_collection_authorization_created": True,
+                "authorization_extension": {
+                    "path": (
+                        "examples/v8/polymarket_configs/"
+                        "challenge_model_development_lane_attempt_120_authorization.json"
+                    ),
+                    "sha256": (
+                        "a40e962c6f5da521726061d66298746900d8fea4a07ae0fa78909c2baff06b0a"
+                    ),
+                },
             },
         },
         "reachable_under_cap": int(
@@ -507,6 +516,13 @@ def validate_training_collector_cap_consistency(
     gate = dict(training_protocol["readiness_gate"])
     registered = dict(gate["collector_cap_consistency"])
     authorization = dict(lane_protocol.get("authorization_checkpoint") or {})
+    training_extension = dict(registered.get("authorization_extension") or {})
+    lane_extension = dict(authorization.get("authorization_extension") or {})
+    _verify_descriptor(
+        training_extension,
+        "attempt 120 authorization extension",
+        repository_root=REPO_ROOT,
+    )
     minimum = int(gate["minimum_quality_valid_outcome_finalized_market_count"])
     registered_cap = int(registered["maximum_capture_attempts_without_additional_permission"])
     lane_cap = int(
@@ -515,12 +531,28 @@ def validate_training_collector_cap_consistency(
     checks = {
         "same_cap": registered_cap == lane_cap,
         "reachable": minimum <= lane_cap,
-        "lane_stops_before_attempt_120": authorization.get("stop_before_attempt_120") is True,
-        "lane_has_no_120_authorization": (
-            authorization.get("explicit_120_round_authorization_recorded") is False
+        "lane_stops_before_attempt_121": (
+            authorization.get("stop_before_attempt_121") is True
         ),
-        "training_has_no_additional_authorization": (
-            registered.get("additional_collection_authorization_created") is False
+        "attempt_120_authorized": (
+            authorization.get("explicit_120_round_authorization_recorded") is True
+            and registered.get("additional_collection_authorization_created") is True
+        ),
+        "attempt_121_not_authorized": (
+            authorization.get("attempt_121_authorized") is False
+        ),
+        "authorization_extension_identity": (
+            training_extension == lane_extension
+            and training_extension
+            == {
+                "path": (
+                    "examples/v8/polymarket_configs/"
+                    "challenge_model_development_lane_attempt_120_authorization.json"
+                ),
+                "sha256": (
+                    "a40e962c6f5da521726061d66298746900d8fea4a07ae0fa78909c2baff06b0a"
+                ),
+            }
         ),
         "unit_mapping": (
             registered.get("readiness_count_unit")
@@ -686,9 +718,10 @@ def build_lane_health_summary(
         ),
         "cumulative": _health_rollup(audits, finalized_ids=finalized_ids),
         "authorization": {
-            "maximum_attempts_before_additional_permission": 119,
-            "attempt_120_authorized": False,
-            "pause_before_attempt_120_required": True,
+            "maximum_attempts_before_additional_permission": 120,
+            "attempt_120_authorized": True,
+            "attempt_121_authorized": False,
+            "pause_before_attempt_121_required": True,
             "collector_reported_attempted_market_count": int(
                 collector_state.get("attempted_market_count") or 0
             ),
@@ -706,8 +739,8 @@ def build_lane_health_summary(
         "promotion_evidence_eligible": False,
         "safety": dict(SAFETY),
     }
-    if int(report["cumulative"]["attempted_market_count"]) > 119:
-        raise ValueError("development lane exceeded the 119-attempt authorization")
+    if int(report["cumulative"]["attempted_market_count"]) > 120:
+        raise ValueError("development lane exceeded the 120-attempt authorization")
     if write:
         daily_path = root / "daily_health_summaries" / f"{selected_date}.json"
         atomic_write_json(daily_path, report)
@@ -945,10 +978,12 @@ def build_training_readiness(
         "conditions": conditions,
         "blocking_reason_codes": blockers,
         "training_start_allowed": not blockers,
-        "attempt_120_authorized": False,
+        "attempt_120_authorized": True,
+        "attempt_121_authorized": False,
         "authorization_note": (
             f"The readiness minimum ({required_count}) is reachable under the collector's "
-            f"{collector_cap}-attempt cap. Attempt 120 remains unauthorized."
+            f"{collector_cap}-attempt cap. Attempt 120 is explicitly authorized; "
+            "attempt 121 remains unauthorized."
         ),
         "model_training_started": False,
         "old_15m_plus_12_39_used_as_gate": False,
@@ -1968,7 +2003,10 @@ def _health_markdown(report: Mapping[str, Any]) -> str:
                 )
                 + "`"
             ),
-            ("- authorization: pause before attempt 120; `attempt_120_authorized=false`"),
+            (
+                "- authorization: attempt 120 explicitly authorized; pause before "
+                "attempt 121; `attempt_121_authorized=false`"
+            ),
             "",
             "Development data only; never promotion evidence. All safety unlocks remain false.",
             "",
@@ -2057,8 +2095,8 @@ def _readiness_markdown(report: Mapping[str, Any]) -> str:
             ("- blockers: `" + json.dumps(report["blocking_reason_codes"], sort_keys=True) + "`"),
             "",
             (
-                "The readiness minimum is reachable under the 119-attempt collector cap. "
-                "Attempt 120 is not authorized."
+                "The readiness minimum is reachable under the 120-attempt collector cap. "
+                "Attempt 120 is explicitly authorized; attempt 121 is not authorized."
             ),
             "",
         ]

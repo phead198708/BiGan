@@ -52,12 +52,12 @@ def run_service(
         raise ValueError("development lane protocol SHA-256 mismatch")
     protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
     validated = validate_development_lane_protocol(protocol, repo_root=ROOT)
-    frozen_protocol = root / "development_lane_protocol.json"
-    if frozen_protocol.is_file():
-        if sha256_file(frozen_protocol) != expected_protocol_sha256.lower():
-            raise ValueError("service protocol bytes differ from the launched protocol")
-    else:
-        frozen_protocol.write_bytes(protocol_path.read_bytes())
+    install_authorized_protocol(
+        root=root,
+        protocol_path=protocol_path,
+        expected_protocol_sha256=expected_protocol_sha256.lower(),
+        validated=validated,
+    )
 
     lock_path = root / "development_lane_collector.lock"
     with lock_path.open("a+", encoding="utf-8") as lock_handle:
@@ -72,6 +72,39 @@ def run_service(
             max_batches=max_batches,
             failure_backoff_seconds=failure_backoff_seconds,
         )
+
+
+def install_authorized_protocol(
+    *,
+    root: Path,
+    protocol_path: Path,
+    expected_protocol_sha256: str,
+    validated: dict,
+) -> None:
+    """Install only the exact authorized successor of the frozen lane protocol."""
+
+    frozen_protocol = root / "development_lane_protocol.json"
+    if frozen_protocol.is_file():
+        frozen_sha256 = sha256_file(frozen_protocol)
+        if frozen_sha256 != expected_protocol_sha256:
+            previous_sha256 = str(validated["previous_protocol_sha256"])
+            if frozen_sha256 != previous_sha256:
+                raise ValueError("service protocol bytes differ from authorized predecessor")
+            superseded_protocol = root / (
+                f"development_lane_protocol.superseded-{previous_sha256}.json"
+            )
+            if superseded_protocol.is_file():
+                if sha256_file(superseded_protocol) != previous_sha256:
+                    raise ValueError("archived predecessor protocol bytes differ")
+            else:
+                superseded_protocol.write_bytes(frozen_protocol.read_bytes())
+            frozen_protocol.write_bytes(protocol_path.read_bytes())
+            if sha256_file(frozen_protocol) != expected_protocol_sha256:
+                raise ValueError("authorized service protocol supersession failed")
+    else:
+        frozen_protocol.write_bytes(protocol_path.read_bytes())
+    if sha256_file(frozen_protocol) != expected_protocol_sha256:
+        raise ValueError("installed service protocol SHA-256 mismatch")
 
 
 def _run_locked(
@@ -103,7 +136,7 @@ def _run_locked(
         remaining = maximum - attempted
         if remaining <= 0:
             state = _state(
-                status="paused_before_attempt_120_pending_explicit_permission",
+                status="paused_before_attempt_121_pending_explicit_permission",
                 collector_commit=collector_commit,
                 protocol_sha256=protocol_sha256,
                 validated=validated,
@@ -241,7 +274,10 @@ def _state(
         "authorization_checkpoint": int(
             validated["maximum_capture_attempts_before_additional_permission"]
         ),
-        "attempt_120_authorized": False,
+        "attempt_120_authorized": bool(validated["attempt_120_authorized"]),
+        "attempt_121_authorized": bool(validated["attempt_121_authorized"]),
+        "authorization_extension_path": validated["authorization_extension_path"],
+        "authorization_extension_sha256": validated["authorization_extension_sha256"],
         "outcomes_labels_or_pnl_available_to_capture_control": False,
         "development_only_forever": True,
         "promotion_evidence_eligible": False,

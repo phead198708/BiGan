@@ -13,12 +13,16 @@
     "all_conditions_required": true,
     "manual_or_implicit_override_allowed": false,
     "collector_cap_consistency": {
-      "maximum_capture_attempts_without_additional_permission": 119,
+      "maximum_capture_attempts_without_additional_permission": 120,
       "readiness_count_unit": "quality_valid_outcome_finalized_markets",
       "collection_capacity_unit": "single_market_capture_attempts",
       "maximum_quality_valid_market_count_per_attempt": 1,
       "minimum_required_must_not_exceed_collector_cap": true,
-      "additional_collection_authorization_created": false
+      "additional_collection_authorization_created": true,
+      "authorization_extension": {
+        "path": "examples/v8/polymarket_configs/challenge_model_development_lane_attempt_120_authorization.json",
+        "sha256": "a40e962c6f5da521726061d66298746900d8fea4a07ae0fa78909c2baff06b0a"
+      }
     }
   },
   "split": {

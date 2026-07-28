@@ -42,7 +42,7 @@ def test_frozen_protocols_preserve_development_only_gates() -> None:
     assert training["readiness_gate"]["minimum_quality_valid_outcome_finalized_market_count"] == 100
     assert consistency == {
         "minimum_quality_valid_outcome_finalized_market_count": 100,
-        "maximum_capture_attempts_without_additional_permission": 119,
+        "maximum_capture_attempts_without_additional_permission": 120,
         "maximum_quality_valid_market_count_per_attempt": 1,
     }
     assert training["representation"]["missing_encoded_as_numeric_zero_allowed"] is False
@@ -125,7 +125,7 @@ def test_readiness_policy_rejects_unreachable_minimum_and_complement_proxy() -> 
     training = json.loads(TRAINING.read_text(encoding="utf-8"))
     lane = json.loads(LANE_PROTOCOL.read_text(encoding="utf-8"))
     inconsistent = copy.deepcopy(training)
-    inconsistent["readiness_gate"]["minimum_quality_valid_outcome_finalized_market_count"] = 120
+    inconsistent["readiness_gate"]["minimum_quality_valid_outcome_finalized_market_count"] = 121
     with pytest.raises(ValueError, match="15m training protocol invalid"):
         validate_training_collector_cap_consistency(inconsistent, lane)
 
@@ -270,7 +270,8 @@ def test_health_and_training_gate_remain_closed_below_threshold(
         write=False,
     )
     assert readiness["training_start_allowed"] is False
-    assert readiness["attempt_120_authorized"] is False
+    assert readiness["attempt_120_authorized"] is True
+    assert readiness["attempt_121_authorized"] is False
     assert (
         "quality_valid_outcome_finalized_market_count_at_least_100"
         in readiness["blocking_reason_codes"]

@@ -83,11 +83,67 @@ def validate_development_lane_protocol(
     authorization = dict(protocol.get("authorization_checkpoint") or {})
     if authorization != {
         "previous_120_round_permission_requirement_preserved": True,
-        "maximum_capture_attempts_before_additional_permission": 119,
-        "explicit_120_round_authorization_recorded": False,
-        "stop_before_attempt_120": True,
+        "maximum_capture_attempts_before_additional_permission": 120,
+        "explicit_120_round_authorization_recorded": True,
+        "authorization_extension": {
+            "path": (
+                "examples/v8/polymarket_configs/"
+                "challenge_model_development_lane_attempt_120_authorization.json"
+            ),
+            "sha256": "a40e962c6f5da521726061d66298746900d8fea4a07ae0fa78909c2baff06b0a",
+        },
+        "stop_before_attempt_121": True,
+        "attempt_121_authorized": False,
     }:
         blockers.append("authorization_checkpoint")
+    authorization_descriptor = dict(authorization.get("authorization_extension") or {})
+    authorization_path = Path(str(authorization_descriptor.get("path") or ""))
+    if not authorization_path.is_absolute():
+        authorization_path = Path(repo_root).resolve() / authorization_path
+    authorization_sha256 = str(authorization_descriptor.get("sha256") or "").lower()
+    previous_protocol_sha256 = ""
+    if (
+        not authorization_path.is_file()
+        or sha256_file(authorization_path) != authorization_sha256
+    ):
+        blockers.append("authorization_extension")
+    else:
+        extension = _load_json(authorization_path)
+        extension_authorization = dict(extension.get("authorization") or {})
+        authorization_source = dict(extension.get("authorization_source") or {})
+        superseded = dict(extension.get("supersedes_protocol") or {})
+        previous_protocol_sha256 = str(superseded.get("sha256") or "").lower()
+        if (
+            extension.get("schema_version")
+            != "bigan-challenge-model-development-lane-authorization-extension-v1"
+            or extension.get("lane_id") != protocol.get("lane_id")
+            or authorization_source.get("type")
+            != "explicit_user_instruction_in_codex_task"
+            or authorization_source.get("instruction") != "OK，开始Attempt 120"
+            or superseded
+            != {
+                "commit": "6fbc74a7af242b437447ee0459d0c3557ddcebd6",
+                "sha256": "19badf0185b16df00b58b029ff39896ffadbc167a7f760a0ee931142411a0fc2",
+                "maximum_capture_attempts": 119,
+            }
+            or extension_authorization
+            != {
+                "exact_newly_authorized_attempts": [120],
+                "maximum_capture_attempts": 120,
+                "attempt_120_authorized": True,
+                "attempt_121_authorized": False,
+                "stop_before_attempt_121": True,
+                "outcome_blind_capture_only": True,
+                "post_close_development_finalization_allowed": True,
+                "development_only_forever": True,
+                "promotion_evidence_eligible": False,
+            }
+            or extension.get("training_started") is not False
+            or extension.get("candidate_lineage_changed") is not False
+            or extension.get("thresholds_changed") is not False
+            or extension.get("safety") != SAFETY
+        ):
+            blockers.append("authorization_extension_semantics")
     causality = dict(protocol.get("causality") or {})
     if causality != {
         "available_at_must_not_exceed_decision_ts": True,
@@ -125,6 +181,11 @@ def validate_development_lane_protocol(
         "maximum_capture_attempts_before_additional_permission": int(
             authorization["maximum_capture_attempts_before_additional_permission"]
         ),
+        "attempt_120_authorized": True,
+        "attempt_121_authorized": False,
+        "authorization_extension_path": str(authorization_path.resolve()),
+        "authorization_extension_sha256": authorization_sha256,
+        "previous_protocol_sha256": previous_protocol_sha256,
         "diagnostic_freeze_path": str(freeze_path.resolve()),
         "diagnostic_freeze_sha256": expected_sha,
     }
