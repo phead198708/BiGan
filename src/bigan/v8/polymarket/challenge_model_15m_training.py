@@ -25,6 +25,12 @@ PREREGISTRATION_SCHEMA_VERSION = "bigan-challenge-model-15m-training-slot-v1"
 TRAINING_REPORT_SCHEMA_VERSION = "bigan-challenge-model-15m-training-report-v1"
 TRAINING_MANIFEST_SCHEMA_VERSION = "bigan-challenge-model-15m-training-manifest-v1"
 DATASET_MANIFEST_SCHEMA_VERSION = "bigan-challenge-model-15m-training-dataset-v1"
+ROLLING_ORIGIN_PREREGISTRATION_SCHEMA_VERSION = (
+    "bigan-challenge-model-15m-rolling-origin-oof-preregistration-v1"
+)
+ROLLING_ORIGIN_REPORT_SCHEMA_VERSION = (
+    "bigan-challenge-model-15m-rolling-origin-oof-report-v1"
+)
 FINALIZED_INDEX_SCHEMA_VERSION = "bigan-challenge-model-development-lane-finalized-index-v1"
 TARGET_FIELD = "total_net_pnl_per_notional"
 TARGET_POLICY = "HOLD_TO_SETTLEMENT"
@@ -579,6 +585,323 @@ def run_challenge_model_15m_training(
     }
 
 
+def validate_rolling_origin_oof_preregistration(payload: Mapping[str, Any]) -> None:
+    """Validate a fixed, strictly prior-market rolling-origin diagnostic."""
+
+    blockers: list[str] = []
+    if payload.get("schema_version") != ROLLING_ORIGIN_PREREGISTRATION_SCHEMA_VERSION:
+        blockers.append("schema_version")
+    if payload.get("role") != "outcome-aware-development-diagnostic-only":
+        blockers.append("role")
+    if payload.get("development_only_forever") is not True:
+        blockers.append("development_only_forever")
+    if payload.get("promotion_evidence_eligible") is not False:
+        blockers.append("promotion_evidence_eligible")
+    candidate = dict(payload.get("candidate_preregistration") or {})
+    if not candidate.get("path") or not _looks_like_sha256(candidate.get("sha256")):
+        blockers.append("candidate_preregistration")
+    prior_result = dict(payload.get("prior_result") or {})
+    if not prior_result.get("path") or not _looks_like_sha256(prior_result.get("sha256")):
+        blockers.append("prior_result")
+    origin = dict(payload.get("rolling_origin") or {})
+    if int(origin.get("initial_training_market_count") or 0) < 5:
+        blockers.append("rolling_origin.initial_training_market_count")
+    if int(origin.get("target_block_size") or 0) != 1:
+        blockers.append("rolling_origin.target_block_size")
+    if float(origin.get("inner_train_fraction") or 0.0) != 0.8:
+        blockers.append("rolling_origin.inner_train_fraction")
+    if origin.get("strictly_prior_market_labels_only") is not True:
+        blockers.append("rolling_origin.strictly_prior_market_labels_only")
+    if origin.get("future_market_labels_or_features_allowed") is not False:
+        blockers.append("rolling_origin.future_market_labels_or_features_allowed")
+    discipline = dict(payload.get("development_discipline") or {})
+    if discipline.get("threshold_search_allowed") is not False:
+        blockers.append("development_discipline.threshold_search_allowed")
+    if discipline.get("hyperparameter_search_allowed") is not False:
+        blockers.append("development_discipline.hyperparameter_search_allowed")
+    if discipline.get("candidate_behavior_changed") is not False:
+        blockers.append("development_discipline.candidate_behavior_changed")
+    if dict(payload.get("safety") or {}) != SAFETY:
+        blockers.append("safety")
+    if blockers:
+        raise ValueError(
+            "BTC 15m rolling-origin preregistration invalid: " + ", ".join(blockers)
+        )
+
+
+def run_challenge_model_15m_rolling_origin_oof(
+    *,
+    preregistration_path: Path | str,
+    expected_preregistration_sha256: str,
+    output_dir: Path | str,
+    source_commit: str,
+    created_at: str | None = None,
+    repository_root: Path | str | None = None,
+) -> dict[str, Any]:
+    """Run a preregistered expanding-window OOF diagnostic."""
+
+    repo_root = Path(repository_root or REPO_ROOT).resolve()
+    prereg_path = Path(preregistration_path).resolve()
+    if sha256_file(prereg_path) != expected_preregistration_sha256.lower():
+        raise ValueError("rolling-origin preregistration SHA-256 mismatch")
+    preregistration = _load_json(prereg_path)
+    validate_rolling_origin_oof_preregistration(preregistration)
+    if not _looks_like_git_commit(source_commit):
+        raise ValueError("source_commit must be a full Git SHA")
+    candidate_path = _verify_repo_descriptor(
+        dict(preregistration["candidate_preregistration"]),
+        repo_root,
+    )
+    _verify_repo_descriptor(dict(preregistration["prior_result"]), repo_root)
+    candidate = _load_json(candidate_path)
+    validate_training_slot_preregistration(candidate)
+    if candidate["model"]["family"] != (
+        "xgboost_shared_side_symmetric_pair_normalized_win_probability_"
+        "with_cost_subtraction"
+    ):
+        raise ValueError("rolling-origin diagnostic requires the pair-normalized candidate")
+    resolved_pins = {
+        name: _verify_repo_descriptor(dict(descriptor), repo_root)
+        for name, descriptor in dict(candidate["input_pins"]).items()
+    }
+    _validate_readiness(_load_json(resolved_pins["training_readiness"]))
+    index_path = resolved_pins["finalized_development_corpus_index"]
+    index_rows = _verify_finalized_index(index_path=index_path, repo_root=repo_root)
+    rows, _ = _load_side_symmetric_rows(index_rows, repo_root=repo_root)
+    ordered_markets = sorted(
+        {
+            (int(row["market_start_ts"]), str(row["market_id"]))
+            for row in rows
+        }
+    )
+    initial_count = int(
+        preregistration["rolling_origin"]["initial_training_market_count"]
+    )
+    if initial_count >= len(ordered_markets):
+        raise ValueError("rolling-origin initial window leaves no OOF markets")
+    feature_names = (
+        *BASE_FEATURE_NAMES,
+        *(f"{name}__missing" for name in BASE_FEATURE_NAMES),
+    )
+    rows_by_market: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        rows_by_market[str(row["market_id"])].append(row)
+    oof_rows: list[dict[str, Any]] = []
+    fold_audits: list[dict[str, Any]] = []
+    parameters = dict(candidate["model"]["parameters"])
+    for target_index in range(initial_count, len(ordered_markets)):
+        prior_market_ids = [
+            market_id for _, market_id in ordered_markets[:target_index]
+        ]
+        inner_train_count = int(
+            len(prior_market_ids)
+            * float(preregistration["rolling_origin"]["inner_train_fraction"])
+        )
+        inner_train_count = min(max(1, inner_train_count), len(prior_market_ids) - 1)
+        train_ids = set(prior_market_ids[:inner_train_count])
+        validation_ids = set(prior_market_ids[inner_train_count:])
+        target_market_id = ordered_markets[target_index][1]
+        train_rows = [
+            row for market_id in train_ids for row in rows_by_market[market_id]
+        ]
+        validation_rows = [
+            row for market_id in validation_ids for row in rows_by_market[market_id]
+        ]
+        target_rows = [dict(row) for row in rows_by_market[target_market_id]]
+        train_matrix = _matrix(
+            train_rows,
+            feature_names,
+            label_field="settlement_payout",
+        )
+        validation_matrix = _matrix(
+            validation_rows,
+            feature_names,
+            label_field="settlement_payout",
+        )
+        target_matrix = _matrix(
+            target_rows,
+            feature_names,
+            label_field="settlement_payout",
+        )
+        booster = xgb.train(
+            params=parameters,
+            dtrain=train_matrix,
+            num_boost_round=int(candidate["model"]["num_boost_round"]),
+            evals=[
+                (train_matrix, "train"),
+                (validation_matrix, "validation"),
+            ],
+            early_stopping_rounds=int(candidate["model"]["early_stopping_rounds"]),
+            verbose_eval=False,
+        )
+        raw_predictions = booster.predict(
+            target_matrix,
+            iteration_range=(0, int(booster.best_iteration) + 1),
+        )
+        for row, raw_prediction in zip(target_rows, raw_predictions, strict=True):
+            row["raw_win_probability"] = float(raw_prediction)
+            row["win_probability"] = float(raw_prediction)
+            row["prediction"] = float(raw_prediction) - float(row["execution_cost"])
+            row["oof_target_rank"] = target_index + 1
+            row["strictly_prior_training_market_count"] = len(prior_market_ids)
+        _apply_pair_probability_normalization(target_rows)
+        oof_rows.extend(target_rows)
+        fold_audits.append(
+            {
+                "target_market_id": target_market_id,
+                "target_market_rank": target_index + 1,
+                "strictly_prior_market_count": len(prior_market_ids),
+                "inner_train_market_count": len(train_ids),
+                "inner_validation_market_count": len(validation_ids),
+                "inner_train_market_ids_sha256": canonical_json_sha256(
+                    prior_market_ids[:inner_train_count]
+                ),
+                "inner_validation_market_ids_sha256": canonical_json_sha256(
+                    prior_market_ids[inner_train_count:]
+                ),
+                "best_iteration": int(booster.best_iteration),
+                "best_score": float(booster.best_score),
+                "target_label_used_for_fit": False,
+                "future_market_used_for_fit": False,
+            }
+        )
+    output = Path(output_dir).resolve()
+    if output.exists() and any(output.iterdir()):
+        raise FileExistsError(f"rolling-origin output directory must be empty: {output}")
+    output.mkdir(parents=True, exist_ok=True)
+    prediction_path = output / "rolling_origin_oof_predictions.jsonl"
+    _write_jsonl(
+        prediction_path,
+        (
+            {
+                "market_id": row["market_id"],
+                "market_start_ts": row["market_start_ts"],
+                "decision_ts": row["decision_ts"],
+                "side": row["side"],
+                "raw_win_probability": row["raw_win_probability"],
+                "win_probability": row["win_probability"],
+                "prediction": row["prediction"],
+                "execution_cost": row["execution_cost"],
+                "target": row["target"],
+                "resolved_outcome": row["resolved_outcome"],
+                "oof_target_rank": row["oof_target_rank"],
+                "strictly_prior_training_market_count": row[
+                    "strictly_prior_training_market_count"
+                ],
+                "development_only_forever": True,
+                "promotion_evidence_eligible": False,
+                "safety": dict(SAFETY),
+            }
+            for row in oof_rows
+        ),
+    )
+    fold_path = output / "rolling_origin_fold_audits.jsonl"
+    _write_jsonl(fold_path, fold_audits)
+    bootstrap_resamples = int(
+        preregistration["development_evaluation_policy"]["bootstrap_resamples"]
+    )
+    bootstrap_seed = int(
+        preregistration["development_evaluation_policy"]["bootstrap_seed"]
+    )
+    selected = _fixed_policy_selected_rows(oof_rows)
+    pnl = [float(row["target"]) for row in selected]
+    midpoint = len(ordered_markets[initial_count:]) // 2
+    first_half_ids = {
+        market_id
+        for _, market_id in ordered_markets[initial_count : initial_count + midpoint]
+    }
+    second_half_ids = {
+        market_id for _, market_id in ordered_markets[initial_count + midpoint :]
+    }
+    fixed_metrics = _fixed_policy_metrics(
+        oof_rows,
+        bootstrap_resamples=bootstrap_resamples,
+        bootstrap_seed=bootstrap_seed,
+    )
+    minimum_accepted = int(
+        preregistration["development_evaluation_policy"][
+            "minimum_accepted_oof_markets"
+        ]
+    )
+    interval = fixed_metrics["mean_unit_net_pnl_bootstrap_interval"]
+    lower = float(interval["lower"]) if interval else None
+    signal_passed = (
+        int(fixed_metrics["accepted_market_count"]) >= minimum_accepted
+        and lower is not None
+        and lower > 0.0
+    )
+    report = {
+        "schema_version": ROLLING_ORIGIN_REPORT_SCHEMA_VERSION,
+        "diagnostic_id": preregistration["diagnostic_id"],
+        "created_at": created_at or datetime.now(UTC).isoformat(),
+        "source_commit": source_commit,
+        "preregistration": _descriptor(prereg_path, repo_root=repo_root),
+        "candidate_preregistration": _descriptor(candidate_path, repo_root=repo_root),
+        "market_count": len(ordered_markets),
+        "initial_training_market_count": initial_count,
+        "oof_market_count": len(ordered_markets) - initial_count,
+        "oof_side_row_count": len(oof_rows),
+        "fold_count": len(fold_audits),
+        "minimum_strictly_prior_market_count": min(
+            audit["strictly_prior_market_count"] for audit in fold_audits
+        ),
+        "maximum_strictly_prior_market_count": max(
+            audit["strictly_prior_market_count"] for audit in fold_audits
+        ),
+        "target_or_future_label_leakage_count": sum(
+            audit["target_label_used_for_fit"] or audit["future_market_used_for_fit"]
+            for audit in fold_audits
+        ),
+        "fixed_policy_metrics": fixed_metrics,
+        "robustness": {
+            "largest_winner_removed_total_unit_net_pnl": (
+                sum(pnl) - max(pnl) if pnl else None
+            ),
+            "first_chronological_half": _fixed_policy_metrics(
+                [row for row in oof_rows if row["market_id"] in first_half_ids],
+                bootstrap_resamples=bootstrap_resamples,
+                bootstrap_seed=bootstrap_seed,
+            ),
+            "second_chronological_half": _fixed_policy_metrics(
+                [row for row in oof_rows if row["market_id"] in second_half_ids],
+                bootstrap_resamples=bootstrap_resamples,
+                bootstrap_seed=bootstrap_seed,
+            ),
+        },
+        "development_signal_rule": {
+            "minimum_accepted_oof_markets": minimum_accepted,
+            "mean_unit_net_pnl_bootstrap_lcb_must_be_gt": 0.0,
+            "observed_accepted_oof_markets": fixed_metrics["accepted_market_count"],
+            "observed_bootstrap_lcb": lower,
+            "passed": signal_passed,
+            "report_only": True,
+            "promotion_claim_allowed": False,
+        },
+        "candidate_behavior_changed": False,
+        "threshold_or_hyperparameter_search_performed": False,
+        "development_only_forever": True,
+        "promotion_evidence_eligible": False,
+        "promotion_claim_made": False,
+        "collection_restarted": False,
+        "new_outcomes_collected": False,
+        "safety": dict(SAFETY),
+    }
+    report_path = output / "rolling_origin_oof_report.json"
+    atomic_write_json(report_path, report)
+    return {
+        "diagnostic_id": preregistration["diagnostic_id"],
+        "output_dir": str(output),
+        "prediction_path": str(prediction_path),
+        "prediction_sha256": sha256_file(prediction_path),
+        "fold_audit_path": str(fold_path),
+        "fold_audit_sha256": sha256_file(fold_path),
+        "report_path": str(report_path),
+        "report_sha256": sha256_file(report_path),
+        "development_signal_rule": report["development_signal_rule"],
+        "safety": dict(SAFETY),
+    }
+
+
 def side_symmetric_features(feature_row: Mapping[str, Any], side: str) -> dict[str, float]:
     """Build the shared UP/DOWN representation without a side identity feature."""
 
@@ -1005,29 +1328,10 @@ def _fixed_policy_metrics(
     bootstrap_resamples: int,
     bootstrap_seed: int,
 ) -> dict[str, Any]:
-    by_market: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-    for row in rows:
-        by_market[str(row["market_id"])].append(row)
-    accepted: list[Mapping[str, Any]] = []
-    for market_rows in by_market.values():
-        by_decision: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
-        for row in market_rows:
-            by_decision[int(row["decision_ts"])].append(row)
-        for decision_ts in sorted(by_decision):
-            candidates = sorted(
-                by_decision[decision_ts],
-                key=lambda row: SIDES.index(str(row["side"])),
-            )
-            selected = max(
-                candidates,
-                key=lambda row: (
-                    float(row["prediction"]),
-                    -SIDES.index(str(row["side"])),
-                ),
-            )
-            if float(selected["prediction"]) > 0.0:
-                accepted.append(selected)
-                break
+    by_market = {
+        str(row["market_id"]) for row in rows
+    }
+    accepted = _fixed_policy_selected_rows(rows)
     pnl = [float(row["target"]) for row in accepted]
     interval = _bootstrap_mean_interval(
         pnl,
@@ -1060,6 +1364,35 @@ def _fixed_policy_metrics(
         "report_only": True,
         "promotion_claim_allowed": False,
     }
+
+
+def _fixed_policy_selected_rows(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    by_market: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_market[str(row["market_id"])].append(row)
+    accepted: list[Mapping[str, Any]] = []
+    for market_rows in by_market.values():
+        by_decision: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
+        for row in market_rows:
+            by_decision[int(row["decision_ts"])].append(row)
+        for decision_ts in sorted(by_decision):
+            candidates = sorted(
+                by_decision[decision_ts],
+                key=lambda row: SIDES.index(str(row["side"])),
+            )
+            selected = max(
+                candidates,
+                key=lambda row: (
+                    float(row["prediction"]),
+                    -SIDES.index(str(row["side"])),
+                ),
+            )
+            if float(selected["prediction"]) > 0.0:
+                accepted.append(selected)
+                break
+    return accepted
 
 
 def _development_signal_rule(

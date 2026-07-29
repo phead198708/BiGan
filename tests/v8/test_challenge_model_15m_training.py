@@ -10,8 +10,10 @@ from bigan.v8.polymarket.challenge_model_15m_training import (
     BASE_FEATURE_NAMES,
     _apply_pair_probability_normalization,
     _assign_market_grouped_temporal_splits,
+    run_challenge_model_15m_rolling_origin_oof,
     run_challenge_model_15m_training,
     side_symmetric_features,
+    validate_rolling_origin_oof_preregistration,
     validate_training_slot_preregistration,
 )
 from bigan.v8.polymarket.contracts import canonical_json_sha256
@@ -142,6 +144,63 @@ def test_training_slot_end_to_end_and_sha_mismatch_fail_closed(tmp_path: Path) -
             repository_root=repo,
         )
 
+    candidate = json.loads(json.dumps(prereg))
+    candidate["training_slot_id"] = "synthetic-pair-candidate"
+    candidate["model"]["family"] = (
+        "xgboost_shared_side_symmetric_pair_normalized_win_probability_"
+        "with_cost_subtraction"
+    )
+    candidate["model"]["parameters"]["objective"] = "binary:logistic"
+    candidate["model"]["parameters"]["eval_metric"] = "logloss"
+    candidate_path = repo / "candidate_pair.json"
+    _write_json(candidate_path, candidate)
+    prior_result_path = repo / "prior_result.json"
+    _write_json(prior_result_path, {"status": "development_only"})
+    oof_prereg = {
+        "schema_version": (
+            "bigan-challenge-model-15m-rolling-origin-oof-preregistration-v1"
+        ),
+        "diagnostic_id": "synthetic-oof",
+        "role": "outcome-aware-development-diagnostic-only",
+        "development_only_forever": True,
+        "promotion_evidence_eligible": False,
+        "candidate_preregistration": _descriptor(repo, candidate_path),
+        "prior_result": _descriptor(repo, prior_result_path),
+        "rolling_origin": {
+            "initial_training_market_count": 5,
+            "target_block_size": 1,
+            "inner_train_fraction": 0.8,
+            "strictly_prior_market_labels_only": True,
+            "future_market_labels_or_features_allowed": False,
+        },
+        "development_evaluation_policy": {
+            "bootstrap_resamples": 100,
+            "bootstrap_seed": 1,
+            "minimum_accepted_oof_markets": 2,
+        },
+        "development_discipline": {
+            "threshold_search_allowed": False,
+            "hyperparameter_search_allowed": False,
+            "candidate_behavior_changed": False,
+        },
+        "safety": dict(SAFETY),
+    }
+    oof_prereg_path = repo / "oof_prereg.json"
+    _write_json(oof_prereg_path, oof_prereg)
+    oof_result = run_challenge_model_15m_rolling_origin_oof(
+        preregistration_path=oof_prereg_path,
+        expected_preregistration_sha256=sha256_file(oof_prereg_path),
+        output_dir=repo / "oof_output",
+        source_commit="c" * 40,
+        created_at="2026-01-03T00:00:00+00:00",
+        repository_root=repo,
+    )
+    oof_report = json.loads(Path(oof_result["report_path"]).read_text())
+    assert oof_report["oof_market_count"] == 5
+    assert oof_report["fold_count"] == 5
+    assert oof_report["target_or_future_label_leakage_count"] == 0
+    assert oof_report["promotion_claim_made"] is False
+
 
 def test_readiness_closed_fails_before_training(tmp_path: Path) -> None:
     prereg = _minimal_preregistration()
@@ -191,6 +250,36 @@ def test_pair_normalization_enforces_complementarity_before_cost() -> None:
     prereg["model"]["parameters"]["objective"] = "binary:logistic"
     prereg["model"]["parameters"]["eval_metric"] = "logloss"
     validate_training_slot_preregistration(prereg)
+
+
+def test_rolling_origin_preregistration_fails_on_non_prior_labels() -> None:
+    payload = {
+        "schema_version": (
+            "bigan-challenge-model-15m-rolling-origin-oof-preregistration-v1"
+        ),
+        "role": "outcome-aware-development-diagnostic-only",
+        "development_only_forever": True,
+        "promotion_evidence_eligible": False,
+        "candidate_preregistration": {"path": "candidate.json", "sha256": "1" * 64},
+        "prior_result": {"path": "result.json", "sha256": "2" * 64},
+        "rolling_origin": {
+            "initial_training_market_count": 40,
+            "target_block_size": 1,
+            "inner_train_fraction": 0.8,
+            "strictly_prior_market_labels_only": True,
+            "future_market_labels_or_features_allowed": False,
+        },
+        "development_discipline": {
+            "threshold_search_allowed": False,
+            "hyperparameter_search_allowed": False,
+            "candidate_behavior_changed": False,
+        },
+        "safety": dict(SAFETY),
+    }
+    validate_rolling_origin_oof_preregistration(payload)
+    payload["rolling_origin"]["future_market_labels_or_features_allowed"] = True
+    with pytest.raises(ValueError, match="future_market_labels_or_features_allowed"):
+        validate_rolling_origin_oof_preregistration(payload)
 
 
 def _preregistration(
