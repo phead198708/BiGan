@@ -1,0 +1,127 @@
+{
+  "candidate_behavior_changed": false,
+  "candidate_preregistration": {
+    "path": "examples/v8/polymarket_configs/challenge_model_15m_model_layer_training_slot_003_preregistration.json",
+    "sha256": "b672f529cffd9e9ceed7d819b24f82a805dc4b51f8dd2e19f8ed6ef0503ff183"
+  },
+  "collection_restarted": false,
+  "created_at": "2026-07-29T10:54:38.892811+00:00",
+  "development_only_forever": true,
+  "development_signal_rule": {
+    "first_chronological_half_total_unit_net_pnl": -2.4287499999999995,
+    "largest_winner_removed_total_unit_net_pnl": 0.37225000000000097,
+    "mean_unit_net_pnl_bootstrap_lcb_must_be_gt": 0.0,
+    "minimum_accepted_oof_markets": 30,
+    "observed_accepted_oof_markets": 72,
+    "observed_bootstrap_lcb": -0.08358333333333332,
+    "passed": false,
+    "promotion_claim_allowed": false,
+    "report_only": true,
+    "second_chronological_half_total_unit_net_pnl": 3.6357500000000007
+  },
+  "diagnostic_id": "challenge-model-15m-slot-003-rolling-origin-oof-v1",
+  "fixed_policy_metrics": {
+    "acceptance_rate": 0.9863013698630136,
+    "accepted_down_count": 41,
+    "accepted_market_count": 72,
+    "accepted_up_count": 31,
+    "cost_signal_ratio": 0.4126520681265208,
+    "fixed_acceptance_threshold": 0.0,
+    "gross_price_edge": 2.0549999999999997,
+    "market_count": 73,
+    "mean_unit_net_pnl": 0.0167638888888889,
+    "mean_unit_net_pnl_bootstrap_interval": {
+      "confidence": 0.95,
+      "lower": -0.08358333333333332,
+      "method": "accepted_market_bootstrap_percentile",
+      "resamples": 10000,
+      "seed": 26015,
+      "upper": 0.11607291666666664
+    },
+    "one_trade_maximum_per_market": true,
+    "promotion_claim_allowed": false,
+    "report_only": true,
+    "total_cost": 0.8480000000000001,
+    "total_unit_net_pnl": 1.207000000000001,
+    "unit_sizing": true
+  },
+  "fold_count": 73,
+  "initial_training_market_count": 40,
+  "market_count": 113,
+  "maximum_strictly_prior_market_count": 112,
+  "minimum_strictly_prior_market_count": 40,
+  "new_outcomes_collected": false,
+  "oof_market_count": 73,
+  "oof_side_row_count": 292,
+  "preregistration": {
+    "path": "examples/v8/polymarket_configs/challenge_model_15m_slot_003_rolling_origin_oof_preregistration.json",
+    "sha256": "02eba0ce1a84d7bf53770214d4d547671b7ecc285baedee1caeb077fcd67bbf8"
+  },
+  "promotion_claim_made": false,
+  "promotion_evidence_eligible": false,
+  "robustness": {
+    "first_chronological_half": {
+      "acceptance_rate": 0.9722222222222222,
+      "accepted_down_count": 24,
+      "accepted_market_count": 35,
+      "accepted_up_count": 11,
+      "cost_signal_ratio": null,
+      "fixed_acceptance_threshold": 0.0,
+      "gross_price_edge": -2.04,
+      "market_count": 36,
+      "mean_unit_net_pnl": -0.06939285714285713,
+      "mean_unit_net_pnl_bootstrap_interval": {
+        "confidence": 0.95,
+        "lower": -0.20953571428571427,
+        "method": "accepted_market_bootstrap_percentile",
+        "resamples": 10000,
+        "seed": 26015,
+        "upper": 0.07389642857142854
+      },
+      "one_trade_maximum_per_market": true,
+      "promotion_claim_allowed": false,
+      "report_only": true,
+      "total_cost": 0.3887500000000001,
+      "total_unit_net_pnl": -2.4287499999999995,
+      "unit_sizing": true
+    },
+    "largest_winner_removed_total_unit_net_pnl": 0.37225000000000097,
+    "second_chronological_half": {
+      "acceptance_rate": 1.0,
+      "accepted_down_count": 17,
+      "accepted_market_count": 37,
+      "accepted_up_count": 20,
+      "cost_signal_ratio": 0.11214896214896217,
+      "fixed_acceptance_threshold": 0.0,
+      "gross_price_edge": 4.095,
+      "market_count": 37,
+      "mean_unit_net_pnl": 0.09826351351351353,
+      "mean_unit_net_pnl_bootstrap_interval": {
+        "confidence": 0.95,
+        "lower": -0.037952702702702686,
+        "method": "accepted_market_bootstrap_percentile",
+        "resamples": 10000,
+        "seed": 26015,
+        "upper": 0.22826351351351357
+      },
+      "one_trade_maximum_per_market": true,
+      "promotion_claim_allowed": false,
+      "report_only": true,
+      "total_cost": 0.45925000000000005,
+      "total_unit_net_pnl": 3.6357500000000007,
+      "unit_sizing": true
+    }
+  },
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-challenge-model-15m-rolling-origin-oof-report-v1",
+  "source_commit": "6195829138f06afe950b2a3626df9bd5b19bbe5a",
+  "target_or_future_label_leakage_count": 0,
+  "threshold_or_hyperparameter_search_performed": false
+}
