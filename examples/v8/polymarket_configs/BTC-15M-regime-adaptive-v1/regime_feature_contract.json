@@ -1,0 +1,214 @@
+{
+  "schema_version": "bigan-btc-15m-regime-feature-contract-v1",
+  "contract_id": "BTC-15M-regime-adaptive-v1-feature-contract",
+  "lineage_id": "BTC-15M-regime-adaptive-v1",
+  "role": "frozen_causal_feature_contract",
+  "created_at": "2026-07-29T12:00:00+00:00",
+  "source_diagnostic": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/temporal_drift_diagnostic_report.json",
+    "sha256": "155ba69aed45ca0a92f6370902c2190dd9642053375ffb1404ffd3324ea06509",
+    "development_only_forever": true,
+    "used_for_validation": false
+  },
+  "causality_contract": {
+    "available_at_ts_must_be_lte_decision_ts": true,
+    "feature_cutoff_ts_must_be_lte_decision_ts": true,
+    "max_input_ts_must_be_lte_decision_ts": true,
+    "raw_provider_evidence_must_be_hash_pinned": true,
+    "market_horizon_seconds": 900,
+    "missing_value_representation": "native_nan_plus_explicit_missing_indicator",
+    "missing_may_be_encoded_as_numeric_zero": false,
+    "feature_values_immutable_after_validation_starts": true
+  },
+  "side_symmetry": {
+    "shared_model_required": true,
+    "side_identity_feature_allowed": false,
+    "directional_transform": "multiply_directional_inputs_by_plus_one_for_UP_and_minus_one_for_DOWN",
+    "paired_probability_normalization_required": true,
+    "paired_executable_ask_required": true,
+    "complement_proxy_allowed": false
+  },
+  "base_feature_families": [
+    {
+      "family": "btc_returns",
+      "features": [
+        "signed_btc_return_10s",
+        "signed_btc_return_30s",
+        "signed_btc_return_1m",
+        "signed_btc_return_5m",
+        "signed_btc_return_15m"
+      ],
+      "causal_inputs": [
+        "btc_trade_tape_at_or_before_decision"
+      ]
+    },
+    {
+      "family": "btc_volatility",
+      "features": [
+        "btc_volatility_1m",
+        "btc_volatility_5m",
+        "btc_volatility_15m"
+      ],
+      "causal_inputs": [
+        "btc_trade_tape_at_or_before_decision"
+      ]
+    },
+    {
+      "family": "reference_distance",
+      "features": [
+        "signed_chainlink_reference_distance",
+        "signed_btc_mid_to_chainlink_relative_distance"
+      ],
+      "causal_inputs": [
+        "chainlink_price_at_or_before_decision",
+        "btc_mid_at_or_before_decision"
+      ]
+    },
+    {
+      "family": "paired_orderbook",
+      "features": [
+        "selected_ask",
+        "selected_bid",
+        "selected_mid",
+        "selected_ask_size",
+        "selected_bid_size",
+        "selected_spread_bps",
+        "selected_executable_ask_notional",
+        "selected_executable_bid_notional",
+        "selected_liquidity_depth",
+        "selected_book_staleness_ms",
+        "selected_book_update_lag_ms",
+        "selected_queue_fill_probability_proxy",
+        "selected_recent_bid_depth_volatility_1m",
+        "selected_recent_book_update_count_1m",
+        "selected_recent_spread_stability_1m",
+        "selected_recent_trade_volume",
+        "opposite_ask",
+        "opposite_bid",
+        "opposite_mid",
+        "opposite_ask_size",
+        "opposite_bid_size",
+        "opposite_spread_bps",
+        "opposite_executable_ask_notional",
+        "opposite_executable_bid_notional",
+        "opposite_liquidity_depth",
+        "opposite_book_staleness_ms",
+        "opposite_book_update_lag_ms",
+        "opposite_queue_fill_probability_proxy",
+        "opposite_recent_bid_depth_volatility_1m",
+        "opposite_recent_book_update_count_1m",
+        "opposite_recent_spread_stability_1m",
+        "opposite_recent_trade_volume",
+        "selected_minus_opposite_mid",
+        "selected_minus_opposite_spread_bps",
+        "selected_minus_opposite_liquidity_depth",
+        "selected_minus_opposite_recent_trade_volume",
+        "paired_ask_sum",
+        "paired_bid_sum",
+        "paired_mid_sum",
+        "combined_spread_bps",
+        "selected_depth_share",
+        "selected_trade_volume_share"
+      ],
+      "causal_inputs": [
+        "paired_up_down_orderbook_at_or_before_decision",
+        "trade_tape_at_or_before_decision"
+      ]
+    },
+    {
+      "family": "market_clock",
+      "features": [
+        "market_progress_fraction",
+        "time_remaining_fraction",
+        "utc_hour_sin",
+        "utc_hour_cos",
+        "utc_weekday_sin",
+        "utc_weekday_cos"
+      ],
+      "causal_inputs": [
+        "market_start_ts",
+        "decision_ts",
+        "fixed_market_horizon_seconds"
+      ]
+    },
+    {
+      "family": "provider_health",
+      "features": [
+        "provider_health_score",
+        "book_snapshot_pair_ts_delta_ms"
+      ],
+      "causal_inputs": [
+        "provider_health_observations_at_or_before_decision"
+      ]
+    }
+  ],
+  "derived_regime_features": {
+    "btc_return_regime": {
+      "source_feature": "unsigned_btc_return_15m_before_side_transform",
+      "bearish_if_lt": -0.00025,
+      "bullish_if_gt": 0.00025,
+      "otherwise": "sideways",
+      "missing_bucket": "missing"
+    },
+    "volatility_bucket": {
+      "source_feature": "btc_volatility_15m",
+      "low_if_lte": 0.0002893233649502971,
+      "medium_if_lte": 0.00042012025376223845,
+      "otherwise": "high",
+      "missing_bucket": "missing"
+    },
+    "spread_bucket": {
+      "source_feature": "combined_spread_bps",
+      "low_if_lte": 436.7289005349933,
+      "medium_if_lte": 692.6406926406918,
+      "otherwise": "high",
+      "missing_bucket": "missing"
+    },
+    "volume_bucket": {
+      "source_feature": "selected_recent_trade_volume_plus_opposite_recent_trade_volume",
+      "low_if_lte": 201.22138,
+      "medium_if_lte": 518.158141,
+      "otherwise": "high",
+      "missing_bucket": "missing",
+      "diagnostic_coverage": 0.1780821917808219
+    },
+    "depth_bucket": {
+      "source_feature": "selected_liquidity_depth_plus_opposite_liquidity_depth",
+      "low_if_lte": 41687.06,
+      "medium_if_lte": 58633.66,
+      "otherwise": "high",
+      "missing_bucket": "missing"
+    }
+  },
+  "forbidden_features": [
+    "settlement_outcome",
+    "oracle_outcome",
+    "post_decision_price",
+    "post_decision_return",
+    "future_market_data",
+    "realized_pnl",
+    "target",
+    "label",
+    "post_close_resolution",
+    "future_exit_state"
+  ],
+  "validation_freeze": {
+    "contract_changes_allowed_after_fresh_collection_starts": false,
+    "regime_cutoff_changes_allowed_after_fresh_collection_starts": false,
+    "feature_addition_or_removal_allowed_after_outcomes_open": false,
+    "future_validation_reuse_allowed": false
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}

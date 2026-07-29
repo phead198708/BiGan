@@ -1,0 +1,188 @@
+{
+  "schema_version": "bigan-btc-15m-regime-adaptive-candidate-family-v1",
+  "protocol_id": "BTC-15M-regime-adaptive-v1-candidate-family",
+  "lineage_id": "BTC-15M-regime-adaptive-v1",
+  "role": "bounded_development_candidate_family",
+  "created_at": "2026-07-29T12:00:00+00:00",
+  "inputs": {
+    "lineage_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/lineage_manifest.json",
+      "sha256": "4d24d95b0f5cb10bdcf1662df64f963d94849b62ed082271e5b6912914cb425a"
+    },
+    "temporal_drift_diagnostic": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/temporal_drift_diagnostic_report.json",
+      "sha256": "155ba69aed45ca0a92f6370902c2190dd9642053375ffb1404ffd3324ea06509",
+      "diagnostic_only": true
+    },
+    "regime_feature_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/regime_feature_contract.json",
+      "sha256": "18681952fd6b3e875b24bf3a76808e4102773a82a715d4b01e481a1ba2f55c32"
+    }
+  },
+  "candidate_budget": {
+    "maximum_candidates": 5,
+    "registered_candidates": 5,
+    "open_ended_search_allowed": false,
+    "threshold_grid_search_allowed": false,
+    "hyperparameter_search_allowed": false,
+    "candidate_substitution_after_outcome_access_allowed": false
+  },
+  "shared_base_learner": {
+    "family": "xgboost_shared_side_symmetric_pair_normalized_win_probability",
+    "target": "settlement_payout_for_selected_side",
+    "parameters": {
+      "objective": "binary:logistic",
+      "eval_metric": "logloss",
+      "tree_method": "hist",
+      "nthread": 1,
+      "max_depth": 2,
+      "eta": 0.05,
+      "min_child_weight": 8.0,
+      "subsample": 1.0,
+      "colsample_bytree": 1.0,
+      "reg_lambda": 10.0,
+      "reg_alpha": 0.0,
+      "gamma": 0.0,
+      "max_bin": 64,
+      "seed": 26015
+    },
+    "num_boost_round": 400,
+    "early_stopping_rounds": 30,
+    "validation_tail_market_count": 20,
+    "minimum_core_training_market_count": 20,
+    "probability_pair_normalization": "divide_each_side_by_same_decision_pair_sum",
+    "prediction": "normalized_win_probability_minus_true_unit_execution_cost"
+  },
+  "shared_action_policy": {
+    "decision_order": "chronological",
+    "side_selection": "highest_prediction_with_UP_then_DOWN_tie_break",
+    "fixed_acceptance_threshold": 0.0,
+    "one_trade_maximum_per_market": true,
+    "unit_sizing": true,
+    "no_trade_if_no_decision_has_prediction_gt_threshold": true,
+    "execution_policy": "HOLD_TO_SETTLEMENT",
+    "true_paired_executable_ask_required": true,
+    "complement_proxy_allowed": false
+  },
+  "candidates": [
+    {
+      "candidate_id": "global_baseline",
+      "ordinal": 1,
+      "mechanism": "shared_base_learner_only",
+      "existing_parent_model_artifact_reused": false,
+      "retrained_inside_new_lineage_only": true,
+      "regime_features_used": false,
+      "purpose": "frozen_global_reference_inside_new_lineage"
+    },
+    {
+      "candidate_id": "regime_conditioned_calibration",
+      "ordinal": 2,
+      "mechanism": "base_learner_plus_regime_specific_platt_calibration",
+      "regime_key": "btc_return_regime",
+      "regime_values": [
+        "bearish",
+        "sideways",
+        "bullish",
+        "missing"
+      ],
+      "calibration_training_population": "strictly_prior_validation_tail_rows_only",
+      "minimum_regime_calibration_side_rows": 20,
+      "fallback_when_regime_rows_insufficient": "global_platt_calibrator_on_same_strictly_prior_tail",
+      "calibrator": {
+        "family": "logistic_outcome_on_logit_base_probability",
+        "l2_penalty": 1.0,
+        "maximum_iterations": 100,
+        "convergence_tolerance": 1e-10
+      },
+      "post_calibration_pair_normalization_required": true
+    },
+    {
+      "candidate_id": "mixture_of_experts",
+      "ordinal": 3,
+      "mechanism": "deterministic_decision_time_router_plus_regime_experts",
+      "router_precedence": [
+        "high_vol_if_volatility_bucket_is_high",
+        "bullish_if_not_high_vol_and_btc_return_regime_is_bullish",
+        "bearish_if_not_high_vol_and_btc_return_regime_is_bearish",
+        "low_vol_otherwise"
+      ],
+      "expert_ids": [
+        "high_vol",
+        "bullish",
+        "bearish",
+        "low_vol"
+      ],
+      "expert_learner": "shared_base_learner_parameters",
+      "minimum_expert_training_markets": 20,
+      "fallback_when_expert_markets_insufficient": "global_baseline_fit_on_same_strictly_prior_markets",
+      "router_training_required": false,
+      "post_expert_pair_normalization_required": true
+    },
+    {
+      "candidate_id": "drift_aware_rolling_calibration",
+      "ordinal": 4,
+      "mechanism": "base_learner_plus_trailing_market_platt_calibration",
+      "calibration_window_market_count": 40,
+      "minimum_calibration_market_count": 20,
+      "calibration_update_frequency_markets": 1,
+      "calibration_inputs": "strictly_prior_markets_only",
+      "calibrator": {
+        "family": "logistic_outcome_on_logit_base_probability",
+        "l2_penalty": 1.0,
+        "maximum_iterations": 100,
+        "convergence_tolerance": 1e-10
+      },
+      "fallback_when_window_insufficient": "uncalibrated_global_baseline",
+      "post_calibration_pair_normalization_required": true
+    },
+    {
+      "candidate_id": "uncertainty_aware_abstention",
+      "ordinal": 5,
+      "mechanism": "fixed_seed_market_bootstrap_ensemble_lower_bound",
+      "ensemble_member_count": 8,
+      "ensemble_seeds": [
+        26015,
+        26016,
+        26017,
+        26018,
+        26019,
+        26020,
+        26021,
+        26022
+      ],
+      "bootstrap_unit": "strictly_prior_market",
+      "ensemble_member_learner": "shared_base_learner_parameters_with_member_seed",
+      "uncertainty_edge_quantile": 0.1,
+      "acceptance_rule": "ensemble_prediction_edge_quantile_0_1_gt_0",
+      "reported_point_prediction": "ensemble_mean_normalized_probability_minus_true_unit_execution_cost",
+      "no_trade_when_uncertainty_rule_fails": true,
+      "minimum_distinct_training_markets": 40
+    }
+  ],
+  "immutability": {
+    "candidate_definitions_changeable_after_freeze": false,
+    "candidate_definitions_changeable_after_collection_starts": false,
+    "candidate_definitions_changeable_after_outcomes_open": false,
+    "parent_failed_lineage_modified": false,
+    "parent_hyperparameters_tuned": false
+  },
+  "state": {
+    "definitions_frozen": true,
+    "training_started": false,
+    "fresh_validation_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}

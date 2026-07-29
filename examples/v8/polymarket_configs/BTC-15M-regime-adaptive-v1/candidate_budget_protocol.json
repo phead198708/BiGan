@@ -1,0 +1,153 @@
+{
+  "schema_version": "bigan-btc-15m-regime-adaptive-candidate-budget-v1",
+  "protocol_id": "BTC-15M-regime-adaptive-v1-candidate-budget",
+  "lineage_id": "BTC-15M-regime-adaptive-v1",
+  "role": "frozen_candidate_budget_multiplicity_and_stopping_protocol",
+  "created_at": "2026-07-29T12:00:00+00:00",
+  "frozen_inputs": {
+    "model_protocol": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/regime_adaptive_model_protocol.json",
+      "sha256": "c8680f69ff1d44727b68fecad3d9619176b40a44c17f94d9fea6305c73e87a92"
+    },
+    "lineage_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/lineage_manifest.json",
+      "sha256": "4d24d95b0f5cb10bdcf1662df64f963d94849b62ed082271e5b6912914cb425a"
+    },
+    "temporal_drift_diagnostic": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/temporal_drift_diagnostic_report.json",
+      "sha256": "155ba69aed45ca0a92f6370902c2190dd9642053375ffb1404ffd3324ea06509"
+    },
+    "regime_feature_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/regime_feature_contract.json",
+      "sha256": "18681952fd6b3e875b24bf3a76808e4102773a82a715d4b01e481a1ba2f55c32"
+    },
+    "candidate_family": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/candidate_family_protocol.json",
+      "sha256": "b1008633ddd5fad3228bbf29031bd0cb5f994663cabae10931c1913f639a8c26"
+    },
+    "rolling_origin_evaluation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/rolling_origin_evaluation_protocol.json",
+      "sha256": "47f143606aa3ead42b88bff5601ceb080ca69e0f4b5799d4760f821d279bf5b9"
+    }
+  },
+  "candidate_budget": {
+    "maximum_distinct_candidates": 5,
+    "registered_candidate_ids": [
+      "global_baseline",
+      "regime_conditioned_calibration",
+      "mixture_of_experts",
+      "drift_aware_rolling_calibration",
+      "uncertainty_aware_abstention"
+    ],
+    "candidate_variants_or_substitutions_count_against_budget": true,
+    "threshold_only_variants_count_against_budget": true,
+    "maximum_development_rolling_origin_executions_per_candidate": 1,
+    "maximum_total_development_rolling_origin_executions": 5,
+    "unused_candidate_slots_may_be_reallocated": false
+  },
+  "confirmatory_budget": {
+    "maximum_candidates_entering_fresh_confirmation": 1,
+    "maximum_confirmatory_rounds": 2,
+    "both_rounds_required": true,
+    "round_replacement_allowed": false,
+    "failed_or_inconclusive_round_may_be_repeated": false,
+    "additional_round_after_budget_exhaustion_allowed": false,
+    "fresh_market_reuse_across_rounds_allowed": false
+  },
+  "frozen_thresholds": {
+    "action_prediction_threshold": 0.0,
+    "development_minimum_accepted_market_count": 15,
+    "development_minimum_acceptance_rate": 0.2,
+    "development_bootstrap_two_sided_confidence": 0.95,
+    "development_bootstrap_lower_bound_must_be_gt": 0.0,
+    "development_largest_winner_removed_must_be_gt": 0.0,
+    "development_each_chronological_half_must_be_gte": 0.0,
+    "fresh_minimum_quality_valid_outcome_finalized_markets_per_round": 40,
+    "fresh_minimum_accepted_market_count_per_round": 8,
+    "fresh_minimum_acceptance_rate_per_round": 0.2,
+    "fresh_paired_executable_ask_coverage_minimum": 0.95,
+    "fresh_bootstrap_one_sided_confidence": 0.975,
+    "fresh_bootstrap_lower_bound_must_be_gt": 0.0,
+    "fresh_largest_winner_removed_must_be_gt": 0.0,
+    "fresh_each_chronological_half_must_be_gte": 0.0,
+    "target_or_future_label_leakage_count_must_equal": 0
+  },
+  "multiplicity_handling": {
+    "development_family": {
+      "method": "predeclared_deterministic_selection_without_confirmatory_claim",
+      "candidate_count": 5,
+      "inferential_claim_allowed": false,
+      "fresh_validation_evidence_claim_allowed": false,
+      "selection_rule": "eligibility_then_highest_LCB_then_lowest_log_loss_then_lowest_ordinal"
+    },
+    "fresh_confirmation": {
+      "candidate_count": 1,
+      "fixed_round_count": 2,
+      "per_round_one_sided_alpha": 0.025,
+      "combination_rule": "intersection_both_rounds_must_pass",
+      "optional_stopping_allowed": false,
+      "round_1_success_alone_is_sufficient": false,
+      "round_2_may_be_skipped_after_round_1_failure": true,
+      "skipped_round_semantics": "lineage_confirmation_failed",
+      "familywise_candidate_selection_occurred_before_fresh_outcomes": true
+    }
+  },
+  "stopping_rules": [
+    {
+      "condition": "any_candidate_definition_or_threshold_changes_after_freeze",
+      "action": "fail_closed_and_open_new_lineage"
+    },
+    {
+      "condition": "no_development_candidate_meets_all_frozen_eligibility_requirements",
+      "action": "stop_without_fresh_collection"
+    },
+    {
+      "condition": "fresh_collection_attempt_cap_not_explicitly_authorized",
+      "action": "do_not_start_collection"
+    },
+    {
+      "condition": "fresh_round_does_not_reach_40_quality_valid_outcome_finalized_markets_within_authorized_cap",
+      "action": "round_inconclusive_and_lineage_confirmation_failed"
+    },
+    {
+      "condition": "fresh_round_1_fails_any_frozen_gate",
+      "action": "stop_and_do_not_consume_round_2"
+    },
+    {
+      "condition": "fresh_round_2_fails_any_frozen_gate",
+      "action": "stop_lineage_confirmation_failed"
+    },
+    {
+      "condition": "both_fresh_rounds_pass",
+      "action": "record_development_lineage_confirmation_only_without_promotion"
+    }
+  ],
+  "fresh_collection_authorization": {
+    "status": "not_authorized",
+    "authorized_attempt_cap": 0,
+    "collection_started": false,
+    "authorization_must_pin_candidate_and_collector_protocol": true,
+    "authorization_must_precede_target_access": true,
+    "extension_requires_new_pre_outcome_frozen_artifact": true
+  },
+  "immutability": {
+    "budget_changeable_after_any_development_result": false,
+    "thresholds_changeable_after_any_development_result": false,
+    "multiplicity_changeable_after_any_development_result": false,
+    "stopping_rules_changeable_after_any_development_result": false,
+    "budget_changeable_after_fresh_outcome_access": false
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}
