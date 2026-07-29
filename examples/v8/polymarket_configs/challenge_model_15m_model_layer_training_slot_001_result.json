@@ -1,0 +1,76 @@
+{
+  "schema_version": "bigan-challenge-model-15m-training-slot-result-v1",
+  "training_slot_id": "challenge-model-15m-model-layer-slot-001",
+  "status": "completed_without_development_signal",
+  "source_commit": "1b0d430ae412220dc3e46e097c318706f93dbc9f",
+  "preregistration": {
+    "path": "examples/v8/polymarket_configs/challenge_model_15m_model_layer_training_slot_001_preregistration.json",
+    "sha256": "608d88eb09364cfd48dc9409b0edaeff10c6a5643e3406c3202475a6cc86e2c3"
+  },
+  "artifacts": {
+    "dataset_manifest": {
+      "path": "examples/v8/polymarket_training_artifacts/challenge-model-15m-model-layer-slot-001/dataset_manifest.json",
+      "sha256": "8351220f3fc0d405c89c55f80bb67e0f56669813691ea969bf035a16237a6230"
+    },
+    "model": {
+      "path": "examples/v8/polymarket_training_artifacts/challenge-model-15m-model-layer-slot-001/model.ubj",
+      "sha256": "63c981c4ccf2dff422597ac69e9debc28123d697a75311eb79745a36be15812c"
+    },
+    "predictions": {
+      "path": "examples/v8/polymarket_training_artifacts/challenge-model-15m-model-layer-slot-001/predictions.jsonl",
+      "sha256": "83e3e16ac3c7bffefcfe7563a1aecfe8f508cf933e8cb5a633ea12f9c050def5"
+    },
+    "training_manifest": {
+      "path": "examples/v8/polymarket_training_artifacts/challenge-model-15m-model-layer-slot-001/training_manifest.json",
+      "sha256": "6e10c0f115c1d7b7aa5ccbf338379e830c3e0ea2d25dadd2fcb1409f8b3b5b7f"
+    },
+    "training_report": {
+      "path": "examples/v8/polymarket_training_artifacts/challenge-model-15m-model-layer-slot-001/training_report.json",
+      "sha256": "72607c8eb41c40512de9643645a0aaea58a124cb2441646568eccb0b5d3dd49e"
+    }
+  },
+  "observed": {
+    "market_count": 113,
+    "side_row_count": 452,
+    "best_iteration": 0,
+    "split_market_counts": {
+      "train": 67,
+      "validation": 22,
+      "test": 24
+    },
+    "fixed_policy": {
+      "train_accepted_market_count": 0,
+      "validation_accepted_market_count": 0,
+      "test_accepted_market_count": 0,
+      "test_total_unit_net_pnl": 0.0
+    }
+  },
+  "development_signal_rule": {
+    "minimum_accepted_test_markets": 5,
+    "test_mean_unit_net_pnl_bootstrap_lcb_must_be_gt": 0.0,
+    "passed": false
+  },
+  "failure_attribution": {
+    "primary": "direct_after_cost_regression_shrank_to_the_negative_structural_cost_mean",
+    "next_mechanism": "model_selected_side_win_probability_then_subtract_frozen_executable_costs",
+    "threshold_or_hyperparameter_search_needed": false
+  },
+  "artifact_validation": {
+    "model_reload_passed": true,
+    "artifact_cross_hash_passed": true,
+    "market_split_overlap_count": 0
+  },
+  "development_only_forever": true,
+  "promotion_evidence_eligible": false,
+  "promotion_claim_made": false,
+  "collection_restarted": false,
+  "new_outcomes_collected": false,
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  }
+}

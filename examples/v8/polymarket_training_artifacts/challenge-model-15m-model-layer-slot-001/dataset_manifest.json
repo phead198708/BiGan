@@ -1,0 +1,710 @@
+{
+  "created_at": "2026-07-29T10:42:40.729462+00:00",
+  "development_only_forever": true,
+  "feature_names_sha256": "a61ef8953a2801d3e404d376261f306846cae5a4bf3ef3c97918572c48720e89",
+  "finalized_index": {
+    "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/finalized_development_corpus_index.jsonl",
+    "sha256": "0c3623e0d6d540a0fae4b71e96e8df3e342e171213212df43473c2b4de2292e6"
+  },
+  "input_corpora": [
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785133800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "5a3932c42db9a2882130b47688efced4160e0f84a6b6054df505dec6c7563d2c",
+      "market_id": "0xfcc31d6a03449dd1ec144a8e9d2b6ed0426961d7ae38da89e5a7975834f1c9cd",
+      "market_start_ts": 1785133800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785134700/polymarket_corpus_manifest.json",
+      "manifest_sha256": "7027f4ac1149c9a0fb30897708f0f1a383053e51cfd542f5c994fd59ba057b42",
+      "market_id": "0x49f6cf98a09ad829fcdd9fedf638bfd9cd6412e98655608d1c68906be5ac0fab",
+      "market_start_ts": 1785134700000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785135600/polymarket_corpus_manifest.json",
+      "manifest_sha256": "c507715858d9b4be1542e923fd8fba1a07da02203808108572570ba7fe155c64",
+      "market_id": "0x9798deb8ade63800c9c1a82be480053a1666033e1eae0788c39d7bbd1b5ab303",
+      "market_start_ts": 1785135600000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785136500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "cf6d016e2942df12cd24a88e1a19a237bc9e4ff8e2ad707f7fee568f9c47cdef",
+      "market_id": "0xd656eca06f104be716ecc9a83722437b23168863d6411beddf496513d1c1cec6",
+      "market_start_ts": 1785136500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785138300/polymarket_corpus_manifest.json",
+      "manifest_sha256": "53a3281f4078a2e131405a856eda7f466960a0d3f2053c0fcf7cc03a06680d18",
+      "market_id": "0x23b4711ce3b79fed26a919e746780a4c497d85985e428b9f52021b19967ec2e8",
+      "market_start_ts": 1785138300000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785139200/polymarket_corpus_manifest.json",
+      "manifest_sha256": "9e67b402c005635ecc3516041d5eb1e84a3c88e6e8a763fbe5dc23b04fb3aa29",
+      "market_id": "0xd83843b60ef11bb6fb9b29aef687f4e46225ad5f3f63abbb5680dceb40fc4ee8",
+      "market_start_ts": 1785139200000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785140100/polymarket_corpus_manifest.json",
+      "manifest_sha256": "ada21b7a7f7abb369f3179f179101c695b2c87dc1a646249f8e143705c77ab37",
+      "market_id": "0x4dd642186ae68e1f65c5ae9b9f51731b0585ae44fd3165ae7c9a00dbc6f1de0b",
+      "market_start_ts": 1785140100000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785141000/polymarket_corpus_manifest.json",
+      "manifest_sha256": "8d3db78503b3b8c2b1c416a9224082bb335949ca1c512c716ada863d4fa6f32e",
+      "market_id": "0x0653c1f0f17d55b5bf1affa20383ba8cff162289116a298b97d591e3234c4192",
+      "market_start_ts": 1785141000000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785142800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "03058d9401acfa1833fc9f24a26d6ea2c7727f915cda77258537c1a5f2ece717",
+      "market_id": "0xb15af6679598ecde6aa79ec53b2858e33ea073531610cc1ac8deda5c3b067890",
+      "market_start_ts": 1785142800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785143700/polymarket_corpus_manifest.json",
+      "manifest_sha256": "90c3850dfb9cae48e85b494e0d6a31e19680730b60096a2f0d3af80b6e48dac8",
+      "market_id": "0x40fe0ca0da0c1c032b5ffdb8849d66668b72bb2b2149e0cd9b67da1bf7749e26",
+      "market_start_ts": 1785143700000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785144600/polymarket_corpus_manifest.json",
+      "manifest_sha256": "db073c721235424e3039d52179f3d060d0a6aa699301daa1119e9bcbc12c620e",
+      "market_id": "0x5a280eb5f005f8978352beab24a6b65ab699f8132cb7df67a55e3480aa6b1ba4",
+      "market_start_ts": 1785144600000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785145500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "478e9017ba89b4a45540721bbf998fbe2cdc425026f1490219ecbbfa7dd25d22",
+      "market_id": "0xd742365fc16f398ab1ba302d7b03cde53bcfc5b3520fc04216038e5ff1030c78",
+      "market_start_ts": 1785145500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785148200/polymarket_corpus_manifest.json",
+      "manifest_sha256": "c64fc32592ef9f6b39c97d4c935dca2e69bad05124323bae68a2394fb95120f7",
+      "market_id": "0x834a2e5f13c75bb0e87c237d6e8a4a73a69961a4ef98b32be1e497d4211d4755",
+      "market_start_ts": 1785148200000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785149100/polymarket_corpus_manifest.json",
+      "manifest_sha256": "a6230bd302f448d33049f55c032213cb55be15e96b5e74a57cfce63bc62d30c4",
+      "market_id": "0x0ce0b85e765afa6bff1983b860a0bb72ad12d84985a63bb4bb672c2780f05c06",
+      "market_start_ts": 1785149100000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785150000/polymarket_corpus_manifest.json",
+      "manifest_sha256": "ff89f1d8d61ab5e1459edd7392f320b5ed03eefaf01257c1e10e378bfa8fa815",
+      "market_id": "0x98a16605b967876957b89eac112f2c31a2b2fa75a6da597853c8e8a1cb04e246",
+      "market_start_ts": 1785150000000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785151800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "df970b6e52d726d258a5b6a17fda5d9a42fc1ae6fac904e5de6a661160bef049",
+      "market_id": "0x5ae54fa10a65a23795d37263499dd0e68165a69ff63e8843faf6792a55ead47c",
+      "market_start_ts": 1785151800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785152700/polymarket_corpus_manifest.json",
+      "manifest_sha256": "1fd3537e031e014f74eb024243df8178461595f3bffb186f2352d2f7e86804b1",
+      "market_id": "0xa9861a7b4975ecdc29979bfeeb21718f9d90d79d0eea35e3da34fe8eae14fe2d",
+      "market_start_ts": 1785152700000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785153600/polymarket_corpus_manifest.json",
+      "manifest_sha256": "dfed7493383561ac18e19c0956aad8399f5fdc52fe072090a6bb4cd18e261d48",
+      "market_id": "0x579788df0305b4ac76e5469f4fb0ed63fb026f8b317f31a4f9cb93a56b482b44",
+      "market_start_ts": 1785153600000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785154500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "c9bd5e1256c04498503f767ee39208dbf3cda2f07fe2ef279790ebdf00e5aaec",
+      "market_id": "0x5243b7185682bd47b0aac493d503b5eef92dd53002d1cd9131df6717dc6c0100",
+      "market_start_ts": 1785154500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785156300/polymarket_corpus_manifest.json",
+      "manifest_sha256": "8c650c2f4100c34b40212e8d27d00f31c2d405d7dfce99b0c476ce5cb1ae13dc",
+      "market_id": "0xf352cbb08e213986c7e28fea0c0a250661504286bd722842a5b1acc0f2e5c940",
+      "market_start_ts": 1785156300000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785157200/polymarket_corpus_manifest.json",
+      "manifest_sha256": "6fb2e75fff7b4297f65bfe531ed04e408deaf481b04136ddc4b5cfcb426f0fb0",
+      "market_id": "0x6870ed964792427723569dbd7a60385c7b258f46ed0fa2b99c4ded07f1d0beb8",
+      "market_start_ts": 1785157200000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785158100/polymarket_corpus_manifest.json",
+      "manifest_sha256": "cab0903794a9ab00aa11e65049a8774b9398d79115e9981d80c8c76b59f8222a",
+      "market_id": "0xae73af4d010a3253407ad10faba3e54e9b7b13f4846543247b9c455b770b998d",
+      "market_start_ts": 1785158100000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785159000/polymarket_corpus_manifest.json",
+      "manifest_sha256": "a0ae70ca95e33a6c92f186e59cb00cc4f0845498af9a49c5cd63024f21332974",
+      "market_id": "0x30d384769534c21598ee876b24e6a8a2c8fc3bf2f383e2f49552c37e26b19c82",
+      "market_start_ts": 1785159000000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785160800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "ced1db5a7e127b344ed9fb40a847195a502e41cefcef52f77df23053daa1415d",
+      "market_id": "0x8302e7d72b84210ce72e047d17f696a3325285f848894ce250ef3281843c6777",
+      "market_start_ts": 1785160800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785161700/polymarket_corpus_manifest.json",
+      "manifest_sha256": "1cd90cdbeaa04ccbb05defe84dd3b39b4d8e01e3fadeb582d779b9c2d95ac5de",
+      "market_id": "0x03fe2bd91d9eb66bffc186d88a4de85843888aa8323311d891791305b3e231c2",
+      "market_start_ts": 1785161700000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785162600/polymarket_corpus_manifest.json",
+      "manifest_sha256": "8d7f0a20621a50db7b80f8c7af68336980d5efa7f8865e83dc2692e5c10970d3",
+      "market_id": "0xfd04e473a32823ad0f69f6502d1908a9d744aab6c966593b79f5eec80c746812",
+      "market_start_ts": 1785162600000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785163500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "81c937d6c9d9a34b402298ecac00cf3e62fbe3cb7bdac41a2049af22ca7c44c0",
+      "market_id": "0x3057b9ef8c4ac6f59d4300e01f08cda728637cdd59e354e934596cfaad5ea044",
+      "market_start_ts": 1785163500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785165300/polymarket_corpus_manifest.json",
+      "manifest_sha256": "af00c4632c94808dd9c4ad440cc30128428ec492e3184042f1f09edb2ab820e3",
+      "market_id": "0xe64d6fdea8d3da60a1909e2275df82e6e2658ec23d6f5a9ca50d75f89d2e8390",
+      "market_start_ts": 1785165300000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785166200/polymarket_corpus_manifest.json",
+      "manifest_sha256": "d29b9084102acff7ddd8ded9067729823dbb5dce03369194af7936b1901abfe2",
+      "market_id": "0xa277ee2b2dcf40164b0fcd3b9986fe2bccf5b6b0f8e54599af2f88d35a35e0df",
+      "market_start_ts": 1785166200000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785167100/polymarket_corpus_manifest.json",
+      "manifest_sha256": "c9d87758287c7637557e045135864194e74d208f97108c6b6f989b6cc345d20b",
+      "market_id": "0xaaa01668158b68dda06976edc16a8cd87b8bb1cab1293dfd7b1b9fb71da33ee2",
+      "market_start_ts": 1785167100000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785168000/polymarket_corpus_manifest.json",
+      "manifest_sha256": "5268d0c44c5dc34faae920f2f1b4db48e3d1459a2ef1ca8546f340d44c94a3d6",
+      "market_id": "0x0a01e104f02b39eecc2b773de1a91c19e5f8453a9e3bd718bc34b88e950084d9",
+      "market_start_ts": 1785168000000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785222000/polymarket_corpus_manifest.json",
+      "manifest_sha256": "93a18626756716cac5150a10770ee15dc9d3adedc53cb9c6443bc2383d0a3394",
+      "market_id": "0x2b05b6406d76d2ab646ade78b3c5efbe58d9596784ed7e1463166ad8b4559a01",
+      "market_start_ts": 1785222000000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785222900/polymarket_corpus_manifest.json",
+      "manifest_sha256": "2fcea2905a4e88da2fec7823e7bde8ab4ade6ec46900b5bc2b00eddbe88c79d7",
+      "market_id": "0x34bf51bc8d0497ca86789556d22bd8adc5c4645cb062a9dbce6a690c402056a5",
+      "market_start_ts": 1785222900000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785223800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "07a9f0ba84a9a37ab5d3a23a722c9c132fb1b9667a709d17110aef8b085f38a5",
+      "market_id": "0x91b5cfd1310501d1fb856837987024bbe69fed951501640abb2316802d2dd806",
+      "market_start_ts": 1785223800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785224700/polymarket_corpus_manifest.json",
+      "manifest_sha256": "5d6c41be6a4c0df11e8a78ec7f5fab68d1fb66ddc74500f8483ab8681ab29ea0",
+      "market_id": "0x58b0d63fec8fa617861186f929e215df226df32a224b3e8cd3bfbc9d74c71456",
+      "market_start_ts": 1785224700000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785226500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "0356b4930f77efab6db9c9ebb51d1bdefc905082054b8440f3d352f5d6389c11",
+      "market_id": "0xb3dd935ab7dbddb7b2805b4a28eb79b796e6fece708de6d66a14c6897c83a073",
+      "market_start_ts": 1785226500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785228300/polymarket_corpus_manifest.json",
+      "manifest_sha256": "1a678aea4715ba3722f9f20003098dc90484381b52de0613ec90cc306f75a1c8",
+      "market_id": "0xc4c0f8c584a3ace2d37600218123a2a746050a9bc7b694ce0dd505faf3f4dff0",
+      "market_start_ts": 1785228300000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785227400/polymarket_corpus_manifest.json",
+      "manifest_sha256": "47ee6504854996a0a2e0522e6f38922e775812dd833cd1a58f86a77564aaac2b",
+      "market_id": "0xb14cf2abf53b891073dcf233092009d686056aa6879f2aac2034a460fea94680",
+      "market_start_ts": 1785227400000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785229200/polymarket_corpus_manifest.json",
+      "manifest_sha256": "bf8699bef24fb6b62f2e6599ff96e1a4add3868331a15e39c794ffcd55c6d294",
+      "market_id": "0xc162a8592203aadc73f51f1c0b20e88fece31812b8c8f7a518daeba52a5665f8",
+      "market_start_ts": 1785229200000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785231000/polymarket_corpus_manifest.json",
+      "manifest_sha256": "04c46348df70e21512d1f5be283962de392a46f2c6a995382e3cdc89c798fa9d",
+      "market_id": "0x00dbfcc79be8a8bbe2349b1acd024197cf6e053d6c6c0b31498971802960d923",
+      "market_start_ts": 1785231000000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785231900/polymarket_corpus_manifest.json",
+      "manifest_sha256": "276b113054e130274b732cfa9eecfdef937cb0815abb38efe650ff4f5bf309ba",
+      "market_id": "0xd272a0ec71208a21721e12222ece164d236a653079b5be62eeb1326fe9cd2830",
+      "market_start_ts": 1785231900000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785232800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "ea99fbc2be30ba17636371abcef35579d1a0fea79c82089c3d3b912d802cf7f2",
+      "market_id": "0xe261bf7ba2f0c88e0d7382ed5b7b04b5e9c262067bc0be027952fbc4960530bb",
+      "market_start_ts": 1785232800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785233700/polymarket_corpus_manifest.json",
+      "manifest_sha256": "abbaf3ee2afe494134521764e693099b22df281759f26e799731b057474b47a5",
+      "market_id": "0x2f004a8eb7e6796c7bfa6f1c6c6e71c7b16e0585c1ce7aa50a403ed952d7b926",
+      "market_start_ts": 1785233700000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785235500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "13bceddf054d88829a71fd23055a18f09dd7a381fa99724ea21dc35e7e9b34c5",
+      "market_id": "0x8ef186060ff25d5f78ffafd43bf04ceb3cf66d975b533bde0243959b6ea56182",
+      "market_start_ts": 1785235500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785236400/polymarket_corpus_manifest.json",
+      "manifest_sha256": "7e7c34e13b4d7087402a4ea05622c7ae0958fc7c6981bc931c482a56ca2e4f83",
+      "market_id": "0xc94e3e1cc66615273ee552fbec28e78b7d4e83751a521c319e609675c863ea8f",
+      "market_start_ts": 1785236400000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785237300/polymarket_corpus_manifest.json",
+      "manifest_sha256": "178b2e9915bcf77e640fa3262dd9eb6fa3590e350b034247244a3b89d8fcdaf5",
+      "market_id": "0x2d029ba2c60e238507a6b99257ee7408485d1282f91b97456745969d7648c9be",
+      "market_start_ts": 1785237300000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785238200/polymarket_corpus_manifest.json",
+      "manifest_sha256": "3f9768f20b85609a872c568cd23ebf7423a9303016ac6f90c71fcb3856959d68",
+      "market_id": "0xe0c5316d60e3cfb88481bb4b413166093f7b1569f8fd3fd4537d3bd51f924bd5",
+      "market_start_ts": 1785238200000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785240000/polymarket_corpus_manifest.json",
+      "manifest_sha256": "1b48d1e42ef91694dc5c45793fb014fb815a99a31f235bdcbe02fa9e49f439e4",
+      "market_id": "0x14fef7382ed7b3ec46b9a12126e7e680f5793cfc078f41d1f51ca37553a9165d",
+      "market_start_ts": 1785240000000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785240900/polymarket_corpus_manifest.json",
+      "manifest_sha256": "a396d067da96b4a9981269137fe7359c7dc0311d31f9525d579985ac7f536b89",
+      "market_id": "0x3f8edf96168a12d561cfc7957b1307727cce023eeed2ec477d22cdebd76a0358",
+      "market_start_ts": 1785240900000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785241800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "a15643e70e7b0dc9ece9867d4a919e56a0df765e35e4e58bbbabb16c2092f1ef",
+      "market_id": "0x7f4a0faa0782fd295dac8587db732728d18d7547f689f3f9ec9cd210cd08e69b",
+      "market_start_ts": 1785241800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785242700/polymarket_corpus_manifest.json",
+      "manifest_sha256": "893bc378a002a1749aec597f88eb0f983fb287302f4fb11b65755d889332f4f0",
+      "market_id": "0xdc90647892f31829c37f2f9511c546d3093df350610c39c967250e6eddfdb6fc",
+      "market_start_ts": 1785242700000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785244500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "c2e34f6143e8864c1acb626c74131725f3ed2c07e409027a56d5743b816a46ed",
+      "market_id": "0x47dafd9d985f0d9532ebe001533ccd40193f1b12ac717a6ff00c16d86b5e01b6",
+      "market_start_ts": 1785244500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785245400/polymarket_corpus_manifest.json",
+      "manifest_sha256": "9293de79f0e50be3e33d6e6d34b8330f9f67924d45f8bc38f52e8accbf30342a",
+      "market_id": "0x1bfb5a7bb093a53f61c243d184ca21ec2cae08969256d2be359251090bf69808",
+      "market_start_ts": 1785245400000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785246300/polymarket_corpus_manifest.json",
+      "manifest_sha256": "d25f343f7064c4a846b15bb4006e61b0abc30725b6f68227f80df7bdd0369197",
+      "market_id": "0x47a08cd4c33f08283719d32dcc3aa2a547f0cbb111107e421c1cf5915252726d",
+      "market_start_ts": 1785246300000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785249000/polymarket_corpus_manifest.json",
+      "manifest_sha256": "132589d8dd538b345c17e628bf7a32c45a7c150ba126ff45f816053611d30f10",
+      "market_id": "0x8c80ec125fd61afe4a0332df8b44de47e3cb28de9115fae7634ddead9f0693d6",
+      "market_start_ts": 1785249000000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785249900/polymarket_corpus_manifest.json",
+      "manifest_sha256": "7acc72fbe1556fb6e01bce8fb12f9320254b99c989660a83c4e99ba196728293",
+      "market_id": "0x986de5ae62ff8fd91d7c3e46ebe4e03e701b5fd3d5fa10d8edc71cf051464e4d",
+      "market_start_ts": 1785249900000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785250800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "42b8cb29f15721d8a265c962503affce7dd3f7c26d5ffcb62358f46eb49cc8e0",
+      "market_id": "0x10a9ef92f616fd64b977585f740c47bc6327dd9232f213f8d88f645dd6954c75",
+      "market_start_ts": 1785250800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785247200/polymarket_corpus_manifest.json",
+      "manifest_sha256": "a7ff5e9814ff9e92e16365cfc43ce9b99fbd4f81737a4e7ebf6f74943b2ec602",
+      "market_id": "0xb70373355700feb99fa0c5b87b3b54feeebd6a05419817fe6ab0b1005f3a5ce7",
+      "market_start_ts": 1785247200000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785251700/polymarket_corpus_manifest.json",
+      "manifest_sha256": "4fdbcab9068ae95b48fde3e48a5b92228c5b49fa83040bd7fcd80025be4aa437",
+      "market_id": "0xb00e245bb7b1a09d8aea907940b5cccddc4ce1722724e340a5b4bce1ab47af8f",
+      "market_start_ts": 1785251700000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785253500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "32fb144bffcfebdbfa13747528585d42b176cc0174927d71e8e2b019efb8c2a7",
+      "market_id": "0xeb542ef6bf4d7ce22f671f574d1584faedae9b7fb2adca6430809233219b9e6a",
+      "market_start_ts": 1785253500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785255300/polymarket_corpus_manifest.json",
+      "manifest_sha256": "f2e0a8111b10730d5c16f031752e9eeb1e95dd82570e08ef8577a86f54899b82",
+      "market_id": "0x11d986117d831a95c4bbd022843cd0cf714ea5ce06c30d7c67672a67ceea952b",
+      "market_start_ts": 1785255300000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785254400/polymarket_corpus_manifest.json",
+      "manifest_sha256": "78375a022b57d6a7b7da843b96e23462f935812f056102172de8df7b00d147a4",
+      "market_id": "0x535e93052ec7ca59171e1b9b2a52c257fff7debbdb86ae1323e298bfcb03a176",
+      "market_start_ts": 1785254400000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785258000/polymarket_corpus_manifest.json",
+      "manifest_sha256": "1632b8cdc3d73effde9aca5351ce67a6c48dc307303e2a671eab3f4631774cf7",
+      "market_id": "0xe9c72a136bd8e809719cc942fb39ea0b793b8f0e0ec50997bbae1c54af0c08b1",
+      "market_start_ts": 1785258000000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785258900/polymarket_corpus_manifest.json",
+      "manifest_sha256": "b9cab67ba1283109abff8015563a4a72108ebb98d4a2c416c0760855b0927155",
+      "market_id": "0xa03d944acff18af9a9909cc9107ff44a20f204e7970e4a39d86b772e6eecfb26",
+      "market_start_ts": 1785258900000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785259800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "dc1c2eb6064d5adea6bcf5093635cb99b6fdb9e821dde224d9a8274a6bfb89e9",
+      "market_id": "0x6ffd0062ec768c40a5346bd3f2fa61cf0bb831c157d89cb32746128365e6c6ea",
+      "market_start_ts": 1785259800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785256200/polymarket_corpus_manifest.json",
+      "manifest_sha256": "67d162a34623be24184c8008c661f20c370f1d26ee703e4292a4814c6e1f8964",
+      "market_id": "0xe1e4c14689d9fb8964041aca179e3266c4e4d86ae4966996c45d65992f790d9d",
+      "market_start_ts": 1785256200000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785260700/polymarket_corpus_manifest.json",
+      "manifest_sha256": "43fbabf824a747f0b2489ecf244c867ce2762dde25bae095856fa2ea55778baf",
+      "market_id": "0xa9ecdf1e738414f0d3d042fdeee050fe4f6a77d90118a182796daffb2f8cfdd9",
+      "market_start_ts": 1785260700000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785262500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "c329ffb99e9b97870995d5274dc3be2bc4d3e7d7dda2ab03d31f03b324a1f99e",
+      "market_id": "0x28c28b6a0520d6411e69bea71ecc56ae011548a6ad695ba4533b6a2dc19a3948",
+      "market_start_ts": 1785262500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785264300/polymarket_corpus_manifest.json",
+      "manifest_sha256": "63eb64a21274d3a34d1bf2528306cdc589ba19293272b817b4cf671848f8bd43",
+      "market_id": "0x4544cebe6a0036bf2915b13c367de0f25df3b18e0717c530bb05f77bb04ef5e7",
+      "market_start_ts": 1785264300000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785263400/polymarket_corpus_manifest.json",
+      "manifest_sha256": "481243a6c6c676d263ca69b322629a1db30fa57e8e7f56215af6812f5a6ef63e",
+      "market_id": "0x3ee667baf00f18a9909cdb844d6273b4fec710aa7f238e344b52b50c0ccd14e3",
+      "market_start_ts": 1785263400000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785265200/polymarket_corpus_manifest.json",
+      "manifest_sha256": "258dd9664a4cdb27e38055bf1c7e1ff49dad55e7150e3d311766835487035aec",
+      "market_id": "0x6ac310b386ec44cd7e6dde87b78715542f8e83ba7c655e833d47b94ae96a8b8f",
+      "market_start_ts": 1785265200000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785267900/polymarket_corpus_manifest.json",
+      "manifest_sha256": "1506fea2097429d4683f9b8a4756cf346d09e2c8042096bd9a0b1ae08ab3075e",
+      "market_id": "0x8c49712e9f3bdd10af5f9422c7d596785ca561947fbdc0661d945a381625c4b9",
+      "market_start_ts": 1785267900000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785268800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "297763df108b4aba369c0b606f53d3faf666f3c8415e286fe86ee2636fa544cc",
+      "market_id": "0x8c6ca68525eecaf52baf97035293389d8c6e68291529b1ad0a1224ad3ec62871",
+      "market_start_ts": 1785268800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785267000/polymarket_corpus_manifest.json",
+      "manifest_sha256": "7fb35ca54187dfba318f6628cf62365713a40ac18a3af6147b1b969b9a61a1ad",
+      "market_id": "0x227f8bef51a393ac4357890e4f07420feb7d76e0ac20f82d39f31fdf46746581",
+      "market_start_ts": 1785267000000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785269700/polymarket_corpus_manifest.json",
+      "manifest_sha256": "4b189dba4c79c3d4cca90b504bb0aa9e4c9c04d658b83be1c3892185a52ff967",
+      "market_id": "0xf9cb1fe54d2ee3dcb4ac179e8c66d57d7655bbbd57e530ccf647e0be691a652b",
+      "market_start_ts": 1785269700000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785271500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "461da2d91bbf385277c6697c67ff2845f3f0a54c17ff1c60c4ac7560e60282e1",
+      "market_id": "0xf762427ce25385f02fbeca7c60a29c46cdfe665c9a9be95d62c4e9221e900f1b",
+      "market_start_ts": 1785271500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785272400/polymarket_corpus_manifest.json",
+      "manifest_sha256": "65bd0f3ff4f8995b82b539a7bf2e8eb2f10e7e7c125c8965a949284eed52ce76",
+      "market_id": "0xe9613797c4a5b4e01b6f3f797dd1ba2788f0d43af5a30f91fc7542de851e893e",
+      "market_start_ts": 1785272400000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785273300/polymarket_corpus_manifest.json",
+      "manifest_sha256": "3b0e49374fdd1e4d6e12f02d7f64347af7a4e3369949e22dab1ae8a38be65b17",
+      "market_id": "0xfb58b1c5fc9fec67f8a752bab058d3daef9b7a67f34647a2effc94ae503a8010",
+      "market_start_ts": 1785273300000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785274200/polymarket_corpus_manifest.json",
+      "manifest_sha256": "d255a7f99b21a73e46ef10b3af848b562d6944f2f027a3d2d5d8506a8d4fccb0",
+      "market_id": "0xfdf048d1745f96718b832ebf5f7f032b3bf35c26e5ca6f8a0a86f800a3c80852",
+      "market_start_ts": 1785274200000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785276000/polymarket_corpus_manifest.json",
+      "manifest_sha256": "326d32acf1f1ccb819aa512410a61f4642beefcf9e2b3ac3f5033946e2d2c825",
+      "market_id": "0x098c00c8481725af781e9ea69fc3542b1f711dc40ea059738417235406fa1074",
+      "market_start_ts": 1785276000000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785276900/polymarket_corpus_manifest.json",
+      "manifest_sha256": "ffa8676db4b3afc506c6f8a66701b567d73b4edeae58b4b90685101e6b454cca",
+      "market_id": "0xc5bb5f615d67f8a109c043f17c5e5ffaaa5d32021ecb3cbb9140b2bffd497e85",
+      "market_start_ts": 1785276900000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785277800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "7c8284150f6787846fe0d63dc448e1914d82c94fc7d1df73b260e961f427a2d1",
+      "market_id": "0xe8f61690e78cc361cae50d093448f892b27a48246cb23623a47e51ad84554236",
+      "market_start_ts": 1785277800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785278700/polymarket_corpus_manifest.json",
+      "manifest_sha256": "165894bd6ae4b034156f94fb3388e9c6201529a1b0b6598521606245dfbda1b2",
+      "market_id": "0x57ea3cc698679c2d8cb49d4e13a48a321b5ef75a7cff0ca7080b4ecf30ee32b0",
+      "market_start_ts": 1785278700000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785280500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "34a718a036ea3dacdddf0c07d6e6a219bc8aa2dd6548ba5c1cb97b9d540ec923",
+      "market_id": "0xce720fa9acc8f9e7d54301176f7d63ef3ff4c3c7739ef15b069813e2bede5d82",
+      "market_start_ts": 1785280500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785286800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "8fdbc32a5fb1ade0a36123cfbe5ebe7a74438148c87c7e322d4d2bc080dc28fb",
+      "market_id": "0x5aa5e23c4ac39bf9a1b90d47c8491d13e4aaa5be730d98362621d9b6f7ae16a6",
+      "market_start_ts": 1785286800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785288600/polymarket_corpus_manifest.json",
+      "manifest_sha256": "6ec4c0355773f6aa6daa43695422581503826b99f0b282f5feb43e17549f7885",
+      "market_id": "0x8b28c66395efa2ceeb3825034acb13a8c26e7d33db88ed14ac83ab43ad94d26b",
+      "market_start_ts": 1785288600000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785289500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "79ed25ab9321db90120bd46f7988b9c384aebd89499f507d2124c751f9cadcf3",
+      "market_id": "0xf281304b75461f3c2e80e96ad185de96f6650c5fe39a5d9d81d23637f16a5c0c",
+      "market_start_ts": 1785289500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785290400/polymarket_corpus_manifest.json",
+      "manifest_sha256": "6a0a643ece8f8885fdf9206800007233e3b90d5b23d4ce70ee36f1b911671953",
+      "market_id": "0x40ba3860d210aa7eeffe95589e1c50dfbdf21e29f4ec65d43a4c05904b15d3b3",
+      "market_start_ts": 1785290400000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785291300/polymarket_corpus_manifest.json",
+      "manifest_sha256": "f33e4ab24f5214de0b944ed04bd3d61365fdab4c48257e0ac560e2fa42fa409b",
+      "market_id": "0x8fea5b5d5f925e1809d62d0df24007ef4e93bad0a8e5de4273f3f881c7e3f84e",
+      "market_start_ts": 1785291300000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785293100/polymarket_corpus_manifest.json",
+      "manifest_sha256": "5875c7f4fa340ab043ca4017ba6dfc017c99a908be2fb237d7c64af9c9e5678f",
+      "market_id": "0xb4eed3d4bd911976652ca7329f4c37bc048b6fffde52aff07d0282b40a00cb44",
+      "market_start_ts": 1785293100000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785294000/polymarket_corpus_manifest.json",
+      "manifest_sha256": "64d1a2d4b4b064c739514d154934365e58acae22d07a60849eaf844b7ff2f193",
+      "market_id": "0xc06a5cc0e9d4f793efd77b5096b1bbc8ac8f2b27085dcf4d890286b7d1227d4e",
+      "market_start_ts": 1785294000000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785294900/polymarket_corpus_manifest.json",
+      "manifest_sha256": "c539bfaad338ce753e9b5de70c827f527c970d85f9bdc8e039fe0ee313990624",
+      "market_id": "0x8ec812e6c1f0e44f07e9a26c1c42f6b618421515214cc45c69d2b97055057e45",
+      "market_start_ts": 1785294900000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785295800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "6598558d0c3f1ebe3a5c68f488ce19b159b5a5aa12399e6f0d94c8f549788e9e",
+      "market_id": "0x2ea56c42e14eb04414e2c389a87cb3ebc7790a36b5c4ab9e5cd7b3fed497b1e7",
+      "market_start_ts": 1785295800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785297600/polymarket_corpus_manifest.json",
+      "manifest_sha256": "b8797de903a9052ce4c31ea1c99d40e912785a3721e1d4881c04ff7a4b650a95",
+      "market_id": "0xa5aa71de4649e2b1467f0817fe8c08925f671eed537694d5dae0042f21804066",
+      "market_start_ts": 1785297600000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785298500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "32670ccd0fd13267627422705d3a809cdd2a1cf4325d31cdc34fe36eb770a016",
+      "market_id": "0xaa52319cf23c9e0b6c49d5b73169dd0c75ad8f57461a9fc345347ac6f20cb843",
+      "market_start_ts": 1785298500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785299400/polymarket_corpus_manifest.json",
+      "manifest_sha256": "81884aecb9c112a31488f1310525b0f486c3028bf104ba2fcaa15a56b7f81aa7",
+      "market_id": "0x7199fd3b8360cbe7a3feab4b9d2083fb262708304a4c806d706a7f74cd728802",
+      "market_start_ts": 1785299400000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785300300/polymarket_corpus_manifest.json",
+      "manifest_sha256": "9b68191e16efe543eaa75aab8258d2920cae0eaa22bc86d16b46a567fddecd67",
+      "market_id": "0x6cc8af032950ef2acc6225c837e51f750fea7f20a518a132ba271cec4f2d117e",
+      "market_start_ts": 1785300300000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785302100/polymarket_corpus_manifest.json",
+      "manifest_sha256": "845ff0a0fd4dd7bf27bc6ce166c66bcd4c6f5f9de6eda3879e0095764378ced1",
+      "market_id": "0x17eee219691a99e58c709f3efd5d95c75b73b49525f3f1a85ff25c14bf88e86f",
+      "market_start_ts": 1785302100000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785303000/polymarket_corpus_manifest.json",
+      "manifest_sha256": "731e31d51a8f5650a07549b2022b6264f4daddedc391689558ec8d534bb4f2ce",
+      "market_id": "0xaad13951a6405123134f07b6b28382c1092bb6b1806b87dc74e2cec76a0f2b0a",
+      "market_start_ts": 1785303000000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785303900/polymarket_corpus_manifest.json",
+      "manifest_sha256": "99aeeb875798c723a1bcd05e2da6a9069a7537625f756a275e7a43edf3e5588c",
+      "market_id": "0x001dfcaa649793701cfe82d67a7deb74fb366f190f1ad29005081f387d241e63",
+      "market_start_ts": 1785303900000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785304800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "34afd91ef6a8b1967ea05c6f57ee70d375164875e80176e8125fb43590097872",
+      "market_id": "0x8c169dd0e21ec7d9db50ffe2846e278b371a3d766267ca36faab157e0f3fa233",
+      "market_start_ts": 1785304800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785306600/polymarket_corpus_manifest.json",
+      "manifest_sha256": "0442cb5990d968833add85f04012ca824ba3205d08d1a9b08d2f28b5b6dfb479",
+      "market_id": "0x196609907213d736a92510a3c44495b52e063bbc9bc604ebc8d261f89fedc92b",
+      "market_start_ts": 1785306600000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785307500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "7e12b3463a676f8595f5ad19c074235f49a3c1d713b834e6cbc94119a63c5aff",
+      "market_id": "0x0852441f1b5aead5e2d096aa61d30cc85358a3cee139840319b8c2b5ffc79114",
+      "market_start_ts": 1785307500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785308400/polymarket_corpus_manifest.json",
+      "manifest_sha256": "8888355f580fb3109b0c9103bc8a84a8399e7d86a688130c52b979beceddbc12",
+      "market_id": "0x660d435f2ab7871e3ca1e84824676f5a27bdcadd1c3931468b8106af303923f7",
+      "market_start_ts": 1785308400000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785309300/polymarket_corpus_manifest.json",
+      "manifest_sha256": "6db9570003a84a128cab6a955f299ef77d12469bbbc53d3d60543e4bdda3b9ae",
+      "market_id": "0x049e224d2624e62390673c61136373c33b9a7744268b61dadbe6133cca0fefc7",
+      "market_start_ts": 1785309300000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785311100/polymarket_corpus_manifest.json",
+      "manifest_sha256": "6dddf8ef4fc80c2bd9be250b9622d23b8deaea8e069eefa85b929cac93cf1caf",
+      "market_id": "0xc96a1ddd456ae1352322871dd0275306b2fbe7b3c43839042fa1c8870c0ad9b7",
+      "market_start_ts": 1785311100000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785312000/polymarket_corpus_manifest.json",
+      "manifest_sha256": "bdf3b90a46bc636fb4aec8fe8e64de63e1e6a25dc55126ea5f5d0a371a0ca3f6",
+      "market_id": "0x46300443034c7454e6567b82670d25c820a240202d65f0ff602417d2bd6564d0",
+      "market_start_ts": 1785312000000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785312900/polymarket_corpus_manifest.json",
+      "manifest_sha256": "dbc3e7a71bd630012f2a1f470db0b6ebb0ccd13de9d091b1ef9cc6c6161e4fe8",
+      "market_id": "0x5532b8cf849bd9e780c27170c971e4b369ffd5a6197d2471e32f764934da38fc",
+      "market_start_ts": 1785312900000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785313800/polymarket_corpus_manifest.json",
+      "manifest_sha256": "57d372ad46eb6baa1dfd2cc4e0fd43de3652e2698743b558ced84e1e0590ae3e",
+      "market_id": "0xc3927335c3cfa23ae858cf440e13efbb79e4aa3c03f232645a8d481ceb123dfa",
+      "market_start_ts": 1785313800000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785315600/polymarket_corpus_manifest.json",
+      "manifest_sha256": "2de4e65e2283fdf5a3bdcd82f989498d6c519fc40e37820ae94f38d3dc5e11ec",
+      "market_id": "0x99b05ff4b00ecbf75725b02adf65589090da2f54f02cd696c62a3948106754f4",
+      "market_start_ts": 1785315600000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785316500/polymarket_corpus_manifest.json",
+      "manifest_sha256": "f7bea331173fce3dc937e654329830ffc8db892e6dca1bc793db428303b7c18c",
+      "market_id": "0x1934f14f538f40790f699d30646b61539d036b43af459155e1b22c7fca7c893d",
+      "market_start_ts": 1785316500000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785317400/polymarket_corpus_manifest.json",
+      "manifest_sha256": "49fa2f861194739c4960a30c0e45db91ffa28a0aa46fcfbf61f957be537c01dd",
+      "market_id": "0xdf3ed747277d4f9c6f9b41da792be74121c27f516697195eb1111fd040061581",
+      "market_start_ts": 1785317400000
+    },
+    {
+      "manifest_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_corpus/polymarket/btc-updown-15m-1785318300/polymarket_corpus_manifest.json",
+      "manifest_sha256": "0331b05dccdf00abe01039e5046950e3dee9eb4a296eb0af6245212c4518faf8",
+      "market_id": "0x8ccc5d24708f3ba824e1e2860786cee576f315624ff7ae42a6e03522b862289d",
+      "market_start_ts": 1785318300000
+    }
+  ],
+  "input_corpus_count": 113,
+  "market_count": 113,
+  "promotion_evidence_eligible": false,
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-challenge-model-15m-training-dataset-v1",
+  "side_row_count": 452,
+  "split_market_ids_sha256": {
+    "test": "14a224b6d740321d9ca2aa23a5bf789bfb6ba3f05f3f1f9112055e7a84f77b07",
+    "train": "a90036e6b27518187b4a9714e561b0c705555170636cb61c605b9dbd4cb81282",
+    "validation": "ce4ee2d06c20d0740de5830ca5f16f868baaf38f781f4f0c7a9fe2bb3f967ae9"
+  },
+  "target_field": "total_net_pnl_per_notional",
+  "target_policy": "HOLD_TO_SETTLEMENT",
+  "training_slot_id": "challenge-model-15m-model-layer-slot-001"
+}
