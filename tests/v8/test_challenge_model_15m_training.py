@@ -183,6 +183,10 @@ def test_training_slot_end_to_end_and_sha_mismatch_fail_closed(tmp_path: Path) -
             "hyperparameter_search_allowed": False,
             "candidate_behavior_changed": False,
         },
+        "robustness_rule": {
+            "largest_winner_removed_total_unit_net_pnl_must_be_gt": 0.0,
+            "each_chronological_half_total_unit_net_pnl_must_be_gt": 0.0,
+        },
         "safety": dict(SAFETY),
     }
     oof_prereg_path = repo / "oof_prereg.json"
@@ -273,6 +277,10 @@ def test_rolling_origin_preregistration_fails_on_non_prior_labels() -> None:
             "threshold_search_allowed": False,
             "hyperparameter_search_allowed": False,
             "candidate_behavior_changed": False,
+        },
+        "robustness_rule": {
+            "largest_winner_removed_total_unit_net_pnl_must_be_gt": 0.0,
+            "each_chronological_half_total_unit_net_pnl_must_be_gt": 0.0,
         },
         "safety": dict(SAFETY),
     }

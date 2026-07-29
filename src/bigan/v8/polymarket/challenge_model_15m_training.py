@@ -621,6 +621,11 @@ def validate_rolling_origin_oof_preregistration(payload: Mapping[str, Any]) -> N
         blockers.append("development_discipline.hyperparameter_search_allowed")
     if discipline.get("candidate_behavior_changed") is not False:
         blockers.append("development_discipline.candidate_behavior_changed")
+    robustness = dict(payload.get("robustness_rule") or {})
+    if robustness.get("largest_winner_removed_total_unit_net_pnl_must_be_gt") != 0.0:
+        blockers.append("robustness_rule.largest_winner_removed")
+    if robustness.get("each_chronological_half_total_unit_net_pnl_must_be_gt") != 0.0:
+        blockers.append("robustness_rule.chronological_halves")
     if dict(payload.get("safety") or {}) != SAFETY:
         blockers.append("safety")
     if blockers:
@@ -825,10 +830,25 @@ def run_challenge_model_15m_rolling_origin_oof(
     )
     interval = fixed_metrics["mean_unit_net_pnl_bootstrap_interval"]
     lower = float(interval["lower"]) if interval else None
+    largest_winner_removed = sum(pnl) - max(pnl) if pnl else None
+    first_half_metrics = _fixed_policy_metrics(
+        [row for row in oof_rows if row["market_id"] in first_half_ids],
+        bootstrap_resamples=bootstrap_resamples,
+        bootstrap_seed=bootstrap_seed,
+    )
+    second_half_metrics = _fixed_policy_metrics(
+        [row for row in oof_rows if row["market_id"] in second_half_ids],
+        bootstrap_resamples=bootstrap_resamples,
+        bootstrap_seed=bootstrap_seed,
+    )
     signal_passed = (
         int(fixed_metrics["accepted_market_count"]) >= minimum_accepted
         and lower is not None
         and lower > 0.0
+        and largest_winner_removed is not None
+        and largest_winner_removed > 0.0
+        and float(first_half_metrics["total_unit_net_pnl"]) > 0.0
+        and float(second_half_metrics["total_unit_net_pnl"]) > 0.0
     )
     report = {
         "schema_version": ROLLING_ORIGIN_REPORT_SCHEMA_VERSION,
@@ -854,25 +874,22 @@ def run_challenge_model_15m_rolling_origin_oof(
         ),
         "fixed_policy_metrics": fixed_metrics,
         "robustness": {
-            "largest_winner_removed_total_unit_net_pnl": (
-                sum(pnl) - max(pnl) if pnl else None
-            ),
-            "first_chronological_half": _fixed_policy_metrics(
-                [row for row in oof_rows if row["market_id"] in first_half_ids],
-                bootstrap_resamples=bootstrap_resamples,
-                bootstrap_seed=bootstrap_seed,
-            ),
-            "second_chronological_half": _fixed_policy_metrics(
-                [row for row in oof_rows if row["market_id"] in second_half_ids],
-                bootstrap_resamples=bootstrap_resamples,
-                bootstrap_seed=bootstrap_seed,
-            ),
+            "largest_winner_removed_total_unit_net_pnl": largest_winner_removed,
+            "first_chronological_half": first_half_metrics,
+            "second_chronological_half": second_half_metrics,
         },
         "development_signal_rule": {
             "minimum_accepted_oof_markets": minimum_accepted,
             "mean_unit_net_pnl_bootstrap_lcb_must_be_gt": 0.0,
             "observed_accepted_oof_markets": fixed_metrics["accepted_market_count"],
             "observed_bootstrap_lcb": lower,
+            "largest_winner_removed_total_unit_net_pnl": largest_winner_removed,
+            "first_chronological_half_total_unit_net_pnl": first_half_metrics[
+                "total_unit_net_pnl"
+            ],
+            "second_chronological_half_total_unit_net_pnl": second_half_metrics[
+                "total_unit_net_pnl"
+            ],
             "passed": signal_passed,
             "report_only": True,
             "promotion_claim_allowed": False,
