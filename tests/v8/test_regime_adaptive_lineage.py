@@ -5,6 +5,12 @@ from pathlib import Path
 
 import pytest
 
+from bigan.v8.polymarket.regime_adaptive_candidate_evaluation import (
+    _annotate_regime,
+    _candidate_metrics,
+    _select_candidate,
+    _selected_rows,
+)
 from bigan.v8.polymarket.regime_adaptive_lineage import (
     FROZEN_PROTOCOL_FILES,
     LINEAGE_ID,
@@ -159,3 +165,124 @@ def test_every_frozen_json_is_canonical_json_object() -> None:
     for filename in FROZEN_PROTOCOL_FILES:
         payload = json.loads((CONFIG_DIR / filename).read_text(encoding="utf-8"))
         assert isinstance(payload, dict)
+
+
+def test_regime_annotation_uses_frozen_decision_time_cutoffs() -> None:
+    contract = verify_frozen_json(CONFIG_DIR / "regime_feature_contract.json")
+    row = {
+        "side": "DOWN",
+        "features": {
+            "signed_btc_return_15m": 0.0003,
+            "btc_volatility_15m": 0.0005,
+            "combined_spread_bps": 500.0,
+            "selected_recent_trade_volume": float("nan"),
+            "opposite_recent_trade_volume": float("nan"),
+            "selected_liquidity_depth": 30_000.0,
+            "opposite_liquidity_depth": 20_000.0,
+        },
+    }
+
+    _annotate_regime(row, contract)
+
+    assert row["btc_return_regime"] == "bearish"
+    assert row["volatility_bucket"] == "high"
+    assert row["spread_bucket"] == "medium"
+    assert row["volume_bucket"] == "missing"
+    assert row["depth_bucket"] == "medium"
+    assert row["expert_route"] == "high_vol"
+
+
+def test_action_policy_selects_earliest_positive_decision_and_allows_no_trade() -> None:
+    rows = [
+        {
+            "market_id": "trade",
+            "decision_ts": 1,
+            "side": "UP",
+            "selection_score": -0.01,
+        },
+        {
+            "market_id": "trade",
+            "decision_ts": 1,
+            "side": "DOWN",
+            "selection_score": -0.02,
+        },
+        {
+            "market_id": "trade",
+            "decision_ts": 2,
+            "side": "UP",
+            "selection_score": 0.02,
+        },
+        {
+            "market_id": "trade",
+            "decision_ts": 2,
+            "side": "DOWN",
+            "selection_score": 0.01,
+        },
+        {
+            "market_id": "no-trade",
+            "decision_ts": 1,
+            "side": "UP",
+            "selection_score": 0.0,
+        },
+        {
+            "market_id": "no-trade",
+            "decision_ts": 1,
+            "side": "DOWN",
+            "selection_score": -0.01,
+        },
+    ]
+
+    selected = _selected_rows(rows)
+
+    assert [(row["market_id"], row["decision_ts"], row["side"]) for row in selected] == [
+        ("trade", 2, "UP")
+    ]
+
+
+def test_synthetic_40_market_evaluation_and_selection() -> None:
+    evaluation = verify_frozen_json(
+        CONFIG_DIR / "rolling_origin_evaluation_protocol.json"
+    )
+    ordered_markets = [(index, f"market-{index:02d}") for index in range(40)]
+    rows: list[dict[str, object]] = []
+    for index, (_, market_id) in enumerate(ordered_markets):
+        winning_side = "UP" if index % 2 == 0 else "DOWN"
+        for side in ("UP", "DOWN"):
+            wins = side == winning_side
+            rows.append(
+                {
+                    "market_id": market_id,
+                    "decision_ts": index,
+                    "side": side,
+                    "selection_score": 0.2 if wins else -0.2,
+                    "win_probability": 0.8 if wins else 0.2,
+                    "settlement_payout": 1.0 if wins else 0.0,
+                    "target": 0.1 if wins else -0.9,
+                    "gross_price_edge": 0.12 if wins else -0.88,
+                    "entry_spread_cost": 0.01,
+                    "fees": 0.002,
+                    "slippage": 0.005,
+                    "liquidity_impact": 0.003,
+                    "btc_return_regime": "bullish" if wins else "bearish",
+                    "volatility_bucket": "medium",
+                    "spread_bucket": "low",
+                    "volume_bucket": "missing",
+                    "depth_bucket": "high",
+                }
+            )
+
+    metrics = _candidate_metrics(
+        candidate_id="synthetic",
+        candidate_ordinal=1,
+        oof_rows=rows,
+        ordered_oof_markets=ordered_markets,
+        evaluation=evaluation,
+    )
+    selection = _select_candidate([metrics], evaluation)
+
+    assert metrics["trading_metrics"]["market_count"] == 40
+    assert metrics["trading_metrics"]["accepted_market_count"] == 40
+    assert metrics["trading_metrics"]["total_unit_net_pnl"] == pytest.approx(4.0)
+    assert metrics["development_selection_eligible"] is True
+    assert selection["selected_candidate_id"] == "synthetic"
+    assert selection["fresh_collection_allowed"] is False
