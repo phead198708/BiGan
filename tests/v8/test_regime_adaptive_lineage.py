@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
+from bigan.v8.polymarket.moe_confirmatory_lineage import (
+    assert_metric_payload_matches,
+    deterministic_moe_route,
+    frozen_expert_or_fallback,
+)
 from bigan.v8.polymarket.regime_adaptive_candidate_evaluation import (
     _annotate_regime,
     _candidate_metrics,
@@ -33,6 +39,13 @@ EVALUATION_DIR = (
     / "v8"
     / "polymarket_training_artifacts"
     / "BTC-15M-regime-adaptive-v1-development-evaluation"
+)
+MOE_CONFIG_DIR = (
+    REPO_ROOT
+    / "examples"
+    / "v8"
+    / "polymarket_configs"
+    / "BTC-15M-MoE-confirmatory-v1"
 )
 
 
@@ -366,3 +379,198 @@ def test_development_predictions_are_bounded_and_never_promotion_evidence() -> N
     assert all(row["development_only_forever"] is True for row in predictions)
     assert all(row["promotion_evidence_eligible"] is False for row in predictions)
     assert all(row["safety"] == SAFETY for row in predictions)
+
+
+def test_moe_parent_lineage_is_unchanged_and_budget_remains_consumed() -> None:
+    result_path = CONFIG_DIR / "development_evaluation_result.json"
+    result = verify_frozen_json(result_path)
+
+    assert _sha256(result_path) == (
+        "e2bce83faa98319c69ddd7560f8cdd6cb0a6aa983d728710c3c0ab22f7e5b57e"
+    )
+    assert result["population"]["candidate_budget_consumed"] == 5
+    assert result["population"]["candidate_budget_maximum"] == 5
+    assert result["selection"]["selected_candidate_id"] is None
+    assert result["selection"]["fresh_collection_allowed"] is False
+    assert result["stopping_rule"]["model_freeze_created"] is False
+
+
+def test_moe_provenance_fails_closed_for_unresolvable_source_commit() -> None:
+    attestation = verify_frozen_json(
+        MOE_CONFIG_DIR / "development_evaluation_provenance_attestation.json"
+    )
+
+    assert attestation["original_source_commit"]["recorded_value"] == (
+        "364fd65b08849cb36227a3c4bb1b55a62cc68825"
+    )
+    assert attestation["original_source_commit"]["exact_commit_reachable"] is False
+    assert attestation["reachable_evaluator"]["commit"] == (
+        "364fd65afa4908170dbc2ae5ff4f71c8a2475573"
+    )
+    assert attestation["timestamp_reconciliation"][
+        "protocol_definitions_existed_before_target_access"
+    ]
+    assert attestation["attestation_status"]["passed"] is False
+    assert attestation["attestation_status"]["new_candidate_freeze_allowed"] is False
+
+
+def test_moe_metric_reconciliation_passes_for_all_five_candidates() -> None:
+    report = verify_frozen_json(
+        MOE_CONFIG_DIR / "development_metric_reconciliation_report.json"
+    )
+
+    assert report["reconciliation_passed"] is True
+    assert report["population"] == {
+        "candidate_count": 5,
+        "prediction_row_count": 1460,
+        "fold_audit_count": 365,
+        "oof_market_count": 73,
+        "target_or_future_label_leakage_count": 0,
+    }
+    assert report["cost_reconciliation"]["row_decomposition_mismatch_count"] == 0
+    assert all(
+        item["comparison"]["passed"]
+        for item in report["candidate_reconciliation"]
+    )
+    assert report["parent_selection_reconciliation"]["selected_candidate_id"] is None
+    assert report["parent_selection_reconciliation"][
+        "fresh_collection_allowed"
+    ] is False
+
+
+def test_moe_metric_tampering_fails_closed() -> None:
+    with pytest.raises(ValueError, match="metric reconciliation mismatch"):
+        assert_metric_payload_matches(
+            {"accepted_market_count": 72, "total_unit_net_pnl": 4.372},
+            {"accepted_market_count": 72, "total_unit_net_pnl": 4.373},
+        )
+
+
+@pytest.mark.parametrize(
+    ("volatility_bucket", "btc_return_regime", "expected"),
+    [
+        ("high", "bearish", "high_vol"),
+        ("medium", "bullish", "bullish"),
+        ("low", "bearish", "bearish"),
+        ("medium", "sideways", "low_vol"),
+    ],
+)
+def test_moe_router_is_deterministic_and_uses_frozen_precedence(
+    volatility_bucket: str,
+    btc_return_regime: str,
+    expected: str,
+) -> None:
+    inputs = {
+        "decision_ts": 100,
+        "available_at_ts": 100,
+        "max_input_ts": 99,
+        "volatility_bucket": volatility_bucket,
+        "btc_return_regime": btc_return_regime,
+    }
+
+    assert deterministic_moe_route(inputs) == expected
+    assert deterministic_moe_route(dict(reversed(list(inputs.items())))) == expected
+
+
+def test_moe_router_rejects_future_and_outcome_fields() -> None:
+    causal = {
+        "decision_ts": 100,
+        "available_at_ts": 100,
+        "max_input_ts": 99,
+        "volatility_bucket": "high",
+        "btc_return_regime": "bullish",
+    }
+    with pytest.raises(ValueError, match="causality violation"):
+        deterministic_moe_route({**causal, "max_input_ts": 101})
+    with pytest.raises(ValueError, match="outcome or future fields"):
+        deterministic_moe_route({**causal, "resolved_outcome": "UP"})
+    with pytest.raises(ValueError, match="outcome or future fields"):
+        deterministic_moe_route({**causal, "target": 0.5})
+
+
+def test_moe_frozen_support_boundary_selects_expert_or_fallback() -> None:
+    assert (
+        frozen_expert_or_fallback(
+            route="high_vol",
+            expert_training_market_count=19,
+        )
+        == "global_baseline_fallback"
+    )
+    assert (
+        frozen_expert_or_fallback(
+            route="high_vol",
+            expert_training_market_count=20,
+        )
+        == "moe_expert_high_vol"
+    )
+
+
+def test_moe_attribution_totals_reconcile() -> None:
+    report = verify_frozen_json(
+        MOE_CONFIG_DIR / "moe_route_attribution_report.json"
+    )
+    rows = [
+        json.loads(line)
+        for line in (MOE_CONFIG_DIR / "moe_route_attribution.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    accepted = [row for row in rows if row["accepted"]]
+
+    assert len(rows) == report["market_count"] == 73
+    assert len(accepted) == report["accepted_market_count"] == 72
+    assert sum(row["unit_net_pnl"] for row in rows) == pytest.approx(
+        report["total_unit_net_pnl"]
+    )
+    assert (
+        report["pnl_attribution"]["native_expert_pnl"]
+        + report["pnl_attribution"]["global_fallback_pnl"]
+        == pytest.approx(report["total_unit_net_pnl"])
+    )
+    assert sum(row["selected_side"] == "UP" for row in accepted) + sum(
+        row["selected_side"] == "DOWN" for row in accepted
+    ) == len(accepted)
+    assert (
+        report["pnl_attribution"]["chronological_half_pnl"]["first"]
+        + report["pnl_attribution"]["chronological_half_pnl"]["second"]
+        == pytest.approx(report["total_unit_net_pnl"])
+    )
+    provider = report["provider_and_missingness"]
+    assert (
+        provider["accepted_complete_feature_market_count"]
+        + provider["accepted_missing_feature_market_count"]
+        == len(accepted)
+    )
+    assert report["attribution_reconciliation_passed"] is True
+
+
+def test_moe_complement_proxy_remains_forbidden() -> None:
+    family = verify_frozen_json(CONFIG_DIR / "candidate_family_protocol.json")
+
+    assert family["shared_action_policy"]["true_paired_executable_ask_required"] is True
+    assert family["shared_action_policy"]["complement_proxy_allowed"] is False
+
+
+def test_moe_blocked_lineage_has_no_model_or_collection_authority() -> None:
+    blocked = verify_frozen_json(MOE_CONFIG_DIR / "lineage_blocked_report.json")
+
+    assert blocked["conclusion"] == "BTC-15M-MoE-confirmatory-v1 remains blocked."
+    assert blocked["phase_results"]["phase_3_candidate_contract"]["status"] == (
+        "not_created_blocked_by_phase_0"
+    )
+    assert blocked["not_produced"]["moe_model_manifest"] is True
+    assert blocked["not_produced"]["expert_model_artifacts"] is True
+    assert blocked["not_produced"]["matched_baseline_artifact"] is True
+    assert blocked["collection_state"] == {
+        "fresh_collection_authorized": False,
+        "fresh_collection_started": False,
+        "fresh_outcomes_opened": False,
+        "new_outcome_access_count": 0,
+    }
+    assert blocked["safety"] == SAFETY
+    assert not (MOE_CONFIG_DIR / "moe_candidate_contract.json").exists()
+    assert not (MOE_CONFIG_DIR / "moe_model_manifest.json").exists()
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()

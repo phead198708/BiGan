@@ -1,0 +1,227 @@
+{
+  "accepted_market_count": 72,
+  "attribution_reconciliation_passed": true,
+  "created_at": "2026-07-29T13:47:54.636700+00:00",
+  "development_only_forever": true,
+  "fallback": {
+    "count": 15,
+    "count_by_requested_expert": {
+      "bullish": 4,
+      "high_vol": 6,
+      "low_vol": 5
+    },
+    "overall_share": 0.2054794520547945,
+    "share_by_chronological_half": {
+      "first": 0.3333333333333333,
+      "second": 0.08108108108108109
+    }
+  },
+  "inputs": {
+    "attribution_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_route_attribution.jsonl",
+      "repository_tracked": true,
+      "sha256": "b3bee6e6a28c9fe2eb2f28b323d15c4dd04f1d2ac6b49d7b1ef4525996dc518c"
+    },
+    "development_corpus_index": {
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/finalized_development_corpus_index.jsonl",
+      "repository_tracked": false,
+      "sha256": "0c3623e0d6d540a0fae4b71e96e8df3e342e171213212df43473c2b4de2292e6"
+    },
+    "metric_reconciliation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_metric_reconciliation_report.json",
+      "repository_tracked": true,
+      "sha256": "153cbcf3573b8ce0b8022c1faab4348193f245ac3de1a8b284c21d0a3d4c8028"
+    },
+    "parent_fold_audits": {
+      "path": "examples/v8/polymarket_training_artifacts/BTC-15M-regime-adaptive-v1-development-evaluation/development_fold_audits.jsonl",
+      "repository_tracked": true,
+      "sha256": "7f2fe6f9e1e8efb37efbb11328f4b9c96e139b99ceb649c085ac603847d59499"
+    },
+    "parent_predictions": {
+      "path": "examples/v8/polymarket_training_artifacts/BTC-15M-regime-adaptive-v1-development-evaluation/development_oof_predictions.jsonl",
+      "repository_tracked": true,
+      "sha256": "d76640aa1550e3ab7bee32e3dd41be26d2ca156020c628bb85a8ae54a47b60f1"
+    },
+    "provenance_attestation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_evaluation_provenance_attestation.json",
+      "repository_tracked": true,
+      "sha256": "306ad3c4e90455f636ca573d43b341497db2fc9fe297287b7045d52cb7f27147"
+    }
+  },
+  "largest_winner_attribution": {
+    "actual_model_used": "moe_expert_high_vol",
+    "assigned_route": "high_vol",
+    "fallback_used": false,
+    "market_id": "0x227f8bef51a393ac4357890e4f07420feb7d76e0ac20f82d39f31fdf46746581",
+    "selected_side": "DOWN",
+    "unit_net_pnl": 0.83475
+  },
+  "lineage_id": "BTC-15M-MoE-confirmatory-v1",
+  "market_count": 73,
+  "new_candidate_freeze_allowed": false,
+  "parent_lineage_id": "BTC-15M-regime-adaptive-v1",
+  "pnl_attribution": {
+    "chronological_half_pnl": {
+      "first": 0.14600000000000066,
+      "second": 4.226
+    },
+    "global_fallback_pnl": 1.9462500000000003,
+    "native_expert_pnl": 2.4257500000000003,
+    "pnl_by_route": {
+      "bearish": -2.05075,
+      "bullish": 1.1105,
+      "high_vol": 3.2885000000000004,
+      "low_vol": 2.02375
+    }
+  },
+  "promotion_evidence_eligible": false,
+  "provenance_attestation_passed": false,
+  "provider_and_missingness": {
+    "accepted_complete_feature_market_count": 13,
+    "accepted_missing_feature_market_count": 59,
+    "by_model_use": {
+      "global_baseline_fallback": {
+        "feature_complete_count": 1,
+        "market_count": 15,
+        "trade_volume_missing_count": 14
+      },
+      "moe_expert_bearish": {
+        "feature_complete_count": 4,
+        "market_count": 24,
+        "trade_volume_missing_count": 20
+      },
+      "moe_expert_bullish": {
+        "feature_complete_count": 4,
+        "market_count": 14,
+        "trade_volume_missing_count": 10
+      },
+      "moe_expert_high_vol": {
+        "feature_complete_count": 4,
+        "market_count": 20,
+        "trade_volume_missing_count": 16
+      }
+    },
+    "chainlink_reference_missing_count": 0,
+    "complete_feature_pnl": -0.7182499999999998,
+    "depth_missing_count": 0,
+    "missing_feature_pnl": 5.09025,
+    "provider_health_score": {
+      "maximum": 1.0,
+      "mean": 0.43424657534246575,
+      "minimum": 0.3,
+      "missing_count": 0,
+      "observed_count": 73
+    },
+    "spread_missing_count": 0,
+    "trade_volume_missing_count": 60
+  },
+  "reconciliation_checks": {
+    "accepted_market_count": true,
+    "chronological_halves_pnl": true,
+    "market_count": true,
+    "missingness_partition": true,
+    "native_plus_fallback_pnl": true,
+    "total_unit_net_pnl": true,
+    "up_plus_down_count": true
+  },
+  "regime_distribution_by_route": {
+    "bearish": {
+      "bearish": 24
+    },
+    "bullish": {
+      "bullish": 18
+    },
+    "high_vol": {
+      "bearish": 7,
+      "bullish": 17,
+      "sideways": 2
+    },
+    "low_vol": {
+      "sideways": 5
+    }
+  },
+  "role": "development_only_moe_route_and_fallback_diagnostic",
+  "route_counts": {
+    "bearish": 24,
+    "bullish": 18,
+    "high_vol": 26,
+    "low_vol": 5
+  },
+  "router": {
+    "expert_ids": [
+      "high_vol",
+      "bullish",
+      "bearish",
+      "low_vol"
+    ],
+    "fallback": "global_baseline_fit_on_same_strictly_prior_markets",
+    "feature_contract_sha256": "18681952fd6b3e875b24bf3a76808e4102773a82a715d4b01e481a1ba2f55c32",
+    "minimum_expert_training_markets": 20,
+    "precedence": [
+      "high_vol_if_volatility_bucket_is_high",
+      "bullish_if_not_high_vol_and_btc_return_regime_is_bullish",
+      "bearish_if_not_high_vol_and_btc_return_regime_is_bearish",
+      "low_vol_otherwise"
+    ],
+    "router_or_threshold_change_performed": false
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-route-attribution-report-v1",
+  "side_distribution_by_route": {
+    "bearish": {
+      "DOWN": 10,
+      "UP": 13
+    },
+    "bullish": {
+      "DOWN": 9,
+      "UP": 9
+    },
+    "high_vol": {
+      "DOWN": 15,
+      "UP": 11
+    },
+    "low_vol": {
+      "DOWN": 4,
+      "UP": 1
+    }
+  },
+  "support_evolution_by_route": {
+    "bearish": {
+      "first": 23,
+      "last": 56,
+      "maximum": 56,
+      "minimum": 23
+    },
+    "bullish": {
+      "first": 14,
+      "last": 39,
+      "maximum": 39,
+      "minimum": 14
+    },
+    "high_vol": {
+      "first": 12,
+      "last": 45,
+      "maximum": 45,
+      "minimum": 12
+    },
+    "low_vol": {
+      "first": 7,
+      "last": 17,
+      "maximum": 17,
+      "minimum": 7
+    }
+  },
+  "total_unit_net_pnl": 4.372000000000001
+}
