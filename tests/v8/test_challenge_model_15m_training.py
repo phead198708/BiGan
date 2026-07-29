@@ -8,6 +8,7 @@ import pytest
 from bigan.v8.polymarket.challenge_development_lane import SAFETY, sha256_file
 from bigan.v8.polymarket.challenge_model_15m_training import (
     BASE_FEATURE_NAMES,
+    _apply_pair_probability_normalization,
     _assign_market_grouped_temporal_splits,
     run_challenge_model_15m_training,
     side_symmetric_features,
@@ -154,6 +155,38 @@ def test_win_probability_family_is_valid_and_keeps_fixed_cost_score() -> None:
     prereg = _minimal_preregistration()
     prereg["model"]["family"] = (
         "xgboost_shared_side_symmetric_win_probability_with_cost_subtraction"
+    )
+    prereg["model"]["parameters"]["objective"] = "binary:logistic"
+    prereg["model"]["parameters"]["eval_metric"] = "logloss"
+    validate_training_slot_preregistration(prereg)
+
+
+def test_pair_normalization_enforces_complementarity_before_cost() -> None:
+    rows = [
+        {
+            "market_id": "market",
+            "decision_ts": 1,
+            "side": "UP",
+            "raw_win_probability": 0.60,
+            "execution_cost": 0.55,
+        },
+        {
+            "market_id": "market",
+            "decision_ts": 1,
+            "side": "DOWN",
+            "raw_win_probability": 0.50,
+            "execution_cost": 0.45,
+        },
+    ]
+    _apply_pair_probability_normalization(rows)
+    assert rows[0]["win_probability"] + rows[1]["win_probability"] == pytest.approx(1.0)
+    assert rows[0]["prediction"] == pytest.approx(0.60 / 1.10 - 0.55)
+    assert rows[1]["prediction"] == pytest.approx(0.50 / 1.10 - 0.45)
+
+    prereg = _minimal_preregistration()
+    prereg["model"]["family"] = (
+        "xgboost_shared_side_symmetric_pair_normalized_win_probability_"
+        "with_cost_subtraction"
     )
     prereg["model"]["parameters"]["objective"] = "binary:logistic"
     prereg["model"]["parameters"]["eval_metric"] = "logloss"

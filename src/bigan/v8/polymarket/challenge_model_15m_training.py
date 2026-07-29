@@ -167,6 +167,7 @@ def validate_training_slot_preregistration(payload: Mapping[str, Any]) -> None:
     if model_family not in (
         "xgboost_shared_side_symmetric_regressor",
         "xgboost_shared_side_symmetric_win_probability_with_cost_subtraction",
+        "xgboost_shared_side_symmetric_pair_normalized_win_probability_with_cost_subtraction",
     ):
         blockers.append("model.family")
     parameters = dict(model.get("parameters") or {})
@@ -299,8 +300,7 @@ def run_challenge_model_15m_training(
     model_family = str(model_config["family"])
     label_field = (
         "settlement_payout"
-        if model_family
-        == "xgboost_shared_side_symmetric_win_probability_with_cost_subtraction"
+        if model_family != "xgboost_shared_side_symmetric_regressor"
         else "target"
     )
     matrices = {
@@ -325,15 +325,22 @@ def run_challenge_model_15m_training(
     }
     for split_name, values in raw_predictions.items():
         for row, raw_prediction in zip(split_rows[split_name], values, strict=True):
-            if (
-                model_family
-                == "xgboost_shared_side_symmetric_win_probability_with_cost_subtraction"
-            ):
-                row["win_probability"] = float(raw_prediction)
-                row["prediction"] = float(raw_prediction) - float(row["execution_cost"])
-            else:
-                row["win_probability"] = None
-                row["prediction"] = float(raw_prediction)
+            row["raw_win_probability"] = (
+                float(raw_prediction) if label_field == "settlement_payout" else None
+            )
+            row["win_probability"] = (
+                float(raw_prediction) if label_field == "settlement_payout" else None
+            )
+            row["prediction"] = (
+                float(raw_prediction) - float(row["execution_cost"])
+                if label_field == "settlement_payout"
+                else float(raw_prediction)
+            )
+        if model_family == (
+            "xgboost_shared_side_symmetric_pair_normalized_win_probability_"
+            "with_cost_subtraction"
+        ):
+            _apply_pair_probability_normalization(split_rows[split_name])
     generated_at = created_at or datetime.now(UTC).isoformat()
     output = Path(output_dir).resolve()
     if output.exists() and any(output.iterdir()):
@@ -352,6 +359,7 @@ def run_challenge_model_15m_training(
                 "side": row["side"],
                 "split": split[row["market_id"]],
                 "prediction": row["prediction"],
+                "raw_win_probability": row["raw_win_probability"],
                 "win_probability": row["win_probability"],
                 "execution_cost": row["execution_cost"],
                 "target": row["target"],
@@ -394,8 +402,14 @@ def run_challenge_model_15m_training(
             "family": model_config["family"],
             "prediction_semantics": (
                 "selected_side_win_probability_minus_frozen_executable_entry_cost"
-                if label_field == "settlement_payout"
-                else "direct_after_cost_unit_net_pnl"
+                if model_family
+                == "xgboost_shared_side_symmetric_win_probability_with_cost_subtraction"
+                else (
+                    "pair_normalized_selected_side_win_probability_minus_frozen_"
+                    "executable_entry_cost"
+                    if label_field == "settlement_payout"
+                    else "direct_after_cost_unit_net_pnl"
+                )
             ),
             "best_iteration": int(booster.best_iteration),
             "best_score": float(booster.best_score),
@@ -448,6 +462,12 @@ def run_challenge_model_15m_training(
         },
         "probability_metrics": {
             name: _probability_metrics(split_rows[name])
+            for name in ("train", "validation", "test")
+        }
+        if label_field == "settlement_payout"
+        else None,
+        "paired_probability_audit": {
+            name: _paired_probability_audit(split_rows[name])
             for name in ("train", "validation", "test")
         }
         if label_field == "settlement_payout"
@@ -523,8 +543,14 @@ def run_challenge_model_15m_training(
         "prediction_semantics": report["model"]["prediction_semantics"],
         "after_cost_score_formula": (
             "win_probability-entry_ask-fees-slippage-liquidity_impact"
-            if label_field == "settlement_payout"
-            else "native_model_output"
+            if model_family
+            == "xgboost_shared_side_symmetric_win_probability_with_cost_subtraction"
+            else (
+                "pair_normalize(raw_up,raw_down)-entry_ask-fees-slippage-"
+                "liquidity_impact"
+                if label_field == "settlement_payout"
+                else "native_model_output"
+            )
         ),
         "artifacts": {
             "model": _descriptor(model_path, repo_root=output),
@@ -924,6 +950,52 @@ def _probability_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "brier_score": float(np.mean(np.square(probabilities - targets))),
         "probability_mean": float(np.mean(probabilities)),
         "outcome_mean": float(np.mean(targets)),
+    }
+
+
+def _apply_pair_probability_normalization(rows: Sequence[dict[str, Any]]) -> None:
+    by_decision: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_decision[(str(row["market_id"]), int(row["decision_ts"]))].append(row)
+    for key, pair in by_decision.items():
+        if len(pair) != len(SIDES) or {str(row["side"]) for row in pair} != set(SIDES):
+            raise ValueError(f"pair normalization requires one row per side: {key}")
+        pair_sum = sum(float(row["raw_win_probability"]) for row in pair)
+        if not math.isfinite(pair_sum) or pair_sum <= 0.0:
+            raise ValueError(f"pair normalization denominator is invalid: {key}")
+        for row in pair:
+            normalized = float(row["raw_win_probability"]) / pair_sum
+            row["win_probability"] = normalized
+            row["prediction"] = normalized - float(row["execution_cost"])
+
+
+def _paired_probability_audit(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    by_decision: dict[tuple[str, int], list[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_decision[(str(row["market_id"]), int(row["decision_ts"]))].append(row)
+    raw_sums = [
+        sum(float(row["raw_win_probability"]) for row in pair)
+        for pair in by_decision.values()
+    ]
+    normalized_sums = [
+        sum(float(row["win_probability"]) for row in pair)
+        for pair in by_decision.values()
+    ]
+    return {
+        "decision_pair_count": len(by_decision),
+        "raw_probability_sum_mean": float(np.mean(raw_sums)),
+        "raw_probability_sum_min": min(raw_sums),
+        "raw_probability_sum_max": max(raw_sums),
+        "normalized_probability_sum_mean": float(np.mean(normalized_sums)),
+        "normalized_probability_sum_max_absolute_error_from_one": max(
+            abs(value - 1.0) for value in normalized_sums
+        ),
+        "exact_complementarity_enforced": max(
+            abs(value - 1.0) for value in normalized_sums
+        )
+        <= 1e-12,
     }
 
 
