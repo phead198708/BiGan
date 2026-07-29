@@ -27,6 +27,13 @@ CONFIG_DIR = (
     / "polymarket_configs"
     / "BTC-15M-regime-adaptive-v1"
 )
+EVALUATION_DIR = (
+    REPO_ROOT
+    / "examples"
+    / "v8"
+    / "polymarket_training_artifacts"
+    / "BTC-15M-regime-adaptive-v1-development-evaluation"
+)
 
 
 def test_frozen_regime_adaptive_protocol_graph_is_coherent() -> None:
@@ -286,3 +293,76 @@ def test_synthetic_40_market_evaluation_and_selection() -> None:
     assert metrics["development_selection_eligible"] is True
     assert selection["selected_candidate_id"] == "synthetic"
     assert selection["fresh_collection_allowed"] is False
+
+
+def test_frozen_development_result_stops_before_fresh_collection() -> None:
+    result = verify_frozen_json(CONFIG_DIR / "development_evaluation_result.json")
+
+    assert result["population"] == {
+        "development_market_count": 113,
+        "initial_strictly_prior_training_market_count": 40,
+        "rolling_origin_evaluation_market_count": 73,
+        "candidate_count": 5,
+        "candidate_budget_consumed": 5,
+        "candidate_budget_maximum": 5,
+        "target_or_future_label_leakage_count": 0,
+    }
+    assert all(
+        candidate["development_selection_eligible"] is False
+        for candidate in result["candidate_results"]
+    )
+    mixture = next(
+        candidate
+        for candidate in result["candidate_results"]
+        if candidate["candidate_id"] == "mixture_of_experts"
+    )
+    assert mixture["total_unit_net_pnl"] == pytest.approx(4.372)
+    assert mixture["mean_unit_net_pnl_bootstrap_95pct_lower"] == pytest.approx(
+        -0.03593672945205478
+    )
+    assert mixture["first_chronological_half_total_unit_net_pnl"] > 0.0
+    assert mixture["second_chronological_half_total_unit_net_pnl"] > 0.0
+    assert result["selection"]["selected_candidate_id"] is None
+    assert result["selection"]["fresh_collection_allowed"] is False
+    assert result["stopping_rule"]["phase_6_allowed"] is False
+    assert result["stopping_rule"]["fresh_collection_started"] is False
+    assert result["stopping_rule"]["fresh_outcomes_opened"] is False
+
+
+def test_all_development_folds_are_strictly_prior_and_leakage_free() -> None:
+    folds = [
+        json.loads(line)
+        for line in (EVALUATION_DIR / "development_fold_audits.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+
+    assert len(folds) == 5 * 73
+    assert {fold["candidate_id"] for fold in folds} == {
+        "global_baseline",
+        "regime_conditioned_calibration",
+        "mixture_of_experts",
+        "drift_aware_rolling_calibration",
+        "uncertainty_aware_abstention",
+    }
+    assert min(fold["strictly_prior_market_count"] for fold in folds) == 40
+    assert max(fold["strictly_prior_market_count"] for fold in folds) == 112
+    assert all(fold["target_market_used_for_fit"] is False for fold in folds)
+    assert all(fold["future_market_used_for_fit"] is False for fold in folds)
+    assert all(fold["target_or_future_label_leakage_count"] == 0 for fold in folds)
+    assert all(fold["promotion_evidence_eligible"] is False for fold in folds)
+
+
+def test_development_predictions_are_bounded_and_never_promotion_evidence() -> None:
+    predictions = [
+        json.loads(line)
+        for line in (EVALUATION_DIR / "development_oof_predictions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+
+    assert len(predictions) == 5 * 73 * 4
+    assert all(0.0 <= row["win_probability"] <= 1.0 for row in predictions)
+    assert all(row["development_only_forever"] is True for row in predictions)
+    assert all(row["promotion_evidence_eligible"] is False for row in predictions)
+    assert all(row["safety"] == SAFETY for row in predictions)

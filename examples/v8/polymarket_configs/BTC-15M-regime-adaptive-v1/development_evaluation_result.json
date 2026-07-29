@@ -1,0 +1,159 @@
+{
+  "schema_version": "bigan-btc-15m-regime-adaptive-development-evaluation-result-v1",
+  "lineage_id": "BTC-15M-regime-adaptive-v1",
+  "status": "completed_no_candidate_met_all_frozen_development_gates",
+  "created_at": "2026-07-29T11:24:51.640929+00:00",
+  "source_commit": "364fd65b08849cb36227a3c4bb1b55a62cc68825",
+  "role": "outcome_aware_development_selection_only",
+  "development_only_forever": true,
+  "promotion_evidence_eligible": false,
+  "fresh_validation_evidence_eligible": false,
+  "parent_oof_reopened_as_validation": false,
+  "frozen_protocols": {
+    "regime_adaptive_model_protocol": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/regime_adaptive_model_protocol.json",
+      "sha256": "c8680f69ff1d44727b68fecad3d9619176b40a44c17f94d9fea6305c73e87a92"
+    },
+    "lineage_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/lineage_manifest.json",
+      "sha256": "4d24d95b0f5cb10bdcf1662df64f963d94849b62ed082271e5b6912914cb425a"
+    },
+    "temporal_drift_diagnostic": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/temporal_drift_diagnostic_report.json",
+      "sha256": "155ba69aed45ca0a92f6370902c2190dd9642053375ffb1404ffd3324ea06509"
+    },
+    "regime_feature_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/regime_feature_contract.json",
+      "sha256": "18681952fd6b3e875b24bf3a76808e4102773a82a715d4b01e481a1ba2f55c32"
+    },
+    "candidate_family": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/candidate_family_protocol.json",
+      "sha256": "b1008633ddd5fad3228bbf29031bd0cb5f994663cabae10931c1913f639a8c26"
+    },
+    "rolling_origin_evaluation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/rolling_origin_evaluation_protocol.json",
+      "sha256": "47f143606aa3ead42b88bff5601ceb080ca69e0f4b5799d4760f821d279bf5b9"
+    },
+    "candidate_budget": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/candidate_budget_protocol.json",
+      "sha256": "743308fa6a56c24a71e29c0e5479bc2f49b49c2b5c6eaf15100dca19227ab7c1"
+    }
+  },
+  "artifacts": {
+    "manifest": {
+      "path": "examples/v8/polymarket_training_artifacts/BTC-15M-regime-adaptive-v1-development-evaluation/development_evaluation_manifest.json",
+      "sha256": "055bfe27a336e94ad5c7b0647db52a5dd5a798cc51f45428dd439b4d715a213b"
+    },
+    "report": {
+      "path": "examples/v8/polymarket_training_artifacts/BTC-15M-regime-adaptive-v1-development-evaluation/development_evaluation_report.json",
+      "sha256": "50413b649f385d8ef31b74427fb687e3aa12249731eab367a1e47657ee516d66"
+    },
+    "report_markdown": {
+      "path": "examples/v8/polymarket_training_artifacts/BTC-15M-regime-adaptive-v1-development-evaluation/development_evaluation_report.md",
+      "sha256": "8d281a8bee5740f5b42ca867803af8120b016191056bbd41aa6653aae6c2582f"
+    },
+    "predictions": {
+      "path": "examples/v8/polymarket_training_artifacts/BTC-15M-regime-adaptive-v1-development-evaluation/development_oof_predictions.jsonl",
+      "sha256": "d76640aa1550e3ab7bee32e3dd41be26d2ca156020c628bb85a8ae54a47b60f1"
+    },
+    "fold_audits": {
+      "path": "examples/v8/polymarket_training_artifacts/BTC-15M-regime-adaptive-v1-development-evaluation/development_fold_audits.jsonl",
+      "sha256": "7f2fe6f9e1e8efb37efbb11328f4b9c96e139b99ceb649c085ac603847d59499"
+    }
+  },
+  "population": {
+    "development_market_count": 113,
+    "initial_strictly_prior_training_market_count": 40,
+    "rolling_origin_evaluation_market_count": 73,
+    "candidate_count": 5,
+    "candidate_budget_consumed": 5,
+    "candidate_budget_maximum": 5,
+    "target_or_future_label_leakage_count": 0
+  },
+  "candidate_results": [
+    {
+      "candidate_id": "global_baseline",
+      "accepted_market_count": 72,
+      "total_unit_net_pnl": 0.5320000000000009,
+      "mean_unit_net_pnl_bootstrap_95pct_lower": -0.09114220890410958,
+      "largest_winner_removed_total_unit_net_pnl": -0.3027499999999991,
+      "first_chronological_half_total_unit_net_pnl": -1.3239999999999994,
+      "second_chronological_half_total_unit_net_pnl": 1.8560000000000003,
+      "development_selection_eligible": false
+    },
+    {
+      "candidate_id": "regime_conditioned_calibration",
+      "accepted_market_count": 72,
+      "total_unit_net_pnl": 0.672000000000001,
+      "mean_unit_net_pnl_bootstrap_95pct_lower": -0.0897105308219178,
+      "largest_winner_removed_total_unit_net_pnl": -0.16274999999999895,
+      "first_chronological_half_total_unit_net_pnl": -2.9139999999999993,
+      "second_chronological_half_total_unit_net_pnl": 3.5860000000000003,
+      "development_selection_eligible": false
+    },
+    {
+      "candidate_id": "mixture_of_experts",
+      "accepted_market_count": 72,
+      "total_unit_net_pnl": 4.372000000000001,
+      "mean_unit_net_pnl_bootstrap_95pct_lower": -0.03593672945205478,
+      "largest_winner_removed_total_unit_net_pnl": 3.5372500000000007,
+      "first_chronological_half_total_unit_net_pnl": 0.14600000000000066,
+      "second_chronological_half_total_unit_net_pnl": 4.226,
+      "development_selection_eligible": false
+    },
+    {
+      "candidate_id": "drift_aware_rolling_calibration",
+      "accepted_market_count": 73,
+      "total_unit_net_pnl": 0.3812500000000008,
+      "mean_unit_net_pnl_bootstrap_95pct_lower": -0.09943835616438354,
+      "largest_winner_removed_total_unit_net_pnl": -0.4534999999999992,
+      "first_chronological_half_total_unit_net_pnl": -0.7794999999999995,
+      "second_chronological_half_total_unit_net_pnl": 1.1607500000000004,
+      "development_selection_eligible": false
+    },
+    {
+      "candidate_id": "uncertainty_aware_abstention",
+      "accepted_market_count": 53,
+      "total_unit_net_pnl": -2.5327499999999996,
+      "mean_unit_net_pnl_bootstrap_95pct_lower": -0.10294289383561643,
+      "largest_winner_removed_total_unit_net_pnl": -3.3574999999999995,
+      "first_chronological_half_total_unit_net_pnl": -0.7367499999999998,
+      "second_chronological_half_total_unit_net_pnl": -1.7959999999999998,
+      "development_selection_eligible": false
+    }
+  ],
+  "selection": {
+    "status": "no_candidate_met_all_frozen_development_gates",
+    "selected_candidate_id": null,
+    "eligible_candidate_ids": [],
+    "fresh_collection_allowed": false
+  },
+  "stopping_rule": {
+    "triggered": "no_development_candidate_meets_all_frozen_eligibility_requirements",
+    "required_action": "stop_without_fresh_collection",
+    "phase_6_allowed": false,
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false,
+    "model_freeze_created": false
+  },
+  "parent_immutability_confirmation": {
+    "parent_lineage": "challenge-model-15m-slot-003-rolling-origin-oof-v1",
+    "parent_artifact_modified": false,
+    "parent_hyperparameter_tuning_continued": false,
+    "parent_oof_reused_as_validation": false
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}

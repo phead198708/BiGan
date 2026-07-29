@@ -49,6 +49,7 @@ FROZEN_PROTOCOL_FILES = (
     "candidate_family_protocol.json",
     "rolling_origin_evaluation_protocol.json",
     "candidate_budget_protocol.json",
+    "development_evaluation_result.json",
 )
 
 
@@ -69,6 +70,7 @@ def validate_frozen_protocol_graph(
     family = payloads["candidate_family_protocol.json"]
     evaluation = payloads["rolling_origin_evaluation_protocol.json"]
     budget = payloads["candidate_budget_protocol.json"]
+    result = payloads["development_evaluation_result.json"]
     _validate_lineage_boundary(model, lineage)
 
     for name, payload in payloads.items():
@@ -152,6 +154,26 @@ def validate_frozen_protocol_graph(
     _verify_embedded_descriptors(family.get("inputs") or {})
     _verify_embedded_descriptors(evaluation.get("inputs") or {}, allow_missing=True)
     _verify_embedded_descriptors(budget.get("frozen_inputs") or {})
+    selection = dict(result.get("selection") or {})
+    stopping = dict(result.get("stopping_rule") or {})
+    candidate_results = list(result.get("candidate_results") or [])
+    if not (
+        result.get("status")
+        == "completed_no_candidate_met_all_frozen_development_gates"
+        and len(candidate_results) == 5
+        and all(
+            candidate.get("development_selection_eligible") is False
+            for candidate in candidate_results
+        )
+        and selection.get("selected_candidate_id") is None
+        and selection.get("fresh_collection_allowed") is False
+        and stopping.get("phase_6_allowed") is False
+        and stopping.get("fresh_collection_started") is False
+        and stopping.get("fresh_outcomes_opened") is False
+    ):
+        raise ValueError("development evaluation fail-closed result is invalid")
+    _verify_embedded_descriptors(result.get("frozen_protocols") or {})
+    _verify_embedded_descriptors(result.get("artifacts") or {})
     return payloads
 
 
