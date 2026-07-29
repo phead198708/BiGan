@@ -129,6 +129,7 @@ def test_training_slot_end_to_end_and_sha_mismatch_fail_closed(tmp_path: Path) -
     assert report["split"]["market_overlap_count"] == 0
     assert report["promotion_claim_made"] is False
     assert report["threshold_or_hyperparameter_search_performed"] is False
+    assert report["development_signal_rule"]["promotion_claim_allowed"] is False
     assert report["safety"] == SAFETY
 
     with pytest.raises(ValueError, match="preregistration SHA-256 mismatch"):
@@ -147,6 +148,16 @@ def test_readiness_closed_fails_before_training(tmp_path: Path) -> None:
     prereg["development_discipline"]["threshold_search_allowed"] = True
     with pytest.raises(ValueError, match="threshold_search_allowed"):
         validate_training_slot_preregistration(prereg)
+
+
+def test_win_probability_family_is_valid_and_keeps_fixed_cost_score() -> None:
+    prereg = _minimal_preregistration()
+    prereg["model"]["family"] = (
+        "xgboost_shared_side_symmetric_win_probability_with_cost_subtraction"
+    )
+    prereg["model"]["parameters"]["objective"] = "binary:logistic"
+    prereg["model"]["parameters"]["eval_metric"] = "logloss"
+    validate_training_slot_preregistration(prereg)
 
 
 def _preregistration(
@@ -233,6 +244,12 @@ def _minimal_preregistration() -> dict:
             "one_trade_maximum_per_market": True,
             "bootstrap_resamples": 100,
             "bootstrap_seed": 1,
+            "development_signal_rule": {
+                "minimum_accepted_test_markets": 2,
+                "test_mean_unit_net_pnl_bootstrap_lcb_must_be_gt": 0.0,
+                "report_only": True,
+                "promotion_claim_allowed": False,
+            },
         },
         "development_discipline": {
             "candidate_count": 1,

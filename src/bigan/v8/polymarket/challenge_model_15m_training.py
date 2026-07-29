@@ -163,12 +163,21 @@ def validate_training_slot_preregistration(payload: Mapping[str, Any]) -> None:
     if split.get("all_rows_for_one_market_must_remain_in_one_split") is not True:
         blockers.append("split.market_grouping")
     model = dict(payload.get("model") or {})
-    if model.get("family") != "xgboost_shared_side_symmetric_regressor":
+    model_family = model.get("family")
+    if model_family not in (
+        "xgboost_shared_side_symmetric_regressor",
+        "xgboost_shared_side_symmetric_win_probability_with_cost_subtraction",
+    ):
         blockers.append("model.family")
     parameters = dict(model.get("parameters") or {})
+    objective_and_metric = (
+        ("reg:squarederror", "rmse")
+        if model_family == "xgboost_shared_side_symmetric_regressor"
+        else ("binary:logistic", "logloss")
+    )
     required_parameters = {
-        "objective": "reg:squarederror",
-        "eval_metric": "rmse",
+        "objective": objective_and_metric[0],
+        "eval_metric": objective_and_metric[1],
         "tree_method": "hist",
         "nthread": 1,
     }
@@ -193,6 +202,30 @@ def validate_training_slot_preregistration(payload: Mapping[str, Any]) -> None:
         blockers.append("development_evaluation_policy.one_trade_maximum_per_market")
     if int(policy.get("bootstrap_resamples") or 0) <= 0:
         blockers.append("development_evaluation_policy.bootstrap_resamples")
+    signal_rule = dict(policy.get("development_signal_rule") or {})
+    if int(signal_rule.get("minimum_accepted_test_markets") or 0) <= 0:
+        blockers.append(
+            "development_evaluation_policy.development_signal_rule."
+            "minimum_accepted_test_markets"
+        )
+    if (
+        signal_rule.get("test_mean_unit_net_pnl_bootstrap_lcb_must_be_gt")
+        is None
+        or float(signal_rule["test_mean_unit_net_pnl_bootstrap_lcb_must_be_gt"])
+        != 0.0
+    ):
+        blockers.append(
+            "development_evaluation_policy.development_signal_rule.bootstrap_lcb"
+        )
+    if signal_rule.get("report_only") is not True:
+        blockers.append(
+            "development_evaluation_policy.development_signal_rule.report_only"
+        )
+    if signal_rule.get("promotion_claim_allowed") is not False:
+        blockers.append(
+            "development_evaluation_policy.development_signal_rule."
+            "promotion_claim_allowed"
+        )
     if dict(payload.get("safety") or {}) != SAFETY:
         blockers.append("safety")
     pins = dict(payload.get("input_pins") or {})
@@ -262,11 +295,18 @@ def run_challenge_model_15m_training(
         name: [row for row in rows if split[row["market_id"]] == name]
         for name in ("train", "validation", "test")
     }
+    model_config = dict(preregistration["model"])
+    model_family = str(model_config["family"])
+    label_field = (
+        "settlement_payout"
+        if model_family
+        == "xgboost_shared_side_symmetric_win_probability_with_cost_subtraction"
+        else "target"
+    )
     matrices = {
-        name: _matrix(partition, feature_names)
+        name: _matrix(partition, feature_names, label_field=label_field)
         for name, partition in split_rows.items()
     }
-    model_config = dict(preregistration["model"])
     booster = xgb.train(
         params=dict(model_config["parameters"]),
         dtrain=matrices["train"],
@@ -279,13 +319,21 @@ def run_challenge_model_15m_training(
         verbose_eval=False,
     )
     iteration_end = int(booster.best_iteration) + 1
-    predictions: dict[str, np.ndarray] = {
+    raw_predictions: dict[str, np.ndarray] = {
         name: booster.predict(matrix, iteration_range=(0, iteration_end))
         for name, matrix in matrices.items()
     }
-    for split_name, values in predictions.items():
-        for row, prediction in zip(split_rows[split_name], values, strict=True):
-            row["prediction"] = float(prediction)
+    for split_name, values in raw_predictions.items():
+        for row, raw_prediction in zip(split_rows[split_name], values, strict=True):
+            if (
+                model_family
+                == "xgboost_shared_side_symmetric_win_probability_with_cost_subtraction"
+            ):
+                row["win_probability"] = float(raw_prediction)
+                row["prediction"] = float(raw_prediction) - float(row["execution_cost"])
+            else:
+                row["win_probability"] = None
+                row["prediction"] = float(raw_prediction)
     generated_at = created_at or datetime.now(UTC).isoformat()
     output = Path(output_dir).resolve()
     if output.exists() and any(output.iterdir()):
@@ -304,6 +352,8 @@ def run_challenge_model_15m_training(
                 "side": row["side"],
                 "split": split[row["market_id"]],
                 "prediction": row["prediction"],
+                "win_probability": row["win_probability"],
+                "execution_cost": row["execution_cost"],
                 "target": row["target"],
                 "resolved_outcome": row["resolved_outcome"],
                 "development_only_forever": True,
@@ -342,6 +392,11 @@ def run_challenge_model_15m_training(
         "target": dict(preregistration["target"]),
         "model": {
             "family": model_config["family"],
+            "prediction_semantics": (
+                "selected_side_win_probability_minus_frozen_executable_entry_cost"
+                if label_field == "settlement_payout"
+                else "direct_after_cost_unit_net_pnl"
+            ),
             "best_iteration": int(booster.best_iteration),
             "best_score": float(booster.best_score),
             "feature_count": len(feature_names),
@@ -391,6 +446,12 @@ def run_challenge_model_15m_training(
             name: _regression_metrics(split_rows[name])
             for name in ("train", "validation", "test")
         },
+        "probability_metrics": {
+            name: _probability_metrics(split_rows[name])
+            for name in ("train", "validation", "test")
+        }
+        if label_field == "settlement_payout"
+        else None,
         "fixed_policy_metrics": {
             name: _fixed_policy_metrics(
                 split_rows[name],
@@ -407,6 +468,20 @@ def run_challenge_model_15m_training(
         },
         "development_evidence_interpretation": (
             "report_only_no_promotion_or_cross_lineage_claim"
+        ),
+        "development_signal_rule": _development_signal_rule(
+            split_rows["test"],
+            minimum_accepted_markets=int(
+                preregistration["development_evaluation_policy"][
+                    "development_signal_rule"
+                ]["minimum_accepted_test_markets"]
+            ),
+            bootstrap_resamples=int(
+                preregistration["development_evaluation_policy"]["bootstrap_resamples"]
+            ),
+            bootstrap_seed=int(
+                preregistration["development_evaluation_policy"]["bootstrap_seed"]
+            ),
         ),
         "model_training_started": True,
         "model_training_completed": True,
@@ -444,6 +519,13 @@ def run_challenge_model_15m_training(
         "training_implementation_commit": preregistration[
             "training_implementation_commit"
         ],
+        "model_family": model_family,
+        "prediction_semantics": report["model"]["prediction_semantics"],
+        "after_cost_score_formula": (
+            "win_probability-entry_ask-fees-slippage-liquidity_impact"
+            if label_field == "settlement_payout"
+            else "native_model_output"
+        ),
         "artifacts": {
             "model": _descriptor(model_path, repo_root=output),
             "predictions": _descriptor(prediction_path, repo_root=output),
@@ -635,6 +717,13 @@ def _load_side_symmetric_rows(
                         "side": side,
                         "features": features,
                         "target": target,
+                        "settlement_payout": float(label["settlement_payout"]),
+                        "execution_cost": (
+                            float(label["entry_ask"])
+                            + float(label["fees"])
+                            + float(label["slippage"])
+                            + float(label["liquidity_impact"])
+                        ),
                         "resolved_outcome": str(label["resolved_outcome"]),
                         "gross_price_edge": gross_price_edge,
                         "entry_spread_cost": entry_spread_cost,
@@ -781,6 +870,8 @@ def _validate_readiness(readiness: Mapping[str, Any]) -> None:
 def _matrix(
     rows: Sequence[Mapping[str, Any]],
     feature_names: Sequence[str],
+    *,
+    label_field: str,
 ) -> xgb.DMatrix:
     values = np.asarray(
         [
@@ -789,7 +880,7 @@ def _matrix(
         ],
         dtype=np.float64,
     )
-    targets = np.asarray([float(row["target"]) for row in rows], dtype=np.float64)
+    targets = np.asarray([float(row[label_field]) for row in rows], dtype=np.float64)
     return xgb.DMatrix(
         values,
         label=targets,
@@ -810,6 +901,29 @@ def _regression_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "mae": float(np.mean(np.abs(residuals))),
         "prediction_mean": float(np.mean([float(row["prediction"]) for row in rows])),
         "target_mean": float(np.mean([float(row["target"]) for row in rows])),
+    }
+
+
+def _probability_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    probabilities = np.asarray(
+        [float(row["win_probability"]) for row in rows],
+        dtype=np.float64,
+    )
+    targets = np.asarray(
+        [float(row["settlement_payout"]) for row in rows],
+        dtype=np.float64,
+    )
+    clipped = np.clip(probabilities, 1e-12, 1.0 - 1e-12)
+    logloss = -np.mean(
+        targets * np.log(clipped) + (1.0 - targets) * np.log(1.0 - clipped)
+    )
+    return {
+        "row_count": len(rows),
+        "market_count": len({str(row["market_id"]) for row in rows}),
+        "logloss": float(logloss),
+        "brier_score": float(np.mean(np.square(probabilities - targets))),
+        "probability_mean": float(np.mean(probabilities)),
+        "outcome_mean": float(np.mean(targets)),
     }
 
 
@@ -871,6 +985,36 @@ def _fixed_policy_metrics(
         "unit_sizing": True,
         "fixed_acceptance_threshold": 0.0,
         "one_trade_maximum_per_market": True,
+        "report_only": True,
+        "promotion_claim_allowed": False,
+    }
+
+
+def _development_signal_rule(
+    test_rows: Sequence[Mapping[str, Any]],
+    *,
+    minimum_accepted_markets: int,
+    bootstrap_resamples: int,
+    bootstrap_seed: int,
+) -> dict[str, Any]:
+    metrics = _fixed_policy_metrics(
+        test_rows,
+        bootstrap_resamples=bootstrap_resamples,
+        bootstrap_seed=bootstrap_seed,
+    )
+    interval = metrics["mean_unit_net_pnl_bootstrap_interval"]
+    lower = float(interval["lower"]) if interval is not None else None
+    passed = (
+        int(metrics["accepted_market_count"]) >= minimum_accepted_markets
+        and lower is not None
+        and lower > 0.0
+    )
+    return {
+        "minimum_accepted_test_markets": minimum_accepted_markets,
+        "test_mean_unit_net_pnl_bootstrap_lcb_must_be_gt": 0.0,
+        "observed_accepted_test_markets": metrics["accepted_market_count"],
+        "observed_bootstrap_lcb": lower,
+        "passed": passed,
         "report_only": True,
         "promotion_claim_allowed": False,
     }
