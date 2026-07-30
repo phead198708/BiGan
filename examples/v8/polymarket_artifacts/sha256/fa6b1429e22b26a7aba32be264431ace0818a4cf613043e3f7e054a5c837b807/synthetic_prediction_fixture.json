@@ -1,0 +1,489 @@
+{
+  "feature_names_sha256": "a61ef8953a2801d3e404d376261f306846cae5a4bf3ef3c97918572c48720e89",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "prediction_fixtures": [
+    {
+      "default_feature_value": 0.0,
+      "execution_costs": [
+        0.45,
+        0.45
+      ],
+      "expected_accepted": true,
+      "expected_actual_model_used": "moe_expert_high_vol",
+      "expected_normalized_probabilities": [
+        0.5,
+        0.5
+      ],
+      "expected_raw_probabilities": [
+        0.5102415084838867,
+        0.5102415084838867
+      ],
+      "expected_route": "high_vol",
+      "expected_scores": [
+        0.04999999999999999,
+        0.04999999999999999
+      ],
+      "expected_selected_side": "UP",
+      "fixture_id": "high_vol_native_expert",
+      "required_path": "high_vol_native_expert",
+      "router_inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "bullish",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "high"
+      },
+      "side_feature_overrides": [
+        {
+          "btc_volatility_15m": 0.001
+        },
+        {
+          "btc_volatility_15m": 0.001
+        }
+      ]
+    },
+    {
+      "default_feature_value": 0.0,
+      "execution_costs": [
+        0.45,
+        0.45
+      ],
+      "expected_accepted": true,
+      "expected_actual_model_used": "moe_expert_bullish",
+      "expected_normalized_probabilities": [
+        0.5216397213579396,
+        0.47836032715487115
+      ],
+      "expected_raw_probabilities": [
+        0.3204529881477356,
+        0.2938656508922577
+      ],
+      "expected_route": "bullish",
+      "expected_scores": [
+        0.07163972135793956,
+        0.028360327154871134
+      ],
+      "expected_selected_side": "UP",
+      "fixture_id": "bullish_native_expert",
+      "required_path": "bullish_native_expert",
+      "router_inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "bullish",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "medium"
+      },
+      "side_feature_overrides": [
+        {
+          "signed_btc_return_15m": 0.005
+        },
+        {
+          "signed_btc_return_15m": -0.005
+        }
+      ]
+    },
+    {
+      "default_feature_value": 0.0,
+      "execution_costs": [
+        0.45,
+        0.45
+      ],
+      "expected_accepted": true,
+      "expected_actual_model_used": "moe_expert_bearish",
+      "expected_normalized_probabilities": [
+        0.3307625070582604,
+        0.6692374929417396
+      ],
+      "expected_raw_probabilities": [
+        0.1761099100112915,
+        0.35632622241973877
+      ],
+      "expected_route": "bearish",
+      "expected_scores": [
+        -0.11923749294173963,
+        0.2192374929417396
+      ],
+      "expected_selected_side": "DOWN",
+      "fixture_id": "bearish_native_expert",
+      "required_path": "bearish_native_expert",
+      "router_inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "bearish",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "medium"
+      },
+      "side_feature_overrides": [
+        {
+          "signed_btc_return_15m": -0.005
+        },
+        {
+          "signed_btc_return_15m": 0.005
+        }
+      ]
+    },
+    {
+      "default_feature_value": 0.0,
+      "execution_costs": [
+        0.45,
+        0.45
+      ],
+      "expected_accepted": true,
+      "expected_actual_model_used": "global_baseline_fallback",
+      "expected_normalized_probabilities": [
+        0.5,
+        0.5
+      ],
+      "expected_raw_probabilities": [
+        0.37598252296447754,
+        0.37598252296447754
+      ],
+      "expected_route": "low_vol",
+      "expected_scores": [
+        0.04999999999999999,
+        0.04999999999999999
+      ],
+      "expected_selected_side": "UP",
+      "fixture_id": "low_vol_global_fallback",
+      "required_path": "low_vol_global_fallback",
+      "router_inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "sideways",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "low"
+      },
+      "side_feature_overrides": [
+        {},
+        {}
+      ]
+    },
+    {
+      "default_feature_value": 0.0,
+      "execution_costs": [
+        0.0,
+        1.0
+      ],
+      "expected_accepted": true,
+      "expected_actual_model_used": "moe_expert_high_vol",
+      "expected_normalized_probabilities": [
+        0.5,
+        0.5
+      ],
+      "expected_raw_probabilities": [
+        0.4846046268939972,
+        0.4846046268939972
+      ],
+      "expected_route": "high_vol",
+      "expected_scores": [
+        0.5,
+        -0.5
+      ],
+      "expected_selected_side": "UP",
+      "fixture_id": "selected_side_up",
+      "required_path": "UP_selection",
+      "router_inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "sideways",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "high"
+      },
+      "side_feature_overrides": [
+        {},
+        {}
+      ]
+    },
+    {
+      "default_feature_value": 0.0,
+      "execution_costs": [
+        1.0,
+        0.0
+      ],
+      "expected_accepted": true,
+      "expected_actual_model_used": "moe_expert_high_vol",
+      "expected_normalized_probabilities": [
+        0.5,
+        0.5
+      ],
+      "expected_raw_probabilities": [
+        0.4846046268939972,
+        0.4846046268939972
+      ],
+      "expected_route": "high_vol",
+      "expected_scores": [
+        -0.5,
+        0.5
+      ],
+      "expected_selected_side": "DOWN",
+      "fixture_id": "selected_side_down",
+      "required_path": "DOWN_selection",
+      "router_inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "sideways",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "high"
+      },
+      "side_feature_overrides": [
+        {},
+        {}
+      ]
+    },
+    {
+      "default_feature_value": 0.0,
+      "execution_costs": [
+        1.0,
+        1.0
+      ],
+      "expected_accepted": false,
+      "expected_actual_model_used": "moe_expert_bullish",
+      "expected_normalized_probabilities": [
+        0.5,
+        0.5
+      ],
+      "expected_raw_probabilities": [
+        0.3204529881477356,
+        0.3204529881477356
+      ],
+      "expected_route": "bullish",
+      "expected_scores": [
+        -0.5,
+        -0.5
+      ],
+      "expected_selected_side": null,
+      "fixture_id": "no_trade_both_scores_nonpositive",
+      "required_path": "NO_TRADE",
+      "router_inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "bullish",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "medium"
+      },
+      "side_feature_overrides": [
+        {},
+        {}
+      ]
+    },
+    {
+      "default_feature_value": 0.0,
+      "execution_costs": [
+        0.45,
+        0.45
+      ],
+      "expected_accepted": true,
+      "expected_actual_model_used": "moe_expert_bearish",
+      "expected_normalized_probabilities": [
+        0.6692374929417396,
+        0.3307625070582604
+      ],
+      "expected_raw_probabilities": [
+        0.35632622241973877,
+        0.1761099100112915
+      ],
+      "expected_route": "bearish",
+      "expected_scores": [
+        0.2192374929417396,
+        -0.11923749294173963
+      ],
+      "expected_selected_side": "UP",
+      "fixture_id": "asymmetric_paired_feature_rows",
+      "required_path": "asymmetric_pair",
+      "router_inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "bearish",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "medium"
+      },
+      "side_feature_overrides": [
+        {
+          "selected_minus_opposite_mid": 0.25,
+          "signed_btc_return_15m": 0.02
+        },
+        {
+          "selected_minus_opposite_mid": -0.25,
+          "signed_btc_return_15m": -0.02
+        }
+      ]
+    },
+    {
+      "default_feature_value": 0.0,
+      "execution_costs": [
+        0.5,
+        0.5
+      ],
+      "expected_accepted": false,
+      "expected_actual_model_used": "moe_expert_high_vol",
+      "expected_normalized_probabilities": [
+        0.5,
+        0.5
+      ],
+      "expected_raw_probabilities": [
+        0.4846046268939972,
+        0.4846046268939972
+      ],
+      "expected_route": "high_vol",
+      "expected_scores": [
+        0.0,
+        0.0
+      ],
+      "expected_selected_side": null,
+      "fixture_id": "exact_threshold_boundary_score_zero",
+      "required_path": "threshold_boundary",
+      "router_inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "sideways",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "high"
+      },
+      "side_feature_overrides": [
+        {},
+        {}
+      ]
+    },
+    {
+      "default_feature_value": 0.0,
+      "execution_costs": [
+        0.4,
+        0.4
+      ],
+      "expected_accepted": true,
+      "expected_actual_model_used": "moe_expert_high_vol",
+      "expected_normalized_probabilities": [
+        0.5,
+        0.5
+      ],
+      "expected_raw_probabilities": [
+        0.4846046268939972,
+        0.4846046268939972
+      ],
+      "expected_route": "high_vol",
+      "expected_scores": [
+        0.09999999999999998,
+        0.09999999999999998
+      ],
+      "expected_selected_side": "UP",
+      "fixture_id": "up_down_tie_frozen_up_tiebreak",
+      "required_path": "UP_tie_break",
+      "router_inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "sideways",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "high"
+      },
+      "side_feature_overrides": [
+        {},
+        {}
+      ]
+    }
+  ],
+  "rejection_fixtures": [
+    {
+      "expected_error": "MoE router inputs missing",
+      "fixture_id": "missing_required_router_field",
+      "inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "bullish",
+        "decision_ts": 10000,
+        "volatility_bucket": "medium"
+      },
+      "operation": "route"
+    },
+    {
+      "expected_error": "outcome or future fields are forbidden",
+      "fixture_id": "forbidden_future_outcome_router_field",
+      "inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "bullish",
+        "decision_ts": 10000,
+        "future_return": 1.0,
+        "max_input_ts": 9999,
+        "target": 1.0,
+        "volatility_bucket": "medium"
+      },
+      "operation": "route"
+    },
+    {
+      "expected_error": "causality violation",
+      "fixture_id": "available_after_decision",
+      "inputs": {
+        "available_at_ts": 10001,
+        "btc_return_regime": "bullish",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "medium"
+      },
+      "operation": "route"
+    },
+    {
+      "expected_error": "causality violation",
+      "fixture_id": "max_input_after_decision",
+      "inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "bullish",
+        "decision_ts": 10000,
+        "max_input_ts": 10001,
+        "volatility_bucket": "medium"
+      },
+      "operation": "route"
+    },
+    {
+      "expected_error": "unknown frozen MoE route",
+      "expert_training_market_count": 20,
+      "fixture_id": "unknown_route",
+      "operation": "expert_resolution",
+      "route": "unknown"
+    }
+  ],
+  "router_fixtures": [
+    {
+      "expected_route": "high_vol",
+      "fixture_id": "high_vol_precedence_over_bullish",
+      "inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "bullish",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "high"
+      }
+    },
+    {
+      "expected_route": "bullish",
+      "fixture_id": "bullish_router_path",
+      "inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "bullish",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "medium"
+      }
+    },
+    {
+      "expected_route": "bearish",
+      "fixture_id": "bearish_router_path",
+      "inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "bearish",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "medium"
+      }
+    },
+    {
+      "expected_route": "low_vol",
+      "fixture_id": "sideways_low_vol_router_path",
+      "inputs": {
+        "available_at_ts": 10000,
+        "btc_return_regime": "sideways",
+        "decision_ts": 10000,
+        "max_input_ts": 9999,
+        "volatility_bucket": "low"
+      }
+    }
+  ],
+  "schema_version": "bigan-btc-15m-moe-runtime-fixtures-v2"
+}

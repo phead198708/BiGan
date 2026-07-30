@@ -1,0 +1,152 @@
+{
+  "architecture_type": "deterministic_regime_router_with_conditional_experts_and_global_fallback",
+  "candidate_id": "mixture_of_experts",
+  "contracts": {
+    "cost_and_action": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_cost_and_action_contract.json",
+      "sha256": "7a2d2f170cd6b042188f8282014dfbfb7d379e49085bd00807aace1881d7bf43"
+    },
+    "features": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_feature_contract.json",
+      "sha256": "dbc6e5e000a79548c5e5c74a38366ede4fe112fd3157850b8e3571599ef642bc"
+    },
+    "router": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_router_contract.json",
+      "sha256": "0d84c7e0e936ac51ca49244cdc56de6e8757f8250cf567ac128157e3cb2b1a6a"
+    }
+  },
+  "created_at": "2026-07-30T09:00:00+00:00",
+  "development_only_forever": true,
+  "development_population": {
+    "market_count": 113,
+    "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/finalized_development_corpus_index.jsonl",
+    "promotion_evidence_eligible": false,
+    "role": "development_training_only",
+    "sha256": "0c3623e0d6d540a0fae4b71e96e8df3e342e171213212df43473c2b4de2292e6"
+  },
+  "frozen_behavior": {
+    "candidate_id": "mixture_of_experts",
+    "complement_proxy_allowed": false,
+    "dynamic_sizing_allowed": false,
+    "execution_policy": "HOLD_TO_SETTLEMENT",
+    "expert_ids": [
+      "high_vol",
+      "bullish",
+      "bearish",
+      "low_vol"
+    ],
+    "fixed_action_threshold": 0.0,
+    "missingness_filters_allowed": false,
+    "pair_normalization_required": true,
+    "post_hoc_abstention_allowed": false,
+    "route_filters_allowed": false,
+    "router_unchanged_from_v1": true,
+    "side_filters_allowed": false,
+    "true_paired_executable_asks_required": true,
+    "uncertainty_overlays_allowed": false,
+    "unit_sizing": true
+  },
+  "hypothesis_inputs": {
+    "metric_reconciliation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_metric_reconciliation_report.json",
+      "sha256": "153cbcf3573b8ce0b8022c1faab4348193f245ac3de1a8b284c21d0a3d4c8028"
+    },
+    "parent_fold_audits": {
+      "path": "examples/v8/polymarket_training_artifacts/BTC-15M-regime-adaptive-v1-development-evaluation/development_fold_audits.jsonl",
+      "sha256": "7f2fe6f9e1e8efb37efbb11328f4b9c96e139b99ceb649c085ac603847d59499"
+    },
+    "parent_predictions": {
+      "path": "examples/v8/polymarket_training_artifacts/BTC-15M-regime-adaptive-v1-development-evaluation/development_oof_predictions.jsonl",
+      "sha256": "d76640aa1550e3ab7bee32e3dd41be26d2ca156020c628bb85a8ae54a47b60f1"
+    },
+    "route_attribution": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_route_attribution_report.json",
+      "sha256": "f540ed6bcbd7bc93e74d283a61cb385c802e8e0c24c102e35ef4d14b3dc99adf"
+    }
+  },
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "model_family": {
+    "early_stopping_rounds": 30,
+    "hyperparameter_search_allowed": false,
+    "maximum_num_boost_round": 400,
+    "name": "xgboost_shared_side_symmetric_pair_normalized_win_probability",
+    "parameters": {
+      "colsample_bytree": 1.0,
+      "eta": 0.05,
+      "eval_metric": "logloss",
+      "gamma": 0.0,
+      "max_bin": 64,
+      "max_depth": 2,
+      "min_child_weight": 8.0,
+      "nthread": 1,
+      "objective": "binary:logistic",
+      "reg_alpha": 0.0,
+      "reg_lambda": 10.0,
+      "seed": 26015,
+      "subsample": 1.0,
+      "tree_method": "hist"
+    }
+  },
+  "parent_hypothesis": {
+    "candidate_budget_consumed": 5,
+    "candidate_budget_maximum": 5,
+    "parent_evidence_is_fresh_validation": false,
+    "parent_evidence_role": "hypothesis_generation_only",
+    "parent_lineage_id": "BTC-15M-regime-adaptive-v1",
+    "parent_result_commit": "fd848defad7874db5decc96b9ef2de07e8007b1e",
+    "parent_selected_candidate_id": null
+  },
+  "promotion_evidence_eligible": false,
+  "provenance_boundary": {
+    "exact_identity_proven": false,
+    "original_recorded_source_commit": "364fd65b08849cb36227a3c4bb1b55a62cc68825",
+    "original_recorded_source_commit_reachable": false,
+    "reachable_evaluator_commit": "364fd65afa4908170dbc2ae5ff4f71c8a2475573"
+  },
+  "role": "single_static_fair_information_budget_candidate_freeze",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-confirmatory-candidate-contract-v2",
+  "state": {
+    "candidate_contract_frozen": true,
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "static_training_protocol": {
+    "candidate_and_baseline_have_equal_development_information_budget": true,
+    "discard_round_selection_fitted_model": true,
+    "expert_availability": {
+      "bearish": true,
+      "bullish": true,
+      "high_vol": true,
+      "low_vol": false
+    },
+    "expert_training_population": "all_113_development_markets_with_rows_assigned_to_frozen_route",
+    "final_global_baseline_training_market_count": 113,
+    "final_global_baseline_uses_validation_labels": true,
+    "low_vol_behavior": "full_113_matched_global_baseline_fallback",
+    "minimum_expert_support": 20,
+    "round_selection_split_use": "selected_num_boost_round_only",
+    "round_selection_train_market_count": 93,
+    "round_selection_validation_market_count": 20,
+    "route_support": {
+      "bearish": 57,
+      "bullish": 40,
+      "high_vol": 46,
+      "low_vol": 18
+    },
+    "same_selected_num_boost_round_for_baseline_and_available_experts": true
+  }
+}

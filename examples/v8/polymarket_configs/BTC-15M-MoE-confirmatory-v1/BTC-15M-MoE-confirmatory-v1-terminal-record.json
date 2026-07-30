@@ -1,0 +1,263 @@
+{
+  "artifact_inventory": [
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_evaluation_provenance_attestation.json",
+      "sha256": "306ad3c4e90455f636ca573d43b341497db2fc9fe297287b7045d52cb7f27147",
+      "size_bytes": 6793
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_evaluation_provenance_attestation.sha256",
+      "sha256": "c2f5c4a8420882d8fb085986104c2069a4521f748e622e9c4f6a6f2e437841ff",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_metric_reconciliation_report.json",
+      "sha256": "153cbcf3573b8ce0b8022c1faab4348193f245ac3de1a8b284c21d0a3d4c8028",
+      "size_bytes": 64208
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_metric_reconciliation_report.md",
+      "sha256": "a65898003760f32edce6995aeae0b4c050f0d9defa8dd53bdecbb15a91582a39",
+      "size_bytes": 744
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_metric_reconciliation_report.sha256",
+      "sha256": "dbbd056b26c5fa3139cb54f534dc884a305f7d2a0e59b079428c6517b15c4f04",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/lineage_blocked_report.json",
+      "sha256": "ef671652cd8aebe7d96dc7ded8711267d9e4dbe779fb6276b473d609689dc6ad",
+      "size_bytes": 5215
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/lineage_blocked_report.sha256",
+      "sha256": "a09372f7c0d547316e558e68410dd166cbca96df84811e9b3636ae7f074cc0d4",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/lineage_hardening_resume_record.json",
+      "sha256": "9974c3b0c58c3cb4943c4d67f78fc777453b3678af9dc2888b5a05be7e618433",
+      "size_bytes": 2249
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/lineage_hardening_resume_record.sha256",
+      "sha256": "76c6f045a7f89343a7131699e4a37bde43421f819a5c843a63262a58990d6e60",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_artifact_graph.json",
+      "sha256": "f0f0f09c14b85a888dd1aa2c1cfe4f88acfe9332bc6513f83e99404a089768dd",
+      "size_bytes": 4846
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_artifact_graph.sha256",
+      "sha256": "b7899d7a3566db5e0a42258655185c45b0b7232cf7f165e227235970aafc95cf",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_artifact_runtime_validation_report.json",
+      "sha256": "78f62f4ce3e7098b2a2aaafead3907443ed3959d6c8cbd4fc015e2acf2a3ab2e",
+      "size_bytes": 3817
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_artifact_runtime_validation_report.sha256",
+      "sha256": "ca83432d4a5b836cbe97d52f272aa709040d5c728d52bab1346ed505f7070ded",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_candidate_contract.json",
+      "sha256": "6c64c9acfa6c5a008a0d0939915f5309b5d882cb18474cd26ae697e6d3d425f0",
+      "size_bytes": 5907
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_candidate_contract.sha256",
+      "sha256": "abf6f818a0cd67c294807862a088390ec58208ba03cb088abbf3debb215766df",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_confirmatory_collector_protocol.json",
+      "sha256": "89943f00eed24332eca227bdf756e76372d63f94a6bfa0be147d4a690a00b4b4",
+      "size_bytes": 3982
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_confirmatory_collector_protocol.sha256",
+      "sha256": "6f3385f0b8164907facaeaeab24955626a638fd4e834740fc18d051551edbb46",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_confirmatory_power_analysis.json",
+      "sha256": "16f893eb7fc750bcf7d0a9aa10e2c56a2f358bb9f23a317f3a0ce2d6e48bf2c7",
+      "size_bytes": 6881
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_confirmatory_power_analysis.sha256",
+      "sha256": "48ff6785886fe8daa79eb1c5f5326431050e93e26fec9ce17af9624d6887cf33",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_confirmatory_protocol.json",
+      "sha256": "372b5a924b13020626df2f74b77a10b5bbc6d52bb2efd77a7fcafb8df9e02aa4",
+      "size_bytes": 8998
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_confirmatory_protocol.sha256",
+      "sha256": "ad8e005c86dd3aec9e0e9c2fc1f022fa1fe59046b04c840c8946ddc74427377d",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_cost_and_action_contract.json",
+      "sha256": "d01f221aae46421239e23fe2321a37e530367bc831e1033161d470b887fce8c0",
+      "size_bytes": 2358
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_cost_and_action_contract.sha256",
+      "sha256": "f1e5e2ad46a90ba6760077ece3625c424dce7f71de9812f820c9eaaca461aa0d",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_feature_contract.json",
+      "sha256": "d6117e95e1fe95c52c2741a5c0cbf6921be8418c50800c77c8bc9e6ed8e30ed5",
+      "size_bytes": 4239
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_feature_contract.sha256",
+      "sha256": "1bf2821aa72d6f43bad3ecc681246b0fc867f03b6433f5bd6d79829808ea8226",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_fresh_collection_authorization_template.json",
+      "sha256": "fa7afe9c4376ba89459db58962aa5fdcb7c8faa3cf9c1e802e1e93af1cab9b6b",
+      "size_bytes": 6632
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_fresh_collection_authorization_template.sha256",
+      "sha256": "983a7addce6522544b4c6e7987729105cc5a5faeaaa76571403d1422f71926b7",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_future_evaluation_reporting_contract.json",
+      "sha256": "e6784c7894d3b729e47345f0e90e4a33915dc2ece59899eb91450f611338d4f4",
+      "size_bytes": 6921
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_future_evaluation_reporting_contract.sha256",
+      "sha256": "b9c8f66e9c9cafae5ee0f9948667335a7d6d4d054699fd51a18e2cabcc6b759b",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_hardening_report.json",
+      "sha256": "6afeab5e934f0a5f19e8f29da4a15d730e2c48bcfc1ec1d06c98c11040078801",
+      "size_bytes": 6078
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_hardening_report.md",
+      "sha256": "f515dcd07a78871e5c53045e2311317da090180cc655ebefdee4bc2dc83b7797",
+      "size_bytes": 3042
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_hardening_report.sha256",
+      "sha256": "e507198f4ee8b0f9a781a9e8f3e2156581eace441bd3861dd22eeb846c0a364f",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_matched_global_baseline_contract.json",
+      "sha256": "d3e7a53fa8b6872c5c3c0925dc1f5f3e0ceb810f4f1beaf0c876fc7fcae437f4",
+      "size_bytes": 4039
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_matched_global_baseline_contract.sha256",
+      "sha256": "6b4e124b3d2a8f95c040928eddec620219247e3ed08597b4cb0ddc3f5202109d",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_model_manifest.json",
+      "sha256": "fddd8c1993c0abdcbd45dc439ae7053ca4173f60f938097bf0e8083f0104b930",
+      "size_bytes": 19875
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_model_manifest.sha256",
+      "sha256": "60885e3b450a5a73b3b45792b33bc79d929d895217e48fe6d4d16a43955e146c",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_route_attribution.jsonl",
+      "sha256": "5f1bc98828ab828d41068930193ecd4aec34b0cbb88f651f5ee3f16e61b3f216",
+      "size_bytes": 154464
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_route_attribution.sha256",
+      "sha256": "8c1a38851e44ea6538b8729c34344710fd304afd0d95adde4c28514df11b16c3",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_route_attribution_report.json",
+      "sha256": "f540ed6bcbd7bc93e74d283a61cb385c802e8e0c24c102e35ef4d14b3dc99adf",
+      "size_bytes": 26150
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_route_attribution_report.md",
+      "sha256": "33f86ec9ede7d99889fd0af45081202513759a0f046015b77ed08088b02b00a3",
+      "size_bytes": 1059
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_route_attribution_report.md.sha256",
+      "sha256": "1ce567427d9945e1fefde868832ef1ea08a7a3831771071a7f638a931756ef2e",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_route_attribution_report.sha256",
+      "sha256": "95044bfdbcc4b4eb37092e8f5d62d0981226f68405381729c0e1ee5c6e93a387",
+      "size_bytes": 65
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_router_contract.json",
+      "sha256": "243b90aedb54198470ac04aeff713d5a6c6cd8b05c2c87eb49b48752d69bdb46",
+      "size_bytes": 3266
+    },
+    {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_router_contract.sha256",
+      "sha256": "ee1f85a20de7e61e78c1a64e82e0a356237a844bb10e6bba732d9501b7cb8fa4",
+      "size_bytes": 65
+    }
+  ],
+  "artifact_inventory_count": 44,
+  "artifact_inventory_scope": "all_44_tracked_v1_artifacts_at_a37320d_before_this_terminal_record",
+  "collection_state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "created_at": "2026-07-30T09:00:00+00:00",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v1",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-confirmatory-terminal-record-v1",
+  "status": "terminal_permanently_collection_forbidden",
+  "terminal_reason_codes": [
+    "matched_baseline_information_budget_mismatch",
+    "confirmatory_protocol_underpowered_at_observed_development_effect",
+    "phase_0_provenance_failure_not_resolved",
+    "internal_resume_record_not_independently_auditable",
+    "runtime_fixture_coverage_incomplete",
+    "full_suite_not_clean_or_baseline_compared"
+  ],
+  "terminalized_at_base_commit": "a37320d4f8aa8ccb8176132def6429c1127758ba",
+  "terminalized_at_base_tree": "f79e97fe58f7858bfa03e2851770de9eee506142",
+  "v1_artifacts_may_not_be_mutated_into_v2": true,
+  "v1_bundle_hash": "30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8",
+  "v1_candidate_artifacts_preserved_for_audit": true,
+  "v1_fresh_collection_permanently_forbidden": true,
+  "v1_fresh_outcome_access_permanently_forbidden": true
+}
