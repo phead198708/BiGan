@@ -2420,7 +2420,13 @@ def test_moe_v2_r2_final_attestation_only_adds_reports() -> None:
 
 def test_moe_v2_all_frozen_json_keeps_safety_false() -> None:
     for path in sorted(MOE_V2_CONFIG_DIR.glob("*.json")):
-        payload = verify_frozen_json(path)
+        appended_sidecar = path.with_suffix(path.suffix + ".sha256")
+        if appended_sidecar.is_file():
+            recorded = appended_sidecar.read_text(encoding="utf-8").split()[0]
+            assert recorded == _sha256(path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            payload = verify_frozen_json(path)
         if "safety" in payload:
             assert payload["safety"] == MOE_V2_SAFETY, path.name
         state = payload.get("state", {})
@@ -2430,7 +2436,11 @@ def test_moe_v2_all_frozen_json_keeps_safety_false() -> None:
             "fresh_outcomes_opened",
         ):
             if field in state:
-                assert state[field] is False, (path.name, field)
+                expected = (
+                    path.name == "manual_collection_authorization_001.json"
+                    and field == "fresh_collection_authorized"
+                )
+                assert state[field] is expected, (path.name, field)
 
 
 @pytest.fixture
