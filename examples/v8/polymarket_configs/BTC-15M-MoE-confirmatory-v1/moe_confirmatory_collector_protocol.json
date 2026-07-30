@@ -1,0 +1,104 @@
+{
+  "schema_version": "bigan-btc-15m-moe-confirmatory-collector-protocol-v1",
+  "protocol_id": "BTC-15M-MoE-confirmatory-v1-outcome-blind-collector",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v1",
+  "candidate_id": "mixture_of_experts",
+  "created_at": "2026-07-30T03:00:00+00:00",
+  "role": "frozen_confirmatory_collection_protocol_not_collection_authority",
+  "frozen": true,
+  "market_family": "btc_updown_15m",
+  "collection_mode": "raw_pending_capture_only",
+  "outcome_blind_capture_required": true,
+  "capture_control_may_read_model_outputs": false,
+  "capture_control_may_read_outcomes_labels_or_pnl": false,
+  "resolution_provider_enabled_during_capture": false,
+  "settlement_finalizer_enabled_during_capture": false,
+  "training_export_enabled_during_capture": false,
+  "required_raw_streams": [
+    "raw_polymarket_markets.jsonl",
+    "raw_polymarket_orderbooks.jsonl",
+    "raw_polymarket_trades.jsonl",
+    "raw_binance_btcusdt_klines.jsonl",
+    "raw_polymarket_chainlink_prices.jsonl"
+  ],
+  "quality_validity": {
+    "unit": "unique_market",
+    "required": [
+      "immutable_raw_evidence_complete",
+      "decision_boundary_causal",
+      "provider_provenance_complete",
+      "paired_up_down_executable_ask_capture_attempt_recorded",
+      "trade_tape_causality_recorded",
+      "chainlink_causality_recorded",
+      "book_causality_recorded"
+    ],
+    "available_at_must_be_lte_decision_ts": true,
+    "max_input_ts_must_be_lte_decision_ts": true,
+    "missing_value_must_not_be_imputed_as_zero": true,
+    "paired_up_down_executable_ask_availability_is_not_a_selection_filter": true,
+    "complement_quote_proxy_allowed": false
+  },
+  "round_assignment": {
+    "predeclared_round_count": 2,
+    "rounds_are_market_disjoint": true,
+    "rounds_are_chronologically_ordered": true,
+    "round_2_market_start_must_be_strictly_after_every_round_1_market_start": true,
+    "selection": "chronological_earliest_quality_valid_unique_markets_after_frozen_authorization_boundary",
+    "round_1_target_quality_valid_market_count": 40,
+    "round_2_target_quality_valid_market_count": 40,
+    "total_target_quality_valid_market_count": 80,
+    "post_hoc_market_reassignment_allowed": false,
+    "market_replacement_after_outcome_access_allowed": false
+  },
+  "proposed_attempt_cap_for_future_authorization": {
+    "attempt_cap_per_round": 59,
+    "total_attempt_cap": 118,
+    "maximum_quality_valid_markets_per_attempt": 1,
+    "target_is_mathematically_reachable_under_cap": true,
+    "currently_authorized_attempts": 0,
+    "extension_requires_new_pre_outcome_frozen_authorization_artifact": true
+  },
+  "outcome_access_boundary": {
+    "both_round_capture_manifests_must_be_frozen_before_any_outcome_open": true,
+    "official_post_close_settlement_required": true,
+    "unresolved_market_outcome_must_remain_unopened": true,
+    "capture_schedule_feedback_from_outcomes_allowed": false,
+    "partial_round_outcome_opening_allowed": false
+  },
+  "forbidden_collection_control_inputs": [
+    "router_route",
+    "expert_id",
+    "model_prediction",
+    "selection_score",
+    "selected_side",
+    "accepted",
+    "settlement_outcome",
+    "realized_pnl",
+    "future_return",
+    "future_price"
+  ],
+  "append_only_audit": {
+    "attempt_index_hash_chain_required": true,
+    "failed_attempts_retained_with_reason_codes": true,
+    "existing_attempt_rewrite_allowed": false,
+    "batch_summary_only": true
+  },
+  "state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}

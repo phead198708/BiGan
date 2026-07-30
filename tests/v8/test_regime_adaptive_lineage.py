@@ -677,6 +677,40 @@ def test_moe_repository_artifact_graph_loads_in_fresh_clone(
     assert loaded["safety"] == SAFETY
 
 
+def test_moe_repository_artifact_runtime_is_deterministic() -> None:
+    graph_path = MOE_CONFIG_DIR / "moe_artifact_graph.json"
+    graph_sha = _sha256(graph_path)
+
+    first = load_and_verify_static_moe_artifact(
+        graph_path=graph_path,
+        expected_graph_sha256=graph_sha,
+        repository_root=REPO_ROOT,
+    )
+    second = load_and_verify_static_moe_artifact(
+        graph_path=graph_path,
+        expected_graph_sha256=graph_sha,
+        repository_root=REPO_ROOT,
+    )
+
+    assert first == second
+    assert first["bundle_hash"] == (
+        "30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8"
+    )
+    assert first["artifact_count"] == first["verified_child_sha256_count"] == 13
+    assert first["router_contract_loaded"] is True
+    assert first["feature_contract_loaded"] is True
+    assert first["cost_contract_loaded"] is True
+    assert first["all_fixtures_reproduced"] is True
+    assert len(first["fixture_results"]) == 2
+    assert all(
+        len(result["raw_probabilities"]) == 2
+        and len(result["normalized_probabilities"]) == 2
+        and len(result["scores"]) == 2
+        and result["reproduced"] is True
+        for result in first["fixture_results"]
+    )
+
+
 def test_moe_artifact_graph_sha_mismatch_fails_closed() -> None:
     with pytest.raises(ValueError, match="graph SHA-256 mismatch"):
         load_and_verify_static_moe_artifact(
@@ -707,6 +741,27 @@ def test_moe_artifact_component_sha_mismatch_fails_closed(
         )
 
 
+def test_moe_artifact_bundle_hash_mismatch_fails_closed(
+    tmp_path: Path,
+) -> None:
+    graph = json.loads(
+        (MOE_CONFIG_DIR / "moe_artifact_graph.json").read_text(encoding="utf-8")
+    )
+    graph["bundle_hash"] = "0" * 64
+    graph_path = tmp_path / "wrong-bundle-hash-graph.json"
+    graph_path.write_text(
+        json.dumps(graph, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="bundle path is not content addressed"):
+        load_and_verify_static_moe_artifact(
+            graph_path=graph_path,
+            expected_graph_sha256=_sha256(graph_path),
+            repository_root=REPO_ROOT,
+        )
+
+
 def test_moe_collection_authorization_is_an_inactive_template() -> None:
     template = verify_frozen_json(
         MOE_CONFIG_DIR / "moe_fresh_collection_authorization_template.json"
@@ -730,6 +785,157 @@ def test_moe_collection_authorization_is_an_inactive_template() -> None:
     assert graph["fresh_collection_started"] is False
     assert graph["fresh_outcomes_opened"] is False
     assert template["safety"] == manifest["safety"] == graph["safety"] == SAFETY
+
+
+def test_moe_confirmatory_protocol_is_frozen_and_internally_consistent() -> None:
+    protocol = verify_frozen_json(MOE_CONFIG_DIR / "moe_confirmatory_protocol.json")
+    graph = verify_frozen_json(MOE_CONFIG_DIR / "moe_artifact_graph.json")
+    reporting = verify_frozen_json(
+        MOE_CONFIG_DIR / "moe_future_evaluation_reporting_contract.json"
+    )
+    collector = verify_frozen_json(
+        MOE_CONFIG_DIR / "moe_confirmatory_collector_protocol.json"
+    )
+
+    for descriptor in (
+        protocol["frozen_inputs"]["router_contract"],
+        protocol["frozen_inputs"]["feature_contract"],
+        protocol["frozen_inputs"]["cost_contract"],
+        protocol["frozen_inputs"]["collector_protocol"],
+        protocol["frozen_inputs"]["future_evaluation_reporting_contract"],
+    ):
+        path = REPO_ROOT / descriptor["path"]
+        assert path.is_file()
+        assert _sha256(path) == descriptor["sha256"]
+    candidate = protocol["frozen_inputs"]["candidate_artifact"]
+    baseline = protocol["frozen_inputs"]["baseline_artifact"]
+    assert candidate["bundle_hash"] == graph["bundle_hash"]
+    assert candidate["artifact_graph_sha256"] == _sha256(
+        MOE_CONFIG_DIR / "moe_artifact_graph.json"
+    )
+    assert baseline["sha256"] == graph["artifacts"]["moe_global_fallback.json"][
+        "sha256"
+    ]
+    assert protocol["bootstrap"] == {
+        "method": (
+            "market_level_paired_percentile_bootstrap_with_shared_resample_indices"
+        ),
+        "unit": "unique_market",
+        "seed": 26015,
+        "resamples": 10000,
+        "confidence": 0.975,
+        "sidedness": "one_sided_lower_confidence_bound",
+        "quantile": 0.025,
+        "no_trade_value": 0.0,
+        "candidate_and_baseline_use_same_market_draws": True,
+        "route_or_trade_level_resampling_allowed": False,
+    }
+    rounds = protocol["confirmatory_rounds"]
+    assert rounds["number_of_confirmatory_rounds"] == 2
+    assert rounds["minimum_quality_valid_outcome_finalized_markets_per_round"] == 40
+    assert rounds["paired_executable_ask_coverage_minimum"] == 0.95
+    stopping = protocol["multiplicity_and_stopping"]
+    assert stopping["both_rounds_must_independently_pass"] is True
+    assert stopping["optional_stopping_allowed"] is False
+    assert stopping["failed_round_rerun_allowed"] is False
+    assert stopping["route_filtering_allowed"] is False
+    assert stopping["post_hoc_exclusions_allowed"] is False
+    assert protocol["state"]["fresh_collection_authorized"] is False
+    assert protocol["state"]["fresh_collection_started"] is False
+    assert protocol["state"]["fresh_outcomes_opened"] is False
+    assert collector["quality_validity"][
+        "paired_up_down_executable_ask_availability_is_not_a_selection_filter"
+    ] is True
+    assert protocol["safety"] == reporting["safety"] == collector["safety"] == SAFETY
+
+
+def test_moe_future_reporting_contract_requires_all_unfiltered_panels() -> None:
+    contract = verify_frozen_json(
+        MOE_CONFIG_DIR / "moe_future_evaluation_reporting_contract.json"
+    )
+    panels = contract["required_panels"]
+
+    assert set(panels) == {
+        "overall",
+        "route",
+        "actual_model",
+        "provider",
+        "regime",
+    }
+    assert set(panels["overall"]["metrics"]) >= {
+        "moe_total_unit_net_pnl",
+        "baseline_total_unit_net_pnl",
+        "delta_total_unit_net_pnl",
+        "delta_market_bootstrap_lcb",
+    }
+    assert panels["route"]["dimensions"] == [
+        "high_vol_expert",
+        "bullish_expert",
+        "bearish_expert",
+        "low_vol_fallback",
+    ]
+    assert panels["actual_model"]["dimensions"] == [
+        "expert_prediction",
+        "fallback_prediction",
+    ]
+    assert panels["provider"]["dimensions"] == [
+        "complete_feature_markets",
+        "missingness_markets",
+    ]
+    assert panels["regime"]["dimensions"] == [
+        "bullish",
+        "bearish",
+        "sideways",
+    ]
+    assert contract["forbidden_reporting_behavior"]["route_filtering"] is True
+    assert contract["forbidden_reporting_behavior"]["post_hoc_exclusions"] is True
+    assert contract["population"]["all_frozen_round_markets_required"] is True
+    assert contract["safety"] == SAFETY
+
+
+def test_moe_authorization_template_pins_scope_but_grants_zero_authority() -> None:
+    template = verify_frozen_json(
+        MOE_CONFIG_DIR / "moe_fresh_collection_authorization_template.json"
+    )
+    graph = verify_frozen_json(MOE_CONFIG_DIR / "moe_artifact_graph.json")
+    frozen = template["frozen_inputs"]
+
+    assert frozen["artifact_bundle"]["bundle_hash"] == graph["bundle_hash"]
+    assert frozen["router_contract"]["sha256"] == graph["artifacts"][
+        "moe_router_contract.json"
+    ]["sha256"]
+    for route in ("high_vol", "bullish", "bearish", "low_vol"):
+        assert frozen["expert_artifacts"][route]["sha256"] == graph["artifacts"][
+            f"moe_expert_{route}.json"
+        ]["sha256"]
+    assert frozen["global_fallback"]["sha256"] == graph["artifacts"][
+        "moe_global_fallback.json"
+    ]["sha256"]
+    assert frozen["feature_contract"]["sha256"] == graph["artifacts"][
+        "moe_feature_contract.json"
+    ]["sha256"]
+    for name in ("statistical_protocol", "collector_protocol", "reporting_contract"):
+        descriptor = frozen[name]
+        assert _sha256(REPO_ROOT / descriptor["path"]) == descriptor["sha256"]
+    assert template["proposed_collection_scope"] == {
+        "number_of_confirmatory_rounds": 2,
+        "attempt_cap_per_round": 59,
+        "total_attempt_cap": 118,
+        "target_quality_valid_market_count_per_round": 40,
+        "total_target_quality_valid_market_count": 80,
+        "paired_executable_ask_coverage_minimum": 0.95,
+        "outcome_blind_capture_required": True,
+        "both_round_capture_manifests_frozen_before_any_outcome_open": True,
+        "strictly_later_authorization_boundary_required": True,
+        "currently_authorized_attempts": 0,
+    }
+    assert template["template_usable_as_collection_authorization"] is False
+    assert template["state"] == {
+        "fresh_collection_authorized": False,
+        "fresh_collection_started": False,
+        "fresh_outcomes_opened": False,
+    }
+    assert template["safety"] == SAFETY
 
 
 def test_moe_hardening_resume_preserves_provenance_limit_and_safety() -> None:
