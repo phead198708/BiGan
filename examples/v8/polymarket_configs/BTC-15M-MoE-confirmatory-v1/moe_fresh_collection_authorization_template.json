@@ -1,9 +1,9 @@
 {
-  "schema_version": "bigan-btc-15m-moe-fresh-collection-authorization-template-v2",
+  "schema_version": "bigan-btc-15m-moe-fresh-collection-authorization-template-v3",
   "lineage_id": "BTC-15M-MoE-confirmatory-v1",
   "candidate_id": "mixture_of_experts",
   "architecture_type": "deterministic_regime_router_with_conditional_experts_and_global_fallback",
-  "created_at": "2026-07-30T03:15:00+00:00",
+  "created_at": "2026-07-30T04:15:00+00:00",
   "artifact_role": "inactive_template_only_not_collection_authority",
   "template_usable_as_collection_authorization": false,
   "frozen_inputs": {
@@ -57,7 +57,7 @@
     },
     "statistical_protocol": {
       "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_confirmatory_protocol.json",
-      "sha256": "f7eb5f4b62a2535d9cea53b616507a56a892ffd6ee1264cf1821f58eca9c6c61"
+      "sha256": "372b5a924b13020626df2f74b77a10b5bbc6d52bb2efd77a7fcafb8df9e02aa4"
     },
     "collector_protocol": {
       "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_confirmatory_collector_protocol.json",
@@ -65,7 +65,22 @@
     },
     "reporting_contract": {
       "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_future_evaluation_reporting_contract.json",
-      "sha256": "2b6b33b545d49072bab6d19e60b54b7cf325e0b8bee4db837ad1225aeec4b20a"
+      "sha256": "e6784c7894d3b729e47345f0e90e4a33915dc2ece59899eb91450f611338d4f4"
+    },
+    "runtime_validation_report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_artifact_runtime_validation_report.json",
+      "sha256": "78f62f4ce3e7098b2a2aaafead3907443ed3959d6c8cbd4fc015e2acf2a3ab2e",
+      "mandatory_gate_passed": true
+    },
+    "baseline_behavior_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_matched_global_baseline_contract.json",
+      "sha256": "d3e7a53fa8b6872c5c3c0925dc1f5f3e0ceb810f4f1beaf0c876fc7fcae437f4"
+    },
+    "power_analysis": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_confirmatory_power_analysis.json",
+      "sha256": "16f893eb7fc750bcf7d0a9aa10e2c56a2f358bb9f23a317f3a0ce2d6e48bf2c7",
+      "planning_only": true,
+      "gates_changed": false
     }
   },
   "proposed_collection_scope": {
@@ -88,6 +103,9 @@
     "outcome_access_policy_required": true,
     "strictly_later_boundary_timestamp_required": true,
     "all_frozen_input_hashes_must_match": true,
+    "runtime_validation_mandatory_gate_must_pass": true,
+    "baseline_behavior_contract_required": true,
+    "power_analysis_present_but_not_a_gate": true,
     "this_template_must_not_be_mutated_into_authority": true
   },
   "authorization_placeholders": {

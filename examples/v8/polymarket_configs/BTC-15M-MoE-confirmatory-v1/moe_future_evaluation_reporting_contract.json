@@ -25,6 +25,7 @@
     "paired_executable_ask_available",
     "requested_route",
     "expert_id",
+    "expert_training_market_count",
     "expert_available",
     "fallback_used",
     "actual_model_used",
@@ -42,6 +43,7 @@
     "cost_decomposition",
     "feature_complete",
     "provider_missingness",
+    "provider_health_score",
     "btc_return_regime",
     "chronological_half"
   ],
@@ -130,6 +132,98 @@
     "combined_panel_allowed_as_diagnostic_only": true,
     "combined_panel_may_not_rescue_failed_round": true,
     "gate_boolean_and_failure_reason_required_for_every_gate": true
+  },
+  "mandatory_round_attribution": {
+    "pnl_by_actual_model": {
+      "dimensions": [
+        "expert",
+        "fallback"
+      ],
+      "metrics": [
+        "market_count",
+        "accepted_count",
+        "moe_total_unit_net_pnl",
+        "baseline_total_unit_net_pnl",
+        "delta_total_unit_net_pnl"
+      ]
+    },
+    "pnl_by_requested_route": {
+      "dimensions": [
+        "high_vol",
+        "bullish",
+        "bearish",
+        "low_vol"
+      ],
+      "metrics": [
+        "market_count",
+        "accepted_count",
+        "moe_total_unit_net_pnl",
+        "baseline_total_unit_net_pnl",
+        "delta_total_unit_net_pnl"
+      ]
+    },
+    "fallback_share": {
+      "numerator": "market_count_with_fallback_used_true",
+      "denominator": "all_frozen_round_markets",
+      "report_count_and_fraction": true
+    },
+    "expert_training_support": {
+      "dimensions": [
+        "requested_route",
+        "actual_model_used"
+      ],
+      "metrics": [
+        "minimum_expert_training_market_count",
+        "maximum_expert_training_market_count",
+        "mean_expert_training_market_count",
+        "support_below_20_count"
+      ]
+    },
+    "route_distribution": {
+      "dimensions": [
+        "high_vol",
+        "bullish",
+        "bearish",
+        "low_vol"
+      ],
+      "metrics": [
+        "market_count",
+        "market_fraction"
+      ]
+    },
+    "missingness_by_route": {
+      "dimensions": [
+        "high_vol",
+        "bullish",
+        "bearish",
+        "low_vol"
+      ],
+      "metrics": [
+        "market_count",
+        "feature_complete_count",
+        "missing_feature_market_count",
+        "missing_field_distribution"
+      ]
+    },
+    "provider_health_by_route": {
+      "dimensions": [
+        "high_vol",
+        "bullish",
+        "bearish",
+        "low_vol"
+      ],
+      "metrics": [
+        "market_count",
+        "provider_health_score_minimum",
+        "provider_health_score_mean",
+        "provider_health_score_maximum",
+        "provider_health_score_missing_count"
+      ]
+    },
+    "required_for_every_round": true,
+    "empty_bucket_policy": "report_zero_count_and_null_rate_metrics",
+    "route_filtering_allowed": false,
+    "post_hoc_exclusion_allowed": false
   },
   "forbidden_reporting_behavior": {
     "route_filtering": true,

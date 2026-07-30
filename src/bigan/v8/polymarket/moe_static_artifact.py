@@ -576,6 +576,81 @@ def load_and_verify_static_moe_artifact(
     }
 
 
+def validate_static_moe_artifact_in_fresh_environment(
+    *,
+    graph_path: Path | str,
+    expected_graph_sha256: str,
+    repository_root: Path | str | None = None,
+) -> dict[str, Any]:
+    """Copy only the graph and children into an isolated tree and load twice."""
+
+    repo_root = Path(repository_root or REPO_ROOT).resolve()
+    source_graph = Path(graph_path).resolve()
+    if not source_graph.is_relative_to(repo_root):
+        raise ValueError("static MoE graph escaped source repository")
+    if sha256_file(source_graph) != expected_graph_sha256:
+        raise ValueError("static MoE graph SHA-256 mismatch")
+    graph = _load_json(source_graph)
+    with tempfile.TemporaryDirectory(prefix="bigan-moe-runtime-validation-") as temporary:
+        fresh_root = Path(temporary) / "fresh-repository"
+        fresh_graph = fresh_root / source_graph.relative_to(repo_root)
+        fresh_graph.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_graph, fresh_graph)
+        for filename, descriptor in graph["artifacts"].items():
+            source = (repo_root / str(descriptor["path"])).resolve()
+            if (
+                not source.is_relative_to(repo_root)
+                or not source.is_file()
+                or sha256_file(source) != descriptor["sha256"]
+            ):
+                raise ValueError(
+                    f"static MoE source artifact SHA-256 mismatch: {filename}"
+                )
+            destination = fresh_root / str(descriptor["path"])
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+        first = load_and_verify_static_moe_artifact(
+            graph_path=fresh_graph,
+            expected_graph_sha256=expected_graph_sha256,
+            repository_root=fresh_root,
+        )
+        second = load_and_verify_static_moe_artifact(
+            graph_path=fresh_graph,
+            expected_graph_sha256=expected_graph_sha256,
+            repository_root=fresh_root,
+        )
+    if not first["all_fixtures_reproduced"]:
+        raise ValueError("static MoE synthetic fixture prediction mismatch")
+    if first != second:
+        raise ValueError("static MoE synthetic runtime output is nondeterministic")
+    return {
+        "runtime_validation_passed": True,
+        "fresh_environment_resolution": True,
+        "bundle_hash_verified": True,
+        "verified_child_sha256_count": first["verified_child_sha256_count"],
+        "router_contract_loaded": first["router_contract_loaded"],
+        "feature_contract_loaded": first["feature_contract_loaded"],
+        "cost_contract_loaded": first["cost_contract_loaded"],
+        "all_expert_artifacts_loaded": set(first["loaded_experts"]) == set(EXPERT_IDS),
+        "available_expert_models_loaded": sorted(
+            route
+            for route, model_format in first["loaded_experts"].items()
+            if model_format == "xgboost_json"
+        ),
+        "unavailable_expert_stubs_verified": sorted(
+            route
+            for route, model_format in first["loaded_experts"].items()
+            if model_format == "support_below_minimum_stub_json"
+        ),
+        "fallback_loaded": first["fallback_loaded"],
+        "synthetic_fixture_count": len(first["fixture_results"]),
+        "synthetic_deterministic_prediction_equality": True,
+        "fixture_results": first["fixture_results"],
+        "fresh_collection_authorized": False,
+        "safety": dict(SAFETY),
+    }
+
+
 def _build_prediction_fixtures(
     *,
     fallback: xgb.Booster,

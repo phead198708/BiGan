@@ -20,6 +20,10 @@
       "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/moe_global_fallback.json",
       "sha256": "662989a6c2f479e04ebc925339fd74e969c85821ad36752d631c8039c18e43d2"
     },
+    "baseline_behavior_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_matched_global_baseline_contract.json",
+      "sha256": "d3e7a53fa8b6872c5c3c0925dc1f5f3e0ceb810f4f1beaf0c876fc7fcae437f4"
+    },
     "router_contract": {
       "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_router_contract.json",
       "sha256": "243b90aedb54198470ac04aeff713d5a6c6cd8b05c2c87eb49b48752d69bdb46"
@@ -38,8 +42,28 @@
     },
     "future_evaluation_reporting_contract": {
       "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_future_evaluation_reporting_contract.json",
-      "sha256": "2b6b33b545d49072bab6d19e60b54b7cf325e0b8bee4db837ad1225aeec4b20a"
+      "sha256": "e6784c7894d3b729e47345f0e90e4a33915dc2ece59899eb91450f611338d4f4"
+    },
+    "artifact_runtime_validation_report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_artifact_runtime_validation_report.json",
+      "sha256": "78f62f4ce3e7098b2a2aaafead3907443ed3959d6c8cbd4fc015e2acf2a3ab2e",
+      "mandatory_gate_passed": true
+    },
+    "confirmatory_power_analysis": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_confirmatory_power_analysis.json",
+      "sha256": "16f893eb7fc750bcf7d0a9aa10e2c56a2f358bb9f23a317f3a0ce2d6e48bf2c7",
+      "planning_only": true,
+      "gates_changed": false
     }
+  },
+  "pre_collection_mandatory_gates": {
+    "artifact_runtime_validation_must_pass": true,
+    "runtime_validation_report_hash_must_match": true,
+    "baseline_behavior_contract_hash_must_match": true,
+    "reporting_contract_hash_must_match": true,
+    "manual_collection_authorization_required": true,
+    "current_manual_collection_authorization_present": false,
+    "collection_may_start": false
   },
   "estimands": {
     "primary": "mean_market_level_unit_net_pnl_delta_moe_minus_matched_global_baseline",

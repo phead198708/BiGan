@@ -1,0 +1,103 @@
+{
+  "schema_version": "bigan-btc-15m-moe-matched-global-baseline-contract-v1",
+  "contract_id": "BTC-15M-MoE-confirmatory-v1-matched-global-baseline",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v1",
+  "baseline_id": "matched_global_baseline",
+  "created_at": "2026-07-30T04:05:00+00:00",
+  "role": "frozen_confirmatory_paired_baseline_behavior",
+  "artifact": {
+    "definition": "byte_identical_global_fallback_model",
+    "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/moe_global_fallback.json",
+    "sha256": "662989a6c2f479e04ebc925339fd74e969c85821ad36752d631c8039c18e43d2",
+    "model_format": "xgboost_json",
+    "num_boost_round": 104,
+    "source_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_model_manifest.json",
+      "sha256": "fddd8c1993c0abdcbd45dc439ae7053ca4173f60f938097bf0e8083f0104b930"
+    }
+  },
+  "features": {
+    "feature_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_feature_contract.json",
+      "sha256": "d6117e95e1fe95c52c2741a5c0cbf6921be8418c50800c77c8bc9e6ed8e30ed5"
+    },
+    "ordered_feature_names": {
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/ordered_feature_names.json",
+      "sha256": "147cda8b3541677f1b49a9ff841b17b0bf849ac36379035d6fa28d1a8c1a2e1b",
+      "feature_count": 108,
+      "ordered_feature_names_sha256": "a61ef8953a2801d3e404d376261f306846cae5a4bf3ef3c97918572c48720e89"
+    },
+    "same_feature_row_as_candidate_required": true,
+    "side_symmetric_transform_required": true,
+    "pair_normalization_required": true,
+    "missing_value": "nan",
+    "missing_as_numeric_zero_allowed": false,
+    "router_or_route_feature_filter_applied": false
+  },
+  "cost_model": {
+    "contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_cost_and_action_contract.json",
+      "sha256": "d01f221aae46421239e23fe2321a37e530367bc831e1033161d470b887fce8c0"
+    },
+    "same_entry_ask_fees_slippage_and_liquidity_impact_as_candidate": true,
+    "true_paired_executable_asks_required": true,
+    "complement_quote_proxy_allowed": false
+  },
+  "behavior": {
+    "model_used_for_every_market": "matched_global_baseline",
+    "routing_applied": false,
+    "sizing": "unit",
+    "sizing_multiplier": 1.0,
+    "dynamic_sizing_allowed": false,
+    "execution_policy": "HOLD_TO_SETTLEMENT",
+    "decision_order": "chronological",
+    "side_selection": "highest_prediction_with_UP_then_DOWN_tie_break",
+    "acceptance_threshold": 0.0,
+    "accept_if": "prediction > 0",
+    "one_trade_maximum_per_market": true,
+    "NO_TRADE_handling": {
+      "condition": "no_decision_has_positive_prediction",
+      "unit_net_pnl": 0.0,
+      "market_retained_in_all_statistics": true
+    }
+  },
+  "bootstrap_participation": {
+    "included_for_every_frozen_confirmatory_market": true,
+    "paired_by_market_id_with_candidate": true,
+    "same_resample_indices_as_candidate": true,
+    "NO_TRADE_contributes_zero": true,
+    "missing_market_drop_allowed": false,
+    "route_filter_allowed": false,
+    "post_hoc_exclusion_allowed": false
+  },
+  "forbidden_changes": [
+    "artifact",
+    "features",
+    "feature_order",
+    "cost_model",
+    "sizing",
+    "execution_policy",
+    "NO_TRADE_handling",
+    "acceptance_threshold",
+    "bootstrap_participation"
+  ],
+  "state": {
+    "contract_frozen": true,
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}
