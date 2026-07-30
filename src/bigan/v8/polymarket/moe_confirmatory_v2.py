@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import tempfile
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -2477,6 +2480,204 @@ def _write_lineage_manifest(
     }
     _write_frozen_json(output, payload)
     return {"path": output, "sha256": sha256_file(output), "payload": payload}
+
+
+def build_regression_failure_ledger(
+    *,
+    base_pytest_junit_path: Path | str,
+    head_pytest_junit_path: Path | str,
+    base_ruff_json_path: Path | str,
+    head_ruff_json_path: Path | str,
+    output_path: Path | str,
+    base_commit: str,
+    head_commit: str,
+    created_at: str = CREATED_AT,
+) -> dict[str, Any]:
+    """Freeze exact normalized base/head pytest and Ruff failure reconciliation."""
+
+    base_pytest_path = Path(base_pytest_junit_path).resolve()
+    head_pytest_path = Path(head_pytest_junit_path).resolve()
+    base_ruff_path = Path(base_ruff_json_path).resolve()
+    head_ruff_path = Path(head_ruff_json_path).resolve()
+    base_pytest = _parse_pytest_junit(base_pytest_path)
+    head_pytest = _parse_pytest_junit(head_pytest_path)
+    base_ruff = _parse_ruff_json(base_ruff_path)
+    head_ruff = _parse_ruff_json(head_ruff_path)
+
+    base_by_node = {row["node_id"]: row for row in base_pytest["failures"]}
+    head_by_node = {row["node_id"]: row for row in head_pytest["failures"]}
+    base_nodes = set(base_by_node)
+    head_nodes = set(head_by_node)
+    added_nodes = sorted(head_nodes - base_nodes)
+    removed_nodes = sorted(base_nodes - head_nodes)
+    unchanged_nodes = sorted(
+        node
+        for node in base_nodes & head_nodes
+        if base_by_node[node]["normalized_message_sha256"]
+        == head_by_node[node]["normalized_message_sha256"]
+    )
+    changed_nodes = sorted(
+        node
+        for node in base_nodes & head_nodes
+        if base_by_node[node]["normalized_message_sha256"]
+        != head_by_node[node]["normalized_message_sha256"]
+    )
+    base_ruff_by_key = {row["identity"]: row for row in base_ruff}
+    head_ruff_by_key = {row["identity"]: row for row in head_ruff}
+    added_ruff = sorted(set(head_ruff_by_key) - set(base_ruff_by_key))
+    removed_ruff = sorted(set(base_ruff_by_key) - set(head_ruff_by_key))
+    unchanged_ruff = sorted(set(base_ruff_by_key) & set(head_ruff_by_key))
+    head_subset_base = not added_nodes and not changed_nodes
+    payload = {
+        "schema_version": "bigan-btc-15m-moe-regression-failure-ledger-v2",
+        "lineage_id": V2_LINEAGE_ID,
+        "created_at": created_at,
+        "base_commit": base_commit,
+        "head_commit": head_commit,
+        "commands": {
+            "pytest": "PYTHONPATH=src:. python -m pytest tests/v8 -q",
+            "ruff": (
+                "PYTHONPATH=src python -m ruff check "
+                "src/bigan/v8/polymarket examples/v8 tests/v8"
+            ),
+            "junit_capture_addition": "--junitxml=<temporary-path>",
+            "ruff_machine_capture_addition": "--output-format=json",
+        },
+        "capture_artifact_hashes": {
+            "base_pytest_junit_sha256": sha256_file(base_pytest_path),
+            "head_pytest_junit_sha256": sha256_file(head_pytest_path),
+            "base_ruff_json_sha256": sha256_file(base_ruff_path),
+            "head_ruff_json_sha256": sha256_file(head_ruff_path),
+        },
+        "message_hash_method": (
+            "sha256_of_junit_failure_message_after_repository_tmp_and_"
+            "object_address_normalization"
+        ),
+        "base_pytest": base_pytest,
+        "head_pytest": head_pytest,
+        "pytest_reconciliation": {
+            "base_failure_node_ids": sorted(base_nodes),
+            "head_failure_node_ids": sorted(head_nodes),
+            "added_failure_node_ids": added_nodes,
+            "removed_failure_node_ids": removed_nodes,
+            "unchanged_failure_node_ids": unchanged_nodes,
+            "changed_message_failure_node_ids": changed_nodes,
+            "new_test_failure_count": len(added_nodes) + len(changed_nodes),
+            "head_failures_subset_of_base_failures": head_subset_base,
+        },
+        "base_ruff_errors": base_ruff,
+        "head_ruff_errors": head_ruff,
+        "ruff_reconciliation": {
+            "added_error_identities": added_ruff,
+            "removed_error_identities": removed_ruff,
+            "unchanged_error_identities": unchanged_ruff,
+            "new_ruff_error_count": len(added_ruff),
+        },
+        "required_condition_passed": (
+            head_subset_base and not added_ruff
+        ),
+        "state": {
+            "fresh_collection_authorized": False,
+            "fresh_collection_started": False,
+            "fresh_outcomes_opened": False,
+        },
+        "safety": dict(SAFETY),
+    }
+    output = Path(output_path).resolve()
+    _write_frozen_json(output, payload)
+    return payload
+
+
+def _parse_pytest_junit(path: Path) -> dict[str, Any]:
+    root = ET.parse(path).getroot()
+    suite = next(root.iter("testsuite"))
+    failures = []
+    for testcase in root.iter("testcase"):
+        failure = testcase.find("failure")
+        error = testcase.find("error")
+        failure_element = failure if failure is not None else error
+        if failure_element is None:
+            continue
+        classname = str(testcase.attrib["classname"])
+        name = str(testcase.attrib["name"])
+        node_id = classname.replace(".", "/") + ".py::" + name
+        raw_message = str(failure_element.attrib.get("message") or "")
+        normalized = _normalize_failure_message(raw_message)
+        failures.append(
+            {
+                "node_id": node_id,
+                "failure_type": failure_element.tag,
+                "message": raw_message,
+                "message_sha256": hashlib.sha256(
+                    raw_message.encode("utf-8")
+                ).hexdigest(),
+                "normalized_message": normalized,
+                "normalized_message_sha256": hashlib.sha256(
+                    normalized.encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+    failures.sort(key=lambda row: row["node_id"])
+    return {
+        "tests_collected": int(suite.attrib["tests"]),
+        "failure_count": int(suite.attrib["failures"]),
+        "error_count": int(suite.attrib["errors"]),
+        "skipped_count": int(suite.attrib["skipped"]),
+        "passed": (
+            int(suite.attrib["tests"])
+            - int(suite.attrib["failures"])
+            - int(suite.attrib["errors"])
+            - int(suite.attrib["skipped"])
+        ),
+        "failure_records": len(failures),
+        "failures_by_node": failures,
+        "failures": failures,
+    }
+
+
+def _normalize_failure_message(message: str) -> str:
+    normalized = message.replace(str(REPO_ROOT.resolve()), "<REPO_ROOT>")
+    normalized = re.sub(
+        r"(?:/private)?/tmp/bigan-moe-v2-regression\.[^/]+/base",
+        "<REPO_ROOT>",
+        normalized,
+    )
+    normalized = re.sub(
+        r"/private/var/folders/[^']+/pytest-of-[^/]+/pytest-\d+",
+        "<PYTEST_TMP>",
+        normalized,
+    )
+    return re.sub(r"object at 0x[0-9a-fA-F]+", "object at <ADDRESS>", normalized)
+
+
+def _parse_ruff_json(path: Path) -> list[dict[str, Any]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError("Ruff JSON output must be a list")
+    results = []
+    for row in payload:
+        filename = str(row["filename"])
+        if filename.startswith(str(REPO_ROOT.resolve())):
+            filename = Path(filename).relative_to(REPO_ROOT).as_posix()
+        message = str(row["message"])
+        identity = (
+            f"{filename}:{row['location']['row']}:{row['location']['column']}:"
+            f"{row['code']}"
+        )
+        results.append(
+            {
+                "identity": identity,
+                "filename": filename,
+                "code": row["code"],
+                "location": row["location"],
+                "end_location": row["end_location"],
+                "message": message,
+                "message_sha256": hashlib.sha256(
+                    message.encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+    return sorted(results, key=lambda row: row["identity"])
 
 
 def _descriptor(path: Path) -> dict[str, str]:

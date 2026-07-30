@@ -1560,6 +1560,30 @@ def test_moe_v2_authorization_template_grants_zero_authority() -> None:
     }
 
 
+def test_moe_v2_regression_ledger_proves_no_new_full_suite_failure() -> None:
+    ledger = verify_frozen_json(
+        MOE_V2_CONFIG_DIR / "regression_failure_ledger.json"
+    )
+
+    assert ledger["base_commit"] == MOE_V2_BASE_COMMIT
+    assert ledger["head_commit"] == (
+        "763a88b49097be41dc818f73db9b225d3dbc7ba2"
+    )
+    assert ledger["base_pytest"]["failure_count"] == 23
+    assert ledger["head_pytest"]["failure_count"] == 23
+    assert ledger["pytest_reconciliation"]["added_failure_node_ids"] == []
+    assert ledger["pytest_reconciliation"][
+        "changed_message_failure_node_ids"
+    ] == []
+    assert ledger["pytest_reconciliation"]["new_test_failure_count"] == 0
+    assert ledger["pytest_reconciliation"][
+        "head_failures_subset_of_base_failures"
+    ] is True
+    assert ledger["ruff_reconciliation"]["new_ruff_error_count"] == 0
+    assert ledger["base_ruff_errors"] == ledger["head_ruff_errors"] == []
+    assert ledger["required_condition_passed"] is True
+
+
 def test_moe_v2_all_frozen_json_keeps_safety_false() -> None:
     for path in sorted(MOE_V2_CONFIG_DIR.glob("*.json")):
         payload = verify_frozen_json(path)
