@@ -1,0 +1,53 @@
+{
+  "candidate_bundle_hash": "fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807",
+  "candidate_bundle_unchanged": true,
+  "created_at": "2026-07-30T12:00:00+00:00",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "model_retraining_performed": false,
+  "preserved_original_artifact_count": 4,
+  "preserved_original_artifacts": {
+    "collection_quality_rate_analysis.json": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_quality_rate_analysis.json",
+      "sha256": "6abe9f28c68f91944601a53d34b972e0de618a96c4292f66f0ee66d94da13097"
+    },
+    "moe_confirmatory_collector_protocol.json": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_collector_protocol.json",
+      "sha256": "ddbdd51fe169f878e9cf0058163603e8899fbfce0818a328ed42095cca5d6312"
+    },
+    "moe_confirmatory_protocol.json": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_protocol.json",
+      "sha256": "e89c57201e3a92779ecdf2a9a0ee694832e6bef5b58333e87880f827f8ce2a80"
+    },
+    "moe_fresh_collection_authorization_template.json": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_fresh_collection_authorization_template.json",
+      "sha256": "e00bd99e8719fc9775f56ee4cb661d3b3550fb307503399999d74384a83ef88d"
+    }
+  },
+  "reviewed_through_commit": "ad8d17037552ccd4147f5f249476251ae22a6166",
+  "revision_id": "BTC-15M-MoE-confirmatory-v2-precollection-r1",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-precollection-revision-r1",
+  "state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "supersession": {
+    "old_attempt_cap": 905,
+    "old_package_may_not_authorize_collection": true,
+    "reason": "expectation_based_attempt_cap_replaced_by_a_minimum_completion_probability_cap_and_exact_window_contract",
+    "superseded_before_authorization": true
+  }
+}

@@ -1,0 +1,854 @@
+{
+  "attempted_market_count": 120,
+  "created_at": "2026-07-30T12:00:00+00:00",
+  "forbidden_snapshot_fields": [
+    "accepted",
+    "expert_id",
+    "future_price",
+    "future_return",
+    "model_prediction",
+    "realized_pnl",
+    "router_route",
+    "selected_side",
+    "settlement_outcome",
+    "target"
+  ],
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "model_outputs_read": false,
+  "outcomes_labels_or_pnl_read": false,
+  "quality_valid_market_count": 113,
+  "raw_evidence_manifest_count": 120,
+  "raw_evidence_manifests": [
+    {
+      "attempt_index": 1,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000001-20260727T062011Z-round01-20260727T063000Z/pending_round_capture_manifest.json",
+      "sha256": "a7b11880dfbf73333d2626c908b2c4bd1045e84f7632851c8f68df62ef29215b"
+    },
+    {
+      "attempt_index": 2,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000001-20260727T062011Z-round02-20260727T064459Z/pending_round_capture_manifest.json",
+      "sha256": "3bdca0dbde1eb41f9e37237125b04eb8d95a506847ea6940dac412cf62f16dab"
+    },
+    {
+      "attempt_index": 3,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000001-20260727T062011Z-round03-20260727T070000Z/pending_round_capture_manifest.json",
+      "sha256": "87ee50fec87114636dbbed1b0cea3da0b3a3e1be87238646d445c52ec2d08d37"
+    },
+    {
+      "attempt_index": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000001-20260727T062011Z-round04-20260727T071459Z/pending_round_capture_manifest.json",
+      "sha256": "3d7bae654a92b242454d86f4834af30d8ce8ac3a26ddb3ad3f9d975058c2beee"
+    },
+    {
+      "attempt_index": 5,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000002-20260727T073044Z-round01-20260727T074459Z/pending_round_capture_manifest.json",
+      "sha256": "36aad1a4dd8fc7df536cfcd66ee86619322327728873e53f3aaed33ad62bd986"
+    },
+    {
+      "attempt_index": 6,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000002-20260727T073044Z-round02-20260727T080000Z/pending_round_capture_manifest.json",
+      "sha256": "8a5e72ac019ec81cca13945bd046c3264ac7a7cdb33418db180a9eb30656d21e"
+    },
+    {
+      "attempt_index": 7,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000002-20260727T073044Z-round03-20260727T081459Z/pending_round_capture_manifest.json",
+      "sha256": "52f6d8ff62c4cf57d4df09d72c04c88cab27c199086703fc57cdca20e7287e7e"
+    },
+    {
+      "attempt_index": 8,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000002-20260727T073044Z-round04-20260727T083000Z/pending_round_capture_manifest.json",
+      "sha256": "b521687892035b3f7239ce3002e6a52af5f6c321f0ac83ce76357b60b6b7a511"
+    },
+    {
+      "attempt_index": 9,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000003-20260727T084553Z-round01-20260727T090000Z/pending_round_capture_manifest.json",
+      "sha256": "2749c5e10ca4588d2777cdfa35df4bbbcf4a28a2fffe9df7bd570d98800a1524"
+    },
+    {
+      "attempt_index": 10,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000003-20260727T084553Z-round02-20260727T091459Z/pending_round_capture_manifest.json",
+      "sha256": "7ffe12c57965b449e3d7689ee2e415c27d9935ff037afcbf91444802bb651be7"
+    },
+    {
+      "attempt_index": 11,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000003-20260727T084553Z-round03-20260727T093000Z/pending_round_capture_manifest.json",
+      "sha256": "d1c8335db270f711ae5cff7b5c376d6fe0a71ac17fc4bfccf813c244768311df"
+    },
+    {
+      "attempt_index": 12,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000003-20260727T084553Z-round04-20260727T094459Z/pending_round_capture_manifest.json",
+      "sha256": "e4634014cb1ca3f71497f7cc8fccd7c10832a112aa926e8a45541bdeeb297f8f"
+    },
+    {
+      "attempt_index": 13,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000004-20260727T100046Z-round01-20260727T101459Z/pending_round_capture_manifest.json",
+      "sha256": "73b273521f525451a4433d8df731782e00a98bd4b44605384b372724bd69076e"
+    },
+    {
+      "attempt_index": 14,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000004-20260727T100046Z-round02-20260727T102959Z/pending_round_capture_manifest.json",
+      "sha256": "c8c9f1d08190f5034b9b98662e0b45f8bac661a7baa6ae09e7d7274535c6215b"
+    },
+    {
+      "attempt_index": 15,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000004-20260727T100046Z-round03-20260727T104500Z/pending_round_capture_manifest.json",
+      "sha256": "6891ebe02d583b93b25cf8548b144c6924a7d0da7eb2680c176d3fb429753dbe"
+    },
+    {
+      "attempt_index": 16,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000004-20260727T100046Z-round04-20260727T110000Z/pending_round_capture_manifest.json",
+      "sha256": "c0a999b711e991098d5ec25f6ab0c7ae279a0ca09e1128d7124b97894d637170"
+    },
+    {
+      "attempt_index": 17,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000005-20260727T111541Z-round01-20260727T112959Z/pending_round_capture_manifest.json",
+      "sha256": "803a6b0f711c06faee8ff4d0ba9bde0abbef4ebaf479226f37a798c08fab6d83"
+    },
+    {
+      "attempt_index": 18,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000005-20260727T111541Z-round02-20260727T114459Z/pending_round_capture_manifest.json",
+      "sha256": "fb85e46f67c44b66ec4c8d0206ce881b27b33b0a81b7e0164a1e953e3af16775"
+    },
+    {
+      "attempt_index": 19,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000005-20260727T111541Z-round03-20260727T115959Z/pending_round_capture_manifest.json",
+      "sha256": "68e55e5cf3f0b2dc5baf123fec03a96d2fb3f74bf9f70c00a01fcdbaf2ca8d4d"
+    },
+    {
+      "attempt_index": 20,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000005-20260727T111541Z-round04-20260727T121500Z/pending_round_capture_manifest.json",
+      "sha256": "30db1914191bf76e4cec741aea58e84016ff822e7849c24ff211330cb01bf610"
+    },
+    {
+      "attempt_index": 21,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000006-20260727T123046Z-round01-20260727T124459Z/pending_round_capture_manifest.json",
+      "sha256": "636805017bf4bf0a85135f161f519b2c9ab959dd41d72a307b419517f5289baf"
+    },
+    {
+      "attempt_index": 22,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000006-20260727T123046Z-round02-20260727T130000Z/pending_round_capture_manifest.json",
+      "sha256": "9aebffe5795edd2a9813206031d62c84b39eeab29e3d40b84e8113ab5fae26d6"
+    },
+    {
+      "attempt_index": 23,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000006-20260727T123046Z-round03-20260727T131500Z/pending_round_capture_manifest.json",
+      "sha256": "0ced7c6c600ae64967ebe4336bee30baf246494f439d90444327c7700c985b57"
+    },
+    {
+      "attempt_index": 24,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000006-20260727T123046Z-round04-20260727T133000Z/pending_round_capture_manifest.json",
+      "sha256": "09ee2a9a03eb44ecccce2db63604f023ddb8aa3cd3121dd15d585ff5d666516d"
+    },
+    {
+      "attempt_index": 25,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000007-20260727T134548Z-round01-20260727T135959Z/pending_round_capture_manifest.json",
+      "sha256": "cfd89fe31ec94377b201264c6e0abcce5b2d2c7413f3ab6d21f350031ec0de27"
+    },
+    {
+      "attempt_index": 26,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000007-20260727T134548Z-round02-20260727T141500Z/pending_round_capture_manifest.json",
+      "sha256": "ed90a07925ff3d511839dde28cf8a8da73eb75dd0d654e056790f9051df4f2d0"
+    },
+    {
+      "attempt_index": 27,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000007-20260727T134548Z-round03-20260727T143000Z/pending_round_capture_manifest.json",
+      "sha256": "ab5767588e2bc530ab1acd17284ba37871d63c46bc3423fc26c9f494cc10670a"
+    },
+    {
+      "attempt_index": 28,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000007-20260727T134548Z-round04-20260727T144500Z/pending_round_capture_manifest.json",
+      "sha256": "780fd8e5ca7b08f315a0512eae87cee48cdcfd848318cd98314edab0621e9747"
+    },
+    {
+      "attempt_index": 29,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000008-20260727T150050Z-round01-20260727T151500Z/pending_round_capture_manifest.json",
+      "sha256": "9847e7d46bbce20128f7183b20b35c2e706ace7fe66df878e29d1f3ccca86242"
+    },
+    {
+      "attempt_index": 30,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000008-20260727T150050Z-round02-20260727T152959Z/pending_round_capture_manifest.json",
+      "sha256": "6ff38fd7ea8659c5fa486bf740093ddc2389106c75fe2cb3290afcb22913230f"
+    },
+    {
+      "attempt_index": 31,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000008-20260727T150050Z-round03-20260727T154500Z/pending_round_capture_manifest.json",
+      "sha256": "f6bdaaf8e674f06bbef5de2f83bffd124c3265474e07a13d31675c9c606f5d76"
+    },
+    {
+      "attempt_index": 32,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000008-20260727T150050Z-round04-20260727T160000Z/pending_round_capture_manifest.json",
+      "sha256": "5477790cc28360f2f16eef46298dda0139d0c629b5054207e7d2bf811ffe7224"
+    },
+    {
+      "attempt_index": 33,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000009-20260728T065131Z-round01-20260728T065959Z/pending_round_capture_manifest.json",
+      "sha256": "8fed584bf4ed3ac8d5143f7b23dfedf8330d419ce5c4e4b7694113918573d4ae"
+    },
+    {
+      "attempt_index": 34,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000009-20260728T065131Z-round02-20260728T071500Z/pending_round_capture_manifest.json",
+      "sha256": "659d5967c7e5572ebe27f717e07e76c8899e839858ee2b6f03443ffc4ed76a56"
+    },
+    {
+      "attempt_index": 35,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000009-20260728T065131Z-round03-20260728T073000Z/pending_round_capture_manifest.json",
+      "sha256": "5de51375d9a2409bb197ed8f0e475f4c7d02399590a9de3ae5ed131e0ecfe54f"
+    },
+    {
+      "attempt_index": 36,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000009-20260728T065131Z-round04-20260728T074500Z/pending_round_capture_manifest.json",
+      "sha256": "41d597eca6c3f92e3057eaf27d48489b8d743ac561a98d7b57b84750030b6018"
+    },
+    {
+      "attempt_index": 37,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000010-20260728T080036Z-round01-20260728T081500Z/pending_round_capture_manifest.json",
+      "sha256": "497f8c2c967db59ec65645a83348929baf8733e9a765043b84c2faa9da515f0b"
+    },
+    {
+      "attempt_index": 38,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000010-20260728T080036Z-round02-20260728T083000Z/pending_round_capture_manifest.json",
+      "sha256": "ad5589ac69060aa3fa23d1b1739c19e86c82790a389f2ac5f0553bc23db510dc"
+    },
+    {
+      "attempt_index": 39,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000010-20260728T080036Z-round03-20260728T084500Z/pending_round_capture_manifest.json",
+      "sha256": "b16e55e2e429775f85307e19b1562e3f83f8715e9aa28f83de7c1a878f73a2ee"
+    },
+    {
+      "attempt_index": 40,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000010-20260728T080036Z-round04-20260728T085959Z/pending_round_capture_manifest.json",
+      "sha256": "2072235cfc9b63ba5e01f4c2c117d44e99bd46d744720602021ec43716f220d9"
+    },
+    {
+      "attempt_index": 41,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000011-20260728T091534Z-round01-20260728T092959Z/pending_round_capture_manifest.json",
+      "sha256": "13b0d3fadd40187acb7616ff86c8c93ce717c5f95035195a6d4d2f988e1e7203"
+    },
+    {
+      "attempt_index": 42,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000011-20260728T091534Z-round02-20260728T094459Z/pending_round_capture_manifest.json",
+      "sha256": "f5499222f6af43f430b054c487c8f5d7b260fbcf6ec555f12cb04c8a68edd4f0"
+    },
+    {
+      "attempt_index": 43,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000011-20260728T091534Z-round03-20260728T100000Z/pending_round_capture_manifest.json",
+      "sha256": "64821f78de580b7da7900c0d76f384b9b92080c8bc64b0e9a667e6ed2b643087"
+    },
+    {
+      "attempt_index": 44,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000011-20260728T091534Z-round04-20260728T101459Z/pending_round_capture_manifest.json",
+      "sha256": "d3f135367840b6c392d6eec3f20388710fcf4f1419006b4eec95581b776c2158"
+    },
+    {
+      "attempt_index": 45,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000012-20260728T103041Z-round01-20260728T104500Z/pending_round_capture_manifest.json",
+      "sha256": "1c4d9702c5a06bf5e79b37d19772ae8803aac22bcee3d9e048216ef49f9bdaf6"
+    },
+    {
+      "attempt_index": 46,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000012-20260728T103041Z-round02-20260728T110000Z/pending_round_capture_manifest.json",
+      "sha256": "c6e8a7d13ba2208e928036e9d9e46a63130033277125a921c6bb544e8d87a294"
+    },
+    {
+      "attempt_index": 47,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000012-20260728T103041Z-round03-20260728T111500Z/pending_round_capture_manifest.json",
+      "sha256": "674c6cbd504136c8a9dfcf00ce0dd8f95ff8fea9b0ab23dc24163c005139a1f7"
+    },
+    {
+      "attempt_index": 48,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000012-20260728T103041Z-round04-20260728T113000Z/pending_round_capture_manifest.json",
+      "sha256": "6a6562f7cc9711db4cff28ff7d9f057e889e0e275588ced957b48a73a1ae119d"
+    },
+    {
+      "attempt_index": 49,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000013-20260728T114541Z-round01-20260728T120000Z/pending_round_capture_manifest.json",
+      "sha256": "03a79b350735c1e00875588205c11abf26b16cd2817568819f6510d8977efc50"
+    },
+    {
+      "attempt_index": 50,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000013-20260728T114541Z-round02-20260728T121500Z/pending_round_capture_manifest.json",
+      "sha256": "f6b9d1be0dac343e3c6a43ee2eaae598c4a07f7eca4bbe6e418762ebb7621518"
+    },
+    {
+      "attempt_index": 51,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000013-20260728T114541Z-round03-20260728T123000Z/pending_round_capture_manifest.json",
+      "sha256": "135e290b3beb2f9e6338725c7fa15d3e218f342bc255109d92348d21b6f7d5a0"
+    },
+    {
+      "attempt_index": 52,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000013-20260728T114541Z-round04-20260728T124500Z/pending_round_capture_manifest.json",
+      "sha256": "62620b458c79462b93c7dc5881ec624534c20f3a4ce942685057730df8203235"
+    },
+    {
+      "attempt_index": 53,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000014-20260728T130106Z-round01-20260728T131500Z/pending_round_capture_manifest.json",
+      "sha256": "daa2e6ce9097981d58e6ba77de293ee65a0bfe8c6acbdc06eeec457a480bc9d4"
+    },
+    {
+      "attempt_index": 54,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000014-20260728T130106Z-round02-20260728T132959Z/pending_round_capture_manifest.json",
+      "sha256": "9f3463c5ef551a362e8a2ec51b453223e8bf65950c2412c65f208c8b59b2d68e"
+    },
+    {
+      "attempt_index": 55,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000014-20260728T130106Z-round03-20260728T134459Z/pending_round_capture_manifest.json",
+      "sha256": "daf18bce9ae8e64c68d8ebc519e6b280de6de2d2423af4a34e312bee8bdfe8d7"
+    },
+    {
+      "attempt_index": 56,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000014-20260728T130106Z-round04-20260728T140000Z/pending_round_capture_manifest.json",
+      "sha256": "b06f9ee68305064b4898e6042069378eca0b2284f1a855bb8d03cc2423458494"
+    },
+    {
+      "attempt_index": 57,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000015-20260728T141544Z-round01-20260728T143000Z/pending_round_capture_manifest.json",
+      "sha256": "d2cee566bcf7eada94fe216686338c6eb052b64bfbf82c86120d5d7ab16cc52d"
+    },
+    {
+      "attempt_index": 58,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000015-20260728T141544Z-round02-20260728T144500Z/pending_round_capture_manifest.json",
+      "sha256": "0c3f7a0b3d3295efd4537f985d841fe1ae45973cdbee50685006ad319bb6bf35"
+    },
+    {
+      "attempt_index": 59,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000015-20260728T141544Z-round03-20260728T150000Z/pending_round_capture_manifest.json",
+      "sha256": "567b8b1c9c5ec668834e9b4197d6de7b272733918a324ef9def146ad7973ad27"
+    },
+    {
+      "attempt_index": 60,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000015-20260728T141544Z-round04-20260728T151500Z/pending_round_capture_manifest.json",
+      "sha256": "0883d5e36c6d67f3b6a97988a7564e55c033eef8ac2e0acf67c0cdc94c11e372"
+    },
+    {
+      "attempt_index": 61,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000016-20260728T153046Z-round01-20260728T154500Z/pending_round_capture_manifest.json",
+      "sha256": "36614b83a571e9779961b8a8643ed1caa54465a2e6ec7709bfdf261dfcdbca78"
+    },
+    {
+      "attempt_index": 62,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000016-20260728T153046Z-round02-20260728T160000Z/pending_round_capture_manifest.json",
+      "sha256": "8fd498b43fe9675c8e817c997c13e12e254e905bc8386b98540abffacd217cfd"
+    },
+    {
+      "attempt_index": 63,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000016-20260728T153046Z-round03-20260728T161500Z/pending_round_capture_manifest.json",
+      "sha256": "7a2ebd6f28ebb9aa07e2ef6a37b803780b5cb55082afd564972dc64624222803"
+    },
+    {
+      "attempt_index": 64,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000016-20260728T153046Z-round04-20260728T163000Z/pending_round_capture_manifest.json",
+      "sha256": "517ef8e1d18ce8f4139b93d0e9c9bba2b17ba3beb568866df1898f5fc2083170"
+    },
+    {
+      "attempt_index": 65,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000017-20260728T164550Z-round01-20260728T165959Z/pending_round_capture_manifest.json",
+      "sha256": "4f0ce29ddcd1d64c42ad4c82003373f7f09af086ef3ea0c53544eaa3e364ed4a"
+    },
+    {
+      "attempt_index": 66,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000017-20260728T164550Z-round02-20260728T171459Z/pending_round_capture_manifest.json",
+      "sha256": "e86b3732a3410c976017117d9cd94292e4c04b686e37862a60d3f180d3158897"
+    },
+    {
+      "attempt_index": 67,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000017-20260728T164550Z-round03-20260728T173000Z/pending_round_capture_manifest.json",
+      "sha256": "df9dc89f3cb876693c1df65b94659abcc327e4d56247c6dc7db015b3e051d141"
+    },
+    {
+      "attempt_index": 68,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000017-20260728T164550Z-round04-20260728T174500Z/pending_round_capture_manifest.json",
+      "sha256": "78286a6ebf02a253c7dcca212ca795725dc6bba95e25596ef7670f7a43e9b676"
+    },
+    {
+      "attempt_index": 69,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000018-20260728T180039Z-round01-20260728T181459Z/pending_round_capture_manifest.json",
+      "sha256": "e38d34e2ce3f1912736a2d84a6af87848a0b718c59308f2050ad9e7b2751f0b3"
+    },
+    {
+      "attempt_index": 70,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000018-20260728T180039Z-round02-20260728T182959Z/pending_round_capture_manifest.json",
+      "sha256": "87f42007b7a29b5aae125f3aa50bfc5229501b26a17733192ed87ac79e23fa7e"
+    },
+    {
+      "attempt_index": 71,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000018-20260728T180039Z-round03-20260728T184500Z/pending_round_capture_manifest.json",
+      "sha256": "5ececca3b20fa618fe7b16269ce79529c70aff5ce5c776cf501cd8e61ea921c6"
+    },
+    {
+      "attempt_index": 72,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000018-20260728T180039Z-round04-20260728T190000Z/pending_round_capture_manifest.json",
+      "sha256": "fb106b82dfb08cdfe3cf52c8107bf819acd2869d6128aba7df4832e3a2d438f1"
+    },
+    {
+      "attempt_index": 73,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000019-20260728T191538Z-round01-20260728T193000Z/pending_round_capture_manifest.json",
+      "sha256": "d06f5af513487e2cd6dbf909ea296487f830f0faf554fa5470cb2e4cc72c2697"
+    },
+    {
+      "attempt_index": 74,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000019-20260728T191538Z-round02-20260728T194500Z/pending_round_capture_manifest.json",
+      "sha256": "98c4d935076091e0a402937e43e5b18ec523baa23f7bef7c4e3ab73dd638a941"
+    },
+    {
+      "attempt_index": 75,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000019-20260728T191538Z-round03-20260728T195959Z/pending_round_capture_manifest.json",
+      "sha256": "0ae673dea959372ac54ebc100c12984e1d903872ef47e75bb14d156170d657bd"
+    },
+    {
+      "attempt_index": 76,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000019-20260728T191538Z-round04-20260728T201500Z/pending_round_capture_manifest.json",
+      "sha256": "893d4e8e1733bc9e157e92ee75e611f1636f52bb9ed55ae4a44d467595f90982"
+    },
+    {
+      "attempt_index": 77,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000020-20260728T203038Z-round01-20260728T204500Z/pending_round_capture_manifest.json",
+      "sha256": "8f9e424015691ee9fb933be2b8d4bfa2d366c83847b33f97136fc98c8d2fd57c"
+    },
+    {
+      "attempt_index": 78,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000020-20260728T203038Z-round02-20260728T210000Z/pending_round_capture_manifest.json",
+      "sha256": "1005b92ae21fb644a2d041c0c359fe0a28940df5c37db8254f7673961a26e8f2"
+    },
+    {
+      "attempt_index": 79,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000020-20260728T203038Z-round03-20260728T211500Z/pending_round_capture_manifest.json",
+      "sha256": "97fb8995f8301853215db3781f75a05b35e11f7a46d56c008b03b4ef0da175f3"
+    },
+    {
+      "attempt_index": 80,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000020-20260728T203038Z-round04-20260728T213000Z/pending_round_capture_manifest.json",
+      "sha256": "9915bb2dcd4a346d82b0cc8ac390a8833348eb19ee52e2d0ab6724fe4b06c6e0"
+    },
+    {
+      "attempt_index": 81,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000021-20260728T214537Z-round01-20260728T215959Z/pending_round_capture_manifest.json",
+      "sha256": "b17c5dbc754a902d7e714e640a0ba57319b4df6644f4365d2e2ccf27ad750c4e"
+    },
+    {
+      "attempt_index": 82,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000021-20260728T214537Z-round02-20260728T221500Z/pending_round_capture_manifest.json",
+      "sha256": "6b2614237b505626ec7f1f4e26433963e49f8d20242608f24329ef329ecd1205"
+    },
+    {
+      "attempt_index": 83,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000021-20260728T214537Z-round03-20260728T223000Z/pending_round_capture_manifest.json",
+      "sha256": "dbea2099013776093d9b5423521dff6da611a1f5a2d967283a25e45b3ac25b7a"
+    },
+    {
+      "attempt_index": 84,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000021-20260728T214537Z-round04-20260728T224500Z/pending_round_capture_manifest.json",
+      "sha256": "a8a2c5778961d7a8e14375198220da0046ed836b98158834f1fd1dbf1c888c8a"
+    },
+    {
+      "attempt_index": 85,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000022-20260728T230037Z-round01-20260728T231500Z/pending_round_capture_manifest.json",
+      "sha256": "f142393606b069c58f70f7e8be38fcf045a89c1b37d9037bd9c9ef9da919f355"
+    },
+    {
+      "attempt_index": 86,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000022-20260728T230037Z-round02-20260728T232959Z/pending_round_capture_manifest.json",
+      "sha256": "916e4470109bf1d9ffce73e6d1b181402b27f9849befdc5b6b42f7f165cc0a37"
+    },
+    {
+      "attempt_index": 87,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000022-20260728T230037Z-round03-20260728T234500Z/pending_round_capture_manifest.json",
+      "sha256": "7a0006ecc8e19b91f908a88c7dd2adcb0b5bb39d90ac9982d3a397f656e387d0"
+    },
+    {
+      "attempt_index": 88,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000022-20260728T230037Z-round04-20260729T000000Z/pending_round_capture_manifest.json",
+      "sha256": "0fadf1fcf3f071ede0c5366a5d6f2f85fbb14be48d007961aa78e1d26c3f544b"
+    },
+    {
+      "attempt_index": 89,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000023-20260729T000105Z-round01-20260729T001500Z/pending_round_capture_manifest.json",
+      "sha256": "3f44a03aeab72faa005cae819393bf237d58d8edf5266beacff7e79b6b3b9bec"
+    },
+    {
+      "attempt_index": 90,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000023-20260729T000105Z-round02-20260729T003000Z/pending_round_capture_manifest.json",
+      "sha256": "351dc9b046822797c05999733dcf1a0b385ca5963205f3aab018d2e3a43927b3"
+    },
+    {
+      "attempt_index": 91,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000023-20260729T000105Z-round03-20260729T004500Z/pending_round_capture_manifest.json",
+      "sha256": "4182962e6ff8dab4dcec249e76954db9213c7f31d56f7484af7535e536a61dc8"
+    },
+    {
+      "attempt_index": 92,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000023-20260729T000105Z-round04-20260729T010000Z/pending_round_capture_manifest.json",
+      "sha256": "67a3bda7006d0de4af326e2ccfa0be71f31b7adf791b3c1ccc31cbb50e920097"
+    },
+    {
+      "attempt_index": 93,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000024-20260729T011540Z-round01-20260729T012959Z/pending_round_capture_manifest.json",
+      "sha256": "c705704a71fea11d377b94caa76da8a7d6513c178a78bc9c4a537376a26f4f71"
+    },
+    {
+      "attempt_index": 94,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000024-20260729T011540Z-round02-20260729T014459Z/pending_round_capture_manifest.json",
+      "sha256": "72560e109fc6a2d08cb60a485923e5b16f176af71e70f1e32cdb7fd0434d9091"
+    },
+    {
+      "attempt_index": 95,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000024-20260729T011540Z-round03-20260729T020000Z/pending_round_capture_manifest.json",
+      "sha256": "0b1490cee94408a6cce1125d5fc0f6b59a32c533a17b7b96741c4295bd7aa5e1"
+    },
+    {
+      "attempt_index": 96,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000024-20260729T011540Z-round04-20260729T021500Z/pending_round_capture_manifest.json",
+      "sha256": "2ad01d978792d5a8bcd8da0c6b67a3ae5f4943c45bb1830bc10084ad1eda3a79"
+    },
+    {
+      "attempt_index": 97,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000025-20260729T023042Z-round01-20260729T024459Z/pending_round_capture_manifest.json",
+      "sha256": "44b65755cd35575acd16f12c6c9fcc2de97cc8a650002473a5f38bd0e20fdf7a"
+    },
+    {
+      "attempt_index": 98,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000025-20260729T023042Z-round02-20260729T030000Z/pending_round_capture_manifest.json",
+      "sha256": "9d9b587b349a4931237f219a66655f6efa97844227152491a90cbfc1806ee9b8"
+    },
+    {
+      "attempt_index": 99,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000025-20260729T023042Z-round03-20260729T031500Z/pending_round_capture_manifest.json",
+      "sha256": "f038f1ad477c097126c23d5d5352ad7d40dba1f47db29cb68062acb96ac95d49"
+    },
+    {
+      "attempt_index": 100,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000025-20260729T023042Z-round04-20260729T033000Z/pending_round_capture_manifest.json",
+      "sha256": "1d257095287d8b8f0f3140a864724c00434d80e64e679721fb6712f91ebd530e"
+    },
+    {
+      "attempt_index": 101,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000026-20260729T034547Z-round01-20260729T040000Z/pending_round_capture_manifest.json",
+      "sha256": "b964161ad43693612882fa415e1d402dda54120112f562b504461855caeae240"
+    },
+    {
+      "attempt_index": 102,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000026-20260729T034547Z-round02-20260729T041500Z/pending_round_capture_manifest.json",
+      "sha256": "e8d99bfd8462fd3ea2cbfb3ae97991f2bcd87c5857232297fefd9e0d4bd52245"
+    },
+    {
+      "attempt_index": 103,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000026-20260729T034547Z-round03-20260729T043000Z/pending_round_capture_manifest.json",
+      "sha256": "860b70431eb492869616168e7190dfc7e889f386301480e6188445db7c66f474"
+    },
+    {
+      "attempt_index": 104,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000026-20260729T034547Z-round04-20260729T044500Z/pending_round_capture_manifest.json",
+      "sha256": "602849032c8b2581ce56ecfbff1c77b1c0bea053b30caad00ab95fd412d6f7a9"
+    },
+    {
+      "attempt_index": 105,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000027-20260729T050118Z-round01-20260729T051459Z/pending_round_capture_manifest.json",
+      "sha256": "64b71cd03d66aac285cbdbd4e313a8c9a850637f10044330388f83e54a22be43"
+    },
+    {
+      "attempt_index": 106,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000027-20260729T050118Z-round02-20260729T053000Z/pending_round_capture_manifest.json",
+      "sha256": "8876274ac303b76ca927c8166efde9b76f5e6de3144ee88bd034dcbbebb1ad82"
+    },
+    {
+      "attempt_index": 107,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000027-20260729T050118Z-round03-20260729T054500Z/pending_round_capture_manifest.json",
+      "sha256": "2b921efed5dae904303c1f74db431302c529185b4b2eb7ad5b0325092a37de4e"
+    },
+    {
+      "attempt_index": 108,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000027-20260729T050118Z-round04-20260729T060000Z/pending_round_capture_manifest.json",
+      "sha256": "8d9b22db54757cf05022f875cc83e2bf075ebd89a634ad59c7ac1bd090b28b4f"
+    },
+    {
+      "attempt_index": 109,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000028-20260729T061545Z-round01-20260729T063000Z/pending_round_capture_manifest.json",
+      "sha256": "5b2226c2d3a10f80f1f7f5e7c03132486085e26cf0b6e5231d27c5f4b39c8c58"
+    },
+    {
+      "attempt_index": 110,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000028-20260729T061545Z-round02-20260729T064459Z/pending_round_capture_manifest.json",
+      "sha256": "b61cec01de5364348e46b9caca13a24e6cbc17da2db70e5d8ad974721b15d9d3"
+    },
+    {
+      "attempt_index": 111,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000028-20260729T061545Z-round03-20260729T070000Z/pending_round_capture_manifest.json",
+      "sha256": "5de93f393d2e5d762fc088dfceb0ee473d7271bca54043d37c01db30e5cbc301"
+    },
+    {
+      "attempt_index": 112,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000028-20260729T061545Z-round04-20260729T071500Z/pending_round_capture_manifest.json",
+      "sha256": "661739203ccab715ed16d9aa362c8a77845c4cd6522a0198556924c022eb0472"
+    },
+    {
+      "attempt_index": 113,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000029-20260729T073046Z-round01-20260729T074500Z/pending_round_capture_manifest.json",
+      "sha256": "ccd993a1e11f4fc03d8250635643c6afec46e35819c514f2b6d2926e2d3f59a8"
+    },
+    {
+      "attempt_index": 114,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000029-20260729T073046Z-round02-20260729T075959Z/pending_round_capture_manifest.json",
+      "sha256": "9181c0378c2cb7bf35ade7c806df6b0bbf0a361a99966d7359056b02ef3513ae"
+    },
+    {
+      "attempt_index": 115,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000029-20260729T073046Z-round03-20260729T081500Z/pending_round_capture_manifest.json",
+      "sha256": "ad6774f05bf72b06dd2cf06248fe32a4d4f42b2dc5f922a7962a80dd1e8ffe0f"
+    },
+    {
+      "attempt_index": 116,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000029-20260729T073046Z-round04-20260729T083000Z/pending_round_capture_manifest.json",
+      "sha256": "ffad22816b8e8483137d67c2f3252c66b90479029f45d0e2ff38c38261d64b06"
+    },
+    {
+      "attempt_index": 117,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000030-20260729T084544Z-round01-20260729T090000Z/pending_round_capture_manifest.json",
+      "sha256": "4f54df9246d549732b9ca06133d609dc331e7942ae102c14cdf868bc688335da"
+    },
+    {
+      "attempt_index": 118,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000030-20260729T084544Z-round02-20260729T091459Z/pending_round_capture_manifest.json",
+      "sha256": "8fe248684872a77eb7366fd88384b99c5fcf4585346256c5cf9c3a0c0bd511b4"
+    },
+    {
+      "attempt_index": 119,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000030-20260729T084544Z-round03-20260729T093000Z/pending_round_capture_manifest.json",
+      "sha256": "2460c0401ca3f427ce49d0273d43c18f577dac69c42f8fd61ea063149b0c4858"
+    },
+    {
+      "attempt_index": 120,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000030-20260729T084544Z-round04-20260729T094500Z/pending_round_capture_manifest.json",
+      "sha256": "4f3ff1366c1c2f35c9b2f828c4918dd53a76fbc5be6457d9763db8869dcb81a9"
+    }
+  ],
+  "revision_id": "BTC-15M-MoE-confirmatory-v2-precollection-r1",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-attempt-health-manifest-r1",
+  "snapshot_content_sha256": "803ed28c87baf9ce0da3578f4625441cd0f0a71cebb0284fc9a699dcaa939fa5",
+  "snapshot_derivation_code_path": "src/bigan/v8/polymarket/moe_precollection_hardening_r1.py",
+  "snapshot_derivation_code_sha256": "c7283a5c38a6b7810bca663b2cf1d7ff6263f9d529c7b7650533e18a016bdd82",
+  "snapshot_path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_attempt_health_snapshot.jsonl",
+  "snapshot_row_count": 120,
+  "snapshot_terminal_entry_sha256": "91129bf0e0c48691fc1766ad2d22061cee1020a6ce5e356767ee9d4d15d37131",
+  "source_capture_batch_count": 30,
+  "source_capture_batches": [
+    {
+      "batch_id": "challenge-development-15m-000001-20260727T062011Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000001-20260727T062011Z/batch_summary.json",
+      "sha256": "c06a2693880b6640f56846dc82400ad8cf44c34b0e0e8dc544ef0209c9fd73cb"
+    },
+    {
+      "batch_id": "challenge-development-15m-000002-20260727T073044Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000002-20260727T073044Z/batch_summary.json",
+      "sha256": "fd85bc0bfc470b130d75bdbb7de5c380232720a91701e823fe91e2ab5472067c"
+    },
+    {
+      "batch_id": "challenge-development-15m-000003-20260727T084553Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000003-20260727T084553Z/batch_summary.json",
+      "sha256": "b78af43d7521bb8a0fc01270fcbca1797fbd96729b1d6b55a5edc4659c76ed71"
+    },
+    {
+      "batch_id": "challenge-development-15m-000004-20260727T100046Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000004-20260727T100046Z/batch_summary.json",
+      "sha256": "a1096bfa583e9a5773516e1cc9e136b9d0ed9a2cecb048fb0985c14763f523cc"
+    },
+    {
+      "batch_id": "challenge-development-15m-000005-20260727T111541Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000005-20260727T111541Z/batch_summary.json",
+      "sha256": "5cfbb142820d967c3a1bd875fd7252b20d0b45577d4475a69c205e1d2fa28986"
+    },
+    {
+      "batch_id": "challenge-development-15m-000006-20260727T123046Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000006-20260727T123046Z/batch_summary.json",
+      "sha256": "1a3e37ea50273660d6ce1259cbc0543ee55835eb7741d6fb64ce7c9a6c86e6dc"
+    },
+    {
+      "batch_id": "challenge-development-15m-000007-20260727T134548Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000007-20260727T134548Z/batch_summary.json",
+      "sha256": "f81e989d4fdecd671e36a4d767f238af493fcb4203c5f6f26dc218c2f5af36ea"
+    },
+    {
+      "batch_id": "challenge-development-15m-000008-20260727T150050Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000008-20260727T150050Z/batch_summary.json",
+      "sha256": "2598a13b400dd5cb75249aa59e5b0aba8496d31cac643ba4e3a8e43e9f368f1d"
+    },
+    {
+      "batch_id": "challenge-development-15m-000009-20260728T065131Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000009-20260728T065131Z/batch_summary.json",
+      "sha256": "822ec719eb955a3e34fb2bd2558298e7fd96a7869bb60a5648321450784b807d"
+    },
+    {
+      "batch_id": "challenge-development-15m-000010-20260728T080036Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000010-20260728T080036Z/batch_summary.json",
+      "sha256": "bc108c040a03a1faddaaf0ee016a3fd2e85ca773a11fb0b3510e6e40077ac88e"
+    },
+    {
+      "batch_id": "challenge-development-15m-000011-20260728T091534Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000011-20260728T091534Z/batch_summary.json",
+      "sha256": "e1ad09e66f784e2df60db9a6c88abf9f494c0f7f929a290c0aac56167299584a"
+    },
+    {
+      "batch_id": "challenge-development-15m-000012-20260728T103041Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000012-20260728T103041Z/batch_summary.json",
+      "sha256": "2c612a3d2b43a2389c16c8ff95857d141f60426b37d51cbe79af7b0c52cc639e"
+    },
+    {
+      "batch_id": "challenge-development-15m-000013-20260728T114541Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000013-20260728T114541Z/batch_summary.json",
+      "sha256": "cfa5fd17b7ae282051de9670c4f1110834ab77772aea342c02d960a4b7e706ad"
+    },
+    {
+      "batch_id": "challenge-development-15m-000014-20260728T130106Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000014-20260728T130106Z/batch_summary.json",
+      "sha256": "b24467f12444c5bbed3fa6ed6f72e99f0a7785eb4df89c3f3a501d4a911cf722"
+    },
+    {
+      "batch_id": "challenge-development-15m-000015-20260728T141544Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000015-20260728T141544Z/batch_summary.json",
+      "sha256": "e80e90198162c3ce0ba7bb6b2d844b0d0280ebb50728254ab00b90d569e52788"
+    },
+    {
+      "batch_id": "challenge-development-15m-000016-20260728T153046Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000016-20260728T153046Z/batch_summary.json",
+      "sha256": "160f4a6b430edfef8c56b28476aaab409b17d3a5435b021df0f33dde3d9b7267"
+    },
+    {
+      "batch_id": "challenge-development-15m-000017-20260728T164550Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000017-20260728T164550Z/batch_summary.json",
+      "sha256": "79bc7378970b32c451c56ce987f05672e2bf2334dd25121ff273ec587654a295"
+    },
+    {
+      "batch_id": "challenge-development-15m-000018-20260728T180039Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000018-20260728T180039Z/batch_summary.json",
+      "sha256": "bded3fb76cab4043c0744f23915cbdfac1c8971fa3f1e18d7a759e88cbadb6ce"
+    },
+    {
+      "batch_id": "challenge-development-15m-000019-20260728T191538Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000019-20260728T191538Z/batch_summary.json",
+      "sha256": "f9745cc1d09e8af9cf174a57b3c0dbfcbe2f731a56e926d620664fda8962e466"
+    },
+    {
+      "batch_id": "challenge-development-15m-000020-20260728T203038Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000020-20260728T203038Z/batch_summary.json",
+      "sha256": "1473f53e556a2e555fe173762fac13eafd676f0a979416841751832428eca31f"
+    },
+    {
+      "batch_id": "challenge-development-15m-000021-20260728T214537Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000021-20260728T214537Z/batch_summary.json",
+      "sha256": "2b9ba4f5a3c728b39a53c5590bf0d9c62a9346c19e158634f604b48e45399eb7"
+    },
+    {
+      "batch_id": "challenge-development-15m-000022-20260728T230037Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000022-20260728T230037Z/batch_summary.json",
+      "sha256": "7875140004e0bae3f4f36a5ae899efcb2841fc40834cd683f3466b1bfe400ef6"
+    },
+    {
+      "batch_id": "challenge-development-15m-000023-20260729T000105Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000023-20260729T000105Z/batch_summary.json",
+      "sha256": "bae1d9926dd569c062dfcfcbd86a2cb98975e57c674a85bf544a5ad0206fcc88"
+    },
+    {
+      "batch_id": "challenge-development-15m-000024-20260729T011540Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000024-20260729T011540Z/batch_summary.json",
+      "sha256": "f7872aa1767a6b0f4ae7adf4a545ec47d7cc446feb6965b0946c2fe368104932"
+    },
+    {
+      "batch_id": "challenge-development-15m-000025-20260729T023042Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000025-20260729T023042Z/batch_summary.json",
+      "sha256": "2a8fbd3370b58cde336a37ce2efdd7bfa56cfd4e03542b793b869b304f62327e"
+    },
+    {
+      "batch_id": "challenge-development-15m-000026-20260729T034547Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000026-20260729T034547Z/batch_summary.json",
+      "sha256": "a05fdcabace60caa151b65e00f2a95a674be020e7c8a0fa357c69e276815e640"
+    },
+    {
+      "batch_id": "challenge-development-15m-000027-20260729T050118Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000027-20260729T050118Z/batch_summary.json",
+      "sha256": "4a909d6c6ea502c3701f53c0ba10d182d556516e971d8a6950d4f34a58edca93"
+    },
+    {
+      "batch_id": "challenge-development-15m-000028-20260729T061545Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000028-20260729T061545Z/batch_summary.json",
+      "sha256": "4369e96b16c13f5853abb2526c6f44397af2e3e63c90b8eda4dcf17eb305609b"
+    },
+    {
+      "batch_id": "challenge-development-15m-000029-20260729T073046Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000029-20260729T073046Z/batch_summary.json",
+      "sha256": "942f263488b0993e872fb7c8ecf486bd72569ab09d987c077ca439180c887987"
+    },
+    {
+      "batch_id": "challenge-development-15m-000030-20260729T084544Z",
+      "capture_count": 4,
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/captures/challenge-development-15m-000030-20260729T084544Z/batch_summary.json",
+      "sha256": "3ac5810142e0c799c20e1a78f922df29ffa3df51efd8700473efe8e9b7c86348"
+    }
+  ],
+  "source_capture_index": {
+    "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/outcome_blind_capture_batch_index.jsonl",
+    "sha256": "a5c9677a3dd5d2f19d7c358e6bb6f3bb6357193b4f9023814ac5b16e0b40b795"
+  },
+  "source_fields_used": [
+    "cumulative.attempted_market_count",
+    "cumulative.quality_valid_market_count",
+    "outcomes_labels_or_pnl_read_for_health",
+    "capture_status",
+    "capture_start_boundary_validation_passed",
+    "orderbook_full_window_coverage_passed",
+    "orderbook_full_window_coverage_required",
+    "raw_chainlink_price_row_count",
+    "raw_polymarket_market_count",
+    "reject_reason_counts",
+    "chainlink_capture_reason_codes",
+    "feature_enrichment_reason_codes",
+    "scheduled_round_start_ts",
+    "run_id"
+  ],
+  "source_ledger_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_lane_health_latest.json",
+  "source_ledger_sha256": "c67167eeb08f26531373e9a27608ef0b8932cbb290c8d7e0f65b4f73501c50d5",
+  "state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  }
+}

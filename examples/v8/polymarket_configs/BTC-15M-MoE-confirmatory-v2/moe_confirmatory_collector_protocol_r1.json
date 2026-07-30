@@ -1,0 +1,125 @@
+{
+  "append_only_audit": {
+    "attempt_index_hash_chain_required": true,
+    "existing_attempt_rewrite_allowed": false,
+    "failed_attempts_retained": true,
+    "failure_reason_codes_required": true
+  },
+  "capture_manifest_required_before_outcome_access": {
+    "partial_outcome_opening_forbidden": true,
+    "path": "confirmatory_capture_manifest.json",
+    "required_fields": [
+      "exact_market_count",
+      "ordered_market_ids",
+      "ordered_market_ids_sha256",
+      "first_market_start_ts",
+      "last_market_start_ts",
+      "attempts_consumed",
+      "unused_attempt_capacity",
+      "all_decisions_frozen",
+      "candidate_decision_rows_sha256",
+      "baseline_decision_rows_sha256",
+      "raw_evidence_manifest_set_sha256"
+    ],
+    "sha256_sidecar": "confirmatory_capture_manifest.sha256"
+  },
+  "capture_stage_state": {
+    "outcome_access_enabled": false,
+    "resolution_provider_enabled": false,
+    "settlement_finalizer_enabled": false,
+    "training_export_enabled": false
+  },
+  "causality": {
+    "available_at_ts_lte_decision_ts": true,
+    "complement_quote_proxy_forbidden": true,
+    "feature_cutoff_ts_lte_decision_ts": true,
+    "max_input_ts_lte_decision_ts": true,
+    "missing_not_numeric_zero": true
+  },
+  "created_at": "2026-07-30T12:00:00+00:00",
+  "forbidden_collection_control_inputs": [
+    "accepted",
+    "baseline_prediction",
+    "candidate_prediction",
+    "expert_id",
+    "future_price",
+    "future_return",
+    "model_prediction",
+    "realized_pnl",
+    "router_route",
+    "selected_side",
+    "selection_score",
+    "settlement_outcome",
+    "target"
+  ],
+  "frozen_inputs": {
+    "attempt_cap_analysis": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_quality_rate_analysis_r1.json",
+      "sha256": "ad97ed2499215377304e532caccc0305f99fd7545083bab8f2e859e5f0dbcf08"
+    },
+    "attempt_health_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_attempt_health_manifest.json",
+      "sha256": "ffedd5aede0d482106b67c33f4d26068afcfc1715d88fda90f09c4de23d0972f"
+    },
+    "attempt_health_snapshot": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_attempt_health_snapshot.jsonl",
+      "sha256": "803ed28c87baf9ce0da3578f4625441cd0f0a71cebb0284fc9a699dcaa939fa5"
+    },
+    "revision_record": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/precollection_protocol_revision_record.json",
+      "sha256": "46db7ead17d075171382065daa5797aca593b0976223a60753d25fe55426a83d"
+    }
+  },
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "ordering": {
+    "primary_order": "market_start_ts ascending",
+    "tie_break_1": "market_id ascending",
+    "tie_break_2": "attempt_index ascending"
+  },
+  "population": {
+    "definition": "chronological_earliest_exact_800_quality_valid_unique_BTC_15m_markets_strictly_later_than_authorization_boundary",
+    "less_than_800_markets_is_incomplete_failure": true,
+    "maximum_attempts": 926,
+    "more_than_800_markets_in_confirmatory_window_allowed": false,
+    "required_final_quality_valid_market_count": 800,
+    "target_quality_valid_market_count": 800
+  },
+  "required_raw_streams": [
+    "raw_polymarket_markets.jsonl",
+    "raw_polymarket_orderbooks.jsonl",
+    "raw_polymarket_trades.jsonl",
+    "raw_binance_btcusdt_klines.jsonl",
+    "raw_polymarket_chainlink_prices.jsonl"
+  ],
+  "revision_id": "BTC-15M-MoE-confirmatory-v2-precollection-r1",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-confirmatory-collector-r1",
+  "state": {
+    "collector_protocol_frozen": true,
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false,
+    "outcome_access_enabled": false
+  },
+  "stopping": {
+    "market_replacement_after_outcome_access_allowed": false,
+    "market_skip_allowed": false,
+    "markets_after_exact_800_boundary_are_not_confirmatory_eligible": true,
+    "post_boundary_markets_may_not_be_added": true,
+    "route_or_prediction_based_selection_allowed": false,
+    "stop_window_selection_immediately_when_800th_market_is_accepted": true,
+    "window_extension_allowed": false
+  }
+}

@@ -5,6 +5,7 @@ import json
 import math
 import shutil
 import statistics
+import subprocess
 from pathlib import Path
 from statistics import NormalDist
 
@@ -29,6 +30,26 @@ from bigan.v8.polymarket.moe_confirmatory_v2 import (
     V1_BUNDLE_HASH,
     load_and_verify_v2_artifact,
     validate_v2_artifact_in_fresh_environment,
+)
+from bigan.v8.polymarket.moe_precollection_hardening_r1 import (
+    BASE_COMMIT as MOE_V2_R1_BASE_COMMIT,
+)
+from bigan.v8.polymarket.moe_precollection_hardening_r1 import (
+    CANDIDATE_BUNDLE_HASH as MOE_V2_R1_BUNDLE_HASH,
+)
+from bigan.v8.polymarket.moe_precollection_hardening_r1 import (
+    FORBIDDEN_HEALTH_SNAPSHOT_FIELDS,
+    assert_outcome_access_allowed,
+    binomial_tail_probability,
+    deterministic_exact_window,
+    empirical_bootstrap_lcb_crossing_power,
+    minimum_attempt_cap,
+    validate_attempt_hash_chain,
+    validate_exact_window,
+    validate_health_snapshot,
+    validate_population_reconciliation,
+    verify_raw_evidence_manifest_hash,
+    wilson_lower_bound,
 )
 from bigan.v8.polymarket.moe_static_artifact import (
     load_and_verify_static_moe_artifact,
@@ -1584,6 +1605,375 @@ def test_moe_v2_regression_ledger_proves_no_new_full_suite_failure() -> None:
     assert ledger["required_condition_passed"] is True
 
 
+def test_moe_v2_r1_vendored_health_snapshot_reconciles_and_is_outcome_blind() -> None:
+    snapshot_path = (
+        MOE_V2_CONFIG_DIR / "collection_attempt_health_snapshot.jsonl"
+    )
+    manifest_path = (
+        MOE_V2_CONFIG_DIR / "collection_attempt_health_manifest.json"
+    )
+    rows = validate_health_snapshot(
+        snapshot_path=snapshot_path,
+        manifest_path=manifest_path,
+    )
+    manifest = verify_frozen_json(manifest_path)
+
+    assert len(rows) == manifest["snapshot_row_count"] == 120
+    assert sum(bool(row["quality_valid"]) for row in rows) == 113
+    assert manifest["attempted_market_count"] == 120
+    assert manifest["quality_valid_market_count"] == 113
+    assert manifest["outcomes_labels_or_pnl_read"] is False
+    assert manifest["model_outputs_read"] is False
+    assert all(
+        not (FORBIDDEN_HEALTH_SNAPSHOT_FIELDS & set(row)) for row in rows
+    )
+    derivation_path = REPO_ROOT / manifest["snapshot_derivation_code_path"]
+    assert _sha256(derivation_path) == manifest[
+        "snapshot_derivation_code_sha256"
+    ]
+
+
+def test_moe_v2_r1_wilson_and_minimum_completion_cap_recompute() -> None:
+    analysis = verify_frozen_json(
+        MOE_V2_CONFIG_DIR / "collection_quality_rate_analysis_r1.json"
+    )
+    lower = wilson_lower_bound(
+        success_count=113,
+        attempt_count=120,
+        confidence=0.975,
+    )
+    cap, at_cap, before_cap = minimum_attempt_cap(
+        target_quality_valid_market_count=800,
+        conservative_quality_rate_lower_bound=lower,
+        required_completion_probability=0.975,
+    )
+
+    assert lower == analysis["conservative_quality_rate_lower_bound"]
+    assert analysis["attempt_cap_method"] == (
+        "wilson_lower_bound_plus_binomial_tail_quantile"
+    )
+    assert cap == analysis["attempt_cap"]
+    assert at_cap == analysis["completion_probability_at_attempt_cap"]
+    assert before_cap == analysis[
+        "completion_probability_at_attempt_cap_minus_one"
+    ]
+    assert at_cap >= 0.975
+    assert before_cap < 0.975
+    assert cap >= 800
+    assert analysis["attempt_cap_is_minimal"] is True
+    assert binomial_tail_probability(
+        attempt_count=cap - 1,
+        required_success_count=800,
+        success_probability=lower,
+    ) < 0.975
+
+
+def test_moe_v2_r1_exact_window_stops_at_800_and_excludes_market_801() -> None:
+    attempts = _moe_v2_r1_attempts(801)
+    selected = deterministic_exact_window(attempts)
+
+    assert len(selected) == 800
+    assert selected == attempts[:800]
+    assert deterministic_exact_window(list(reversed(attempts))) == attempts[:800]
+    assert attempts[800] not in selected
+    validate_exact_window(
+        attempts=attempts,
+        selected_markets=selected,
+    )
+
+
+def test_moe_v2_r1_window_rejects_duplicates_skips_replacements_and_model_inputs() -> None:
+    attempts = _moe_v2_r1_attempts(801)
+    duplicate = [dict(row) for row in attempts]
+    duplicate[800]["market_id"] = duplicate[0]["market_id"]
+    with pytest.raises(ValueError, match="duplicate"):
+        deterministic_exact_window(duplicate)
+
+    expected = deterministic_exact_window(attempts)
+    skipped = expected[1:] + [attempts[800]]
+    with pytest.raises(ValueError, match="skipped, replaced"):
+        validate_exact_window(attempts=attempts, selected_markets=skipped)
+
+    for field, value in (
+        ("router_route", "high_vol"),
+        ("model_prediction", 0.75),
+    ):
+        model_controlled = [dict(row) for row in attempts]
+        model_controlled[0][field] = value
+        with pytest.raises(ValueError, match="forbidden collection-control"):
+            deterministic_exact_window(model_controlled)
+
+
+def test_moe_v2_r1_outcome_access_requires_frozen_exact_manifest() -> None:
+    ordered = [f"market-{index:04d}" for index in range(800)]
+    manifest = {
+        "exact_market_count": 800,
+        "ordered_market_ids": ordered,
+        "ordered_market_ids_sha256": canonical_json_sha256(ordered),
+        "capture_manifest_frozen": True,
+        "decision_artifacts_frozen": True,
+        "all_artifact_hashes_reconcile": True,
+        "all_decisions_frozen": True,
+    }
+
+    with pytest.raises(ValueError, match="manifest is required"):
+        assert_outcome_access_allowed(capture_manifest=None)
+    with pytest.raises(ValueError, match="partial"):
+        assert_outcome_access_allowed(
+            capture_manifest=manifest,
+            requested_market_ids=ordered[:799],
+        )
+    assert_outcome_access_allowed(
+        capture_manifest=manifest,
+        requested_market_ids=ordered,
+    )
+
+
+@pytest.mark.parametrize("count", [799, 801])
+def test_moe_v2_r1_population_count_other_than_800_fails(count: int) -> None:
+    reconciliation = {
+        "frozen_window_market_count": count,
+        "reported_market_count": count,
+        "candidate_market_row_count": count,
+        "baseline_market_row_count": count,
+        "paired_delta_market_row_count": count,
+        "dropped_market_count": 0,
+        "duplicate_market_count": 0,
+        "out_of_window_market_count": 0,
+    }
+    with pytest.raises(ValueError, match="exactly 800"):
+        validate_population_reconciliation(reconciliation)
+
+
+def test_moe_v2_r1_exact_population_reconciliation_passes() -> None:
+    protocol = verify_frozen_json(
+        MOE_V2_CONFIG_DIR / "moe_confirmatory_protocol_r1.json"
+    )
+    validate_population_reconciliation(protocol["population_reconciliation"])
+    assert protocol["gates"]["quality_valid_market_count"] == {
+        "operator": "eq",
+        "value": 800,
+    }
+
+
+def test_moe_v2_r1_attempt_hash_chain_tampering_fails() -> None:
+    rows = []
+    previous = "0" * 64
+    for index in range(1, 4):
+        row = {
+            "attempt_index": index,
+            "market_id": f"market-{index}",
+            "quality_valid": True,
+            "previous_entry_sha256": previous,
+        }
+        row["entry_sha256"] = canonical_json_sha256(row)
+        previous = row["entry_sha256"]
+        rows.append(row)
+    validate_attempt_hash_chain(rows)
+
+    tampered = [dict(row) for row in rows]
+    tampered[1]["quality_valid"] = False
+    with pytest.raises(ValueError, match="entry hash mismatch"):
+        validate_attempt_hash_chain(tampered)
+
+
+def test_moe_v2_r1_health_snapshot_raw_evidence_tamper_fails(
+    tmp_path: Path,
+) -> None:
+    source_snapshot = (
+        MOE_V2_CONFIG_DIR / "collection_attempt_health_snapshot.jsonl"
+    )
+    source_manifest = (
+        MOE_V2_CONFIG_DIR / "collection_attempt_health_manifest.json"
+    )
+    snapshot = tmp_path / source_snapshot.name
+    manifest = tmp_path / source_manifest.name
+    shutil.copy2(source_snapshot, snapshot)
+    shutil.copy2(source_manifest, manifest)
+    shutil.copy2(source_manifest.with_suffix(".sha256"), manifest.with_suffix(".sha256"))
+    rows = snapshot.read_text(encoding="utf-8").splitlines()
+    first = json.loads(rows[0])
+    first["raw_evidence_manifest_sha256"] = "0" * 64
+    rows[0] = json.dumps(first, sort_keys=True, separators=(",", ":"))
+    snapshot.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    snapshot.with_suffix(".sha256").write_text(
+        _sha256(snapshot) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="content SHA-256 mismatch"):
+        validate_health_snapshot(
+            snapshot_path=snapshot,
+            manifest_path=manifest,
+        )
+
+
+def test_moe_v2_r1_raw_evidence_manifest_hash_mismatch_fails(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "raw_evidence_manifest.json"
+    manifest.write_text('{"outcome_blind":true}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="raw evidence manifest SHA-256 mismatch"):
+        verify_raw_evidence_manifest_hash(
+            manifest_path=manifest,
+            expected_sha256="0" * 64,
+        )
+    assert verify_raw_evidence_manifest_hash(
+        manifest_path=manifest,
+        expected_sha256=_sha256(manifest),
+    ) == {"outcome_blind": True}
+
+
+def test_moe_v2_r1_revision_supersedes_old_905_package_without_rewrite() -> None:
+    revision = verify_frozen_json(
+        MOE_V2_CONFIG_DIR / "precollection_protocol_revision_record.json"
+    )
+    old_names = {
+        "collection_quality_rate_analysis.json",
+        "moe_confirmatory_collector_protocol.json",
+        "moe_confirmatory_protocol.json",
+        "moe_fresh_collection_authorization_template.json",
+    }
+
+    assert revision["candidate_bundle_unchanged"] is True
+    assert revision["model_retraining_performed"] is False
+    assert revision["supersession"][
+        "superseded_before_authorization"
+    ] is True
+    assert revision["supersession"][
+        "old_package_may_not_authorize_collection"
+    ] is True
+    assert set(revision["preserved_original_artifacts"]) == old_names
+    for name, descriptor in revision["preserved_original_artifacts"].items():
+        assert descriptor["path"].endswith(name)
+        assert _sha256(REPO_ROOT / descriptor["path"]) == descriptor["sha256"]
+
+
+def test_moe_v2_r1_authorization_grants_zero_authority_and_pins_new_cap() -> None:
+    template = verify_frozen_json(
+        MOE_V2_CONFIG_DIR
+        / "moe_fresh_collection_authorization_template_r1.json"
+    )
+    analysis = verify_frozen_json(
+        MOE_V2_CONFIG_DIR / "collection_quality_rate_analysis_r1.json"
+    )
+
+    assert template["template_usable_as_collection_authorization"] is False
+    assert template["old_905_attempt_template_non_authoritative"] is True
+    assert template["activation_placeholders"][
+        "explicit_request_received"
+    ] is False
+    assert template["activation_placeholders"]["maximum_attempts"] == analysis[
+        "attempt_cap"
+    ]
+    assert template["activation_placeholders"]["maximum_markets"] == 800
+    assert template["state"] == {
+        "fresh_collection_authorized": False,
+        "fresh_collection_started": False,
+        "fresh_outcomes_opened": False,
+    }
+
+
+def test_moe_v2_r1_candidate_bytes_and_800_target_remain_unchanged() -> None:
+    graph = verify_frozen_json(MOE_V2_CONFIG_DIR / "moe_artifact_graph.json")
+    collector = verify_frozen_json(
+        MOE_V2_CONFIG_DIR / "moe_confirmatory_collector_protocol_r1.json"
+    )
+    power = verify_frozen_json(
+        MOE_V2_CONFIG_DIR / "moe_confirmatory_power_interpretation_r1.json"
+    )
+
+    assert graph["bundle_hash"] == MOE_V2_R1_BUNDLE_HASH
+    for descriptor in graph["artifacts"].values():
+        assert _sha256(REPO_ROOT / descriptor["path"]) == descriptor["sha256"]
+    assert collector["population"]["target_quality_valid_market_count"] == 800
+    assert collector["population"][
+        "required_final_quality_valid_market_count"
+    ] == 800
+    assert power["selected_confirmatory_market_count"] == 800
+    assert power["selected_target_unchanged"] is True
+
+
+def test_moe_v2_r1_power_interpretation_and_empirical_result_reproduce() -> None:
+    report = verify_frozen_json(
+        MOE_V2_CONFIG_DIR / "moe_confirmatory_power_interpretation_r1.json"
+    )
+    rows = [
+        json.loads(line)
+        for line in (
+            MOE_V2_CONFIG_DIR / "development_paired_planning_rows.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    recomputed = empirical_bootstrap_lcb_crossing_power(rows)
+
+    assert report["primary_and_absolute_lcb_design_ready"] is True
+    assert report["overall_all_gate_success_probability_estimated"] is False
+    assert report["overall_all_gate_success_probability_not_guaranteed"] is True
+    assert report["winner_selection_bias_possible"] is True
+    assert report["development_effect_may_be_optimistic"] is True
+    assert report["design_criterion"]["variance_multiplier"] == 1.25
+    assert report["design_criterion"]["selected_sample_size"] == 800
+    assert {
+        row["scenario_name"]
+        for row in report[
+            "report_only_75pct_and_50pct_effect_power_at_n800"
+        ]
+    } == {"75pct_of_observed_effect", "50pct_of_observed_effect"}
+    assert recomputed == report[
+        "empirical_paired_market_bootstrap_validation_at_n800"
+    ]
+
+
+def test_moe_v2_r1_final_regression_ledger_covers_executable_head() -> None:
+    ledger_path = MOE_V2_CONFIG_DIR / "regression_failure_ledger_r1.json"
+    if not ledger_path.exists():
+        pytest.skip("Commit B attestation is created after executable Commit A")
+    ledger = verify_frozen_json(ledger_path)
+    executable_head = ledger["executable_head_commit"]
+
+    subprocess.run(
+        ["git", "cat-file", "-e", f"{executable_head}^{{commit}}"],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+    changed_after_executable_head = set(
+        subprocess.check_output(
+            ["git", "diff", "--name-only", f"{executable_head}..HEAD"],
+            cwd=REPO_ROOT,
+            text=True,
+        ).splitlines()
+    )
+    allowed = {
+        (
+            "examples/v8/polymarket_configs/"
+            "BTC-15M-MoE-confirmatory-v2/regression_failure_ledger_r1.json"
+        ),
+        (
+            "examples/v8/polymarket_configs/"
+            "BTC-15M-MoE-confirmatory-v2/regression_failure_ledger_r1.sha256"
+        ),
+        (
+            "examples/v8/polymarket_configs/"
+            "BTC-15M-MoE-confirmatory-v2/final_precollection_hardening_report.json"
+        ),
+        (
+            "examples/v8/polymarket_configs/"
+            "BTC-15M-MoE-confirmatory-v2/final_precollection_hardening_report.sha256"
+        ),
+    }
+    assert ledger["base_commit"] == MOE_V2_R1_BASE_COMMIT
+    assert ledger["attestation_commit"] is None
+    assert changed_after_executable_head <= allowed
+    assert ledger["pytest_reconciliation"]["new_test_failure_count"] == 0
+    assert ledger["pytest_reconciliation"][
+        "head_failures_subset_of_base_failures"
+    ] is True
+    assert ledger["ruff_reconciliation"]["new_ruff_error_count"] == 0
+    assert ledger["required_condition_passed"] is True
+
+
 def test_moe_v2_all_frozen_json_keeps_safety_false() -> None:
     for path in sorted(MOE_V2_CONFIG_DIR.glob("*.json")):
         payload = verify_frozen_json(path)
@@ -1612,3 +2002,18 @@ def _moe_v2_runtime_prediction(required_path: str) -> dict:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _moe_v2_r1_attempts(count: int) -> list[dict]:
+    return [
+        {
+            "attempt_index": index,
+            "market_id": f"market-{index:04d}",
+            "market_start_ts": 1_800_000_000_000 + index * 900_000,
+            "quality_valid": True,
+            "raw_evidence_manifest_sha256": hashlib.sha256(
+                f"evidence-{index}".encode()
+            ).hexdigest(),
+        }
+        for index in range(1, count + 1)
+    ]

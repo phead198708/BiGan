@@ -1,0 +1,58 @@
+{
+  "assumption_limitation": "The binomial calculation assumes conditionally independent attempt validity and may be optimistic under clustered provider outages.",
+  "attempt_cap": 926,
+  "attempt_cap_is_minimal": true,
+  "attempt_cap_method": "wilson_lower_bound_plus_binomial_tail_quantile",
+  "attempted_market_count": 120,
+  "completion_probability_at_attempt_cap": 0.9756110142753859,
+  "completion_probability_at_attempt_cap_minus_one": 0.9702719717353927,
+  "completion_probability_sensitivity_at_observed_rate": 0.9999999999999679,
+  "completion_probability_sensitivity_with_rate_minus_0_02": 0.9999999992163061,
+  "completion_probability_sensitivity_with_rate_minus_0_05": 0.9963875357309445,
+  "conservative_quality_rate_lower_bound": 0.8844740796636988,
+  "created_at": "2026-07-30T12:00:00+00:00",
+  "invariants": {
+    "attempt_cap_gte_target": true,
+    "completion_probability_at_attempt_cap_gte_0_975": true,
+    "completion_probability_at_attempt_cap_minus_one_lt_0_975": true
+  },
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "model_outputs_read": false,
+  "observed_quality_valid_rate": 0.9416666666666667,
+  "outcomes_labels_or_pnl_read": false,
+  "quality_rate_confidence": 0.975,
+  "quality_rate_method": "one_sided_Wilson_lower_bound",
+  "quality_rate_z_value": 1.9599639845400534,
+  "quality_valid_market_count": 113,
+  "required_window_completion_probability": 0.975,
+  "revision_id": "BTC-15M-MoE-confirmatory-v2-precollection-r1",
+  "role": "outcome_blind_completion_probability_attempt_cap",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-collection-quality-analysis-r1",
+  "source_snapshot": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_attempt_health_snapshot.jsonl",
+    "sha256": "803ed28c87baf9ce0da3578f4625441cd0f0a71cebb0284fc9a699dcaa939fa5"
+  },
+  "source_snapshot_manifest": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_attempt_health_manifest.json",
+    "sha256": "ffedd5aede0d482106b67c33f4d26068afcfc1715d88fda90f09c4de23d0972f"
+  },
+  "state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "target_quality_valid_market_count": 800
+}
