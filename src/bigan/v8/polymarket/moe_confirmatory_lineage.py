@@ -356,20 +356,55 @@ def build_moe_route_attribution(
             raise ValueError(
                 f"MoE expert support and frozen fallback disagree: {market_id}"
             )
+        router_inputs = {
+            "btc_return_15m": representative["unsigned_btc_return_15m"],
+            "btc_return_regime": representative["btc_return_regime"],
+            "btc_volatility_15m": representative["btc_volatility_15m"],
+            "volatility_bucket": representative["volatility_bucket"],
+        }
+        cost_decomposition = {
+            "gross_price_edge": (
+                float(selected["gross_price_edge"])
+                if selected is not None
+                else 0.0
+            ),
+            "entry_spread_cost": (
+                float(selected["entry_spread_cost"])
+                if selected is not None
+                else 0.0
+            ),
+            "fees": float(selected["fees"]) if selected is not None else 0.0,
+            "slippage": (
+                float(selected["slippage"]) if selected is not None else 0.0
+            ),
+            "liquidity_impact": (
+                float(selected["liquidity_impact"])
+                if selected is not None
+                else 0.0
+            ),
+        }
+        provider_and_missingness = {
+            "provider_health_score": representative["provider_health_score"],
+            "trade_volume_missing": representative["trade_volume_missing"],
+            "depth_missing": representative["depth_missing"],
+            "spread_missing": representative["spread_missing"],
+            "chainlink_reference_missing": representative[
+                "chainlink_reference_missing"
+            ],
+            "feature_complete": representative["feature_complete"],
+        }
         attribution.append(
             {
                 "lineage_id": LINEAGE_ID,
                 "parent_lineage_id": PARENT_LINEAGE_ID,
                 "market_id": market_id,
                 "decision_ts": int(representative["decision_ts"]),
-                "router_input_values": {
-                    "btc_return_15m": representative["unsigned_btc_return_15m"],
-                    "btc_return_regime": representative["btc_return_regime"],
-                    "btc_volatility_15m": representative["btc_volatility_15m"],
-                    "volatility_bucket": representative["volatility_bucket"],
-                },
+                "router_inputs": router_inputs,
+                "router_input_values": router_inputs,
                 "assigned_route": route,
+                "requested_route": route,
                 "requested_expert": route,
+                "expert_id": f"moe_expert_{route}",
                 "expert_training_market_count": training_count,
                 "expert_available": not fallback_used,
                 "fallback_used": fallback_used,
@@ -381,50 +416,25 @@ def build_moe_route_attribution(
                 "selected_side": (
                     str(selected["side"]) if selected is not None else None
                 ),
+                "prediction": float(representative["prediction"]),
+                "selection_score": float(representative["selection_score"]),
                 "accepted": selected is not None,
                 "unit_net_pnl": (
                     float(selected["target"]) if selected is not None else 0.0
                 ),
-                "costs": {
-                    "gross_price_edge": (
-                        float(selected["gross_price_edge"])
-                        if selected is not None
-                        else 0.0
-                    ),
-                    "entry_spread_cost": (
-                        float(selected["entry_spread_cost"])
-                        if selected is not None
-                        else 0.0
-                    ),
-                    "fees": (
-                        float(selected["fees"]) if selected is not None else 0.0
-                    ),
-                    "slippage": (
-                        float(selected["slippage"])
-                        if selected is not None
-                        else 0.0
-                    ),
-                    "liquidity_impact": (
-                        float(selected["liquidity_impact"])
-                        if selected is not None
-                        else 0.0
-                    ),
-                },
+                "cost_decomposition": cost_decomposition,
+                "costs": cost_decomposition,
                 "chronological_half": half_by_market[market_id],
-                "provider_missingness": {
-                    "provider_health_score": representative[
-                        "provider_health_score"
+                "regime_bucket": {
+                    "btc_return_regime": representative[
+                        "btc_return_regime"
                     ],
-                    "trade_volume_missing": representative[
-                        "trade_volume_missing"
+                    "volatility_bucket": representative[
+                        "volatility_bucket"
                     ],
-                    "depth_missing": representative["depth_missing"],
-                    "spread_missing": representative["spread_missing"],
-                    "chainlink_reference_missing": representative[
-                        "chainlink_reference_missing"
-                    ],
-                    "feature_complete": representative["feature_complete"],
                 },
+                "provider_and_missingness": provider_and_missingness,
+                "provider_missingness": provider_and_missingness,
                 "development_only_forever": True,
                 "promotion_evidence_eligible": False,
                 "safety": dict(SAFETY),
@@ -532,8 +542,44 @@ def render_moe_attribution_markdown(report: Mapping[str, Any]) -> str:
             f"{report['fallback']['count_by_requested_expert'].get(route, 0)} | "
             f"{report['pnl_attribution']['pnl_by_route'].get(route, 0.0):.6f} |"
         )
+    fallback_quartiles = report["fallback"]["share_by_chronological_quartile"]
     lines.extend(
         [
+            "",
+            "## Fallback over time",
+            "",
+            "| Q1 | Q2 | Q3 | Q4 |",
+            "|---:|---:|---:|---:|",
+            f"| {fallback_quartiles['q1']:.6f} | "
+            f"{fallback_quartiles['q2']:.6f} | "
+            f"{fallback_quartiles['q3']:.6f} | "
+            f"{fallback_quartiles['q4']:.6f} |",
+            "",
+            "## Expert support growth",
+            "",
+            "| Route | First observed support | Last observed support |",
+            "|---|---:|---:|",
+        ]
+    )
+    for route, support in report["support_evolution_by_route"].items():
+        lines.append(f"| {route} | {support['first']} | {support['last']} |")
+    winner = report["largest_winner_contribution"]
+    missingness = report["provider_and_missingness"]
+    lines.extend(
+        [
+            "",
+            "## Concentration and missingness",
+            "",
+            f"- Native-expert largest winner: "
+            f"{winner['native_expert_largest_winner_pnl']:.6f}",
+            f"- Global-fallback largest winner: "
+            f"{winner['global_fallback_largest_winner_pnl']:.6f}",
+            f"- Trade-volume missing markets: "
+            f"{missingness['trade_volume_missing_count']}/{report['market_count']}",
+            f"- Depth missing markets: "
+            f"{missingness['depth_missing_count']}/{report['market_count']}",
+            f"- Spread missing markets: "
+            f"{missingness['spread_missing_count']}/{report['market_count']}",
             "",
             "This is diagnostic development attribution only. No router, expert, "
             "filter, support threshold, or fallback behavior was changed.",
@@ -1227,10 +1273,30 @@ def _attribution_report(
                 for row in reversed(rows)
                 if row["assigned_route"] == route
             ),
+            "chronological_series": [
+                {
+                    "market_id": row["market_id"],
+                    "chronological_half": row["chronological_half"],
+                    "expert_training_market_count": row[
+                        "expert_training_market_count"
+                    ],
+                    "fallback_used": row["fallback_used"],
+                }
+                for row in rows
+                if row["assigned_route"] == route
+            ],
         }
         for route in sorted(route_counts)
     }
     largest = max(accepted, key=lambda row: float(row["unit_net_pnl"]))
+    largest_native = max(
+        native,
+        key=lambda row: float(row["unit_net_pnl"]),
+    )
+    largest_fallback = max(
+        fallback,
+        key=lambda row: float(row["unit_net_pnl"]),
+    )
     complete = [
         row
         for row in accepted
@@ -1278,6 +1344,10 @@ def _attribution_report(
         "lineage_id": LINEAGE_ID,
         "parent_lineage_id": PARENT_LINEAGE_ID,
         "role": "development_only_moe_route_and_fallback_diagnostic",
+        "architecture_type": (
+            "deterministic_regime_router_with_conditional_experts_"
+            "and_global_fallback"
+        ),
         "created_at": created_at,
         "inputs": dict(inputs),
         "router": {
@@ -1317,6 +1387,9 @@ def _attribution_report(
                 )
                 for half in ("first", "second")
             },
+            "share_by_chronological_quartile": _fallback_share_by_quartile(
+                rows
+            ),
         },
         "pnl_attribution": {
             "pnl_by_route": pnl_by_route,
@@ -1338,6 +1411,17 @@ def _attribution_report(
             "fallback_used": largest["fallback_used"],
             "actual_model_used": largest["actual_model_used"],
             "selected_side": largest["selected_side"],
+        },
+        "largest_winner_contribution": {
+            "overall": _winner_descriptor(largest),
+            "native_expert": _winner_descriptor(largest_native),
+            "global_fallback": _winner_descriptor(largest_fallback),
+            "native_expert_largest_winner_pnl": largest_native[
+                "unit_net_pnl"
+            ],
+            "global_fallback_largest_winner_pnl": largest_fallback[
+                "unit_net_pnl"
+            ],
         },
         "provider_and_missingness": {
             "provider_health_score": _numeric_summary(
@@ -1384,6 +1468,31 @@ def _attribution_report(
                     field="actual_model_used",
                 ).items()
             },
+            "by_route": {
+                route: {
+                    "market_count": len(group),
+                    "trade_volume_missing_count": sum(
+                        row["provider_missingness"]["trade_volume_missing"]
+                        for row in group
+                    ),
+                    "depth_missing_count": sum(
+                        row["provider_missingness"]["depth_missing"]
+                        for row in group
+                    ),
+                    "spread_missing_count": sum(
+                        row["provider_missingness"]["spread_missing"]
+                        for row in group
+                    ),
+                    "feature_complete_count": sum(
+                        row["provider_missingness"]["feature_complete"]
+                        for row in group
+                    ),
+                }
+                for route, group in _group_rows(
+                    rows,
+                    field="assigned_route",
+                ).items()
+            },
         },
         "reconciliation_checks": reconciliations,
         "attribution_reconciliation_passed": all(reconciliations.values()),
@@ -1392,6 +1501,30 @@ def _attribution_report(
         "development_only_forever": True,
         "promotion_evidence_eligible": False,
         "safety": dict(SAFETY),
+    }
+
+
+def _fallback_share_by_quartile(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, float]:
+    quartiles: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for index, row in enumerate(rows):
+        quartile = min(4, int(index * 4 / len(rows)) + 1)
+        quartiles[f"q{quartile}"].append(row)
+    return {
+        name: sum(row["fallback_used"] for row in group) / len(group)
+        for name, group in sorted(quartiles.items())
+    }
+
+
+def _winner_descriptor(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "market_id": row["market_id"],
+        "unit_net_pnl": row["unit_net_pnl"],
+        "assigned_route": row["assigned_route"],
+        "fallback_used": row["fallback_used"],
+        "actual_model_used": row["actual_model_used"],
+        "selected_side": row["selected_side"],
     }
 
 

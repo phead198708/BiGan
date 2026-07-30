@@ -519,6 +519,29 @@ def test_moe_attribution_totals_reconcile() -> None:
 
     assert len(rows) == report["market_count"] == 73
     assert len(accepted) == report["accepted_market_count"] == 72
+    assert report["architecture_type"] == (
+        "deterministic_regime_router_with_conditional_experts_and_global_fallback"
+    )
+    required_fields = {
+        "market_id",
+        "decision_ts",
+        "router_inputs",
+        "requested_route",
+        "expert_id",
+        "expert_training_market_count",
+        "expert_available",
+        "fallback_used",
+        "actual_model_used",
+        "prediction",
+        "selected_side",
+        "accepted",
+        "unit_net_pnl",
+        "cost_decomposition",
+        "chronological_half",
+        "regime_bucket",
+        "provider_and_missingness",
+    }
+    assert all(required_fields <= row.keys() for row in rows)
     assert sum(row["unit_net_pnl"] for row in rows) == pytest.approx(
         report["total_unit_net_pnl"]
     )
@@ -542,6 +565,24 @@ def test_moe_attribution_totals_reconcile() -> None:
         == len(accepted)
     )
     assert report["attribution_reconciliation_passed"] is True
+    assert set(report["fallback"]["share_by_chronological_quartile"]) == {
+        "q1",
+        "q2",
+        "q3",
+        "q4",
+    }
+    assert set(report["support_evolution_by_route"]) == {
+        "high_vol",
+        "bullish",
+        "bearish",
+        "low_vol",
+    }
+    assert set(report["provider_and_missingness"]["by_route"]) == {
+        "high_vol",
+        "bullish",
+        "bearish",
+        "low_vol",
+    }
 
 
 def test_moe_complement_proxy_remains_forbidden() -> None:
@@ -551,25 +592,21 @@ def test_moe_complement_proxy_remains_forbidden() -> None:
     assert family["shared_action_policy"]["complement_proxy_allowed"] is False
 
 
-def test_moe_blocked_lineage_has_no_model_or_collection_authority() -> None:
-    blocked = verify_frozen_json(MOE_CONFIG_DIR / "lineage_blocked_report.json")
+def test_moe_candidate_contract_freezes_architecture_without_collection() -> None:
+    candidate = verify_frozen_json(MOE_CONFIG_DIR / "moe_candidate_contract.json")
 
-    assert blocked["conclusion"] == "BTC-15M-MoE-confirmatory-v1 remains blocked."
-    assert blocked["phase_results"]["phase_3_candidate_contract"]["status"] == (
-        "not_created_blocked_by_phase_0"
+    assert candidate["candidate_id"] == "mixture_of_experts"
+    assert candidate["architecture_type"] == (
+        "deterministic_regime_router_with_conditional_experts_and_global_fallback"
     )
-    assert blocked["not_produced"]["moe_model_manifest"] is True
-    assert blocked["not_produced"]["expert_model_artifacts"] is True
-    assert blocked["not_produced"]["matched_baseline_artifact"] is True
-    assert blocked["collection_state"] == {
-        "fresh_collection_authorized": False,
-        "fresh_collection_started": False,
-        "fresh_outcomes_opened": False,
-        "new_outcome_access_count": 0,
-    }
-    assert blocked["safety"] == SAFETY
-    assert not (MOE_CONFIG_DIR / "moe_candidate_contract.json").exists()
-    assert not (MOE_CONFIG_DIR / "moe_model_manifest.json").exists()
+    assert candidate["hardening_inputs"]["metric_reconciliation"][
+        "reconciliation_passed"
+    ] is True
+    assert candidate["frozen_behavior"]["complement_proxy_allowed"] is False
+    assert candidate["state"]["fresh_collection_authorized"] is False
+    assert candidate["state"]["fresh_collection_started"] is False
+    assert candidate["state"]["fresh_outcomes_opened"] is False
+    assert candidate["safety"] == SAFETY
 
 
 def _sha256(path: Path) -> str:
