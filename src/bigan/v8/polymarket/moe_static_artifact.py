@@ -176,7 +176,7 @@ def train_static_moe_artifact(
             FEATURE_NAMES,
             label_field="settlement_payout",
         )
-        fallback = xgb.train(
+        trained_fallback = xgb.train(
             params=parameters,
             dtrain=train_matrix,
             num_boost_round=int(
@@ -191,11 +191,14 @@ def train_static_moe_artifact(
             ),
             verbose_eval=False,
         )
+        fallback_best_iteration = int(trained_fallback.best_iteration)
+        fallback_best_score = float(trained_fallback.best_score)
+        num_boost_round = fallback_best_iteration + 1
+        fallback = trained_fallback[:num_boost_round]
         fallback_path = staging / "moe_global_fallback.json"
         fallback.save_model(fallback_path)
         expert_boosters: dict[str, xgb.Booster] = {}
         expert_specs: dict[str, dict[str, Any]] = {}
-        num_boost_round = int(fallback.best_iteration) + 1
         for route in EXPERT_IDS:
             support = len(route_market_ids[route])
             available = support >= 20
@@ -343,8 +346,8 @@ def train_static_moe_artifact(
             "global_fallback": {
                 **_bundle_descriptor(fallback_path := bundle_dir / "moe_global_fallback.json", repo_root),
                 "model_format": "xgboost_json",
-                "best_iteration": int(fallback.best_iteration),
-                "best_score": float(fallback.best_score),
+                "best_iteration": fallback_best_iteration,
+                "best_score": fallback_best_score,
                 "num_boost_round_used": num_boost_round,
             },
             "matched_global_baseline": {
