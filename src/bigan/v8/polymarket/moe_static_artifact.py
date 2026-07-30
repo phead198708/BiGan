@@ -57,6 +57,7 @@ def train_static_moe_artifact(
     candidate = _load_pinned_json(candidate_path)
     _validate_candidate_contract(candidate)
     router_path = _verify_contract_descriptor(candidate["contracts"]["router"], repo_root)
+    router_contract = _load_json(router_path)
     feature_path = _verify_contract_descriptor(
         candidate["contracts"]["features"],
         repo_root,
@@ -72,7 +73,6 @@ def train_static_moe_artifact(
     reconciliation = _load_json(reconciliation_path)
     if reconciliation.get("reconciliation_passed") is not True:
         raise ValueError("static MoE training requires passed reconciliation")
-    feature_contract = _load_json(feature_path)
     index_path = (
         repo_root / str(candidate["development_population"]["finalized_index_path"])
     ).resolve()
@@ -99,8 +99,18 @@ def train_static_moe_artifact(
     if len(ordered_markets) != 113:
         raise ValueError("static MoE requires exactly 113 development markets")
     rows_by_route: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    route_feature_contract = {
+        "derived_regime_features": {
+            "btc_return_regime": router_contract["router_inputs"][
+                "btc_return_regime"
+            ],
+            "volatility_bucket": router_contract["router_inputs"][
+                "volatility_bucket"
+            ],
+        }
+    }
     for row in rows:
-        rows_by_route[_raw_row_route(row, feature_contract)].append(row)
+        rows_by_route[_raw_row_route(row, route_feature_contract)].append(row)
     route_market_ids = {
         route: sorted(
             {str(row["market_id"]) for row in rows_by_route[route]},
