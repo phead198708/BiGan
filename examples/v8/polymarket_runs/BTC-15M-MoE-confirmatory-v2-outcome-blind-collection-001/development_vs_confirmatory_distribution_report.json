@@ -18,46 +18,48 @@
   "confirmatory": {
     "liquidity_bucket_distribution": {
       "counts": {
-        "high": 1,
-        "medium": 2
+        "high": 2,
+        "medium": 5
       },
       "percentages": {
-        "high": 33.333333333333336,
-        "medium": 66.66666666666667
+        "high": 28.571428571428573,
+        "medium": 71.42857142857143
       }
     },
     "market_regime_distribution": {
       "counts": {
-        "bullish": 2,
-        "sideways": 1
+        "bullish": 4,
+        "sideways": 3
       },
       "percentages": {
-        "bullish": 66.66666666666667,
-        "sideways": 33.333333333333336
+        "bullish": 57.142857142857146,
+        "sideways": 42.857142857142854
       }
     },
     "router_distribution": {
       "bearish_route_percentage": 0.0,
-      "bullish_route_percentage": 66.66666666666667,
+      "bullish_route_percentage": 57.142857142857146,
       "counts": {
-        "bullish": 2,
-        "low_vol": 1
+        "bullish": 4,
+        "low_vol": 3
       },
-      "fallback_percentage": 33.333333333333336,
+      "fallback_percentage": 42.857142857142854,
       "high_vol_route_percentage": 0.0,
-      "low_vol_route_percentage": 33.333333333333336
+      "low_vol_route_percentage": 42.857142857142854
     },
     "spread_bucket_distribution": {
       "counts": {
-        "low": 3
+        "high": 1,
+        "low": 6
       },
       "percentages": {
-        "low": 100.0
+        "high": 14.285714285714286,
+        "low": 85.71428571428571
       }
     },
     "time_to_close_bucket_distribution": {
       "counts": {
-        "low": 3
+        "low": 7
       },
       "percentages": {
         "low": 100.0
@@ -65,17 +67,17 @@
     },
     "volatility_bucket_distribution": {
       "counts": {
-        "low": 1,
-        "medium": 2
+        "low": 3,
+        "medium": 4
       },
       "percentages": {
-        "low": 33.333333333333336,
-        "medium": 66.66666666666667
+        "low": 42.857142857142854,
+        "medium": 57.142857142857146
       }
     }
   },
-  "confirmatory_market_count": 3,
-  "created_at": "2026-07-30T09:24:04.390679+00:00",
+  "confirmatory_market_count": 7,
+  "created_at": "2026-07-30T10:28:45.920961+00:00",
   "development": {
     "liquidity_bucket_distribution": {
       "counts": {
@@ -150,7 +152,10 @@
   "development_market_count": 113,
   "diagnostic_only": true,
   "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "monitoring_influences_collection": false,
   "monitoring_influences_collection_decisions": false,
+  "monitoring_influences_model": false,
+  "monitoring_only": true,
   "outcomes_accessed": false,
   "pnl_accessed": false,
   "promotion_evidence_eligible": false,

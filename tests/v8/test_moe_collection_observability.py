@@ -13,11 +13,14 @@ from bigan.v8.polymarket.moe_collection_observability import (
     REQUIRED_CURRENT_RAW_FILES,
     TARGET_QUALITY_VALID_MARKETS,
     _allowed_current_path,
+    _assert_decision_time_only_rows,
     _assert_outcome_free_decision_rows,
     _attribution_report,
     _distribution_report,
+    _distribution_shift_report,
     _health_report,
     _load_development_distribution_reference,
+    _load_development_distribution_shift_reference,
     _load_runtime_bundle,
     build_evaluation_dry_run_report,
     build_finalization_checklist,
@@ -49,6 +52,11 @@ def _attempt(
         "rejected": index != 1,
         "provider_health_score": None,
         "missing_feature_count": 3,
+        "missing_feature_names": [
+            "opposite_recent_trade_volume",
+            "selected_minus_opposite_recent_trade_volume",
+            "selected_recent_trade_volume",
+        ],
         "router_inputs": {},
         "regime_bucket": {
             "btc_return_regime": "bullish",
@@ -197,6 +205,219 @@ def test_distribution_report_is_diagnostic_only() -> None:
     assert report["pnl_accessed"] is False
 
 
+def test_shift_report_reads_only_decision_time_fields() -> None:
+    reference = _load_development_distribution_shift_reference(
+        repository_root=REPO_ROOT
+    )
+    _assert_decision_time_only_rows(reference["decision_time_rows"])
+    attempt = _attempt(index=1, quality_valid=True)
+    attempt["market_observation"]["future_price"] = 0.75
+
+    with pytest.raises(ValueError, match="non-decision-time fields"):
+        _distribution_shift_report(
+            development_reference=reference,
+            attempts=[attempt],
+            created_at="2026-07-30T00:00:00+00:00",
+        )
+
+
+def test_shift_report_outcome_field_fails_closed() -> None:
+    _assert_shift_target_field_fails_closed("resolved_outcome")
+
+
+def test_shift_report_pnl_field_fails_closed() -> None:
+    _assert_shift_target_field_fails_closed("unit_pnl")
+
+
+def test_shift_report_settlement_field_fails_closed() -> None:
+    _assert_shift_target_field_fails_closed("settlement_status")
+
+
+def test_shift_monitoring_cannot_mutate_collection_state() -> None:
+    reference = _load_development_distribution_shift_reference(
+        repository_root=REPO_ROOT
+    )
+    attempts = [
+        _attempt(index=1, quality_valid=True),
+        _attempt(index=2, quality_valid=False, provider_failed=True),
+    ]
+    before = json.loads(json.dumps(attempts))
+    report = _distribution_shift_report(
+        development_reference=reference,
+        attempts=attempts,
+        created_at="2026-07-30T00:00:00+00:00",
+    )
+
+    assert attempts == before
+    assert report["monitoring_influences_collection"] is False
+    assert report["collection_stop_condition_created"] is False
+    assert report["market_filtering_allowed"] is False
+
+
+def test_shift_monitoring_cannot_reorder_population() -> None:
+    reference = _load_development_distribution_shift_reference(
+        repository_root=REPO_ROOT
+    )
+    attempts = [
+        _attempt(index=2, quality_valid=True),
+        _attempt(index=1, quality_valid=True),
+    ]
+
+    with pytest.raises(ValueError, match="population was reordered"):
+        _distribution_shift_report(
+            development_reference=reference,
+            attempts=attempts,
+            created_at="2026-07-30T00:00:00+00:00",
+        )
+
+
+def test_shift_population_hashes_remain_separate() -> None:
+    reference = _load_development_distribution_shift_reference(
+        repository_root=REPO_ROOT
+    )
+    report = _distribution_shift_report(
+        development_reference=reference,
+        attempts=[_attempt(index=1, quality_valid=True)],
+        created_at="2026-07-30T00:00:00+00:00",
+    )
+    population = report["population"]
+
+    assert population["development_population_hash"] == (
+        reference["population_identity_sha256"]
+    )
+    assert population["collection_population_hash"] != (
+        population["development_population_hash"]
+    )
+    assert population["hashes_are_separate"] is True
+    assert population["collection_attempt_order"] == [1]
+
+
+def test_shift_router_attribution_reconciles() -> None:
+    reference = _load_development_distribution_shift_reference(
+        repository_root=REPO_ROOT
+    )
+    report = _distribution_shift_report(
+        development_reference=reference,
+        attempts=[
+            _attempt(index=1, quality_valid=True),
+            _attempt(index=2, quality_valid=True),
+        ],
+        created_at="2026-07-30T00:00:00+00:00",
+    )
+    routing = report["moe_routing"]
+
+    assert routing["attribution_reconciled"] is True
+    assert routing["collection_fallback_ratio"] == 0.5
+    assert len(routing["collection_route_attribution"]) == 2
+    assert set(routing["collection_route_attribution"][0]) == {
+        "population_position",
+        "market_id",
+        "decision_ts",
+        "requested_route",
+        "actual_model_used",
+        "expert_available",
+        "fallback_used",
+        "expert_training_market_count",
+    }
+
+
+def test_shift_missingness_metrics_reconcile() -> None:
+    reference = _load_development_distribution_shift_reference(
+        repository_root=REPO_ROOT
+    )
+    report = _distribution_shift_report(
+        development_reference=reference,
+        attempts=[
+            _attempt(index=1, quality_valid=True),
+            _attempt(index=2, quality_valid=True),
+        ],
+        created_at="2026-07-30T00:00:00+00:00",
+    )
+    missingness = report["feature_missingness"]
+    recent = missingness["by_feature"]["selected_recent_trade_volume"]
+
+    assert missingness["reconciled"] is True
+    assert recent["development_missing_count"] == 90
+    assert recent["development_total"] == 113
+    assert recent["collection_missing_count"] == 2
+    assert recent["collection_total"] == 2
+    assert missingness["missing_values_encoded_as_zero"] is False
+
+
+def test_shift_provider_health_metrics_reconcile() -> None:
+    reference = _load_development_distribution_shift_reference(
+        repository_root=REPO_ROOT
+    )
+    report = _distribution_shift_report(
+        development_reference=reference,
+        attempts=[
+            _attempt(index=1, quality_valid=True),
+            _attempt(
+                index=2,
+                quality_valid=False,
+                provider_failed=True,
+                retry_used=True,
+            ),
+        ],
+        created_at="2026-07-30T00:00:00+00:00",
+    )
+    provider = report["provider_quality"]
+
+    assert provider["reconciled"] is True
+    assert provider["raw_market_coverage"]["coverage"] == 1.0
+    assert provider["orderbook_coverage"]["coverage"] == 1.0
+    assert provider["trade_availability"]["coverage"] == 0.5
+    assert provider["paired_executable_ask_coverage"] == 1.0
+    assert provider["retry_rate"] == 0.5
+    assert provider["invalid_attempt_rate"] == 0.5
+    assert provider["causality_violation_count"] == 0
+
+
+def test_shift_drift_metrics_are_deterministic() -> None:
+    reference = _load_development_distribution_shift_reference(
+        repository_root=REPO_ROOT
+    )
+    attempts = [
+        _attempt(index=1, quality_valid=True),
+        _attempt(index=2, quality_valid=True),
+    ]
+    kwargs = {
+        "development_reference": reference,
+        "attempts": attempts,
+        "created_at": "2026-07-30T00:00:00+00:00",
+    }
+
+    assert _distribution_shift_report(**kwargs) == _distribution_shift_report(
+        **kwargs
+    )
+    report = _distribution_shift_report(**kwargs)
+    assert report["drift_metrics"]["deterministic"] is True
+    assert report["drift_metrics"]["automatic_thresholds_present"] is False
+    assert report["drift_metrics"]["numeric"]["combined_spread_bps"][
+        "missing_values_encoded_as_zero"
+    ] is False
+
+
+def test_shift_safety_flags_remain_false() -> None:
+    reference = _load_development_distribution_shift_reference(
+        repository_root=REPO_ROOT
+    )
+    report = _distribution_shift_report(
+        development_reference=reference,
+        attempts=[_attempt(index=1, quality_valid=True)],
+        created_at="2026-07-30T00:00:00+00:00",
+    )
+
+    assert report["outcomes_accessed"] is False
+    assert report["settlement_accessed"] is False
+    assert report["pnl_accessed"] is False
+    assert report["monitoring_only"] is True
+    assert report["monitoring_influences_collection"] is False
+    assert report["monitoring_influences_model"] is False
+    assert report["safety"] == REPORT_SAFETY
+    assert not any(report["safety"].values())
+
+
 def test_frozen_runtime_bundle_loads_without_changing_bytes() -> None:
     bundle = _load_runtime_bundle(REPO_ROOT)
 
@@ -282,3 +503,18 @@ def test_finalization_checklist_keeps_outcome_access_blocked(
     assert report["fresh_collection_started"] is True
     assert report["fresh_outcomes_opened"] is False
     assert not any(report["safety"].values())
+
+
+def _assert_shift_target_field_fails_closed(field: str) -> None:
+    reference = _load_development_distribution_shift_reference(
+        repository_root=REPO_ROOT
+    )
+    attempt = _attempt(index=1, quality_valid=True)
+    attempt["market_observation"][field] = "forbidden"
+
+    with pytest.raises(ValueError, match="forbidden monitoring target field"):
+        _distribution_shift_report(
+            development_reference=reference,
+            attempts=[attempt],
+            created_at="2026-07-30T00:00:00+00:00",
+        )

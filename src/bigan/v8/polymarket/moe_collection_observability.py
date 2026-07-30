@@ -78,6 +78,57 @@ DEVELOPMENT_DISTRIBUTION_REFERENCE = (
     "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/"
     "moe_development_distribution_reference.json"
 )
+DEVELOPMENT_DISTRIBUTION_SHIFT_REFERENCE = (
+    "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/"
+    "moe_development_distribution_shift_reference.json"
+)
+MONITORING_FORBIDDEN_FIELD_TOKENS = (
+    "label",
+    "outcome",
+    "pnl",
+    "resolution",
+    "settlement",
+    "target",
+)
+NUMERIC_DRIFT_FIELDS = (
+    "btc_return_15m",
+    "btc_volatility_15m",
+    "combined_spread_bps",
+    "total_liquidity_depth",
+    "time_to_close_seconds",
+    "market_age_seconds",
+    "provider_health_score",
+)
+NUMERIC_DRIFT_QUANTILES = (0.10, 0.25, 0.50, 0.75, 0.90)
+DISTRIBUTION_SOURCE_ALLOWED_FIELDS = {
+    "accepted",
+    "actual_model_used",
+    "baseline_accepted",
+    "baseline_selected_side",
+    "btc_return_15m",
+    "btc_volatility_15m",
+    "combined_spread_bps",
+    "decision_source",
+    "decision_ts",
+    "expert_available",
+    "expert_id",
+    "expert_training_market_count",
+    "expert_training_support",
+    "fallback_used",
+    "market_age_seconds",
+    "market_id",
+    "market_start_ts",
+    "missing_feature_count",
+    "missing_feature_names",
+    "provider_health_score",
+    "regime_bucket",
+    "rejected",
+    "requested_route",
+    "router_inputs",
+    "selected_side",
+    "time_to_close_seconds",
+    "total_liquidity_depth",
+}
 
 
 def build_collection_observability(
@@ -117,19 +168,33 @@ def build_collection_observability(
         confirmatory=_market_observations(attempts),
         created_at=stamp,
     )
+    shift_reference = _load_development_distribution_shift_reference(
+        repository_root=repo_root,
+    )
+    shift = _distribution_shift_report(
+        development_reference=shift_reference,
+        attempts=attempts,
+        created_at=stamp,
+    )
     health_path = root / "confirmatory_collection_health_report.json"
     health_md_path = root / "confirmatory_collection_health_report.md"
     distribution_path = root / "development_vs_confirmatory_distribution_report.json"
     attribution_path = root / "moe_live_collection_attribution_report.json"
+    shift_path = root / "moe_collection_distribution_shift_report.json"
+    shift_md_path = root / "moe_collection_distribution_shift_report.md"
     _atomic_write_json(health_path, health)
     _atomic_write_text(health_md_path, _health_markdown(health))
     _atomic_write_json(distribution_path, distribution)
     _atomic_write_json(attribution_path, attribution)
+    _atomic_write_json(shift_path, shift)
+    _atomic_write_text(shift_md_path, _distribution_shift_markdown(shift))
     for path in (
         health_path,
         health_md_path,
         distribution_path,
         attribution_path,
+        shift_path,
+        shift_md_path,
     ):
         _write_sha_sidecar(path)
     return {
@@ -139,6 +204,8 @@ def build_collection_observability(
         "distribution_report_sha256": sha256_file(distribution_path),
         "attribution_report_path": attribution_path,
         "attribution_report_sha256": sha256_file(attribution_path),
+        "distribution_shift_report_path": shift_path,
+        "distribution_shift_report_sha256": sha256_file(shift_path),
         "attempts_consumed": health["progress"]["attempts_consumed"],
         "quality_valid_market_count": health["progress"][
             "quality_valid_market_count"
@@ -182,6 +249,55 @@ def build_development_distribution_reference(
         "outcomes_accessed": False,
         "settlement_accessed": False,
         "pnl_accessed": False,
+        "promotion_evidence_eligible": False,
+        "safety": dict(REPORT_SAFETY),
+    }
+    _write_frozen_json(target, report)
+    return report
+
+
+def build_development_distribution_shift_reference(
+    *,
+    output_path: Path | str,
+    repository_root: Path | str | None = None,
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    """Freeze decision-time-only development rows for drift monitoring."""
+
+    repo_root = Path(repository_root or REPO_ROOT).resolve()
+    target = Path(output_path).resolve()
+    if not target.is_relative_to(repo_root):
+        raise ValueError("development shift reference escaped repository")
+    bundle = _load_runtime_bundle(repo_root)
+    observations, source_index = _derive_development_market_observations(
+        repository_root=repo_root,
+        bundle=bundle,
+    )
+    rows = [
+        _distribution_monitor_row(row, population_position=index)
+        for index, row in enumerate(observations, start=1)
+    ]
+    _assert_decision_time_only_rows(rows)
+    report = {
+        "schema_version": (
+            "bigan-btc-15m-moe-development-distribution-shift-reference-v1"
+        ),
+        "lineage_id": LINEAGE_ID,
+        "created_at": _frozen_created_at(target, requested=created_at),
+        "role": "outcome_free_distribution_shift_reference_only",
+        "candidate_bundle_hash": CANDIDATE_BUNDLE_HASH,
+        "source_development_index": source_index,
+        "development_market_count": len(rows),
+        "population_order": "source_index_order",
+        "population_identity_sha256": _population_identity_sha256(rows),
+        "decision_time_rows_sha256": canonical_json_sha256(rows),
+        "decision_time_rows": rows,
+        "outcomes_accessed": False,
+        "settlement_accessed": False,
+        "pnl_accessed": False,
+        "monitoring_only": True,
+        "monitoring_influences_collection": False,
+        "monitoring_influences_model": False,
         "promotion_evidence_eligible": False,
         "safety": dict(REPORT_SAFETY),
     }
@@ -464,10 +580,9 @@ def _load_completed_captures(root: Path) -> list[dict[str, Any]]:
         raise ValueError("unexpected confirmatory batch id")
     if int(progress.get("finalization_attempt_count") or 0) != 0:
         raise ValueError("current collection attempted finalization")
-    captures = sorted(
-        (dict(row) for row in progress.get("captures") or []),
-        key=lambda row: int(row["round_index"]),
-    )
+    captures = [
+        dict(row) for row in progress.get("captures") or []
+    ]
     if len(captures) > MAXIMUM_ATTEMPTS:
         raise ValueError("attempt cap exceeded")
     for expected, capture in enumerate(captures, start=1):
@@ -858,6 +973,12 @@ def _predict_market(
                 "time_to_close_seconds": _json_finite_or_none(
                     dict(feature_row["features"]).get("time_to_close_seconds")
                 ),
+                "market_age_seconds": _json_finite_or_none(
+                    dict(feature_row["features"]).get("market_age_seconds")
+                ),
+                "btc_return_15m": _json_finite_or_none(
+                    dict(feature_row["features"]).get("btc_return_15m")
+                ),
                 "btc_volatility_15m": _json_finite_or_none(
                     dict(feature_row["features"]).get("btc_volatility_15m")
                 ),
@@ -1089,6 +1210,9 @@ def _health_report(
         "outcomes_accessed": False,
         "settlement_accessed": False,
         "pnl_accessed": False,
+        "monitoring_only": True,
+        "monitoring_influences_collection": False,
+        "monitoring_influences_model": False,
         "promotion_evidence_eligible": False,
         "safety": dict(REPORT_SAFETY),
     }
@@ -1131,6 +1255,12 @@ def _attribution_report(
         "current_confirmatory_outcomes_accessed": False,
         "current_confirmatory_settlement_accessed": False,
         "current_confirmatory_pnl_accessed": False,
+        "outcomes_accessed": False,
+        "settlement_accessed": False,
+        "pnl_accessed": False,
+        "monitoring_only": True,
+        "monitoring_influences_collection": False,
+        "monitoring_influences_model": False,
         "monitoring_influences_collection_decisions": False,
         "promotion_evidence_eligible": False,
         "safety": dict(REPORT_SAFETY),
@@ -1205,6 +1335,758 @@ def _load_development_distribution_reference(
     return rows
 
 
+def _load_development_distribution_shift_reference(
+    *,
+    repository_root: Path,
+) -> dict[str, Any]:
+    path = (repository_root / DEVELOPMENT_DISTRIBUTION_SHIFT_REFERENCE).resolve()
+    sidecar = path.with_suffix(".sha256")
+    if not path.is_relative_to(repository_root):
+        raise ValueError("development shift reference escaped repository")
+    if not path.is_file() or not sidecar.is_file():
+        raise ValueError("development shift reference is not frozen")
+    if sidecar.read_text(encoding="utf-8").strip() != sha256_file(path):
+        raise ValueError("development shift reference SHA mismatch")
+    payload = _load_json(path)
+    if payload.get("candidate_bundle_hash") != CANDIDATE_BUNDLE_HASH:
+        raise ValueError("development shift candidate hash changed")
+    rows = list(payload.get("decision_time_rows") or [])
+    if len(rows) != 113 or len(rows) != int(
+        payload.get("development_market_count") or 0
+    ):
+        raise ValueError("development shift population must contain 113 markets")
+    _assert_decision_time_only_rows(rows)
+    if canonical_json_sha256(rows) != payload.get("decision_time_rows_sha256"):
+        raise ValueError("development shift row hash mismatch")
+    if _population_identity_sha256(rows) != payload.get(
+        "population_identity_sha256"
+    ):
+        raise ValueError("development shift population identity mismatch")
+    for field in (
+        "outcomes_accessed",
+        "settlement_accessed",
+        "pnl_accessed",
+        "monitoring_influences_collection",
+        "monitoring_influences_model",
+        "promotion_evidence_eligible",
+    ):
+        if payload.get(field) is not False:
+            raise ValueError(f"development shift safety boundary changed: {field}")
+    if payload.get("monitoring_only") is not True:
+        raise ValueError("development shift reference is not monitoring-only")
+    if payload.get("safety") != REPORT_SAFETY or any(payload["safety"].values()):
+        raise ValueError("development shift safety flags changed")
+    return payload
+
+
+def _distribution_shift_report(
+    *,
+    development_reference: Mapping[str, Any],
+    attempts: Sequence[Mapping[str, Any]],
+    created_at: str,
+) -> dict[str, Any]:
+    development = [
+        dict(row) for row in development_reference["decision_time_rows"]
+    ]
+    attempt_indices = [int(row["attempt_index"]) for row in attempts]
+    if attempt_indices != list(range(1, len(attempts) + 1)):
+        raise ValueError("confirmatory attempt population was reordered")
+    collection = [
+        _distribution_monitor_row(
+            dict(attempt["market_observation"]),
+            population_position=int(attempt["attempt_index"]),
+        )
+        for attempt in attempts
+    ]
+    _assert_decision_time_only_rows(development)
+    _assert_decision_time_only_rows(collection)
+    if [int(row["population_position"]) for row in collection] != attempt_indices:
+        raise ValueError("confirmatory monitoring population order changed")
+
+    structure_fields = {
+        "spread_buckets": "combined_spread_bps",
+        "liquidity_buckets": "total_liquidity_depth",
+        "time_to_close_buckets": "time_to_close_seconds",
+        "market_age_buckets": "market_age_seconds",
+    }
+    structure_cutoffs = {
+        output_name: _tertile_cutoffs(development, field)
+        for output_name, field in structure_fields.items()
+    }
+    direction = _categorical_comparison(
+        [_direction_regime(row) for row in development],
+        [_direction_regime(row) for row in collection],
+        categories=("bullish", "bearish", "sideways_or_unknown"),
+    )
+    volatility = _categorical_comparison(
+        [_volatility_regime(row) for row in development],
+        [_volatility_regime(row) for row in collection],
+        categories=("high_vol", "low_vol", "unknown"),
+    )
+    requested_route = _categorical_comparison(
+        [str(row["requested_route"]) for row in development],
+        [str(row["requested_route"]) for row in collection],
+        categories=("high_vol", "bullish", "bearish", "low_vol"),
+    )
+    actual_model = _categorical_comparison(
+        [str(row["actual_model_category"]) for row in development],
+        [str(row["actual_model_category"]) for row in collection],
+        categories=("native_expert", "global_fallback"),
+    )
+    structure = {
+        output_name: {
+            "development_cutoffs": structure_cutoffs[output_name],
+            "comparison": _categorical_comparison(
+                [
+                    _bucket(row.get(field), structure_cutoffs[output_name])
+                    for row in development
+                ],
+                [
+                    _bucket(row.get(field), structure_cutoffs[output_name])
+                    for row in collection
+                ],
+                categories=("low", "medium", "high", "missing"),
+            ),
+        }
+        for output_name, field in structure_fields.items()
+    }
+    missingness = _feature_missingness_shift(
+        development=development,
+        collection=collection,
+    )
+    provider_quality = _provider_quality_report(attempts)
+    numeric = {
+        field: _numeric_shift(
+            [row.get(field) for row in development],
+            [row.get(field) for row in collection],
+        )
+        for field in NUMERIC_DRIFT_FIELDS
+    }
+    collection_hash = _population_identity_sha256(collection)
+    development_hash = str(
+        development_reference["population_identity_sha256"]
+    )
+    report = {
+        "schema_version": (
+            "bigan-btc-15m-moe-collection-distribution-shift-report-v1"
+        ),
+        "lineage_id": LINEAGE_ID,
+        "run_id": "BTC-15M-MoE-confirmatory-v2-outcome-blind-collection-001",
+        "reporting_timestamp": created_at,
+        "role": "outcome_blind_diagnostic_monitoring_only",
+        "candidate_bundle_hash": CANDIDATE_BUNDLE_HASH,
+        "population": {
+            "development_market_count": len(development),
+            "collection_market_count": len(collection),
+            "development_population_hash": development_hash,
+            "collection_population_hash": collection_hash,
+            "development_decision_rows_hash": canonical_json_sha256(
+                development
+            ),
+            "collection_decision_rows_hash": canonical_json_sha256(collection),
+            "development_source_decision_rows_hash": (
+                development_reference["decision_time_rows_sha256"]
+            ),
+            "hashes_are_separate": True,
+            "collection_attempt_order": attempt_indices,
+            "collection_order_preserved": True,
+            "collection_rows_filtered": False,
+            "collection_rows_reordered": False,
+        },
+        "regime_distribution": {
+            "direction": direction,
+            "volatility": volatility,
+        },
+        "market_structure": structure,
+        "moe_routing": {
+            "requested_route": requested_route,
+            "actual_model": actual_model,
+            "development_fallback_ratio": _ratio_true(
+                development, "fallback_used"
+            ),
+            "collection_fallback_ratio": _ratio_true(
+                collection, "fallback_used"
+            ),
+            "fallback_ratio_delta": (
+                _ratio_true(collection, "fallback_used")
+                - _ratio_true(development, "fallback_used")
+            ),
+            "collection_route_attribution": [
+                {
+                    "population_position": row["population_position"],
+                    "market_id": row["market_id"],
+                    "decision_ts": row["decision_ts"],
+                    "requested_route": row["requested_route"],
+                    "actual_model_used": row["actual_model_used"],
+                    "expert_available": row["expert_available"],
+                    "fallback_used": row["fallback_used"],
+                    "expert_training_market_count": row[
+                        "expert_training_market_count"
+                    ],
+                }
+                for row in collection
+            ],
+            "attribution_reconciled": (
+                len(collection)
+                == sum(
+                    int(value["collection_count"])
+                    for value in requested_route["categories"].values()
+                )
+                == sum(
+                    int(value["collection_count"])
+                    for value in actual_model["categories"].values()
+                )
+            ),
+            "routing_modification_allowed": False,
+        },
+        "feature_missingness": missingness,
+        "provider_quality": provider_quality,
+        "drift_metrics": {
+            "numeric": numeric,
+            "categorical": {
+                "direction_total_variation_distance": direction[
+                    "total_variation_distance"
+                ],
+                "volatility_total_variation_distance": volatility[
+                    "total_variation_distance"
+                ],
+                "requested_route_total_variation_distance": requested_route[
+                    "total_variation_distance"
+                ],
+                "actual_model_total_variation_distance": actual_model[
+                    "total_variation_distance"
+                ],
+                "market_structure_total_variation_distance": {
+                    name: panel["comparison"]["total_variation_distance"]
+                    for name, panel in structure.items()
+                },
+            },
+            "deterministic": True,
+            "automatic_thresholds_present": False,
+            "materiality_conclusion": (
+                "not_assigned_monitoring_has_no_threshold_or_gate"
+            ),
+        },
+        "outcomes_accessed": False,
+        "settlement_accessed": False,
+        "pnl_accessed": False,
+        "monitoring_only": True,
+        "monitoring_influences_collection": False,
+        "monitoring_influences_model": False,
+        "monitoring_influences_promotion": False,
+        "market_filtering_allowed": False,
+        "population_reordering_allowed": False,
+        "collection_stop_condition_created": False,
+        "promotion_evidence_eligible": False,
+        "safety": dict(REPORT_SAFETY),
+    }
+    _assert_distribution_shift_report(report)
+    return report
+
+
+def _distribution_monitor_row(
+    row: Mapping[str, Any],
+    *,
+    population_position: int,
+) -> dict[str, Any]:
+    _assert_distribution_source_row(row)
+    router_inputs = dict(row.get("router_inputs") or {})
+    regime_bucket = dict(row.get("regime_bucket") or {})
+    missing_names = sorted(
+        {str(name) for name in (row.get("missing_feature_names") or [])}
+    )
+    time_to_close = _json_finite_or_none(row.get("time_to_close_seconds"))
+    market_age = _json_finite_or_none(row.get("market_age_seconds"))
+    if market_age is None and time_to_close is not None:
+        market_age = 900.0 - time_to_close
+    fallback_used = bool(row["fallback_used"])
+    output = {
+        "population_position": int(population_position),
+        "market_id": str(row["market_id"]),
+        "market_start_ts": int(row["market_start_ts"]),
+        "decision_ts": int(row["decision_ts"]),
+        "btc_return_15m": _json_finite_or_none(
+            row.get("btc_return_15m", router_inputs.get("btc_return_15m"))
+        ),
+        "btc_volatility_15m": _json_finite_or_none(
+            row.get(
+                "btc_volatility_15m",
+                router_inputs.get("btc_volatility_15m"),
+            )
+        ),
+        "direction_regime": _normalize_direction_regime(
+            regime_bucket.get("btc_return_regime")
+        ),
+        "volatility_regime": _normalize_volatility_regime(
+            regime_bucket.get("volatility_bucket")
+        ),
+        "requested_route": str(row["requested_route"]),
+        "actual_model_used": str(row["actual_model_used"]),
+        "actual_model_category": (
+            "global_fallback" if fallback_used else "native_expert"
+        ),
+        "expert_available": bool(row["expert_available"]),
+        "fallback_used": fallback_used,
+        "expert_training_market_count": int(
+            row.get(
+                "expert_training_market_count",
+                row.get("expert_training_support"),
+            )
+        ),
+        "selected_side": row.get("selected_side"),
+        "accepted": bool(row.get("accepted")),
+        "combined_spread_bps": _json_finite_or_none(
+            row.get("combined_spread_bps")
+        ),
+        "total_liquidity_depth": _json_finite_or_none(
+            row.get("total_liquidity_depth")
+        ),
+        "time_to_close_seconds": time_to_close,
+        "market_age_seconds": market_age,
+        "provider_health_score": _json_finite_or_none(
+            row.get("provider_health_score")
+        ),
+        "missing_feature_names": missing_names,
+        "missing_feature_count": len(missing_names),
+        "missing_values_encoded_as_zero": False,
+    }
+    _assert_decision_time_row(output)
+    return output
+
+
+def _population_identity_sha256(
+    rows: Sequence[Mapping[str, Any]],
+) -> str:
+    identities = [
+        {
+            "population_position": int(row["population_position"]),
+            "market_id": str(row["market_id"]),
+            "decision_ts": int(row["decision_ts"]),
+        }
+        for row in rows
+    ]
+    return canonical_json_sha256(identities)
+
+
+def _categorical_comparison(
+    development: Sequence[str],
+    collection: Sequence[str],
+    *,
+    categories: Sequence[str],
+) -> dict[str, Any]:
+    ordered_categories = list(
+        dict.fromkeys(
+            [
+                *categories,
+                *sorted((set(development) | set(collection)) - set(categories)),
+            ]
+        )
+    )
+    development_counts = Counter(development)
+    collection_counts = Counter(collection)
+    development_total = len(development)
+    collection_total = len(collection)
+    output = {}
+    for category in ordered_categories:
+        development_percentage = _percentage(
+            development_counts[category],
+            development_total,
+        )
+        collection_percentage = _percentage(
+            collection_counts[category],
+            collection_total,
+        )
+        output[category] = {
+            "development_count": development_counts[category],
+            "development_percentage": development_percentage,
+            "collection_count": collection_counts[category],
+            "collection_percentage": collection_percentage,
+            "percentage_point_delta": (
+                collection_percentage - development_percentage
+            ),
+        }
+    return {
+        "categories": output,
+        "development_total": development_total,
+        "collection_total": collection_total,
+        "total_variation_distance": 0.5
+        * sum(
+            abs(
+                output[category]["collection_percentage"]
+                - output[category]["development_percentage"]
+            )
+            / 100.0
+            for category in ordered_categories
+        ),
+        "diagnostic_only": True,
+    }
+
+
+def _numeric_shift(
+    development_values: Sequence[Any],
+    collection_values: Sequence[Any],
+) -> dict[str, Any]:
+    development = _numeric_summary(development_values)
+    collection = _numeric_summary(collection_values)
+    return {
+        "development": development,
+        "collection": collection,
+        "mean_shift": _optional_difference(
+            collection["mean"], development["mean"]
+        ),
+        "std_shift": _optional_difference(
+            collection["std"], development["std"]
+        ),
+        "quantile_shift": {
+            key: _optional_difference(
+                collection["quantiles"][key],
+                development["quantiles"][key],
+            )
+            for key in development["quantiles"]
+        },
+        "missing_values_encoded_as_zero": False,
+        "diagnostic_only": True,
+    }
+
+
+def _numeric_summary(values: Sequence[Any]) -> dict[str, Any]:
+    finite = np.asarray(
+        [float(value) for value in values if _finite(value)],
+        dtype=np.float64,
+    )
+    quantiles = {
+        f"q{int(quantile * 100):02d}": (
+            float(np.quantile(finite, quantile)) if len(finite) else None
+        )
+        for quantile in NUMERIC_DRIFT_QUANTILES
+    }
+    return {
+        "observed_count": int(len(finite)),
+        "missing_count": len(values) - int(len(finite)),
+        "mean": float(np.mean(finite)) if len(finite) else None,
+        "std": float(np.std(finite)) if len(finite) else None,
+        "quantiles": quantiles,
+    }
+
+
+def _feature_missingness_shift(
+    *,
+    development: Sequence[Mapping[str, Any]],
+    collection: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    by_feature = {
+        name: _missingness_comparison(
+            development=development,
+            collection=collection,
+            required_missing_features=(name,),
+        )
+        for name in BASE_FEATURE_NAMES
+    }
+    important_groups = {
+        "recent_trade_volume": ("selected_recent_trade_volume",),
+        "opposite_trade_volume": ("opposite_recent_trade_volume",),
+        "orderbook_depth": (
+            "selected_liquidity_depth",
+            "opposite_liquidity_depth",
+        ),
+        "trade_tape_coverage": (
+            "selected_recent_trade_volume",
+            "opposite_recent_trade_volume",
+        ),
+        "btc_feature_coverage": tuple(
+            name
+            for name in BASE_FEATURE_NAMES
+            if "btc_return" in name or name.startswith("btc_volatility")
+        ),
+        "chainlink_reference_coverage": (
+            "signed_chainlink_reference_distance",
+            "signed_btc_mid_to_chainlink_relative_distance",
+        ),
+    }
+    return {
+        "by_feature": by_feature,
+        "important_features": {
+            name: _missingness_comparison(
+                development=development,
+                collection=collection,
+                required_missing_features=features,
+            )
+            for name, features in important_groups.items()
+        },
+        "development_feature_count": len(BASE_FEATURE_NAMES),
+        "collection_feature_count": len(BASE_FEATURE_NAMES),
+        "missing_values_encoded_as_zero": False,
+        "reconciled": (
+            all(
+                panel["development_missing_count"]
+                <= panel["development_total"]
+                and panel["collection_missing_count"]
+                <= panel["collection_total"]
+                for panel in by_feature.values()
+            )
+        ),
+    }
+
+
+def _missingness_comparison(
+    *,
+    development: Sequence[Mapping[str, Any]],
+    collection: Sequence[Mapping[str, Any]],
+    required_missing_features: Sequence[str],
+) -> dict[str, Any]:
+    required = set(required_missing_features)
+
+    def missing_count(rows: Sequence[Mapping[str, Any]]) -> int:
+        return sum(
+            bool(required & set(row["missing_feature_names"]))
+            for row in rows
+        )
+
+    development_missing = missing_count(development)
+    collection_missing = missing_count(collection)
+    development_rate = (
+        development_missing / len(development) if development else 0.0
+    )
+    collection_rate = (
+        collection_missing / len(collection) if collection else 0.0
+    )
+    return {
+        "feature_group": list(required_missing_features),
+        "development_total": len(development),
+        "development_missing_count": development_missing,
+        "development_missing_rate": development_rate,
+        "collection_total": len(collection),
+        "collection_missing_count": collection_missing,
+        "collection_missing_rate": collection_rate,
+        "missing_rate_delta": collection_rate - development_rate,
+    }
+
+
+def _provider_quality_report(
+    attempts: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    total = len(attempts)
+
+    def coverage(field: str) -> dict[str, Any]:
+        covered = sum(
+            bool(row["data_quality"][field]) for row in attempts
+        )
+        return {
+            "covered_attempts": covered,
+            "total_attempts": total,
+            "coverage": covered / total if total else 0.0,
+        }
+
+    invalid = sum(not bool(row["quality"]["quality_valid"]) for row in attempts)
+    retries = sum(bool(row["retry_used"]) for row in attempts)
+    causality = sum(
+        int(row["data_quality"]["causality_violation_count"])
+        for row in attempts
+    )
+    paired_coverage = _mean_or_zero(
+        [
+            float(row["data_quality"]["paired_executable_ask_coverage"])
+            for row in attempts
+        ]
+    )
+    return {
+        "raw_market_coverage": coverage("raw_market_capture_coverage"),
+        "orderbook_coverage": coverage("orderbook_coverage"),
+        "trade_availability": coverage("trade_tape_available"),
+        "btc_feature_coverage": _mean_or_zero(
+            [
+                float(row["data_quality"]["btc_feature_coverage"])
+                for row in attempts
+            ]
+        ),
+        "chainlink_reference_coverage": coverage(
+            "chainlink_reference_coverage"
+        ),
+        "paired_executable_ask_coverage": paired_coverage,
+        "retry_count": retries,
+        "retry_rate": retries / total if total else 0.0,
+        "invalid_attempt_count": invalid,
+        "invalid_attempt_rate": invalid / total if total else 0.0,
+        "causality_violation_count": causality,
+        "causality_violation_rate_per_attempt": (
+            causality / total if total else 0.0
+        ),
+        "reconciled": all(
+            0.0 <= value <= 1.0
+            for value in (
+                paired_coverage,
+                retries / total if total else 0.0,
+                invalid / total if total else 0.0,
+            )
+        ),
+        "diagnostic_only": True,
+    }
+
+
+def _direction_regime(row: Mapping[str, Any]) -> str:
+    return _normalize_direction_regime(row.get("direction_regime"))
+
+
+def _normalize_direction_regime(value: Any) -> str:
+    normalized = str(value or "").lower()
+    return (
+        normalized
+        if normalized in {"bullish", "bearish"}
+        else "sideways_or_unknown"
+    )
+
+
+def _volatility_regime(row: Mapping[str, Any]) -> str:
+    return _normalize_volatility_regime(row.get("volatility_regime"))
+
+
+def _normalize_volatility_regime(value: Any) -> str:
+    normalized = str(value or "").lower()
+    if normalized in {"high", "high_vol"}:
+        return "high_vol"
+    if normalized in {"low", "medium", "low_vol"}:
+        return "low_vol"
+    return "unknown"
+
+
+def _ratio_true(rows: Sequence[Mapping[str, Any]], field: str) -> float:
+    return (
+        sum(bool(row[field]) for row in rows) / len(rows)
+        if rows
+        else 0.0
+    )
+
+
+def _optional_difference(
+    left: float | None,
+    right: float | None,
+) -> float | None:
+    return None if left is None or right is None else left - right
+
+
+def _assert_no_forbidden_monitoring_fields(value: Any, path: str = "row") -> None:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            key_text = str(key).lower()
+            if any(
+                token in key_text
+                for token in MONITORING_FORBIDDEN_FIELD_TOKENS
+            ):
+                raise ValueError(
+                    f"forbidden monitoring target field: {path}.{key}"
+                )
+            _assert_no_forbidden_monitoring_fields(
+                nested,
+                f"{path}.{key}",
+            )
+    elif isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        for index, nested in enumerate(value):
+            _assert_no_forbidden_monitoring_fields(
+                nested,
+                f"{path}[{index}]",
+            )
+
+
+def _assert_distribution_source_row(row: Mapping[str, Any]) -> None:
+    _assert_no_forbidden_monitoring_fields(row)
+    unknown = set(row) - DISTRIBUTION_SOURCE_ALLOWED_FIELDS
+    if unknown:
+        raise ValueError(
+            "distribution source contains non-decision-time fields: "
+            + ", ".join(sorted(unknown))
+        )
+
+
+def _assert_decision_time_only_rows(
+    rows: Sequence[Mapping[str, Any]],
+) -> None:
+    for expected_position, row in enumerate(rows, start=1):
+        _assert_decision_time_row(row)
+        if int(row["population_position"]) != expected_position:
+            raise ValueError("monitoring population was reordered")
+
+
+def _assert_decision_time_row(row: Mapping[str, Any]) -> None:
+    required_fields = {
+        "population_position",
+        "market_id",
+        "market_start_ts",
+        "decision_ts",
+        "btc_return_15m",
+        "btc_volatility_15m",
+        "direction_regime",
+        "volatility_regime",
+        "requested_route",
+        "actual_model_used",
+        "actual_model_category",
+        "expert_available",
+        "fallback_used",
+        "expert_training_market_count",
+        "selected_side",
+        "accepted",
+        "combined_spread_bps",
+        "total_liquidity_depth",
+        "time_to_close_seconds",
+        "market_age_seconds",
+        "provider_health_score",
+        "missing_feature_names",
+        "missing_feature_count",
+        "missing_values_encoded_as_zero",
+    }
+    _assert_no_forbidden_monitoring_fields(row)
+    if set(row) != required_fields:
+        raise ValueError("monitoring row field contract changed")
+    if row["missing_values_encoded_as_zero"] is not False:
+        raise ValueError("monitoring encoded missing values as zero")
+    names = list(row["missing_feature_names"])
+    if names != sorted(set(names)):
+        raise ValueError("monitoring missing feature names are not canonical")
+    if int(row["missing_feature_count"]) != len(names):
+        raise ValueError("monitoring missingness count mismatch")
+
+
+def _assert_distribution_shift_report(report: Mapping[str, Any]) -> None:
+    for field in (
+        "outcomes_accessed",
+        "settlement_accessed",
+        "pnl_accessed",
+        "monitoring_influences_collection",
+        "monitoring_influences_model",
+        "monitoring_influences_promotion",
+        "market_filtering_allowed",
+        "population_reordering_allowed",
+        "collection_stop_condition_created",
+        "promotion_evidence_eligible",
+    ):
+        if report.get(field) is not False:
+            raise ValueError(f"distribution shift safety field changed: {field}")
+    if report.get("monitoring_only") is not True:
+        raise ValueError("distribution shift report is not monitoring-only")
+    if report.get("safety") != REPORT_SAFETY or any(report["safety"].values()):
+        raise ValueError("distribution shift safety flags changed")
+    population = dict(report["population"])
+    if (
+        population["collection_rows_filtered"] is not False
+        or population["collection_rows_reordered"] is not False
+        or population["collection_order_preserved"] is not True
+    ):
+        raise ValueError("distribution shift population contract changed")
+    if (
+        population["hashes_are_separate"] is not True
+        or population["development_population_hash"]
+        == population["collection_population_hash"]
+    ):
+        raise ValueError("distribution shift population hashes are not separate")
+    if report["moe_routing"]["attribution_reconciled"] is not True:
+        raise ValueError("distribution shift route attribution mismatch")
+    if report["feature_missingness"]["reconciled"] is not True:
+        raise ValueError("distribution shift missingness mismatch")
+    if report["provider_quality"]["reconciled"] is not True:
+        raise ValueError("distribution shift provider quality mismatch")
+
+
 def _market_observations(
     attempts: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1243,6 +2125,9 @@ def _distribution_report(
         "outcomes_accessed": False,
         "settlement_accessed": False,
         "pnl_accessed": False,
+        "monitoring_only": True,
+        "monitoring_influences_collection": False,
+        "monitoring_influences_model": False,
         "promotion_evidence_eligible": False,
         "safety": dict(REPORT_SAFETY),
     }
@@ -1656,6 +2541,120 @@ def _write_frozen_json(path: Path, payload: Mapping[str, Any]) -> None:
     _write_sha_sidecar(path)
 
 
+def _distribution_shift_markdown(report: Mapping[str, Any]) -> str:
+    population = dict(report["population"])
+    direction = dict(report["regime_distribution"]["direction"]["categories"])
+    routes = dict(report["moe_routing"]["requested_route"]["categories"])
+    missingness = dict(report["feature_missingness"]["important_features"])
+    provider = dict(report["provider_quality"])
+    lines = [
+        "# BTC 15m MoE collection distribution shift",
+        "",
+        "- Role: outcome-blind diagnostic monitoring only",
+        f"- Reporting timestamp: `{report['reporting_timestamp']}`",
+        f"- Candidate bundle: `{report['candidate_bundle_hash']}`",
+        f"- Development markets: `{population['development_market_count']}`",
+        f"- Collection markets: `{population['collection_market_count']}`",
+        f"- Development population hash: "
+        f"`{population['development_population_hash']}`",
+        f"- Collection population hash: "
+        f"`{population['collection_population_hash']}`",
+        "",
+        "## Direction regime",
+        "",
+        "| Regime | Development | Collection | Delta (pp) |",
+        "|---|---:|---:|---:|",
+    ]
+    for name in ("bullish", "bearish", "sideways_or_unknown"):
+        panel = direction[name]
+        lines.append(
+            f"| {name} | {panel['development_count']} "
+            f"({panel['development_percentage']:.2f}%) | "
+            f"{panel['collection_count']} "
+            f"({panel['collection_percentage']:.2f}%) | "
+            f"{panel['percentage_point_delta']:+.2f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Requested route",
+            "",
+            "| Route | Development | Collection | Delta (pp) |",
+            "|---|---:|---:|---:|",
+        ]
+    )
+    for name in ("high_vol", "bullish", "bearish", "low_vol"):
+        panel = routes[name]
+        lines.append(
+            f"| {name} | {panel['development_count']} "
+            f"({panel['development_percentage']:.2f}%) | "
+            f"{panel['collection_count']} "
+            f"({panel['collection_percentage']:.2f}%) | "
+            f"{panel['percentage_point_delta']:+.2f} |"
+        )
+    lines.extend(
+        [
+            "",
+            f"- Development fallback ratio: "
+            f"`{report['moe_routing']['development_fallback_ratio']:.6f}`",
+            f"- Collection fallback ratio: "
+            f"`{report['moe_routing']['collection_fallback_ratio']:.6f}`",
+            "",
+            "## Important feature missingness",
+            "",
+            "| Feature group | Development missing | Collection missing | Delta |",
+            "|---|---:|---:|---:|",
+        ]
+    )
+    for name, panel in missingness.items():
+        lines.append(
+            f"| {name} | {panel['development_missing_rate']:.4f} | "
+            f"{panel['collection_missing_rate']:.4f} | "
+            f"{panel['missing_rate_delta']:+.4f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Collection provider quality",
+            "",
+            f"- Raw market coverage: "
+            f"`{provider['raw_market_coverage']['coverage']:.6f}`",
+            f"- Orderbook coverage: "
+            f"`{provider['orderbook_coverage']['coverage']:.6f}`",
+            f"- Trade availability: "
+            f"`{provider['trade_availability']['coverage']:.6f}`",
+            f"- Paired executable ask coverage: "
+            f"`{provider['paired_executable_ask_coverage']:.6f}`",
+            f"- Retry rate: `{provider['retry_rate']:.6f}`",
+            f"- Invalid attempt rate: `{provider['invalid_attempt_rate']:.6f}`",
+            f"- Causality violations: "
+            f"`{provider['causality_violation_count']}`",
+            "",
+            "- No drift threshold or materiality gate is assigned.",
+            "- No market is filtered or reordered.",
+            "- Monitoring influences collection: false",
+            "- Monitoring influences model: false",
+            "- Outcomes accessed: false",
+            "- Settlement accessed: false",
+            "- PnL accessed: false",
+            "",
+            "## Safety",
+            "",
+            "- source_model_candidate_eligible=false",
+            "- freeze_ready=false",
+            "- promotion_evidence_eligible=false",
+            "- paper_candidate_allowed=false",
+            "- v8_execution_handoff_allowed=false",
+            "- live_trading_allowed=false",
+            "- wallet_signing_allowed=false",
+            "- polymarket_write_allowed=false",
+            "- capital_at_risk=false",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _health_markdown(report: Mapping[str, Any]) -> str:
     progress = dict(report["progress"])
     health = dict(report["attempt_health"])
@@ -1693,6 +2692,7 @@ def _health_markdown(report: Mapping[str, Any]) -> str:
 __all__ = [
     "build_collection_observability",
     "build_development_distribution_reference",
+    "build_development_distribution_shift_reference",
     "build_evaluation_dry_run_report",
     "build_finalization_checklist",
 ]

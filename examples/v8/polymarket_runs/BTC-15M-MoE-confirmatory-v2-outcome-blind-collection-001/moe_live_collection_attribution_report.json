@@ -1,16 +1,16 @@
 {
-  "accepted_decision_count": 3,
+  "accepted_decision_count": 7,
   "actual_model_distribution": {
-    "global_baseline_fallback": 1,
-    "moe_expert_bullish": 5
+    "global_baseline_fallback": 4,
+    "moe_expert_bullish": 10
   },
   "candidate_bundle_hash": "fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807",
-  "collected_market_count": 3,
-  "created_at": "2026-07-30T09:24:04.390679+00:00",
+  "collected_market_count": 7,
+  "created_at": "2026-07-30T10:28:45.920961+00:00",
   "current_confirmatory_outcomes_accessed": false,
   "current_confirmatory_pnl_accessed": false,
   "current_confirmatory_settlement_accessed": false,
-  "decision_row_count": 6,
+  "decision_row_count": 14,
   "decision_rows": [
     {
       "accepted": true,
@@ -227,17 +227,310 @@
         "volatility_bucket": "low"
       },
       "selected_side": null
+    },
+    {
+      "accepted": true,
+      "actual_model_used": "moe_expert_bullish",
+      "baseline_accepted": true,
+      "baseline_selected_side": "UP",
+      "decision_source": "post_capture_frozen_artifact_replay",
+      "decision_ts": 1785403200000,
+      "expert_available": true,
+      "expert_id": "moe_expert_bullish",
+      "expert_training_support": 40,
+      "fallback_used": false,
+      "market_id": "0xc920c1e898699cbe5a5e424fd8f2c1690b88f22ebb26b32e1a8a269e50ba8622",
+      "missing_feature_count": 3,
+      "missing_feature_names": [
+        "selected_recent_trade_volume",
+        "opposite_recent_trade_volume",
+        "selected_minus_opposite_recent_trade_volume"
+      ],
+      "provider_health_score": 0.3,
+      "regime_bucket": {
+        "btc_return_regime": "bullish",
+        "volatility_bucket": "medium"
+      },
+      "rejected": false,
+      "requested_route": "bullish",
+      "router_inputs": {
+        "available_at_ts": 1785403200000,
+        "btc_return_15m": 0.0014148969683738244,
+        "btc_return_regime": "bullish",
+        "btc_volatility_15m": 0.00029644655783360056,
+        "decision_ts": 1785403200000,
+        "max_input_ts": 1785403199981,
+        "volatility_bucket": "medium"
+      },
+      "selected_side": "DOWN"
+    },
+    {
+      "accepted": false,
+      "actual_model_used": "moe_expert_bullish",
+      "baseline_accepted": false,
+      "baseline_selected_side": null,
+      "decision_source": "post_capture_frozen_artifact_replay",
+      "decision_ts": 1785403500000,
+      "expert_available": true,
+      "expert_id": "moe_expert_bullish",
+      "expert_training_support": 40,
+      "fallback_used": false,
+      "market_id": "0xc920c1e898699cbe5a5e424fd8f2c1690b88f22ebb26b32e1a8a269e50ba8622",
+      "missing_feature_count": 3,
+      "missing_feature_names": [
+        "selected_recent_trade_volume",
+        "opposite_recent_trade_volume",
+        "selected_minus_opposite_recent_trade_volume"
+      ],
+      "provider_health_score": 0.3,
+      "regime_bucket": {
+        "btc_return_regime": "bullish",
+        "volatility_bucket": "medium"
+      },
+      "rejected": true,
+      "requested_route": "bullish",
+      "router_inputs": {
+        "available_at_ts": 1785403500000,
+        "btc_return_15m": 0.0023870512469723604,
+        "btc_return_regime": "bullish",
+        "btc_volatility_15m": 0.00031868979627322865,
+        "decision_ts": 1785403500000,
+        "max_input_ts": 1785403499353,
+        "volatility_bucket": "medium"
+      },
+      "selected_side": null
+    },
+    {
+      "accepted": true,
+      "actual_model_used": "moe_expert_bullish",
+      "baseline_accepted": true,
+      "baseline_selected_side": "UP",
+      "decision_source": "post_capture_frozen_artifact_replay",
+      "decision_ts": 1785404100000,
+      "expert_available": true,
+      "expert_id": "moe_expert_bullish",
+      "expert_training_support": 40,
+      "fallback_used": false,
+      "market_id": "0x0a921072ab6b9079db0f449f6d49fcb245607ec5c8d1b25d08eb828fe8ed42ad",
+      "missing_feature_count": 3,
+      "missing_feature_names": [
+        "selected_recent_trade_volume",
+        "opposite_recent_trade_volume",
+        "selected_minus_opposite_recent_trade_volume"
+      ],
+      "provider_health_score": 0.3,
+      "regime_bucket": {
+        "btc_return_regime": "bullish",
+        "volatility_bucket": "medium"
+      },
+      "rejected": false,
+      "requested_route": "bullish",
+      "router_inputs": {
+        "available_at_ts": 1785404100000,
+        "btc_return_15m": 0.003074911110748202,
+        "btc_return_regime": "bullish",
+        "btc_volatility_15m": 0.0003609054032446993,
+        "decision_ts": 1785404100000,
+        "max_input_ts": 1785404099890,
+        "volatility_bucket": "medium"
+      },
+      "selected_side": "DOWN"
+    },
+    {
+      "accepted": false,
+      "actual_model_used": "moe_expert_bullish",
+      "baseline_accepted": false,
+      "baseline_selected_side": null,
+      "decision_source": "post_capture_frozen_artifact_replay",
+      "decision_ts": 1785404400000,
+      "expert_available": true,
+      "expert_id": "moe_expert_bullish",
+      "expert_training_support": 40,
+      "fallback_used": false,
+      "market_id": "0x0a921072ab6b9079db0f449f6d49fcb245607ec5c8d1b25d08eb828fe8ed42ad",
+      "missing_feature_count": 3,
+      "missing_feature_names": [
+        "selected_recent_trade_volume",
+        "opposite_recent_trade_volume",
+        "selected_minus_opposite_recent_trade_volume"
+      ],
+      "provider_health_score": 0.3,
+      "regime_bucket": {
+        "btc_return_regime": "bullish",
+        "volatility_bucket": "medium"
+      },
+      "rejected": true,
+      "requested_route": "bullish",
+      "router_inputs": {
+        "available_at_ts": 1785404400000,
+        "btc_return_15m": 0.0012589243029061947,
+        "btc_return_regime": "bullish",
+        "btc_volatility_15m": 0.0003429294075124605,
+        "decision_ts": 1785404400000,
+        "max_input_ts": 1785404399734,
+        "volatility_bucket": "medium"
+      },
+      "selected_side": null
+    },
+    {
+      "accepted": true,
+      "actual_model_used": "global_baseline_fallback",
+      "baseline_accepted": true,
+      "baseline_selected_side": "UP",
+      "decision_source": "post_capture_frozen_artifact_replay",
+      "decision_ts": 1785405000000,
+      "expert_available": false,
+      "expert_id": "moe_expert_low_vol",
+      "expert_training_support": 18,
+      "fallback_used": true,
+      "market_id": "0x8945329c7d7e17eba124633168642c57109b4287cbff37bb70a44d75ba46e073",
+      "missing_feature_count": 3,
+      "missing_feature_names": [
+        "selected_recent_trade_volume",
+        "opposite_recent_trade_volume",
+        "selected_minus_opposite_recent_trade_volume"
+      ],
+      "provider_health_score": 0.3,
+      "regime_bucket": {
+        "btc_return_regime": "sideways",
+        "volatility_bucket": "low"
+      },
+      "rejected": false,
+      "requested_route": "low_vol",
+      "router_inputs": {
+        "available_at_ts": 1785405000000,
+        "btc_return_15m": -5.7514662750945966e-05,
+        "btc_return_regime": "sideways",
+        "btc_volatility_15m": 0.00028254500051399953,
+        "decision_ts": 1785405000000,
+        "max_input_ts": 1785404999364,
+        "volatility_bucket": "low"
+      },
+      "selected_side": "UP"
+    },
+    {
+      "accepted": false,
+      "actual_model_used": "global_baseline_fallback",
+      "baseline_accepted": false,
+      "baseline_selected_side": null,
+      "decision_source": "post_capture_frozen_artifact_replay",
+      "decision_ts": 1785405300000,
+      "expert_available": false,
+      "expert_id": "moe_expert_low_vol",
+      "expert_training_support": 18,
+      "fallback_used": true,
+      "market_id": "0x8945329c7d7e17eba124633168642c57109b4287cbff37bb70a44d75ba46e073",
+      "missing_feature_count": 3,
+      "missing_feature_names": [
+        "selected_recent_trade_volume",
+        "opposite_recent_trade_volume",
+        "selected_minus_opposite_recent_trade_volume"
+      ],
+      "provider_health_score": 0.3,
+      "regime_bucket": {
+        "btc_return_regime": "sideways",
+        "volatility_bucket": "low"
+      },
+      "rejected": true,
+      "requested_route": "low_vol",
+      "router_inputs": {
+        "available_at_ts": 1785405300000,
+        "btc_return_15m": 7.908782889498589e-05,
+        "btc_return_regime": "sideways",
+        "btc_volatility_15m": 0.0002534652959368591,
+        "decision_ts": 1785405300000,
+        "max_input_ts": 1785405299791,
+        "volatility_bucket": "low"
+      },
+      "selected_side": null
+    },
+    {
+      "accepted": true,
+      "actual_model_used": "global_baseline_fallback",
+      "baseline_accepted": true,
+      "baseline_selected_side": "UP",
+      "decision_source": "post_capture_frozen_artifact_replay",
+      "decision_ts": 1785405900000,
+      "expert_available": false,
+      "expert_id": "moe_expert_low_vol",
+      "expert_training_support": 18,
+      "fallback_used": true,
+      "market_id": "0x1ebc17a2925d33ae16dd59661777d5c631bc28cb52bcfc3adbe305044779dc13",
+      "missing_feature_count": 3,
+      "missing_feature_names": [
+        "selected_recent_trade_volume",
+        "opposite_recent_trade_volume",
+        "selected_minus_opposite_recent_trade_volume"
+      ],
+      "provider_health_score": 0.3,
+      "regime_bucket": {
+        "btc_return_regime": "sideways",
+        "volatility_bucket": "low"
+      },
+      "rejected": false,
+      "requested_route": "low_vol",
+      "router_inputs": {
+        "available_at_ts": 1785405900000,
+        "btc_return_15m": -2.4650558947625356e-05,
+        "btc_return_regime": "sideways",
+        "btc_volatility_15m": 0.00018332522933520732,
+        "decision_ts": 1785405900000,
+        "max_input_ts": 1785405899780,
+        "volatility_bucket": "low"
+      },
+      "selected_side": "UP"
+    },
+    {
+      "accepted": false,
+      "actual_model_used": "moe_expert_bullish",
+      "baseline_accepted": false,
+      "baseline_selected_side": null,
+      "decision_source": "post_capture_frozen_artifact_replay",
+      "decision_ts": 1785406200000,
+      "expert_available": true,
+      "expert_id": "moe_expert_bullish",
+      "expert_training_support": 40,
+      "fallback_used": false,
+      "market_id": "0x1ebc17a2925d33ae16dd59661777d5c631bc28cb52bcfc3adbe305044779dc13",
+      "missing_feature_count": 3,
+      "missing_feature_names": [
+        "selected_recent_trade_volume",
+        "opposite_recent_trade_volume",
+        "selected_minus_opposite_recent_trade_volume"
+      ],
+      "provider_health_score": 0.3,
+      "regime_bucket": {
+        "btc_return_regime": "bullish",
+        "volatility_bucket": "low"
+      },
+      "rejected": true,
+      "requested_route": "bullish",
+      "router_inputs": {
+        "available_at_ts": 1785406200000,
+        "btc_return_15m": 0.00043742965034931913,
+        "btc_return_regime": "bullish",
+        "btc_volatility_15m": 0.00020769589462804247,
+        "decision_ts": 1785406200000,
+        "max_input_ts": 1785406199306,
+        "volatility_bucket": "low"
+      },
+      "selected_side": null
     }
   ],
-  "fallback_decision_count": 1,
-  "fallback_share": 0.16666666666666666,
+  "fallback_decision_count": 4,
+  "fallback_share": 0.2857142857142857,
   "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "monitoring_influences_collection": false,
   "monitoring_influences_collection_decisions": false,
-  "native_expert_decision_count": 5,
+  "monitoring_influences_model": false,
+  "monitoring_only": true,
+  "native_expert_decision_count": 10,
+  "outcomes_accessed": false,
+  "pnl_accessed": false,
   "promotion_evidence_eligible": false,
   "requested_route_distribution": {
-    "bullish": 5,
-    "low_vol": 1
+    "bullish": 10,
+    "low_vol": 4
   },
   "role": "outcome_free_monitoring_only",
   "safety": {
@@ -253,5 +546,6 @@
     "v8_execution_handoff_allowed": false,
     "wallet_signing_allowed": false
   },
-  "schema_version": "bigan-btc-15m-moe-live-collection-attribution-v1"
+  "schema_version": "bigan-btc-15m-moe-live-collection-attribution-v1",
+  "settlement_accessed": false
 }

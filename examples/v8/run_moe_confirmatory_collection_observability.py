@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 from bigan.v8.polymarket.moe_collection_observability import (  # noqa: E402
     build_collection_observability,
     build_development_distribution_reference,
+    build_development_distribution_shift_reference,
     build_evaluation_dry_run_report,
     build_finalization_checklist,
 )
@@ -33,6 +34,10 @@ def main() -> int:
     parser.add_argument("--service-root", default=str(DEFAULT_SERVICE_ROOT))
     parser.add_argument("--config-root", default=str(DEFAULT_CONFIG_ROOT))
     parser.add_argument("--build-development-reference", action="store_true")
+    parser.add_argument(
+        "--build-development-distribution-shift-reference",
+        action="store_true",
+    )
     parser.add_argument("--skip-live-monitor", action="store_true")
     args = parser.parse_args()
     config_root = Path(args.config_root).resolve()
@@ -42,6 +47,16 @@ def main() -> int:
             build_development_distribution_reference(
                 output_path=(
                     config_root / "moe_development_distribution_reference.json"
+                ),
+                repository_root=ROOT,
+            )
+        )
+    if args.build_development_distribution_shift_reference:
+        output["development_distribution_shift_reference"] = (
+            build_development_distribution_shift_reference(
+                output_path=(
+                    config_root
+                    / "moe_development_distribution_shift_reference.json"
                 ),
                 repository_root=ROOT,
             )

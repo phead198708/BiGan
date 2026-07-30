@@ -6,62 +6,65 @@
     "invalid_reason_distribution": {},
     "official_attempt_ledger_hash_chain_status": "not_yet_frozen_or_validated",
     "provider_failure_rate": 0.0,
-    "retry_rate": 0.0,
-    "total_attempts": 3,
-    "valid_attempts": 3
+    "retry_rate": 0.14285714285714285,
+    "total_attempts": 7,
+    "valid_attempts": 7
   },
   "candidate_bundle_hash": "fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807",
-  "created_at": "2026-07-30T09:24:04.390679+00:00",
+  "created_at": "2026-07-30T10:28:45.920961+00:00",
   "data_quality": {
     "btc_feature_coverage": 1.0,
     "causality_violations": 0,
     "chainlink_reference_coverage": {
       "coverage": 1.0,
-      "covered_attempts": 3,
-      "total_attempts": 3
+      "covered_attempts": 7,
+      "total_attempts": 7
     },
-    "missing_feature_count_total": 36,
+    "missing_feature_count_total": 84,
     "missing_feature_counts": {
-      "opposite_recent_trade_volume": 12,
-      "selected_minus_opposite_recent_trade_volume": 12,
-      "selected_recent_trade_volume": 12
+      "opposite_recent_trade_volume": 28,
+      "selected_minus_opposite_recent_trade_volume": 28,
+      "selected_recent_trade_volume": 28
     },
     "missing_values_encoded_as_zeros": false,
     "orderbook_coverage": {
       "coverage": 1.0,
-      "covered_attempts": 3,
-      "total_attempts": 3
+      "covered_attempts": 7,
+      "total_attempts": 7
     },
     "paired_executable_ask_coverage": 1.0,
     "raw_market_capture_coverage": {
       "coverage": 1.0,
-      "covered_attempts": 3,
-      "total_attempts": 3
+      "covered_attempts": 7,
+      "total_attempts": 7
     },
     "trade_tape_available": {
       "coverage": 1.0,
-      "covered_attempts": 3,
-      "total_attempts": 3
+      "covered_attempts": 7,
+      "total_attempts": 7
     }
   },
   "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "monitoring_influences_collection": false,
   "monitoring_influences_collection_decisions": false,
+  "monitoring_influences_model": false,
+  "monitoring_only": true,
   "outcomes_accessed": false,
   "pnl_accessed": false,
   "progress": {
-    "attempts_consumed": 3,
-    "completion_probability_estimate": 0.9949722308653399,
+    "attempts_consumed": 7,
+    "completion_probability_estimate": 0.9965720381290409,
     "estimated_collection_progress": {
-      "attempt_cap_fraction": 0.0032397408207343412,
+      "attempt_cap_fraction": 0.00755939524838013,
       "estimate_is_outcome_free": true,
-      "estimated_additional_attempts": 797,
+      "estimated_additional_attempts": 793,
       "estimated_completion_timestamp": "2026-08-07T16:15:00+00:00",
       "quality_rate_used": 1.0,
-      "quality_target_fraction": 0.00375
+      "quality_target_fraction": 0.00875
     },
     "maximum_attempts": 926,
-    "quality_valid_market_count": 3,
-    "remaining_quality_valid_markets": 797,
+    "quality_valid_market_count": 7,
+    "remaining_quality_valid_markets": 793,
     "target_quality_valid_market_count": 800
   },
   "promotion_evidence_eligible": false,
