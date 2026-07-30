@@ -1,0 +1,90 @@
+{
+  "authorization_scope": "outcome_blind_capture_only",
+  "authorization_validation_required_before_capture": true,
+  "candidate_bundle_hash": "fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807",
+  "causality": {
+    "available_at_ts_lte_decision_ts": true,
+    "complement_quote_proxy_forbidden": true,
+    "feature_cutoff_ts_lte_decision_ts": true,
+    "max_input_ts_lte_decision_ts": true,
+    "missing_numeric_zero_forbidden": true
+  },
+  "created_at": "2026-07-30T14:00:00+00:00",
+  "exact_window_selector": {
+    "attempt_927_forbidden": true,
+    "cap_exhaustion_is_terminal_incomplete_failure": true,
+    "exact_market_count": 800,
+    "extension_replacement_skip_reset_or_new_budget_allowed": false,
+    "implementation": "select_exact_authorized_window",
+    "ordering": [
+      "market_start_ts ascending",
+      "market_id ascending",
+      "attempt_index ascending"
+    ],
+    "post_exact_800_concurrent_attempts_are_audit_only": true,
+    "strictly_later_than_authorization_boundary": true
+  },
+  "health_reason_semantics_amendment": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_attempt_health_reason_semantics_r2.json",
+    "sha256": "9ec4117aeb218352aa53837c5e980b83cb2a981a0e12a76be064a579b70f956e"
+  },
+  "integrated_attempt_ledger_validator": {
+    "attempt_hash_chain_required": true,
+    "caller_quality_valid_trusted": false,
+    "implementation": "validate_authorized_attempt_ledger",
+    "raw_evidence_required": true,
+    "source": {
+      "path": "src/bigan/v8/polymarket/moe_collection_boundary_r2.py",
+      "sha256": "3ee86c84803a33be324eaf8d9522199aad6a602bdc6abfbf31d29d1ec5373054"
+    }
+  },
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "maximum_attempts": 926,
+  "quality_valid_derivation": {
+    "caller_quality_valid_trusted": false,
+    "contract": "all frozen raw quality observations must be exactly true",
+    "outcome_gate_rederives_quality_from_raw_evidence": true,
+    "required_observation_fields": [
+      "market_identity_complete",
+      "provider_capture_complete",
+      "paired_executable_asks_complete",
+      "book_capture_complete",
+      "chainlink_capture_complete"
+    ],
+    "selector_rederives_quality_from_raw_evidence": true
+  },
+  "required_raw_streams": [
+    "raw_polymarket_markets.jsonl",
+    "raw_polymarket_orderbooks.jsonl",
+    "raw_polymarket_trades.jsonl",
+    "raw_binance_btcusdt_klines.jsonl",
+    "raw_polymarket_chainlink_prices.jsonl"
+  ],
+  "revision_id": "BTC-15M-MoE-confirmatory-v2-collection-boundary-r2",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-collector-boundary-r2",
+  "state": {
+    "authorization_artifact_present": false,
+    "collector_runtime_enabled": false,
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "supersedes_for_runtime_collection": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_collector_protocol_r1.json",
+    "sha256": "04b0e968013e44ac6edc059a75038896268bc087064091e044dc00146f3a699b"
+  },
+  "target_quality_valid_market_count": 800
+}

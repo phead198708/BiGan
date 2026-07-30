@@ -1,0 +1,224 @@
+{
+  "attempt_cap_unchanged": 926,
+  "created_at": "2026-07-30T14:00:00+00:00",
+  "derived_reason_semantics": "minimal reason derived from a failed frozen quality observation",
+  "direct_reason_semantics": "reason code directly present in immutable capture-time evidence",
+  "invalid_attempt_record_count": 7,
+  "invalid_attempt_records": [
+    {
+      "attempt_id": "challenge-development-15m-000004-20260727T100046Z-round01-20260727T101459Z",
+      "attempt_index": 13,
+      "derived_failure_reason_codes": [
+        "provider_capture_incomplete",
+        "causality_checks_failed"
+      ],
+      "directly_observed_failure_reason_codes": [
+        "chainlink_rtds_no_market_window",
+        "missing_btc_feature_candles",
+        "missing_complete_up_down_orderbook",
+        "polymarket_clob_rest_fallback_market_closed",
+        "polymarket_clob_ws_window_coverage_incomplete"
+      ],
+      "quality_failure_reason_codes": [
+        "causality_checks_failed",
+        "chainlink_rtds_no_market_window",
+        "missing_btc_feature_candles",
+        "missing_complete_up_down_orderbook",
+        "polymarket_clob_rest_fallback_market_closed",
+        "polymarket_clob_ws_window_coverage_incomplete",
+        "provider_capture_incomplete"
+      ],
+      "unknown_failure_reason": false
+    },
+    {
+      "attempt_id": "challenge-development-15m-000022-20260728T230037Z-round02-20260728T232959Z",
+      "attempt_index": 86,
+      "derived_failure_reason_codes": [
+        "provider_capture_incomplete",
+        "causality_checks_failed"
+      ],
+      "directly_observed_failure_reason_codes": [
+        "btc_feature_candle_sources_unavailable",
+        "chainlink_rtds_no_market_window",
+        "missing_btc_feature_candles",
+        "missing_complete_up_down_orderbook",
+        "polymarket_clob_rest_fallback_empty",
+        "polymarket_clob_rest_fallback_snapshot_after_market_close",
+        "polymarket_clob_ws_snapshot_stream_stalled",
+        "read_only_public_http_transport_error"
+      ],
+      "quality_failure_reason_codes": [
+        "btc_feature_candle_sources_unavailable",
+        "causality_checks_failed",
+        "chainlink_rtds_no_market_window",
+        "missing_btc_feature_candles",
+        "missing_complete_up_down_orderbook",
+        "polymarket_clob_rest_fallback_empty",
+        "polymarket_clob_rest_fallback_snapshot_after_market_close",
+        "polymarket_clob_ws_snapshot_stream_stalled",
+        "provider_capture_incomplete",
+        "read_only_public_http_transport_error"
+      ],
+      "unknown_failure_reason": false
+    },
+    {
+      "attempt_id": "challenge-development-15m-000022-20260728T230037Z-round03-20260728T234500Z",
+      "attempt_index": 87,
+      "derived_failure_reason_codes": [
+        "provider_capture_incomplete",
+        "causality_checks_failed"
+      ],
+      "directly_observed_failure_reason_codes": [
+        "chainlink_rtds_no_market_window",
+        "gamma_market_identity_cache_clob_revalidation_failed",
+        "missing_btc_feature_candles",
+        "polymarket_clob_rest_fallback_empty",
+        "polymarket_clob_ws_window_coverage_incomplete",
+        "read_only_public_http_transport_error"
+      ],
+      "quality_failure_reason_codes": [
+        "causality_checks_failed",
+        "chainlink_rtds_no_market_window",
+        "gamma_market_identity_cache_clob_revalidation_failed",
+        "missing_btc_feature_candles",
+        "polymarket_clob_rest_fallback_empty",
+        "polymarket_clob_ws_window_coverage_incomplete",
+        "provider_capture_incomplete",
+        "read_only_public_http_transport_error"
+      ],
+      "unknown_failure_reason": false
+    },
+    {
+      "attempt_id": "challenge-development-15m-000022-20260728T230037Z-round04-20260729T000000Z",
+      "attempt_index": 88,
+      "derived_failure_reason_codes": [
+        "provider_capture_incomplete",
+        "causality_checks_failed"
+      ],
+      "directly_observed_failure_reason_codes": [
+        "chainlink_rtds_no_market_window",
+        "gamma_market_identity_cache_stale",
+        "missing_btc_feature_candles",
+        "polymarket_clob_rest_fallback_empty",
+        "polymarket_clob_ws_window_coverage_incomplete",
+        "read_only_public_http_transport_error"
+      ],
+      "quality_failure_reason_codes": [
+        "causality_checks_failed",
+        "chainlink_rtds_no_market_window",
+        "gamma_market_identity_cache_stale",
+        "missing_btc_feature_candles",
+        "polymarket_clob_rest_fallback_empty",
+        "polymarket_clob_ws_window_coverage_incomplete",
+        "provider_capture_incomplete",
+        "read_only_public_http_transport_error"
+      ],
+      "unknown_failure_reason": false
+    },
+    {
+      "attempt_id": "challenge-development-15m-000023-20260729T000105Z-round01-20260729T001500Z",
+      "attempt_index": 89,
+      "derived_failure_reason_codes": [
+        "provider_capture_incomplete",
+        "causality_checks_failed"
+      ],
+      "directly_observed_failure_reason_codes": [
+        "gamma_market_identity_cache_stale",
+        "missing_btc_feature_candles",
+        "polymarket_clob_rest_fallback_empty",
+        "polymarket_clob_ws_window_coverage_incomplete",
+        "read_only_public_http_transport_error"
+      ],
+      "quality_failure_reason_codes": [
+        "causality_checks_failed",
+        "gamma_market_identity_cache_stale",
+        "missing_btc_feature_candles",
+        "polymarket_clob_rest_fallback_empty",
+        "polymarket_clob_ws_window_coverage_incomplete",
+        "provider_capture_incomplete",
+        "read_only_public_http_transport_error"
+      ],
+      "unknown_failure_reason": false
+    },
+    {
+      "attempt_id": "challenge-development-15m-000023-20260729T000105Z-round02-20260729T003000Z",
+      "attempt_index": 90,
+      "derived_failure_reason_codes": [
+        "provider_capture_incomplete",
+        "causality_checks_failed"
+      ],
+      "directly_observed_failure_reason_codes": [
+        "gamma_market_identity_cache_stale",
+        "missing_btc_feature_candles",
+        "polymarket_clob_rest_fallback_empty",
+        "polymarket_clob_ws_window_coverage_incomplete",
+        "read_only_public_http_transport_error"
+      ],
+      "quality_failure_reason_codes": [
+        "causality_checks_failed",
+        "gamma_market_identity_cache_stale",
+        "missing_btc_feature_candles",
+        "polymarket_clob_rest_fallback_empty",
+        "polymarket_clob_ws_window_coverage_incomplete",
+        "provider_capture_incomplete",
+        "read_only_public_http_transport_error"
+      ],
+      "unknown_failure_reason": false
+    },
+    {
+      "attempt_id": "challenge-development-15m-000023-20260729T000105Z-round03-20260729T004500Z",
+      "attempt_index": 91,
+      "derived_failure_reason_codes": [
+        "provider_capture_incomplete",
+        "causality_checks_failed"
+      ],
+      "directly_observed_failure_reason_codes": [
+        "gamma_market_identity_cache_stale",
+        "missing_btc_feature_candles",
+        "polymarket_clob_rest_fallback_empty",
+        "polymarket_clob_ws_window_coverage_incomplete",
+        "read_only_public_http_transport_error"
+      ],
+      "quality_failure_reason_codes": [
+        "causality_checks_failed",
+        "gamma_market_identity_cache_stale",
+        "missing_btc_feature_candles",
+        "polymarket_clob_rest_fallback_empty",
+        "polymarket_clob_ws_window_coverage_incomplete",
+        "provider_capture_incomplete",
+        "read_only_public_http_transport_error"
+      ],
+      "unknown_failure_reason": false
+    }
+  ],
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "old_broad_reason_attachment_is_authoritative": false,
+  "revision_id": "BTC-15M-MoE-confirmatory-v2-collection-boundary-r2",
+  "role": "diagnostic_amendment_only",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-health-reason-semantics-r2",
+  "source_attempted_market_count": 120,
+  "source_quality_valid_market_count": 113,
+  "source_snapshot": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_attempt_health_snapshot.jsonl",
+    "sha256": "803ed28c87baf9ce0da3578f4625441cd0f0a71cebb0284fc9a699dcaa939fa5"
+  },
+  "state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "unknown_reason_semantics": "use quality_failure_reason_codes=['unknown'] when neither direct nor derived evidence identifies a reason"
+}

@@ -1,0 +1,66 @@
+{
+  "collector_protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_collector_protocol_r2.json",
+    "sha256": "b45125d272fe289cd1411caac553601d274d6c164bc5ebbc7d8cdb34881a68f7"
+  },
+  "contract_is_collection_authority": false,
+  "created_at": "2026-07-30T14:00:00+00:00",
+  "exact_market_target": 800,
+  "forbidden_permissions": [
+    "outcome_access",
+    "settlement",
+    "training",
+    "paper",
+    "promotion",
+    "live_trading",
+    "wallet_signing",
+    "polymarket_writes"
+  ],
+  "implementation": {
+    "function": "validate_manual_collection_authorization",
+    "source": {
+      "path": "src/bigan/v8/polymarket/moe_collection_boundary_r2.py",
+      "sha256": "3ee86c84803a33be324eaf8d9522199aad6a602bdc6abfbf31d29d1ec5373054"
+    }
+  },
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "manual_artifact_still_required": true,
+  "maximum_attempts": 926,
+  "only_permitted_scope": "outcome_blind_capture_only",
+  "outcome_access_protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_exact_outcome_access_protocol_r2.json",
+    "sha256": "5bb67dd0814232e370d8483832916c2bdfaa403c5934383b28bc77c456ef16b3"
+  },
+  "required_frozen_artifact_keys": [
+    "candidate_artifact_graph",
+    "matched_baseline_contract",
+    "matched_baseline_artifact",
+    "collector_protocol",
+    "reporting_contract",
+    "statistical_protocol",
+    "health_snapshot",
+    "health_manifest",
+    "attempt_cap_analysis",
+    "runtime_validation_report"
+  ],
+  "revision_id": "BTC-15M-MoE-confirmatory-v2-collection-boundary-r2",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-manual-authorization-contract-r2",
+  "state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  }
+}
