@@ -1,0 +1,58 @@
+{
+  "schema_version": "bigan-btc-15m-moe-fresh-collection-authorization-template-v1",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v1",
+  "candidate_id": "mixture_of_experts",
+  "architecture_type": "deterministic_regime_router_with_conditional_experts_and_global_fallback",
+  "created_at": "2026-07-30T01:25:00+00:00",
+  "artifact_role": "inactive_template_only_not_collection_authority",
+  "template_usable_as_collection_authorization": false,
+  "frozen_inputs": {
+    "candidate_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_candidate_contract.json",
+      "sha256": "6c64c9acfa6c5a008a0d0939915f5309b5d882cb18474cd26ae697e6d3d425f0"
+    },
+    "model_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_model_manifest.json",
+      "sha256": "fddd8c1993c0abdcbd45dc439ae7053ca4173f60f938097bf0e8083f0104b930"
+    },
+    "artifact_graph": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_artifact_graph.json",
+      "sha256": "f0f0f09c14b85a888dd1aa2c1cfe4f88acfe9332bc6513f83e99404a089768dd"
+    }
+  },
+  "activation_requirements": {
+    "separate_frozen_authorization_artifact_required": true,
+    "explicit_human_authorization_required": true,
+    "collection_protocol_sha256_required": true,
+    "collector_attempt_cap_required": true,
+    "outcome_access_policy_required": true,
+    "this_template_must_not_be_mutated_into_authority": true
+  },
+  "authorization_placeholders": {
+    "authorization_artifact_id": null,
+    "authorized_by": null,
+    "authorized_at": null,
+    "collection_protocol_path": null,
+    "collection_protocol_sha256": null,
+    "maximum_attempts": null,
+    "maximum_markets": null
+  },
+  "state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}

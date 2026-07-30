@@ -461,8 +461,18 @@ def load_and_verify_static_moe_artifact(
         and dict(graph.get("safety") or {}) == SAFETY
     ):
         raise ValueError("static MoE graph governance mismatch")
+    bundle_repo_path = Path(str(graph["bundle_repo_path"]))
+    if (
+        bundle_repo_path.is_absolute()
+        or bundle_repo_path.name != graph["bundle_hash"]
+    ):
+        raise ValueError("static MoE bundle path is not content addressed")
     resolved: dict[str, Path] = {}
     for filename, descriptor in graph["artifacts"].items():
+        if Path(str(descriptor["path"])) != bundle_repo_path / filename:
+            raise ValueError(
+                f"static MoE artifact path is not bundle-local: {filename}"
+            )
         path = (repo_root / str(descriptor["path"])).resolve()
         if not path.is_relative_to(repo_root):
             raise ValueError(f"static MoE artifact escaped repository: {filename}")
@@ -471,22 +481,51 @@ def load_and_verify_static_moe_artifact(
         resolved[str(filename)] = path
     if canonical_json_sha256(graph["artifacts"]) != graph["graph_content_sha256"]:
         raise ValueError("static MoE graph content hash mismatch")
+    primary_hashes = {
+        filename: descriptor["sha256"]
+        for filename, descriptor in graph["artifacts"].items()
+        if filename != "moe_model_manifest.json"
+    }
+    if canonical_json_sha256(primary_hashes) != graph["bundle_hash"]:
+        raise ValueError("static MoE bundle content hash mismatch")
     manifest = _load_json(resolved["moe_model_manifest.json"])
+    if not (
+        manifest.get("bundle_hash") == graph["bundle_hash"]
+        and manifest.get("lineage_id") == graph["lineage_id"]
+        and manifest.get("candidate_id") == graph["candidate_id"]
+        and manifest.get("architecture_type") == graph["architecture_type"]
+        and manifest.get("fresh_collection_authorized") is False
+        and manifest.get("promotion_evidence_eligible") is False
+        and dict(manifest.get("safety") or {}) == SAFETY
+    ):
+        raise ValueError("static MoE manifest and graph disagree")
     router = _load_json(resolved["moe_router_contract.json"])
     features = _load_json(resolved["ordered_feature_names.json"])
     cost = _load_json(resolved["moe_cost_and_action_contract.json"])
     fallback = xgb.Booster()
     fallback.load_model(resolved["moe_global_fallback.json"])
+    fallback_rounds = int(fallback.num_boosted_rounds())
+    if fallback_rounds != int(
+        manifest["global_fallback"]["num_boost_round_used"]
+    ):
+        raise ValueError("static MoE fallback round count mismatch")
     boosters: dict[str, xgb.Booster] = {}
     loaded_experts: dict[str, str] = {}
+    expert_rounds: dict[str, int] = {}
     for route in EXPERT_IDS:
         spec = manifest["experts"][route]
         path = resolved[f"moe_expert_{route}.json"]
         if spec["available"]:
             booster = xgb.Booster()
             booster.load_model(path)
+            observed_rounds = int(booster.num_boosted_rounds())
+            if observed_rounds != int(spec["num_boost_round"]):
+                raise ValueError(
+                    f"static MoE expert round count mismatch: {route}"
+                )
             boosters[route] = booster
             loaded_experts[route] = "xgboost_json"
+            expert_rounds[route] = observed_rounds
         else:
             stub = _load_json(path)
             if not (
@@ -495,6 +534,7 @@ def load_and_verify_static_moe_artifact(
             ):
                 raise ValueError(f"static MoE unavailable expert stub invalid: {route}")
             loaded_experts[route] = "support_below_minimum_stub_json"
+            expert_rounds[route] = 0
     fixtures = _load_json(resolved["synthetic_prediction_fixture.json"])
     fixture_results = [
         _reproduce_fixture(
@@ -520,7 +560,9 @@ def load_and_verify_static_moe_artifact(
         "bundle_hash": graph["bundle_hash"],
         "artifact_count": len(resolved),
         "loaded_experts": loaded_experts,
+        "expert_rounds": expert_rounds,
         "fallback_loaded": True,
+        "fallback_rounds": fallback_rounds,
         "fixture_results": fixture_results,
         "all_fixtures_reproduced": all(
             result["reproduced"] for result in fixture_results

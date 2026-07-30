@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,9 @@ from bigan.v8.polymarket.moe_confirmatory_lineage import (
     assert_metric_payload_matches,
     deterministic_moe_route,
     frozen_expert_or_fallback,
+)
+from bigan.v8.polymarket.moe_static_artifact import (
+    load_and_verify_static_moe_artifact,
 )
 from bigan.v8.polymarket.regime_adaptive_candidate_evaluation import (
     _annotate_regime,
@@ -432,6 +436,21 @@ def test_moe_metric_reconciliation_passes_for_all_five_candidates() -> None:
         item["comparison"]["passed"]
         for item in report["candidate_reconciliation"]
     )
+    assert {
+        item["candidate_id"] for item in report["candidate_reconciliation"]
+    } == {
+        "global_baseline",
+        "regime_conditioned_calibration",
+        "mixture_of_experts",
+        "drift_aware_rolling_calibration",
+        "uncertainty_aware_abstention",
+    }
+    assert all(
+        item["comparison"]["metric_mismatches"] == []
+        and item["comparison"]["gate_mismatches"] == []
+        and item["comparison"]["result_summary_mismatches"] == []
+        for item in report["candidate_reconciliation"]
+    )
     assert report["parent_selection_reconciliation"]["selected_candidate_id"] is None
     assert report["parent_selection_reconciliation"][
         "fresh_collection_allowed"
@@ -607,6 +626,134 @@ def test_moe_candidate_contract_freezes_architecture_without_collection() -> Non
     assert candidate["state"]["fresh_collection_started"] is False
     assert candidate["state"]["fresh_outcomes_opened"] is False
     assert candidate["safety"] == SAFETY
+
+
+def test_moe_repository_artifact_graph_loads_in_fresh_clone(
+    tmp_path: Path,
+) -> None:
+    graph = verify_frozen_json(MOE_CONFIG_DIR / "moe_artifact_graph.json")
+    graph_sha = _sha256(MOE_CONFIG_DIR / "moe_artifact_graph.json")
+    fresh_root = tmp_path / "fresh-clone"
+    fresh_graph = fresh_root / (
+        "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/"
+        "moe_artifact_graph.json"
+    )
+    fresh_graph.parent.mkdir(parents=True)
+    shutil.copyfile(MOE_CONFIG_DIR / "moe_artifact_graph.json", fresh_graph)
+    for descriptor in graph["artifacts"].values():
+        source = REPO_ROOT / descriptor["path"]
+        destination = fresh_root / descriptor["path"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+
+    loaded = load_and_verify_static_moe_artifact(
+        graph_path=fresh_graph,
+        expected_graph_sha256=graph_sha,
+        repository_root=fresh_root,
+    )
+
+    assert graph["all_paths_repository_relative"] is True
+    assert graph["machine_local_absolute_paths_allowed"] is False
+    assert not any(
+        Path(descriptor["path"]).is_absolute()
+        for descriptor in graph["artifacts"].values()
+    )
+    assert loaded["all_fixtures_reproduced"] is True
+    assert loaded["fallback_loaded"] is True
+    assert loaded["loaded_experts"] == {
+        "high_vol": "xgboost_json",
+        "bullish": "xgboost_json",
+        "bearish": "xgboost_json",
+        "low_vol": "support_below_minimum_stub_json",
+    }
+    assert loaded["fallback_rounds"] == 104
+    assert loaded["expert_rounds"] == {
+        "high_vol": 104,
+        "bullish": 104,
+        "bearish": 104,
+        "low_vol": 0,
+    }
+    assert loaded["fresh_collection_authorized"] is False
+    assert loaded["safety"] == SAFETY
+
+
+def test_moe_artifact_graph_sha_mismatch_fails_closed() -> None:
+    with pytest.raises(ValueError, match="graph SHA-256 mismatch"):
+        load_and_verify_static_moe_artifact(
+            graph_path=MOE_CONFIG_DIR / "moe_artifact_graph.json",
+            expected_graph_sha256="0" * 64,
+            repository_root=REPO_ROOT,
+        )
+
+
+def test_moe_artifact_component_sha_mismatch_fails_closed(
+    tmp_path: Path,
+) -> None:
+    graph = json.loads(
+        (MOE_CONFIG_DIR / "moe_artifact_graph.json").read_text(encoding="utf-8")
+    )
+    graph["artifacts"]["moe_global_fallback.json"]["sha256"] = "0" * 64
+    graph_path = tmp_path / "tampered-graph.json"
+    graph_path.write_text(
+        json.dumps(graph, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="artifact SHA-256 mismatch"):
+        load_and_verify_static_moe_artifact(
+            graph_path=graph_path,
+            expected_graph_sha256=_sha256(graph_path),
+            repository_root=REPO_ROOT,
+        )
+
+
+def test_moe_collection_authorization_is_an_inactive_template() -> None:
+    template = verify_frozen_json(
+        MOE_CONFIG_DIR / "moe_fresh_collection_authorization_template.json"
+    )
+    manifest = verify_frozen_json(MOE_CONFIG_DIR / "moe_model_manifest.json")
+    graph = verify_frozen_json(MOE_CONFIG_DIR / "moe_artifact_graph.json")
+
+    assert template["artifact_role"] == (
+        "inactive_template_only_not_collection_authority"
+    )
+    assert template["template_usable_as_collection_authorization"] is False
+    assert template["state"] == {
+        "fresh_collection_authorized": False,
+        "fresh_collection_started": False,
+        "fresh_outcomes_opened": False,
+    }
+    assert manifest["fresh_collection_authorized"] is False
+    assert manifest["fresh_collection_started"] is False
+    assert manifest["fresh_outcomes_opened"] is False
+    assert graph["fresh_collection_authorized"] is False
+    assert graph["fresh_collection_started"] is False
+    assert graph["fresh_outcomes_opened"] is False
+    assert template["safety"] == manifest["safety"] == graph["safety"] == SAFETY
+
+
+def test_moe_hardening_resume_preserves_provenance_limit_and_safety() -> None:
+    resume = verify_frozen_json(
+        MOE_CONFIG_DIR / "lineage_hardening_resume_record.json"
+    )
+    report = verify_frozen_json(MOE_CONFIG_DIR / "moe_hardening_report.json")
+
+    assert resume["previous_blocked_record"]["preserved_as_historical_record"] is True
+    assert resume["resume_basis"]["recorded_parent_source_commit_now_claimed_reachable"] is (
+        False
+    )
+    assert resume["resume_basis"]["provenance_limitation_preserved"] is True
+    assert resume["outcome_access"]["new_outcomes_opened"] == 0
+    assert report["reconciliation"]["reconciliation_passed"] is True
+    assert report["static_artifact"]["fresh_clone_load_passed"] is True
+    assert report["fresh_collection_remains_blocked"] is True
+    assert report["collection_state"] == {
+        "fresh_collection_authorized": False,
+        "fresh_collection_started": False,
+        "fresh_outcomes_opened": False,
+        "new_outcome_access_count": 0,
+    }
+    assert resume["safety"] == report["safety"] == SAFETY
 
 
 def _sha256(path: Path) -> str:

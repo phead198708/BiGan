@@ -1,0 +1,146 @@
+{
+  "schema_version": "bigan-btc-15m-moe-confirmatory-hardening-report-v1",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v1",
+  "candidate_id": "mixture_of_experts",
+  "created_at": "2026-07-30T01:40:00+00:00",
+  "status": "internally_consistent_collection_blocked",
+  "reconciliation": {
+    "reconciliation_passed": true,
+    "candidate_count": 5,
+    "prediction_row_count": 1460,
+    "fold_audit_count": 365,
+    "market_count": 73,
+    "cost_decomposition_mismatch_count": 0,
+    "metric_or_gate_mismatch_count": 0,
+    "report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_metric_reconciliation_report.json",
+      "sha256": "153cbcf3573b8ce0b8022c1faab4348193f245ac3de1a8b284c21d0a3d4c8028"
+    }
+  },
+  "architecture": {
+    "architecture_type": "deterministic_regime_router_with_conditional_experts_and_global_fallback",
+    "candidate_id_unchanged": true,
+    "pure_independent_expert_ensemble_claimed": false,
+    "router_changed": false,
+    "threshold_changed": false,
+    "filter_added": false,
+    "expert_added": false
+  },
+  "development_route_attribution": {
+    "attribution_reconciliation_passed": true,
+    "market_count": 73,
+    "accepted_market_count": 72,
+    "total_unit_net_pnl": 4.372000000000001,
+    "native_expert_pnl": 2.4257500000000003,
+    "global_fallback_pnl": 1.9462500000000003,
+    "fallback_count": 15,
+    "fallback_share": 0.2054794520547945,
+    "fallback_share_by_chronological_quartile": {
+      "q1": 0.5263157894736842,
+      "q2": 0.1111111111111111,
+      "q3": 0.1111111111111111,
+      "q4": 0.05555555555555555
+    },
+    "route_counts": {
+      "high_vol": 26,
+      "bullish": 18,
+      "bearish": 24,
+      "low_vol": 5
+    },
+    "pnl_by_route": {
+      "high_vol": 3.2885000000000004,
+      "bullish": 1.1105,
+      "bearish": -2.05075,
+      "low_vol": 2.02375
+    },
+    "native_expert_largest_winner_pnl": 0.83475,
+    "global_fallback_largest_winner_pnl": 0.73475,
+    "trade_volume_missing_market_count": 60,
+    "depth_missing_market_count": 0,
+    "spread_missing_market_count": 0,
+    "report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_route_attribution_report.json",
+      "sha256": "f540ed6bcbd7bc93e74d283a61cb385c802e8e0c24c102e35ef4d14b3dc99adf"
+    },
+    "rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_route_attribution.jsonl",
+      "sha256": "5f1bc98828ab828d41068930193ecd4aec34b0cbb88f651f5ee3f16e61b3f216"
+    }
+  },
+  "static_artifact": {
+    "source_commit": "95ce656585bde6e89a47089258d25bdebe74669b",
+    "bundle_hash": "30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8",
+    "candidate_contract_sha256": "6c64c9acfa6c5a008a0d0939915f5309b5d882cb18474cd26ae697e6d3d425f0",
+    "router_contract_sha256": "243b90aedb54198470ac04aeff713d5a6c6cd8b05c2c87eb49b48752d69bdb46",
+    "feature_contract_sha256": "d6117e95e1fe95c52c2741a5c0cbf6921be8418c50800c77c8bc9e6ed8e30ed5",
+    "cost_and_action_contract_sha256": "d01f221aae46421239e23fe2321a37e530367bc831e1033161d470b887fce8c0",
+    "model_manifest_sha256": "fddd8c1993c0abdcbd45dc439ae7053ca4173f60f938097bf0e8083f0104b930",
+    "artifact_graph_sha256": "f0f0f09c14b85a888dd1aa2c1cfe4f88acfe9332bc6513f83e99404a089768dd",
+    "expert_sha256": {
+      "high_vol": "40f9ee88f16cbebea9bb8c15b7d9d9e72293fb6f203400ef1d5164f4091796c6",
+      "bullish": "4c4be84cac34ee35a8b923d49b9f8a0b4b4a6834bac5c9ee9654358974366bb2",
+      "bearish": "fe302bf971c656cf086bd5a9abdd494bad858c106524128548c5c235649bb6c0",
+      "low_vol_unavailable_stub": "0958b4b9d3d4b1f7e77c1afbc122a66834829cb1909c45e7d05868749932548b"
+    },
+    "global_fallback_sha256": "662989a6c2f479e04ebc925339fd74e969c85821ad36752d631c8039c18e43d2",
+    "all_paths_repository_relative": true,
+    "machine_local_absolute_path_count": 0,
+    "all_graph_hashes_verified": true,
+    "fresh_clone_load_passed": true,
+    "router_loaded": true,
+    "available_experts_loaded": true,
+    "unavailable_expert_stub_verified": true,
+    "fallback_loaded": true,
+    "synthetic_prediction_fixture_reproduced": true,
+    "sha_mismatch_fails_closed": true
+  },
+  "validation": {
+    "targeted_hardening_pytest": {
+      "passed": 33,
+      "failed": 0
+    },
+    "full_tests_v8": {
+      "collected": 1597,
+      "passed": 1574,
+      "failed": 23,
+      "hardening_related_failure_count": 0,
+      "known_unrelated_failure_classes": [
+        "missing_legacy_v6_O_HTS_run_artifacts",
+        "preexisting_future_evaluation_fixture_gate_mismatch",
+        "public_provider_legacy_mocks_do_not_accept_data_api_fallback"
+      ]
+    },
+    "ruff_changed_files_passed": true,
+    "ruff_full_repository_passed": false,
+    "ruff_full_repository_preexisting_unrelated_error_count": 4,
+    "git_diff_check_passed": true
+  },
+  "known_limitations": [
+    "the_parent_report_recorded_source_commit_remains_unresolvable_and_is_not_claimed_reachable",
+    "all_development_metrics_and_route_attribution_are_permanently_ineligible_as_promotion_evidence",
+    "low_vol_expert_has_18_development_markets_and_is_frozen_to_global_fallback",
+    "development_MoE_bootstrap_LCB_is_negative_and_no_parent_candidate_was_selected",
+    "full_tests_v8_and_full_repository_ruff_have_preexisting_failures_outside_this_governance_scope"
+  ],
+  "collection_state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false,
+    "new_outcome_access_count": 0
+  },
+  "protocol_statement": "BTC-15M-MoE-confirmatory-v1 hardening protocol is internally consistent.",
+  "fresh_collection_remains_blocked": true,
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}
