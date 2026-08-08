@@ -1,0 +1,47 @@
+{
+  "artifact_byte_changes": {
+    "confirmatory_market_evaluation_rows": false,
+    "evaluation_manifest": false,
+    "evaluation_report_json": false,
+    "evaluation_report_markdown": false,
+    "official_settlement_rows": false,
+    "outcome_access_claim": false,
+    "settlement_ingestion_report": false
+  },
+  "created_at": "2026-08-08T15:32:53Z",
+  "evaluation_implementation_commit": "b3bcdf468a4c24d03e400eff0a56be4b1111345e",
+  "evaluation_report_hashes": {
+    "json": "72b7c4a8abaa438e0656f7b510acd6fd01894b5d6e55869dc8fd4708e35cc26f",
+    "markdown": "055f048d547fb122053e852d8b50ab5398216b6ad14c84b63f632498b7d2a333"
+  },
+  "gate_or_metric_changed": false,
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "outcome_data_changed": false,
+  "packaging_issue": {
+    "cause": "Path.with_suffix('.sha256') mapped the same-stem JSON and Markdown reports to one sidecar path",
+    "detected_after_evaluation": true,
+    "evaluation_manifest_descriptors_were_correct": true,
+    "scope": "hash sidecar namespace only"
+  },
+  "repair": {
+    "evaluation_report_json_sidecar": "moe_confirmatory_evaluation_report.sha256",
+    "evaluation_report_markdown_sidecar": "moe_confirmatory_evaluation_report.md.sha256",
+    "result": "distinct deterministic sidecars matching unchanged report bytes"
+  },
+  "rerun_performed": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-confirmatory-evidence-packaging-audit-v1",
+  "source_capture_mutated": false
+}
