@@ -1,0 +1,301 @@
+{
+  "candidate_bundle_hash": "fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807",
+  "created_at": "2026-08-09T05:14:37Z",
+  "decision": {
+    "current_lineage": {
+      "additional_confirmatory_collection_allowed": false,
+      "confirmatory_result": "terminal_failed",
+      "rerun_allowed": false,
+      "threshold_or_router_salvage_justified": false
+    },
+    "new_lineage": {
+      "confirmatory_collection_authorized": false,
+      "creation_authorized_by_this_report": false,
+      "development_justification": "conditionally_justified",
+      "fresh_outcomes_opened": false,
+      "model_training_authorized_by_this_report": false,
+      "recommended_lineage_id": "BTC-15M-cost-aware-market-residual-v1",
+      "required_hypothesis_change": "predict market-relative residual or after-cost action advantage instead of applying deterministic regime experts to raw outcome probability"
+    },
+    "rationale": [
+      "The frozen candidate failed absolute and paired bootstrap LCB gates and chronological stability gates.",
+      "The development candidate mean and paired effect retained only 7.40% and 5.80% in confirmatory data.",
+      "The candidate remained directionally predictive but was worse than the matched global baseline on Brier score and AUC.",
+      "Predicted action edge was strongly optimistic and had weak realized-PnL rank correlation.",
+      "Route and time panels show mechanism instability that cannot be repaired by collecting more markets under the terminal lineage."
+    ]
+  },
+  "development_to_confirmatory_effect": {
+    "candidate": {
+      "confirmatory_mean_unit_net_pnl": 0.00442906250000002,
+      "confirmatory_standard_deviation": 0.43359054947668135,
+      "development_mean_unit_net_pnl": 0.05989041095890412,
+      "effect_retained_fraction": 0.07395278190759409,
+      "effect_shrinkage_fraction": 0.9260472180924059,
+      "normal_approximation_market_count_for_positive_97_5pct_lcb_at_confirmatory_effect": 36816
+    },
+    "paired_delta": {
+      "confirmatory_mean_unit_net_pnl": 0.003051562500000002,
+      "confirmatory_standard_deviation": 0.357983790362268,
+      "development_mean_unit_net_pnl": 0.052602739726027394,
+      "effect_retained_fraction": 0.058011474609375044,
+      "effect_shrinkage_fraction": 0.941988525390625,
+      "normal_approximation_market_count_for_positive_97_5pct_lcb_at_confirmatory_effect": 52867
+    },
+    "interpretation": "The original effect-size assumption, not the authorized market count, failed to generalize. The market-count projections are diagnostics only and do not authorize further collection."
+  },
+  "diagnostic_boundary": {
+    "current_confirmatory_outcomes_used_for_diagnosis": true,
+    "diagnostic_recomputation_only": true,
+    "frozen_candidate_or_baseline_modified": false,
+    "frozen_collection_population_modified": false,
+    "future_lineage_role_of_current_800_markets": "development_only_forever",
+    "promotion_evidence_eligible": false,
+    "source_confirmatory_artifacts_modified": false
+  },
+  "distribution_shift": {
+    "development_market_count": 113,
+    "feature_complete_share": {
+      "confirmatory": 0.13625,
+      "development": 0.20353982300884957
+    },
+    "fallback_share": {
+      "confirmatory": 0.215,
+      "development": 0.07964601769911504
+    },
+    "high_vol_route_share": {
+      "confirmatory": 0.18875,
+      "development": 0.3185840707964602
+    },
+    "low_vol_route_share": {
+      "confirmatory": 0.215,
+      "development": 0.07964601769911504
+    },
+    "provider_health_mean": {
+      "confirmatory": 0.4018749999999999,
+      "development": 0.45221238938053093
+    },
+    "sideways_regime_share": {
+      "confirmatory": 0.23125,
+      "development": 0.09734513274336283
+    },
+    "interpretation": "Covariate shift was present, but route-stratified reversals show that mixture change alone does not explain the failure."
+  },
+  "economic_edge_diagnosis": {
+    "baseline_probability_metrics": {
+      "auc": 0.8311958984375,
+      "brier_score": 0.16595940345425653,
+      "log_loss": 0.5078812257903045,
+      "side_decision_row_count": 3200
+    },
+    "candidate_probability_metrics": {
+      "auc": 0.8197509765625,
+      "brier_score": 0.16979701249965132,
+      "log_loss": 0.5185541480864977,
+      "side_decision_row_count": 3200
+    },
+    "candidate_selected_action": {
+      "accepted_market_count": 795,
+      "mean_predicted_net_score": 0.1047876691235727,
+      "mean_realized_unit_net_pnl": 0.00445691823899373,
+      "prediction_optimism_gap": 0.10033075088457898,
+      "score_to_realized_pnl_correlation": 0.067623818743102,
+      "win_rate": 0.5333333333333333
+    },
+    "cost_signal": {
+      "confirmatory_cost_signal_ratio": 0.7388524469339623,
+      "confirmatory_gross_price_edge_total": 13.568,
+      "confirmatory_total_cost": 10.024750000000001,
+      "development_cost_signal_ratio": 0.16084452975047991,
+      "interpretation": "Cost per accepted trade changed modestly; realized gross edge collapsed. The failure is signal-relative-to-price, not primarily higher execution cost."
+    },
+    "root_cause": "raw outcome probability contains direction signal but does not provide stable incremental edge over executable market price after frozen costs"
+  },
+  "failure_classification": {
+    "collection_or_settlement_defect": false,
+    "confirmatory_population_defect": false,
+    "cost_increase_primary_cause": false,
+    "development_effect_optimism": true,
+    "market_relative_edge_ranking_failure": true,
+    "missingness_and_distribution_shift_contributing": true,
+    "preregistered_effect_underpowered_at_n800": false,
+    "route_specific_non_generalization": true,
+    "temporal_instability": true
+  },
+  "fallback_attribution_caveat": {
+    "fallback_panel_paired_delta": 1.5,
+    "markets_with_identical_candidate_and_baseline_action": 169,
+    "markets_with_sequential_expert_rejection_then_fallback_acceptance": 3,
+    "total_fallback_attributed_market_count": 172,
+    "interpretation": "The full +1.5 delta comes from three sequential route-switch paths. It is not evidence that the byte-identical fallback artifact directly outperformed itself."
+  },
+  "future_development_requirements": {
+    "data": [
+      "Register the opened 800-market confirmatory population and the prior 113-market corpus as development-only forever.",
+      "Require a strictly later, never-opened population for any future promotion claim."
+    ],
+    "discipline": [
+      "Preregister a finite candidate-slot budget before outcome-aware development.",
+      "Forbid post-hoc route, side, outlier, or missingness filtering.",
+      "Forbid threshold grid search as a substitute for a new model hypothesis."
+    ],
+    "model": [
+      "Use rolling-origin, market-grouped, side-symmetric training with native missingness.",
+      "Predict market-relative residual or settlement-minus-executable-ask-minus-frozen-cost action advantage.",
+      "Start with a pooled global residual model; treat regime as interactions until each expert has adequate independent support.",
+      "Keep NO_TRADE at zero and include every market in paired bootstrap evaluation."
+    ],
+    "readiness_before_future_collection": [
+      "Positive absolute market-bootstrap LCB on preregistered rolling-origin development OOF.",
+      "Positive paired-delta market-bootstrap LCB against a matched frozen baseline.",
+      "Non-negative chronological blocks and largest-winner-removed totals.",
+      "Stable score-to-realized-PnL ordering and route/side attribution without post-hoc exclusions.",
+      "A new conservative power analysis derived from OOF effect sizes."
+    ]
+  },
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "overall_confirmatory_result": {
+    "baseline_accepted_market_count": 792,
+    "baseline_total_unit_net_pnl": 1.1020000000000136,
+    "candidate_accepted_market_count": 795,
+    "candidate_bootstrap_97_5pct_interval": {
+      "lower": -0.026126281249999987,
+      "upper": 0.034883031250000016
+    },
+    "candidate_total_unit_net_pnl": 3.5432500000000156,
+    "confirmatory_gate_passed": false,
+    "market_count": 800,
+    "paired_delta_bootstrap_97_5pct_interval": {
+      "lower": -0.021840812499999997,
+      "upper": 0.028274921874999998
+    },
+    "paired_delta_total_unit_net_pnl": 2.441250000000002,
+    "paired_executable_ask_coverage": 1.0,
+    "rerun_allowed": false,
+    "terminal_failed": true
+  },
+  "power_diagnosis": {
+    "design_assumed_absolute_mean": 0.05989041095890412,
+    "design_assumed_paired_delta_mean": 0.052602739726027394,
+    "design_estimated_absolute_lcb_crossing_probability_at_n800": 0.9572966774033395,
+    "design_estimated_paired_delta_lcb_crossing_probability_at_n800": 0.8026552332189634,
+    "selected_market_count": 800,
+    "verdict": "the observed confirmatory effect invalidated the planning assumption; additional same-lineage sampling is not justified"
+  },
+  "route_diagnosis": {
+    "bearish": {
+      "confirmatory_candidate_mean_pnl": -0.0011365313653136395,
+      "confirmatory_candidate_total_pnl": -0.3079999999999963,
+      "confirmatory_market_count": 271,
+      "confirmatory_paired_delta_total": 3.7707500000000005,
+      "development_candidate_mean_pnl": -0.08544791666666664
+    },
+    "bullish": {
+      "confirmatory_candidate_mean_pnl": 0.010381067961165063,
+      "confirmatory_candidate_total_pnl": 2.138500000000003,
+      "confirmatory_market_count": 206,
+      "confirmatory_paired_delta_total": -0.7627500000000007,
+      "development_candidate_mean_pnl": 0.06169444444444445
+    },
+    "high_vol": {
+      "confirmatory_candidate_mean_pnl": -0.014932119205297993,
+      "confirmatory_candidate_total_pnl": -2.254749999999997,
+      "confirmatory_market_count": 151,
+      "confirmatory_paired_delta_total": -2.0667500000000008,
+      "development_candidate_mean_pnl": 0.12648076923076923
+    },
+    "low_vol": {
+      "confirmatory_candidate_mean_pnl": 0.0230668604651163,
+      "confirmatory_candidate_total_pnl": 3.967500000000004,
+      "confirmatory_market_count": 172,
+      "confirmatory_paired_delta_total": 1.4999999999999998,
+      "development_candidate_mean_pnl": 0.40474999999999994,
+      "native_expert_available": false
+    }
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-terminal-failure-diagnostic-v1",
+  "side_diagnosis": {
+    "down": {
+      "accepted_market_count": 467,
+      "mean_unit_net_pnl": 0.016307815845824428,
+      "total_unit_net_pnl": 7.615750000000008
+    },
+    "outcome_distribution": {
+      "down_count": 423,
+      "down_share": 0.52875,
+      "up_count": 377,
+      "up_share": 0.47125
+    },
+    "up": {
+      "accepted_market_count": 328,
+      "mean_unit_net_pnl": -0.012416158536585349,
+      "total_unit_net_pnl": -4.0724999999999945
+    }
+  },
+  "source_artifacts": {
+    "confirmatory_capture_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/confirmatory_capture_manifest.json",
+      "sha256": "a7d82694b9b4a798f382b6d086f74dda2fa7a296f0870f193fcc00e9192be4ff"
+    },
+    "confirmatory_evaluation_report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/moe_confirmatory_evaluation_report.json",
+      "sha256": "72b7c4a8abaa438e0656f7b510acd6fd01894b5d6e55869dc8fd4708e35cc26f"
+    },
+    "confirmatory_market_evaluation_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/confirmatory_market_evaluation_rows.jsonl",
+      "sha256": "1bd6e2fe4ae3d8f867976fe490fb79e32a784f7266950a269d83495264c580c7"
+    },
+    "development_distribution_reference": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_development_distribution_shift_reference.json",
+      "sha256": "cc2134ef5518c2b8fc8d48b1969ade0d55affef8fd690a6abffb438e9063037b"
+    },
+    "development_metric_reconciliation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_metric_reconciliation_report.json",
+      "sha256": "153cbcf3573b8ce0b8022c1faab4348193f245ac3de1a8b284c21d0a3d4c8028"
+    },
+    "development_route_attribution": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_route_attribution_report.json",
+      "sha256": "f540ed6bcbd7bc93e74d283a61cb385c802e8e0c24c102e35ef4d14b3dc99adf"
+    },
+    "power_interpretation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_power_interpretation_r1.json",
+      "sha256": "8cfc1700782115274e248b859a98d8f1dd7352a609947ab177e8e242598f0910"
+    }
+  },
+  "temporal_diagnosis": {
+    "candidate_chronological_halves": {
+      "first": 4.521250000000008,
+      "second": -0.9779999999999927
+    },
+    "candidate_quartile_totals": [
+      4.720500000000004,
+      -0.1992499999999957,
+      -6.197249999999997,
+      5.219250000000004
+    ],
+    "paired_delta_chronological_halves": {
+      "first": -4.160499999999999,
+      "second": 6.601750000000001
+    },
+    "paired_delta_quartile_totals": [
+      -3.775749999999999,
+      -0.38475000000000026,
+      3.9982500000000005,
+      2.6035
+    ],
+    "stable_absolute_and_relative_edge_in_same_half": false
+  }
+}
