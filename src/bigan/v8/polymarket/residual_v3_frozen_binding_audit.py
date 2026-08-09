@@ -32,8 +32,11 @@ from bigan.v8.polymarket.residual_v3_terminal_review import (
     verify_residual_v3_terminal_review,
 )
 
-SCHEMA_VERSION = "bigan-btc-15m-residual-v3-frozen-binding-audit-v1"
+SCHEMA_VERSION = "bigan-btc-15m-residual-v3-frozen-binding-audit-v2"
 CREATED_AT = "2026-08-09T15:45:49Z"
+SUPERSEDED_AUDIT_SHA256 = (
+    "8be286404f7e7782d2b2980cb6c5d65b2245436deac3603b1868f73801dfe0dd"
+)
 DEFAULT_AUDIT_PATH = (
     DEFAULT_CONFIG_DIR / "residual_v3_frozen_artifact_binding_audit.json"
 )
@@ -168,6 +171,18 @@ def build_residual_v3_frozen_binding_audit(
             "https://github.com/phead198708/BiGan/pull/268"
             "#pullrequestreview-4891741652"
         ),
+        "supersession": {
+            "supersedes_audit_sha256": SUPERSEDED_AUDIT_SHA256,
+            "reason": (
+                "The v1 audit embedded an exact hash of a rebuilt floating-point "
+                "report. Python 3.11 and 3.12 produced semantically equivalent "
+                "reports within the frozen 1e-12 reconciliation tolerance but "
+                "different byte hashes. The v2 audit retains semantic equality "
+                "and frozen artifact SHA checks without treating platform "
+                "roundoff as governance drift."
+            ),
+            "frozen_v3_bytes_changed": False,
+        },
         "frozen_bytes_changed": {
             "candidate_implementations": False,
             "protocols": False,
@@ -325,7 +340,11 @@ def _audit_candidate(
         "market_result_count": len(markets),
         "fold_audit_count": len(folds),
         "report_rebuilt_independently": True,
-        "report_semantic_sha256": canonical_json_sha256(rebuilt),
+        "report_semantic_reconciliation_passed": True,
+        "report_numeric_tolerance": {
+            "relative": 1e-12,
+            "absolute": 1e-12,
+        },
         "frozen_report_sha256": sha256_file(artifacts["report"]),
         "report_markdown_rebuilt": True,
         "all_gates_passed": bool(frozen["all_gates_passed"]),
