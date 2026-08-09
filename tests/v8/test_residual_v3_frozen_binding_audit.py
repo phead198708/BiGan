@@ -16,6 +16,7 @@ from bigan.v8.polymarket.residual_v3_frozen_binding_audit import (
     PRIMARY_PROTOCOL_PATH,
     build_residual_v3_frozen_binding_audit,
     require_executing_module_descriptor,
+    verify_residual_v3_frozen_binding_audit,
 )
 
 
@@ -115,3 +116,16 @@ def test_additive_audit_rebuilds_reports_and_verifies_frozen_inventory() -> None
         "regression_test_required": True,
     }
     assert all(value is False for value in audit["safety"].values())
+
+
+def test_frozen_binding_audit_reproduces_and_keeps_all_permissions_false() -> None:
+    result = verify_residual_v3_frozen_binding_audit()
+    assert result["verification_passed"] is True
+    assert result["audit_passed"] is True
+    assert result["primary_report_rebuilt"] is True
+    assert result["challenger_report_rebuilt"] is True
+    assert result["frozen_sidecar_count"] == 20
+    assert result["audit_sha256"] == (
+        "8be286404f7e7782d2b2980cb6c5d65b2245436deac3603b1868f73801dfe0dd"
+    )
+    assert all(value is False for value in result["safety"].values())
