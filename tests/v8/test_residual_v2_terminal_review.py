@@ -11,6 +11,7 @@ from bigan.v8.polymarket.cost_aware_residual_v2_uncertainty import (
 )
 from bigan.v8.polymarket.residual_v2_terminal_review import (
     build_residual_v2_terminal_review,
+    verify_residual_v2_terminal_review,
 )
 
 
@@ -79,3 +80,14 @@ def test_terminal_review_rejects_any_third_candidate_budget() -> None:
             challenger=changed,
             source_descriptors=_descriptors(),
         )
+
+
+def test_frozen_terminal_review_rebuilds_and_keeps_every_permission_false() -> None:
+    result = verify_residual_v2_terminal_review()
+    assert result["verification_passed"] is True
+    assert result["phase_1_terminal_failed"] is True
+    assert result["candidate_budget_exhausted"] is True
+    assert result["candidate_freeze_allowed"] is False
+    assert result["live_shadow_start_allowed"] is False
+    assert result["fresh_confirmatory_collection_authorized"] is False
+    assert all(value is False for value in result["safety"].values())
