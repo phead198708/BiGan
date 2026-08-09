@@ -126,6 +126,6 @@ def test_frozen_binding_audit_reproduces_and_keeps_all_permissions_false() -> No
     assert result["challenger_report_rebuilt"] is True
     assert result["frozen_sidecar_count"] == 20
     assert result["audit_sha256"] == (
-        "8be286404f7e7782d2b2980cb6c5d65b2245436deac3603b1868f73801dfe0dd"
+        "7f1e336642cebdd4fba76a68671ba33cbcc3ed896e2281fb835be7e84721bb85"
     )
     assert all(value is False for value in result["safety"].values())

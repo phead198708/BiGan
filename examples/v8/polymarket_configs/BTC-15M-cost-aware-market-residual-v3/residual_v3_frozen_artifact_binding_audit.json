@@ -1,7 +1,7 @@
 {
   "audit_implementation": {
     "path": "src/bigan/v8/polymarket/residual_v3_frozen_binding_audit.py",
-    "sha256": "2998da3eda1d83896835c7ba20edff3893b255811e5bed2be37c5b8095ac9b7e"
+    "sha256": "cda1d18c40d1a84f52163a17eb462208d6ae9687e847fbd03e2283d739db8ca1"
   },
   "audit_passed": true,
   "candidate_binding": {
@@ -20,8 +20,12 @@
       "market_result_count": 600,
       "protocol_descriptor_match": true,
       "report_markdown_rebuilt": true,
+      "report_numeric_tolerance": {
+        "absolute": 1e-12,
+        "relative": 1e-12
+      },
       "report_rebuilt_independently": true,
-      "report_semantic_sha256": "ff9b5c09ea01e16e5e27f90a76812986e29241f850bbd8ecb9538bd93e3fcffa",
+      "report_semantic_reconciliation_passed": true,
       "safety": {
         "#134_resume_allowed": false,
         "#146_start_allowed": false,
@@ -51,8 +55,12 @@
       "market_result_count": 600,
       "protocol_descriptor_match": true,
       "report_markdown_rebuilt": true,
+      "report_numeric_tolerance": {
+        "absolute": 1e-12,
+        "relative": 1e-12
+      },
       "report_rebuilt_independently": true,
-      "report_semantic_sha256": "6b266cd21e5f053e43f30d6b133b1b1742e79e90c282b6c5bd3d5c1afddceb65",
+      "report_semantic_reconciliation_passed": true,
       "safety": {
         "#134_resume_allowed": false,
         "#146_start_allowed": false,
@@ -100,7 +108,7 @@
     "v8_execution_handoff_allowed": false,
     "wallet_signing_allowed": false
   },
-  "schema_version": "bigan-btc-15m-residual-v3-frozen-binding-audit-v1",
+  "schema_version": "bigan-btc-15m-residual-v3-frozen-binding-audit-v2",
   "sidecar_audit": {
     "all_sidecars_verified": true,
     "entries": [
@@ -214,6 +222,11 @@
     "fresh_collection_authorized": false,
     "live_shadow_start_allowed": false,
     "promotion_authorized": false
+  },
+  "supersession": {
+    "frozen_v3_bytes_changed": false,
+    "reason": "The v1 audit embedded an exact hash of a rebuilt floating-point report. Python 3.11 and 3.12 produced semantically equivalent reports within the frozen 1e-12 reconciliation tolerance but different byte hashes. The v2 audit retains semantic equality and frozen artifact SHA checks without treating platform roundoff as governance drift.",
+    "supersedes_audit_sha256": "8be286404f7e7782d2b2980cb6c5d65b2245436deac3603b1868f73801dfe0dd"
   },
   "terminal_review_reconciliation": {
     "candidate_freeze_allowed": false,
