@@ -230,9 +230,7 @@ def run_exact_confirmatory_evaluation(
         report,
     )
     markdown_path = output / "moe_confirmatory_evaluation_report.md"
-    markdown_path.write_text(_evaluation_markdown(report), encoding="utf-8")
-    markdown_sha = sha256_file(markdown_path)
-    markdown_path.with_suffix(".sha256").write_text(markdown_sha + "\n", encoding="utf-8")
+    _write_new_frozen_text(markdown_path, _evaluation_markdown(report))
     manifest = {
         "schema_version": "bigan-btc-15m-moe-confirmatory-evaluation-manifest-v1",
         "lineage_id": LINEAGE_ID,
@@ -896,13 +894,29 @@ def _verified_json(path: Path) -> dict[str, Any]:
 
 
 def _verified_path(path: Path) -> dict[str, Any]:
-    sidecar = path.with_suffix(".sha256")
+    sidecar = _artifact_sidecar_path(path)
     if not path.is_file() or not sidecar.is_file():
         raise ValueError(f"missing frozen artifact or sidecar: {path}")
     actual = sha256_file(path)
     if sidecar.read_text(encoding="utf-8").strip() != actual:
         raise ValueError(f"frozen artifact SHA mismatch: {path}")
     return {"path": path.resolve(), "sha256": actual}
+
+
+def _artifact_sidecar_path(path: Path) -> Path:
+    if path.suffix == ".md":
+        return path.with_name(f"{path.name}.sha256")
+    return path.with_suffix(".sha256")
+
+
+def _write_new_frozen_text(path: Path, value: str) -> dict[str, Any]:
+    sidecar = _artifact_sidecar_path(path)
+    if path.exists() or sidecar.exists():
+        raise FileExistsError(f"frozen text artifact already exists: {path}")
+    path.write_text(value, encoding="utf-8")
+    digest = sha256_file(path)
+    sidecar.write_text(digest + "\n", encoding="utf-8")
+    return {"path": path.resolve(), "sha256": digest, "sidecar": sidecar.resolve()}
 
 
 def _resolve_verified_descriptor(

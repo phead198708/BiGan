@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import numpy as np
 
+from bigan.v8.polymarket.moe_collection_boundary_r2 import _write_new_frozen_json
 from bigan.v8.polymarket.moe_confirmatory_evaluation import (
+    _artifact_sidecar_path,
     _gate_passes,
     _group_panel,
     _policy_result,
+    _verified_path,
+    _write_new_frozen_text,
 )
 
 
@@ -68,3 +72,17 @@ def test_frozen_gate_operators_evaluate_observed_values() -> None:
     assert not _gate_passes(1, {"operator": "eq", "value": 0})
     assert _gate_passes(0.951, {"operator": "gte", "value": 0.95})
     assert not _gate_passes(0.0, {"operator": "gt", "value": 0.0})
+
+
+def test_json_and_markdown_sidecars_generate_and_verify_independently(tmp_path) -> None:
+    json_path = tmp_path / "report.json"
+    markdown_path = tmp_path / "report.md"
+
+    json_artifact = _write_new_frozen_json(json_path, {"passed": False})
+    markdown_artifact = _write_new_frozen_text(markdown_path, "# Report\n")
+
+    assert _artifact_sidecar_path(json_path) == tmp_path / "report.sha256"
+    assert _artifact_sidecar_path(markdown_path) == tmp_path / "report.md.sha256"
+    assert json_artifact["sha256"] != markdown_artifact["sha256"]
+    assert _verified_path(json_path)["sha256"] == json_artifact["sha256"]
+    assert _verified_path(markdown_path)["sha256"] == markdown_artifact["sha256"]

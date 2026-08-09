@@ -1,0 +1,352 @@
+{
+  "contract_sha256": "6bd381da3be4204089ad1e0ae67dacbd9acbe09abd2abcd428cebc8f56cf0291",
+  "cost_signal": {
+    "confirmatory": {
+      "accepted_market_count": 795,
+      "cost_signal_ratio": 0.7388524469339623,
+      "gross_price_edge_total": 13.568,
+      "total_cost": 10.024750000000001
+    },
+    "development_cost_signal_ratio": 0.16084452975047991,
+    "interpretation": "realized_gross_edge_collapsed_relative_to_stable_frozen_costs",
+    "primary_failure_is_cost_increase": false
+  },
+  "created_at": "2026-08-09T06:00:00Z",
+  "distribution_shift": {
+    "confirmatory_population_count": 800,
+    "distribution_population_count": 113,
+    "fallback_share": {
+      "confirmatory": 0.215,
+      "development": 0.07964601769911504
+    },
+    "feature_complete_share": {
+      "confirmatory": 0.13625,
+      "development": 0.20353982300884957
+    },
+    "high_vol_route_share": {
+      "confirmatory": 0.18875,
+      "development": 0.3185840707964602
+    },
+    "low_vol_route_share": {
+      "confirmatory": 0.215,
+      "development": 0.07964601769911504
+    }
+  },
+  "effect_reconciliation": {
+    "candidate": {
+      "confirmatory_mean_unit_net_pnl": 0.00442906250000002,
+      "confirmatory_standard_deviation": 0.43359054947668135,
+      "development_mean_unit_net_pnl": 0.05989041095890412,
+      "effect_retained_fraction": 0.07395278190759409,
+      "effect_shrinkage_fraction": 0.9260472180924059
+    },
+    "confirmatory_population_count": 800,
+    "development_effect_population_count": 73,
+    "paired_delta": {
+      "confirmatory_mean_unit_net_pnl": 0.003051562500000002,
+      "confirmatory_standard_deviation": 0.357983790362268,
+      "development_mean_unit_net_pnl": 0.052602739726027394,
+      "effect_retained_fraction": 0.058011474609375044,
+      "effect_shrinkage_fraction": 0.9419885253906249
+    }
+  },
+  "fallback_attribution_caveat": {
+    "direct_fallback_superiority_claim_allowed": false,
+    "fallback_attributed_market_count": 172,
+    "fallback_panel_paired_delta": 1.5,
+    "identical_candidate_and_baseline_action_count": 169,
+    "sequential_expert_rejection_then_fallback_acceptance_count": 3
+  },
+  "future_evidence_boundary": {
+    "current_800_market_population_role": "development_only_forever",
+    "prior_113_market_distribution_population_role": "development_only_forever",
+    "prior_73_market_effect_population_role": "development_only_forever",
+    "promotion_evidence_eligible": false,
+    "strictly_later_unopened_population_required": true
+  },
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "new_lineage_decision": {
+    "confirmatory_collection_authorized": false,
+    "creation_authorized_by_this_report": false,
+    "development_justification": "conditionally_justified",
+    "recommended_lineage_id": "BTC-15M-cost-aware-market-residual-v1",
+    "required_hypothesis_change": "pooled side-symmetric direct regression of market-relative after-cost action value",
+    "training_authorized_by_this_report": false
+  },
+  "population_denominators": {
+    "confirmatory_population_count": 800,
+    "distribution_population_count": 113,
+    "effect_population_count": 73
+  },
+  "power_diagnostic": {
+    "diagnostic_only_not_collection_plan": true,
+    "target_crossing_probability_0_5": {
+      "absolute_candidate": 36816,
+      "paired_delta": 52867
+    },
+    "target_crossing_probability_0_5_is_not_80pct_power": true,
+    "target_crossing_probability_0_8": {
+      "absolute_candidate": 75222,
+      "paired_delta": 108017
+    }
+  },
+  "probability_metrics": {
+    "candidate": {
+      "auc": 0.8197509765625,
+      "brier_score": 0.16979701249965132,
+      "log_loss": 0.5185541480864977,
+      "probability_clipping_rule": "clip_to_[1e-15,1-1e-15]_for_log_loss_only",
+      "side_decision_row_count": 3200
+    },
+    "matched_global_baseline": {
+      "auc": 0.8311958984375,
+      "brier_score": 0.16595940345425653,
+      "log_loss": 0.5078812257903045,
+      "probability_clipping_rule": "clip_to_[1e-15,1-1e-15]_for_log_loss_only",
+      "side_decision_row_count": 3200
+    },
+    "probability_clipping_epsilon_for_log_loss": 1e-15
+  },
+  "promotion_evidence_eligible": false,
+  "role": "deterministic_post_terminal_failure_diagnostic",
+  "root_cause": {
+    "collection_or_settlement_defect_identified": false,
+    "conclusion": "raw outcome probability retained direction signal but did not provide stable incremental edge over executable market price after frozen costs",
+    "development_effect_optimism": true,
+    "distribution_shift_contributed": true,
+    "frozen_derived_artifact_defect_identified": false,
+    "market_relative_edge_ranking_failure": true,
+    "raw_provenance_status": "recovered_content_addressed_archive_deep_hash_verified",
+    "route_specific_non_generalization": true,
+    "temporal_instability": true
+  },
+  "route_diagnosis": {
+    "bearish": {
+      "confirmatory": {
+        "candidate_mean_unit_net_pnl": -0.0011365313653136395,
+        "candidate_total_unit_net_pnl": -0.3079999999999963,
+        "market_count": 271,
+        "paired_delta_mean_unit_net_pnl": 0.013914206642066423,
+        "paired_delta_total_unit_net_pnl": 3.7707500000000005
+      },
+      "development": {
+        "candidate_mean_unit_net_pnl": -0.08544791666666664,
+        "candidate_total_unit_net_pnl": -2.0507499999999994,
+        "market_count": 24,
+        "paired_delta_mean_unit_net_pnl": -0.039375,
+        "paired_delta_total_unit_net_pnl": -0.945
+      }
+    },
+    "bullish": {
+      "confirmatory": {
+        "candidate_mean_unit_net_pnl": 0.010381067961165063,
+        "candidate_total_unit_net_pnl": 2.138500000000003,
+        "market_count": 206,
+        "paired_delta_mean_unit_net_pnl": -0.003702669902912625,
+        "paired_delta_total_unit_net_pnl": -0.7627500000000007
+      },
+      "development": {
+        "candidate_mean_unit_net_pnl": 0.06169444444444445,
+        "candidate_total_unit_net_pnl": 1.1105,
+        "market_count": 18,
+        "paired_delta_mean_unit_net_pnl": 0.04416666666666666,
+        "paired_delta_total_unit_net_pnl": 0.7949999999999999
+      }
+    },
+    "high_vol": {
+      "confirmatory": {
+        "candidate_mean_unit_net_pnl": -0.014932119205297993,
+        "candidate_total_unit_net_pnl": -2.254749999999997,
+        "market_count": 151,
+        "paired_delta_mean_unit_net_pnl": -0.013687086092715238,
+        "paired_delta_total_unit_net_pnl": -2.0667500000000008
+      },
+      "development": {
+        "candidate_mean_unit_net_pnl": 0.12648076923076923,
+        "candidate_total_unit_net_pnl": 3.2885,
+        "market_count": 26,
+        "paired_delta_mean_unit_net_pnl": 0.15346153846153848,
+        "paired_delta_total_unit_net_pnl": 3.99
+      }
+    },
+    "low_vol": {
+      "confirmatory": {
+        "candidate_mean_unit_net_pnl": 0.0230668604651163,
+        "candidate_total_unit_net_pnl": 3.967500000000004,
+        "market_count": 172,
+        "paired_delta_mean_unit_net_pnl": 0.008720930232558138,
+        "paired_delta_total_unit_net_pnl": 1.4999999999999998
+      },
+      "development": {
+        "candidate_mean_unit_net_pnl": 0.40474999999999994,
+        "candidate_total_unit_net_pnl": 2.0237499999999997,
+        "market_count": 5,
+        "paired_delta_mean_unit_net_pnl": 0.0,
+        "paired_delta_total_unit_net_pnl": 0.0
+      }
+    }
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-terminal-failure-diagnostic-v2",
+  "scored_rows": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/terminal_diagnostic_002/terminal_diagnostic_scored_rows.jsonl",
+    "sha256": "b8867ff511251a8505e480dcef413e1ff18cb98b72a28969772147b6d3b809ed"
+  },
+  "selected_action_metrics": {
+    "candidate": {
+      "accepted_market_count": 795,
+      "mean_predicted_net_score": 0.1047876691235727,
+      "mean_realized_unit_net_pnl": 0.004456918238993732,
+      "prediction_optimism_gap": 0.10033075088457898,
+      "score_to_realized_pnl_correlation": 0.067623818743102,
+      "win_rate": 0.5333333333333333
+    },
+    "correlation_method": "pearson_product_moment_on_accepted_action_predicted_net_score_and_realized_unit_net_pnl",
+    "matched_global_baseline": {
+      "accepted_market_count": 792,
+      "mean_predicted_net_score": 0.08621405154280698,
+      "mean_realized_unit_net_pnl": 0.0013914141414141576,
+      "prediction_optimism_gap": 0.08482263740139283,
+      "score_to_realized_pnl_correlation": 0.07458245153202277,
+      "win_rate": 0.553030303030303
+    }
+  },
+  "side_diagnosis": {
+    "DOWN": {
+      "accepted_market_count": 467,
+      "mean_unit_net_pnl": 0.016307815845824428,
+      "total_unit_net_pnl": 7.6157500000000065
+    },
+    "UP": {
+      "accepted_market_count": 328,
+      "mean_unit_net_pnl": -0.012416158536585349,
+      "total_unit_net_pnl": -4.072499999999994
+    },
+    "outcome_distribution": {
+      "DOWN": {
+        "count": 423,
+        "share": 0.52875
+      },
+      "UP": {
+        "count": 377,
+        "share": 0.47125
+      }
+    }
+  },
+  "source_artifacts": {
+    "artifact_graph": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_artifact_graph.json",
+      "sha256": "265ecd1b62bd5489099b37b09df9e65a6bbf62a4fe1b293a2b8a73d1951cf205"
+    },
+    "baseline_decision_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/baseline_decision_rows.jsonl",
+      "sha256": "49ee6bdd7a3caccb824af8dd3645d3f42a9342b81a766412dfe7ed42f21f8006"
+    },
+    "candidate_decision_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/candidate_decision_rows.jsonl",
+      "sha256": "7784f2423b7d16f3ac665729432e16c6980ad94b656e049d03ecf776fdaed338"
+    },
+    "confirmatory_capture_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/confirmatory_capture_manifest.json",
+      "sha256": "a7d82694b9b4a798f382b6d086f74dda2fa7a296f0870f193fcc00e9192be4ff"
+    },
+    "confirmatory_evaluation_report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/moe_confirmatory_evaluation_report.json",
+      "sha256": "72b7c4a8abaa438e0656f7b510acd6fd01894b5d6e55869dc8fd4708e35cc26f"
+    },
+    "confirmatory_market_evaluation_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/confirmatory_market_evaluation_rows.jsonl",
+      "sha256": "1bd6e2fe4ae3d8f867976fe490fb79e32a784f7266950a269d83495264c580c7"
+    },
+    "cost_action_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_cost_and_action_contract.json",
+      "sha256": "7a2d2f170cd6b042188f8282014dfbfb7d379e49085bd00807aace1881d7bf43"
+    },
+    "development_distribution_reference": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_development_distribution_shift_reference.json",
+      "sha256": "cc2134ef5518c2b8fc8d48b1969ade0d55affef8fd690a6abffb438e9063037b"
+    },
+    "development_metric_reconciliation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_metric_reconciliation_report.json",
+      "sha256": "153cbcf3573b8ce0b8022c1faab4348193f245ac3de1a8b284c21d0a3d4c8028"
+    },
+    "development_paired_planning_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/development_paired_planning_rows.jsonl",
+      "sha256": "d7f670e2c367a01dab4055603077f6b31c751b41a1a2a42cdcb1c3733ea2fb83"
+    },
+    "development_route_attribution": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_route_attribution_report.json",
+      "sha256": "f540ed6bcbd7bc93e74d283a61cb385c802e8e0c24c102e35ef4d14b3dc99adf"
+    },
+    "power_interpretation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_power_interpretation_r1.json",
+      "sha256": "8cfc1700782115274e248b859a98d8f1dd7352a609947ab177e8e242598f0910"
+    },
+    "raw_capture_recovery_bundle_manifest": {
+      "path": "examples/v8/polymarket_artifacts/raw_archives/sha256/5deddaabd9d4ec9d979dfe47f77dd01ee6671c708154588b7325ae8325638639/bundle_manifest.json",
+      "sha256": "aab5c7187cdce4f7b6e2f9c5ed08b3a1f79b3c0d72c75fdf017384254c388d72"
+    },
+    "raw_evidence_manifest_index": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/raw_evidence_manifest_index.jsonl",
+      "sha256": "4b8a51c20299986440676c27f1a488ed099a898e337b17aa3838bdf0d5bc2495"
+    }
+  },
+  "temporal_diagnosis": {
+    "candidate_chronological_halves": {
+      "first": 4.521250000000008,
+      "second": -0.9779999999999927
+    },
+    "candidate_quartile_totals": [
+      4.720500000000004,
+      -0.1992499999999957,
+      -6.197249999999997,
+      5.219250000000004
+    ],
+    "paired_delta_chronological_halves": {
+      "first": -4.160499999999999,
+      "second": 6.601750000000001
+    },
+    "paired_delta_quartile_totals": [
+      -3.775749999999999,
+      -0.38475000000000026,
+      3.9982500000000005,
+      2.6035
+    ],
+    "stable_absolute_and_relative_edge_in_same_half": false
+  },
+  "terminal_result": {
+    "baseline_total_unit_net_pnl": 1.1020000000000136,
+    "candidate_bootstrap_interval": {
+      "confidence": 0.975,
+      "lower": -0.026126281249999987,
+      "method": "market_level_paired_percentile_bootstrap",
+      "resample_count": 10000,
+      "upper": 0.034883031250000016
+    },
+    "candidate_total_unit_net_pnl": 3.5432500000000156,
+    "confirmatory_gate_passed": false,
+    "market_count": 800,
+    "paired_delta_bootstrap_interval": {
+      "confidence": 0.975,
+      "lower": -0.021840812499999997,
+      "method": "market_level_paired_percentile_bootstrap",
+      "resample_count": 10000,
+      "upper": 0.028274921874999998
+    },
+    "paired_delta_total_unit_net_pnl": 2.441250000000002,
+    "rerun_allowed": false,
+    "terminal_failed": true
+  }
+}
