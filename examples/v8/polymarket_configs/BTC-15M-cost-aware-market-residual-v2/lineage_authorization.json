@@ -1,0 +1,82 @@
+{
+  "authorization_scope": {
+    "candidate_slot_budget": {
+      "challenger_slots": 1,
+      "maximum_total_slots": 2,
+      "primary_slots": 1,
+      "slot_budget_may_be_increased": false
+    },
+    "fresh_confirmatory_collection_authorized": false,
+    "live_shadow_start_authorized": false,
+    "micro_live_authorized": false,
+    "outcome_aware_development_training_authorized": true,
+    "paper_or_live_execution_authorized": false,
+    "promotion_authorized": false,
+    "training_may_start_only_after_slot_protocol_is_sha_frozen": true
+  },
+  "authorization_source": {
+    "instruction": "建立新的 residual lineage，并授予新的候选 slot；旧 gate、阈值、失败报告及安全状态保持不可修改。",
+    "instruction_sha256": "9ec526fd63a8e50b6c3000ca50a6cbedc440d70e563fab1ca3617ec7075c272b",
+    "source_id": "codex-thread-019fb261-29fd-76b2-a2b5-99e29668d4e3",
+    "type": "explicit_user_instruction"
+  },
+  "created_at": "2026-08-09T08:05:26Z",
+  "forbidden": [
+    "mutation_of_parent_v1_gate_or_threshold",
+    "mutation_of_parent_v1_failed_report_or_manifest",
+    "candidate_slot_budget_increase",
+    "threshold_or_hyperparameter_grid_search",
+    "route_side_missingness_or_outlier_filtering",
+    "deterministic_expert_or_route_selection",
+    "opened_development_data_as_promotion_evidence",
+    "training_before_slot_protocol_sha_freeze",
+    "paper_live_wallet_write_or_capital_risk"
+  ],
+  "hypothesis": {
+    "architecture": "pooled_side_symmetric_market_anchored_probability_residual_regressor_with_pair_coherence",
+    "expected_mechanism": "anchoring payout probability to the causal paired market midpoint and learning only the residual reduces unstable absolute extrapolation; deterministic UP/DOWN pair normalization preserves probability coherence before frozen costs are deducted",
+    "feature_contract": "unchanged_108_feature_side_symmetric_causal_native_missingness_contract",
+    "routes_or_experts_allowed": false,
+    "threshold_change_allowed": false
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v2",
+  "parent_lineage": {
+    "candidate_budget_consumed": 2,
+    "candidate_budget_maximum": 2,
+    "failed_artifacts_mutable": false,
+    "gate_or_threshold_change_allowed": false,
+    "lineage_id": "BTC-15M-cost-aware-market-residual-v1",
+    "status": "phase_1_terminal_failed",
+    "terminal_review": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v1/residual_development_terminal_review.json",
+      "sha256": "e5f21667e351630bbe1a0e68c146d43287e830892c9a1f3d2b2e45825d7e81e0"
+    }
+  },
+  "registered_development_data": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v2/development_data_registry.json",
+    "sha256": "9a673326169cfac94801591dbcc562e17bf94004304ffa53167cff079e26e4c4"
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-cost-aware-residual-lineage-authorization-v2",
+  "state": {
+    "candidate_frozen": false,
+    "fresh_confirmatory_collection_started": false,
+    "fresh_outcomes_opened": false,
+    "lineage_authorized_for_governed_development": true,
+    "live_shadow_started": false,
+    "micro_live_started": false,
+    "training_started": false
+  }
+}
