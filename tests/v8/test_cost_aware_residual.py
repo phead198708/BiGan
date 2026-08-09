@@ -13,16 +13,18 @@ from bigan.v8.polymarket.cost_aware_residual import (
     build_residual_oof_report,
     market_results_from_predictions,
     validate_residual_oof_protocol,
-    verify_frozen_residual_oof,
 )
 from bigan.v8.polymarket.cost_aware_residual_quantile import (
     CHALLENGER_PROTOCOL_SCHEMA_VERSION,
     DEFAULT_CHALLENGER_OUTPUT_DIR,
     DEFAULT_CHALLENGER_PROTOCOL,
     validate_quantile_challenger_protocol,
-    verify_frozen_quantile_challenger_oof,
 )
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
+from bigan.v8.polymarket.residual_cross_platform_verification import (
+    verify_challenger_oof_cross_platform,
+    verify_primary_oof_cross_platform,
+)
 from bigan.v8.polymarket.residual_terminal_review import (
     DEFAULT_REVIEW_PATH,
     verify_residual_terminal_review,
@@ -301,7 +303,7 @@ def test_report_uses_shared_market_bootstrap_and_all_frozen_gates() -> None:
 
 
 def test_frozen_primary_oof_verifies_and_remains_fail_closed() -> None:
-    result = verify_frozen_residual_oof(
+    result = verify_primary_oof_cross_platform(
         protocol_path=DEFAULT_PROTOCOL,
         output_dir=DEFAULT_OUTPUT_DIR,
     )
@@ -311,6 +313,11 @@ def test_frozen_primary_oof_verifies_and_remains_fail_closed() -> None:
         "every_chronological_block_paired_delta_total_gte_zero",
         "prospective_power_required_market_count_lte_2000",
     ]
+    assert result["cross_platform_float_tolerance"] == {
+        "relative": 1e-12,
+        "absolute": 1e-12,
+        "non_numeric_fields_require_exact_equality": True,
+    }
     assert all(value is False for value in result["safety"].values())
 
 
@@ -366,7 +373,7 @@ def test_only_remaining_slot_is_structurally_distinct_lower_quantile() -> None:
 
 
 def test_frozen_challenger_oof_verifies_and_exhausts_budget() -> None:
-    result = verify_frozen_quantile_challenger_oof(
+    result = verify_challenger_oof_cross_platform(
         protocol_path=DEFAULT_CHALLENGER_PROTOCOL,
         output_dir=DEFAULT_CHALLENGER_OUTPUT_DIR,
     )

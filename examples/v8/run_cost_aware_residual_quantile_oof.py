@@ -16,7 +16,9 @@ from bigan.v8.polymarket.cost_aware_residual_quantile import (  # noqa: E402
     DEFAULT_CHALLENGER_OUTPUT_DIR,
     DEFAULT_CHALLENGER_PROTOCOL,
     run_quantile_challenger_oof,
-    verify_frozen_quantile_challenger_oof,
+)
+from bigan.v8.polymarket.residual_cross_platform_verification import (  # noqa: E402
+    verify_challenger_oof_cross_platform,
 )
 
 
@@ -39,7 +41,7 @@ def main() -> int:
             repository_root=ROOT,
         )
     else:
-        result = verify_frozen_quantile_challenger_oof(
+        result = verify_challenger_oof_cross_platform(
             protocol_path=args.protocol,
             output_dir=args.output_dir,
             repository_root=ROOT,
