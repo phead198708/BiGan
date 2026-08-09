@@ -147,8 +147,11 @@ def verify_frozen_terminal_diagnostic(
         sources=sources,
     )
     report_path = _verify_descriptor(manifest["report"], repository_root=root)
-    if rebuilt != _load_json(report_path):
-        raise ValueError("terminal report does not reproduce from frozen scored rows")
+    _assert_semantically_equal(
+        rebuilt,
+        _load_json(report_path),
+        path="terminal_report",
+    )
     markdown_path = _verify_descriptor(
         manifest["report_markdown"], repository_root=root
     )
@@ -1022,6 +1025,70 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _assert_semantically_equal(
+    actual: Any,
+    expected: Any,
+    *,
+    path: str,
+    relative_tolerance: float = 1e-12,
+    absolute_tolerance: float = 1e-12,
+) -> None:
+    """Compare deterministic reports while absorbing platform float roundoff only."""
+
+    if isinstance(actual, Mapping) and isinstance(expected, Mapping):
+        if set(actual) != set(expected):
+            raise ValueError(f"terminal report field set changed at {path}")
+        for key in actual:
+            _assert_semantically_equal(
+                actual[key],
+                expected[key],
+                path=f"{path}.{key}",
+                relative_tolerance=relative_tolerance,
+                absolute_tolerance=absolute_tolerance,
+            )
+        return
+    if (
+        isinstance(actual, Sequence)
+        and not isinstance(actual, (str, bytes))
+        and isinstance(expected, Sequence)
+        and not isinstance(expected, (str, bytes))
+    ):
+        if len(actual) != len(expected):
+            raise ValueError(f"terminal report sequence length changed at {path}")
+        for index, (actual_item, expected_item) in enumerate(
+            zip(actual, expected, strict=True)
+        ):
+            _assert_semantically_equal(
+                actual_item,
+                expected_item,
+                path=f"{path}[{index}]",
+                relative_tolerance=relative_tolerance,
+                absolute_tolerance=absolute_tolerance,
+            )
+        return
+    if (
+        isinstance(actual, float)
+        and isinstance(expected, float)
+        and math.isfinite(actual)
+        and math.isfinite(expected)
+    ):
+        if not math.isclose(
+            actual,
+            expected,
+            rel_tol=relative_tolerance,
+            abs_tol=absolute_tolerance,
+        ):
+            raise ValueError(
+                f"terminal report numeric value changed at {path}: "
+                f"{actual!r} != {expected!r}"
+            )
+        return
+    if actual != expected or type(actual) is not type(expected):
+        raise ValueError(
+            f"terminal report value changed at {path}: {actual!r} != {expected!r}"
+        )
 
 
 __all__ = [

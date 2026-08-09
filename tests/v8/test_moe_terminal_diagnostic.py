@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from bigan.v8.polymarket.moe_terminal_diagnostic import (
+    _assert_semantically_equal,
     _plugin_sample_count,
     _probability_metrics,
     verify_frozen_terminal_diagnostic,
@@ -54,3 +56,23 @@ def test_plugin_counts_distinguish_half_crossing_from_eighty_percent() -> None:
     assert half == 36816
     assert eighty == 75222
     assert eighty > half
+
+
+def test_terminal_report_comparison_allows_only_tiny_float_roundoff() -> None:
+    _assert_semantically_equal(
+        {"metric": [0.1234567890123], "gate": False},
+        {"metric": [0.1234567890124], "gate": False},
+        path="report",
+    )
+    with pytest.raises(ValueError, match="numeric value changed"):
+        _assert_semantically_equal(
+            {"metric": 0.1234},
+            {"metric": 0.1235},
+            path="report",
+        )
+    with pytest.raises(ValueError, match="value changed"):
+        _assert_semantically_equal(
+            {"gate": True},
+            {"gate": False},
+            path="report",
+        )
