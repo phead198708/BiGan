@@ -1,0 +1,96 @@
+{
+  "candidate_budget": {
+    "budget_increase_allowed_in_current_lineage": false,
+    "candidate_budget_exhausted": true,
+    "consumed_slots": 2,
+    "maximum_total_slots": 2,
+    "remaining_slots": 0
+  },
+  "candidate_budget_exhausted": true,
+  "candidate_freeze_allowed": false,
+  "candidate_selected": null,
+  "created_at": "2026-08-09T06:53:54Z",
+  "development_only_forever": true,
+  "fresh_confirmatory_collection_authorized": false,
+  "fresh_outcomes_opened": false,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v1",
+  "live_shadow_start_allowed": false,
+  "micro_live_authorized": false,
+  "paper_or_live_execution_authorized": false,
+  "phase_1_terminal_failed": true,
+  "phase_status": {
+    "phase_0_evidence_repair_complete": true,
+    "phase_1_candidate_freeze_complete": false,
+    "phase_2_live_shadow_start_allowed": false,
+    "phase_3_strictly_later_collection_authorized": false,
+    "phase_4_micro_live_build_or_launch_allowed": false
+  },
+  "promotion_evidence_eligible": false,
+  "required_next_governance": "new_lineage_and_new_explicit_candidate_budget_authorization_required;current_gates_thresholds_and_failed_artifacts_must_not_be_rewritten",
+  "role": "outcome_aware_development_terminal_review_only",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-cost-aware-residual-terminal-review-v1",
+  "slot_results": {
+    "challenger": {
+      "all_gates_passed": false,
+      "candidate_accepted_market_count": 529,
+      "candidate_bootstrap_lcb": 0.011008989583333349,
+      "candidate_role": "challenger",
+      "candidate_total_unit_net_pnl": 25.38575000000001,
+      "failed_gates": [
+        "every_chronological_block_candidate_total_gte_zero",
+        "prospective_power_required_market_count_lte_2000"
+      ],
+      "paired_delta_bootstrap_lcb": 0.019610645833333353,
+      "paired_delta_total_unit_net_pnl": 32.78,
+      "required_prospective_market_count": 2696,
+      "slot_id": "residual-challenger-slot-002"
+    },
+    "primary": {
+      "all_gates_passed": false,
+      "candidate_accepted_market_count": 570,
+      "candidate_bootstrap_lcb": 0.0010904270833333623,
+      "candidate_role": "primary",
+      "candidate_total_unit_net_pnl": 20.99750000000001,
+      "failed_gates": [
+        "every_chronological_block_paired_delta_total_gte_zero",
+        "prospective_power_required_market_count_lte_2000"
+      ],
+      "paired_delta_bootstrap_lcb": 0.006173614583333335,
+      "paired_delta_total_unit_net_pnl": 28.391750000000002,
+      "required_prospective_market_count": 4535,
+      "slot_id": "residual-primary-slot-001"
+    }
+  },
+  "source_artifacts": {
+    "challenger_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v1/residual_challenger_slot_002_oof/residual_oof_manifest.json",
+      "sha256": "5dd34aa6887eb5bbc86552632c262a4ffa0cfc0b94b390c49987769c6297612b"
+    },
+    "challenger_report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v1/residual_challenger_slot_002_oof/residual_oof_report.json",
+      "sha256": "ae4a946a4e1cfc3c3ac8b4d7851a37ad1e8e09675688bab7125e9a5a859f8b21"
+    },
+    "primary_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v1/residual_primary_slot_001_oof/residual_oof_manifest.json",
+      "sha256": "4aff8e840e099de7bc6b6a1ff254d8e9f4e03b5095f91599b1b42c5a16038319"
+    },
+    "primary_report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v1/residual_primary_slot_001_oof/residual_oof_report.json",
+      "sha256": "0cf732f79d39dd86b3603bfea2befd72cc781a319549a936b64d68484c897edf"
+    }
+  },
+  "terminal_reason": "neither_of_two_preregistered_candidates_passed_every_frozen_gate"
+}

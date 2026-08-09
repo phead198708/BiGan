@@ -17,9 +17,16 @@ from bigan.v8.polymarket.cost_aware_residual import (
 )
 from bigan.v8.polymarket.cost_aware_residual_quantile import (
     CHALLENGER_PROTOCOL_SCHEMA_VERSION,
+    DEFAULT_CHALLENGER_OUTPUT_DIR,
+    DEFAULT_CHALLENGER_PROTOCOL,
     validate_quantile_challenger_protocol,
+    verify_frozen_quantile_challenger_oof,
 )
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
+from bigan.v8.polymarket.residual_terminal_review import (
+    DEFAULT_REVIEW_PATH,
+    verify_residual_terminal_review,
+)
 
 
 def _protocol() -> dict:
@@ -356,3 +363,29 @@ def test_only_remaining_slot_is_structurally_distinct_lower_quantile() -> None:
     changed["model"]["parameters"]["quantile_alpha"] = 0.4
     with pytest.raises(ValueError, match="model"):
         validate_quantile_challenger_protocol(changed, verify_artifacts=False)
+
+
+def test_frozen_challenger_oof_verifies_and_exhausts_budget() -> None:
+    result = verify_frozen_quantile_challenger_oof(
+        protocol_path=DEFAULT_CHALLENGER_PROTOCOL,
+        output_dir=DEFAULT_CHALLENGER_OUTPUT_DIR,
+    )
+    assert result["verification_passed"] is True
+    assert result["all_gates_passed"] is False
+    assert result["candidate_budget_exhausted"] is True
+    assert result["failed_gates"] == [
+        "every_chronological_block_candidate_total_gte_zero",
+        "prospective_power_required_market_count_lte_2000",
+    ]
+    assert all(value is False for value in result["safety"].values())
+
+
+def test_two_slot_terminal_review_blocks_later_phases() -> None:
+    result = verify_residual_terminal_review(review_path=DEFAULT_REVIEW_PATH)
+    assert result["verification_passed"] is True
+    assert result["phase_1_terminal_failed"] is True
+    assert result["candidate_budget_exhausted"] is True
+    assert result["candidate_freeze_allowed"] is False
+    assert result["live_shadow_start_allowed"] is False
+    assert result["fresh_confirmatory_collection_authorized"] is False
+    assert all(value is False for value in result["safety"].values())
