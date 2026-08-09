@@ -5,12 +5,15 @@ from copy import deepcopy
 import pytest
 
 from bigan.v8.polymarket.cost_aware_residual import (
+    DEFAULT_OUTPUT_DIR,
+    DEFAULT_PROTOCOL,
     FOLD_SCHEMA_VERSION,
     MARKET_RESULT_SCHEMA_VERSION,
     PROTOCOL_SCHEMA_VERSION,
     build_residual_oof_report,
     market_results_from_predictions,
     validate_residual_oof_protocol,
+    verify_frozen_residual_oof,
 )
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 
@@ -287,3 +290,17 @@ def test_report_uses_shared_market_bootstrap_and_all_frozen_gates() -> None:
     assert first["population"]["candidate_market_count"] == 600
     assert first["population"]["baseline_market_count"] == 600
     assert first["population"]["paired_market_count"] == 600
+
+
+def test_frozen_primary_oof_verifies_and_remains_fail_closed() -> None:
+    result = verify_frozen_residual_oof(
+        protocol_path=DEFAULT_PROTOCOL,
+        output_dir=DEFAULT_OUTPUT_DIR,
+    )
+    assert result["verification_passed"] is True
+    assert result["all_gates_passed"] is False
+    assert result["failed_gates"] == [
+        "every_chronological_block_paired_delta_total_gte_zero",
+        "prospective_power_required_market_count_lte_2000",
+    ]
+    assert all(value is False for value in result["safety"].values())
