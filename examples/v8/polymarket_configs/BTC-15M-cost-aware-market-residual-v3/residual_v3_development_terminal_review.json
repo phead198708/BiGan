@@ -1,0 +1,129 @@
+{
+  "best_candidate_failed_gates": [
+    "prospective_power_required_market_count_lte_2000"
+  ],
+  "best_candidate_fast_track_maximum_market_count": 2000,
+  "best_candidate_required_prospective_market_count": 3043,
+  "best_development_candidate_by_gate_count": "residual-v3-challenger-slot-002",
+  "candidate_budget": {
+    "budget_increase_allowed_in_current_lineage": false,
+    "candidate_budget_exhausted": true,
+    "consumed_slots": 2,
+    "maximum_total_slots": 2,
+    "remaining_slots": 0
+  },
+  "candidate_budget_exhausted": true,
+  "candidate_freeze_allowed": false,
+  "candidate_selected": null,
+  "capital_at_risk": false,
+  "created_at": "2026-08-09T10:14:01Z",
+  "development_only_forever": true,
+  "fresh_collection_authorized": false,
+  "fresh_outcomes_opened": false,
+  "immutability": {
+    "cost_model_baseline_or_population_changed": false,
+    "existing_gate_or_threshold_changed": false,
+    "safety_permission_change_allowed": false,
+    "v1_or_v2_failed_artifact_changed": false,
+    "v3_failed_report_or_manifest_change_allowed": false,
+    "zero_threshold_or_N_max_2000_changed": false
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v3",
+  "live_shadow_start_allowed": false,
+  "paper_or_live_execution_authorized": false,
+  "phase_1_terminal_failed": true,
+  "phase_status": {
+    "fresh_collection_authorized": false,
+    "live_shadow_start_allowed": false,
+    "next_stage_authorization_request_allowed": false,
+    "phase_1_candidate_freeze_complete": false,
+    "v3_lineage_authorization_complete": true,
+    "v3_two_slot_development_complete": true
+  },
+  "promotion_authorized": false,
+  "promotion_evidence_eligible": false,
+  "required_next_governance": "new_explicit_user_authorization_required_for_any_new_lineage;_current_gates_thresholds_cost_baseline_population_failed_artifacts_and_safety_must_not_be_rewritten",
+  "role": "outcome_aware_development_terminal_review_only",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-cost-aware-residual-terminal-review-v3",
+  "slot_results": {
+    "challenger": {
+      "all_gates_passed": false,
+      "candidate_accepted_market_count": 559,
+      "candidate_bootstrap_lcb": 0.0093739791666667,
+      "candidate_role": "challenger",
+      "candidate_total_unit_net_pnl": 25.789750000000012,
+      "failed_gates": [
+        "prospective_power_required_market_count_lte_2000"
+      ],
+      "paired_delta_bootstrap_lcb": 0.015069052083333338,
+      "paired_delta_total_unit_net_pnl": 33.184,
+      "required_prospective_market_count": 3043,
+      "slot_id": "residual-v3-challenger-slot-002"
+    },
+    "primary": {
+      "all_gates_passed": false,
+      "candidate_accepted_market_count": 573,
+      "candidate_bootstrap_lcb": 0.004872281250000037,
+      "candidate_role": "primary",
+      "candidate_total_unit_net_pnl": 23.326250000000012,
+      "failed_gates": [
+        "every_chronological_block_candidate_total_gte_zero",
+        "every_chronological_block_paired_delta_total_gte_zero",
+        "prospective_power_required_market_count_lte_2000"
+      ],
+      "paired_delta_bootstrap_lcb": 0.01001276041666668,
+      "paired_delta_total_unit_net_pnl": 30.7205,
+      "required_prospective_market_count": 3576,
+      "slot_id": "residual-v3-primary-slot-001"
+    }
+  },
+  "source_artifacts": {
+    "challenger_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_challenger_slot_002_oof/residual_v3_logit_oof_manifest.json",
+      "sha256": "3fa284399699fea6948b4a7ffd462371a0aeec1c90fa0213d6dcfad29e8cd2b5"
+    },
+    "challenger_report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_challenger_slot_002_oof/residual_v3_logit_oof_report.json",
+      "sha256": "383104a77c8385615d242b2e7d6612a95d6ac63212df2e9d52c3e844cc7a9966"
+    },
+    "development_data_registry": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/development_data_registry.json",
+      "sha256": "0c9cb8a4cacdfa71e946b4405f0e76931b577163c7374685f66fa91eaeeeb506"
+    },
+    "implementation": {
+      "path": "src/bigan/v8/polymarket/residual_v3_terminal_review.py",
+      "sha256": "33e8698faed592f6a8e284968f9a12446ae46623073824339eee77075675a363"
+    },
+    "lineage_authorization": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/lineage_authorization.json",
+      "sha256": "90dba1500e1240df41e7d1f53d126e94fa49d7840fbe2bb125fd64d49f2752cb"
+    },
+    "parent_v2_terminal_review": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v2/residual_v2_development_terminal_review.json",
+      "sha256": "3850abf82477c8aedfdc5bd831390989504184ad539bda9666a89bd3d452ab11"
+    },
+    "primary_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_primary_slot_001_oof/residual_v3_oof_manifest.json",
+      "sha256": "554bf4c4922ec85a4a959f825634c9c3f061bd04a9592bd3ee48bd7a3595dfd8"
+    },
+    "primary_report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_primary_slot_001_oof/residual_v3_oof_report.json",
+      "sha256": "aece8fa20dc1954cbe1571c14348e2ab88ba3856cd342e1a73713b8fb01a5a84"
+    }
+  },
+  "terminal_reason": "neither_of_two_user_authorized_preregistered_candidates_passed_every_unchanged_gate",
+  "wallet_or_write_authorized": false
+}
