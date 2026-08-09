@@ -15,6 +15,10 @@ from bigan.v8.polymarket.cost_aware_residual import (
     validate_residual_oof_protocol,
     verify_frozen_residual_oof,
 )
+from bigan.v8.polymarket.cost_aware_residual_quantile import (
+    CHALLENGER_PROTOCOL_SCHEMA_VERSION,
+    validate_quantile_challenger_protocol,
+)
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 
 
@@ -52,10 +56,7 @@ def _protocol() -> dict:
         "dataset": {"market_count": 800, "side_decision_row_count": 3200},
         "target": {
             "name": "direct_after_cost_action_value",
-            "formula": (
-                "settlement_payout-executable_ask-frozen_fees-slippage-"
-                "liquidity_impact"
-            ),
+            "formula": ("settlement_payout-executable_ask-frozen_fees-slippage-liquidity_impact"),
             "execution_policy": "HOLD_TO_SETTLEMENT",
             "NO_TRADE_value": 0.0,
             "post_close_only": True,
@@ -304,3 +305,54 @@ def test_frozen_primary_oof_verifies_and_remains_fail_closed() -> None:
         "prospective_power_required_market_count_lte_2000",
     ]
     assert all(value is False for value in result["safety"].values())
+
+
+def test_only_remaining_slot_is_structurally_distinct_lower_quantile() -> None:
+    protocol = _protocol()
+    protocol["schema_version"] = CHALLENGER_PROTOCOL_SCHEMA_VERSION
+    protocol["candidate_role"] = "challenger"
+    protocol["candidate_budget"] = {
+        "maximum_total_slots": 2,
+        "this_slot_ordinal": 2,
+        "slots_consumed_before_run": 1,
+        "slots_remaining_after_run": 0,
+        "slot_budget_may_be_increased": False,
+    }
+    protocol["model"]["family"] = "pooled_global_xgboost_direct_lower_quantile_regressor"
+    protocol["model"]["parameters"].update(
+        {
+            "objective": "reg:quantileerror",
+            "eval_metric": "quantile",
+            "quantile_alpha": 0.35,
+        }
+    )
+    protocol["prior_slot_result"] = {
+        "manifest": {"path": "examples/primary-manifest.json", "sha256": "b" * 64},
+        "report": {"path": "examples/primary-report.json", "sha256": "c" * 64},
+        "failed_gates": [
+            "every_chronological_block_paired_delta_total_gte_zero",
+            "prospective_power_required_market_count_lte_2000",
+        ],
+    }
+    protocol["structural_change"] = {
+        "changed_component": "fixed_training_loss_only",
+        "from": "conditional_mean_squared_error",
+        "to": "lower_conditional_quantile_loss_alpha_0_35",
+        "reason": (
+            "primary accepted 570_of_600 markets and exceeded the N_max_2000 "
+            "variance budget despite positive absolute and paired LCBs"
+        ),
+        "expected_mechanism": (
+            "a positive lower conditional action-value quantile abstains unless the "
+            "after-cost edge is robust across the lower tail"
+        ),
+        "threshold_changed": False,
+        "feature_set_changed": False,
+        "rolling_population_changed": False,
+    }
+    validate_quantile_challenger_protocol(protocol, verify_artifacts=False)
+
+    changed = deepcopy(protocol)
+    changed["model"]["parameters"]["quantile_alpha"] = 0.4
+    with pytest.raises(ValueError, match="model"):
+        validate_quantile_challenger_protocol(changed, verify_artifacts=False)
