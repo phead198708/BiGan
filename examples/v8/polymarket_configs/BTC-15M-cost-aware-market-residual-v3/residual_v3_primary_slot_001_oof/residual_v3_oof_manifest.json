@@ -1,0 +1,65 @@
+{
+  "artifacts": {
+    "dataset_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_primary_slot_001_oof/residual_v3_development_dataset_rows.jsonl",
+      "sha256": "d3fb4ebcdf75208af5d997580b84fd8521384a82aa95152b36148c9fb6c863b6"
+    },
+    "fold_audits": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_primary_slot_001_oof/residual_v3_oof_fold_audits.jsonl",
+      "sha256": "0ed172c6e6af7c014d044285afcc5cd8b7ac5781e7e08e5ceec46f04c59d60e0"
+    },
+    "market_results": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_primary_slot_001_oof/residual_v3_oof_market_results.jsonl",
+      "sha256": "5760b43b3ef09610e22232c703a6707a784a7f6fc1b50c2d6b35e611c3a4fa2f"
+    },
+    "predictions": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_primary_slot_001_oof/residual_v3_oof_predictions.jsonl",
+      "sha256": "85265712eafd0b657967a502c60e649a7306c118f52a93cf46092ad88a3170a5"
+    },
+    "report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_primary_slot_001_oof/residual_v3_oof_report.json",
+      "sha256": "aece8fa20dc1954cbe1571c14348e2ab88ba3856cd342e1a73713b8fb01a5a84"
+    },
+    "report_markdown": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_primary_slot_001_oof/residual_v3_oof_report.md",
+      "sha256": "a07d160afb8f63e2968774c391492c826f36dbd0d7e56376c7bc0e26436ae86d"
+    }
+  },
+  "candidate_freeze_allowed": false,
+  "candidate_implementation": {
+    "path": "src/bigan/v8/polymarket/cost_aware_residual_v3.py",
+    "sha256": "194be7580988384d2b8e7963f2bcc09531a51154db96a69691d56e40968837f2"
+  },
+  "candidate_role": "primary",
+  "created_at": "2026-08-09T09:58:36Z",
+  "development_only_forever": true,
+  "evaluation_executed_exactly_once": true,
+  "immutable_gate_implementation": {
+    "path": "src/bigan/v8/polymarket/cost_aware_residual.py",
+    "sha256": "491a329f708a16d5aecdd952552cbff3fa13d8f7446bfe3e0c78fade3b36f78c"
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v3",
+  "next_stage_authorization_required_even_if_all_gates_pass": true,
+  "promotion_evidence_eligible": false,
+  "protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_primary_slot_001_protocol.json",
+    "sha256": "49550a4f924c82060aa3e56fd1dbe6f691c96ad83c39b431fe0be86f7df9b3db"
+  },
+  "remaining_candidate_slots": 1,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-causal-time-adaptive-residual-oof-manifest-v3",
+  "slot_id": "residual-v3-primary-slot-001",
+  "source_commit": "f7f6fe6d1449dce80c578c426348b548f3057de3"
+}
