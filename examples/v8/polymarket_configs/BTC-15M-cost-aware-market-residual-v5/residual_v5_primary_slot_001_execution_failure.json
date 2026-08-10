@@ -1,0 +1,64 @@
+{
+  "candidate_budget": {
+    "maximum_total_slots": 2,
+    "remaining_candidate_slots": 1,
+    "slot_1_consumed": true,
+    "slot_budget_increased": false
+  },
+  "candidate_implementation": {
+    "path": "src/bigan/v8/polymarket/cost_aware_residual_v5.py",
+    "sha256": "daf9da7efeba997a077e21bca5b600aed4fe1c52b2bd37c966a7592d680080cb"
+  },
+  "created_at": "2026-08-10T10:55:47Z",
+  "development_only_forever": true,
+  "evaluation": {
+    "candidate_evaluation_attempt_started": true,
+    "candidate_metrics_computed": false,
+    "evaluation_completed": false,
+    "gate_evaluation_performed": false,
+    "model_fit_started": false,
+    "outcome_aware_development_rows_loaded": true,
+    "output_file_count": 0,
+    "promotion_evidence_eligible": false
+  },
+  "failure": {
+    "exception_message": "v5 inherited 108-feature order changed",
+    "exception_type": "ValueError",
+    "fail_closed": true,
+    "stage": "corrector_feature_schema_validation_before_first_model_fit",
+    "technical_cause": "the immutable v4 dataset JSONL is serialized with canonical key ordering, while slot 1 incorrectly required feature-object insertion order to equal the semantic FEATURE_NAMES order",
+    "target_or_future_label_leakage_detected": false
+  },
+  "immutability": {
+    "candidate_implementation_mutable": false,
+    "parent_v1_v2_v3_v4_failed_artifacts_changed": false,
+    "protocol_mutable": false
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v5",
+  "next_action": {
+    "candidate_algorithm_parameter_threshold_or_gate_change_allowed": false,
+    "remaining_slot_requires_distinct_frozen_executing_module": true,
+    "slot_2_may_add_only_deterministic_canonical_feature_order_adaptation": true,
+    "slot_2_requires_preregistration_before_any_rerun": true
+  },
+  "protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_primary_slot_001_protocol.json",
+    "sha256": "f6ed1d30b42f36170e3da23f59fde19b7c8841bade9dde839757beddaa554da4"
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-v5-slot-execution-failure-v1",
+  "slot_id": "residual-v5-primary-slot-001",
+  "source_commit": "1f3c1a61b0b6b5a5de1d0dc27a566dc8e077ffb1"
+}

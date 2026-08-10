@@ -16,6 +16,9 @@ from bigan.v8.polymarket.cost_aware_residual_v5 import (
     validate_residual_v5_protocol,
     validate_v5_lineage_authorization,
 )
+from bigan.v8.polymarket.cost_aware_residual_v5_challenger import (
+    _canonicalize_feature_order,
+)
 from bigan.v8.polymarket.moe_collection_observability import FEATURE_NAMES
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 
@@ -172,3 +175,15 @@ def test_v5_fails_closed_on_missing_frozen_base_row() -> None:
             population_order=population,
             protocol=protocol,
         )
+
+
+def test_v5_challenger_adapter_resolves_semantic_order_without_changing_values() -> None:
+    rows, _, _, _ = _fixture()
+    row = deepcopy(rows[0])
+    row["features"] = dict(reversed(list(row["features"].items())))
+
+    adapted = _canonicalize_feature_order(row)
+
+    assert tuple(adapted["features"]) == tuple(FEATURE_NAMES)
+    assert adapted["features"] == rows[0]["features"]
+    assert tuple(row["features"]) != tuple(adapted["features"])
