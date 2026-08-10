@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import math
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
+from bigan.v8.polymarket.cost_aware_residual import _load_json
 from bigan.v8.polymarket.cost_aware_residual_v5 import (
+    DEFAULT_PROTOCOL,
     FIXED_NUM_BOOST_ROUND,
     FIXED_PARAMETERS,
     _corrector_features,
     prequential_market_residual_corrector_predict,
+    validate_residual_v5_protocol,
     validate_v5_lineage_authorization,
 )
 from bigan.v8.polymarket.moe_collection_observability import FEATURE_NAMES
@@ -85,6 +89,22 @@ def test_v5_authorization_is_exact_and_parent_is_immutable() -> None:
     assert result["maximum_total_slots"] == 2
     assert result["parent_v4_immutable"] is True
     assert result["safety"] == SAFETY
+
+
+def test_v5_slot_1_protocol_and_executing_module_are_frozen() -> None:
+    protocol_path = Path(DEFAULT_PROTOCOL)
+    protocol = _load_json(protocol_path)
+
+    validate_residual_v5_protocol(protocol)
+
+    assert protocol_path.with_suffix(".sha256").read_text(encoding="utf-8").strip() == (
+        "f6ed1d30b42f36170e3da23f59fde19b7c8841bade9dde839757beddaa554da4"
+    )
+    assert protocol["inputs"]["candidate_implementation"]["sha256"] == (
+        "daf9da7efeba997a077e21bca5b600aed4fe1c52b2bd37c966a7592d680080cb"
+    )
+    assert protocol["action_policy"]["fixed_acceptance_threshold"] == 0.0
+    assert protocol["prospective_power"]["maximum_market_count"] == 2000
 
 
 def test_v5_prequential_corrector_is_deterministic_and_leakage_free() -> None:
