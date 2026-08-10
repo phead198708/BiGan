@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any
 
 from bigan.v8.polymarket.challenge_development_lane import sha256_file
 from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.moe_collection_observability import _current_feature_rows
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 from bigan.v8.polymarket.residual_promotion_collection import (
     assert_outcome_blind,
@@ -28,6 +30,9 @@ SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-exact-population-freeze-v1"
 FORBIDDEN_CAPTURE_NAME_TOKENS = ("settlement", "realized_pnl", "outcome")
 IMPLEMENTATION_REPOSITORY_PATH = (
     "src/bigan/v8/polymarket/residual_promotion_finalization.py"
+)
+FEATURE_RECONSTRUCTION_REPOSITORY_PATH = (
+    "src/bigan/v8/polymarket/moe_collection_observability.py"
 )
 
 
@@ -91,6 +96,10 @@ def freeze_exact_outcome_blind_population(
     finalization_implementation = _repo_descriptor(
         repo / IMPLEMENTATION_REPOSITORY_PATH, repository_root=repo
     )
+    feature_reconstruction_implementation = _repo_descriptor(
+        repo / FEATURE_RECONSTRUCTION_REPOSITORY_PATH,
+        repository_root=repo,
+    )
     prospective_boundary_utc = str(authorization.get("created_at") or "")
     prospective_boundary_ts = _iso_to_epoch_ms(prospective_boundary_utc)
     ledger_path = root / "outcome_blind_attempts.jsonl"
@@ -123,7 +132,10 @@ def freeze_exact_outcome_blind_population(
     baseline_rows: list[dict[str, Any]] = []
     capture_index: list[dict[str, Any]] = []
     for position, attempt in enumerate(selection["selected_attempts"], start=1):
-        capture = _validate_capture(
+        _validate_quality_contract(
+            attempt, validation_fixture_only=validation_fixture_only
+        )
+        capture, feature_rows = _validate_capture(
             root=root,
             attempt=attempt,
             validation_fixture_only=validation_fixture_only,
@@ -148,6 +160,9 @@ def freeze_exact_outcome_blind_population(
                     attempt["scheduled_round_start_ts"]
                 ),
                 "quality_valid": True,
+                "quality_record_sha256": canonical_json_sha256(
+                    dict(attempt["quality"])
+                ),
                 "candidate_accepted": any(
                     row["candidate_accepted_at_this_decision"] is True
                     for row in decisions
@@ -184,6 +199,8 @@ def freeze_exact_outcome_blind_population(
             baseline_artifact_sha256=evaluation_bindings["baseline_artifact"][
                 "sha256"
             ],
+            feature_rows=feature_rows,
+            validation_fixture_only=validation_fixture_only,
         )
         candidate_rows.append(market_candidate)
         baseline_rows.append(market_baseline)
@@ -225,6 +242,9 @@ def freeze_exact_outcome_blind_population(
         "candidate_bundle": candidate_bundle,
         **evaluation_bindings,
         "finalization_implementation": finalization_implementation,
+        "feature_reconstruction_implementation": (
+            feature_reconstruction_implementation
+        ),
         "target_quality_valid_market_count": target_market_count,
         "exact_market_count": len(population_rows),
         "attempts_consumed": len(attempts),
@@ -384,11 +404,15 @@ def validate_frozen_population(
         "runtime_implementation",
         "runtime_parity_report",
         "finalization_implementation",
+        "feature_reconstruction_implementation",
     ):
         _verified_bound_descriptor(manifest.get(name), repository_root=repo)
     implementation = dict(manifest["finalization_implementation"])
     if implementation.get("path") != IMPLEMENTATION_REPOSITORY_PATH:
         raise ValueError("finalization implementation binding mismatch")
+    reconstruction = dict(manifest["feature_reconstruction_implementation"])
+    if reconstruction.get("path") != FEATURE_RECONSTRUCTION_REPOSITORY_PATH:
+        raise ValueError("feature reconstruction implementation binding mismatch")
     artifacts = dict(manifest.get("artifacts") or {})
     expected_artifacts = {
         "population_rows",
@@ -470,7 +494,7 @@ def _validate_capture(
     root: Path,
     attempt: Mapping[str, Any],
     validation_fixture_only: bool,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     attempt_id = str(attempt["attempt_id"])
     run_dir = (root / "captures" / attempt_id).resolve()
     if not run_dir.is_relative_to(root) or not run_dir.is_dir():
@@ -511,6 +535,11 @@ def _validate_capture(
         manifest=manifest,
         validation_fixture_only=validation_fixture_only,
     )
+    feature_rows = (
+        []
+        if validation_fixture_only
+        else _current_feature_rows(run_dir=run_dir, manifest=manifest)
+    )
     return {
         "capture_dir": run_dir.relative_to(root).as_posix(),
         "capture_manifest_path": manifest_path.relative_to(root).as_posix(),
@@ -519,7 +548,7 @@ def _validate_capture(
         "capture_report_sha256": sha256_file(report_path),
         "file_count": len(file_graph),
         "files": file_graph,
-    }
+    }, feature_rows
 
 
 def _validate_decision_rows(
@@ -549,6 +578,29 @@ def _validate_decision_rows(
         raise ValueError("more than one trade was accepted per market")
 
 
+def _validate_quality_contract(
+    attempt: Mapping[str, Any], *, validation_fixture_only: bool
+) -> None:
+    quality = dict(attempt.get("quality") or {})
+    if quality.get("quality_valid") is not True:
+        raise ValueError("selected attempt is not quality-valid")
+    if validation_fixture_only:
+        return
+    observations = dict(quality.get("quality_observations") or {})
+    if not observations or any(value is not True for value in observations.values()):
+        raise ValueError("quality-valid attempt has an unsatisfied observation")
+    if not (
+        quality.get("invalid_reason_codes") == []
+        and int(quality.get("observed_decision_count") or 0) > 0
+        and int(quality.get("paired_executable_ask_decision_count") or 0) > 0
+        and int(quality.get("btc_feature_complete_decision_count") or 0) > 0
+        and int(quality.get("causality_violation_count") or 0) == 0
+        and int(quality.get("missing_feature_count") or 0) == 0
+        and quality.get("missing_values_encoded_as_zero") is False
+    ):
+        raise ValueError("quality-valid attempt is internally inconsistent")
+
+
 def _market_level_decisions(
     *,
     decisions: Sequence[Mapping[str, Any]],
@@ -557,6 +609,8 @@ def _market_level_decisions(
     market_id: str,
     candidate_bundle_sha256: str,
     baseline_artifact_sha256: str,
+    feature_rows: Sequence[Mapping[str, Any]],
+    validation_fixture_only: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     candidate_accepted = next(
         (row for row in decisions if row["candidate_accepted_at_this_decision"] is True),
@@ -568,6 +622,18 @@ def _market_level_decisions(
     )
     candidate_action = candidate_accepted or decisions[-1]
     baseline_action = baseline_accepted or decisions[-1]
+    candidate_execution = _execution_features(
+        feature_rows=feature_rows,
+        market_id=market_id,
+        decision_ts=int(candidate_action["decision_ts"]),
+        validation_fixture_only=validation_fixture_only,
+    )
+    baseline_execution = _execution_features(
+        feature_rows=feature_rows,
+        market_id=market_id,
+        decision_ts=int(baseline_action["decision_ts"]),
+        validation_fixture_only=validation_fixture_only,
+    )
     common = {
         "population_position": population_position,
         "attempt_index": attempt_index,
@@ -584,7 +650,16 @@ def _market_level_decisions(
         "decision_ts": int(candidate_action["decision_ts"]),
         "action_values": dict(candidate_action["candidate_action_values"]),
         "selected_action": str(candidate_action["candidate_selected_action"]),
+        "selected_side": _selected_side(
+            str(candidate_action["candidate_selected_action"])
+        ),
         "accepted": candidate_accepted is not None,
+        "selected_action_value": _selected_action_value(
+            candidate_action["candidate_action_values"],
+            str(candidate_action["candidate_selected_action"]),
+        ),
+        "execution_features": candidate_execution,
+        "execution_features_sha256": canonical_json_sha256(candidate_execution),
         "decision_trace_sha256": canonical_json_sha256(
             [
                 {
@@ -606,7 +681,16 @@ def _market_level_decisions(
         "decision_ts": int(baseline_action["decision_ts"]),
         "action_values": dict(baseline_action["baseline_action_values"]),
         "selected_action": str(baseline_action["baseline_selected_action"]),
+        "selected_side": _selected_side(
+            str(baseline_action["baseline_selected_action"])
+        ),
         "accepted": baseline_accepted is not None,
+        "selected_action_value": _selected_action_value(
+            baseline_action["baseline_action_values"],
+            str(baseline_action["baseline_selected_action"]),
+        ),
+        "execution_features": baseline_execution,
+        "execution_features_sha256": canonical_json_sha256(baseline_execution),
         "fail_closed": bool(baseline_action.get("baseline_fail_closed", False)),
         "fail_closed_reasons": list(
             baseline_action.get("baseline_fail_closed_reasons", [])
@@ -630,6 +714,76 @@ def _market_level_decisions(
         ),
     }
     return candidate, baseline
+
+
+def _execution_features(
+    *,
+    feature_rows: Sequence[Mapping[str, Any]],
+    market_id: str,
+    decision_ts: int,
+    validation_fixture_only: bool,
+) -> dict[str, float]:
+    if validation_fixture_only:
+        source: Mapping[str, Any] = {
+            "up_ask": 0.55,
+            "up_bid": 0.53,
+            "up_liquidity_depth": 10.0,
+            "down_ask": 0.47,
+            "down_bid": 0.45,
+            "down_liquidity_depth": 10.0,
+        }
+    else:
+        matches = [
+            row
+            for row in feature_rows
+            if str(row.get("market_id")) == market_id
+            and int(row.get("decision_ts") or 0) == decision_ts
+        ]
+        if len(matches) != 1:
+            raise ValueError("decision execution feature row did not reconcile")
+        source = matches[0]
+    result = {
+        name: float(source[name])
+        for name in (
+            "up_ask",
+            "up_bid",
+            "up_liquidity_depth",
+            "down_ask",
+            "down_bid",
+            "down_liquidity_depth",
+        )
+    }
+    for side in ("up", "down"):
+        ask = result[f"{side}_ask"]
+        bid = result[f"{side}_bid"]
+        depth = result[f"{side}_liquidity_depth"]
+        if not (
+            math.isfinite(ask)
+            and math.isfinite(bid)
+            and math.isfinite(depth)
+            and 0.0 < bid <= ask < 1.0
+            and depth >= 0.0
+        ):
+            raise ValueError("decision execution features are not executable")
+    return result
+
+
+def _selected_side(action: str) -> str | None:
+    if action == "NO_TRADE":
+        return None
+    if action == "BUY_UP_HOLD":
+        return "UP"
+    if action == "BUY_DOWN_HOLD":
+        return "DOWN"
+    raise ValueError("frozen action is unknown")
+
+
+def _selected_action_value(values: Any, action: str) -> float:
+    action_values = dict(values or {})
+    value = action_values.get(action)
+    if value is None or not math.isfinite(float(value)):
+        raise ValueError("selected action value is not finite")
+    return float(value)
 
 
 def _verify_manifest_raw_bindings(
