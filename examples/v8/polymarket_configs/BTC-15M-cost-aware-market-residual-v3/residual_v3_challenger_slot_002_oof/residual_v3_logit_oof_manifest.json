@@ -1,0 +1,81 @@
+{
+  "additional_candidate_allowed": false,
+  "artifacts": {
+    "dataset_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_challenger_slot_002_oof/residual_v3_logit_development_dataset_rows.jsonl",
+      "sha256": "3cb4d38831916c9b702079b0da19c78ca4ea75799d444dc39655f6bce31d5493"
+    },
+    "fold_audits": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_challenger_slot_002_oof/residual_v3_logit_oof_fold_audits.jsonl",
+      "sha256": "ba120d106b64342811f5e00827c69db7dc546fd6e8bc1135b2d3f0a45d6d42ef"
+    },
+    "market_results": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_challenger_slot_002_oof/residual_v3_logit_oof_market_results.jsonl",
+      "sha256": "80808fe6b6cdb1261ecafbe76df674faf4964f1d306e3732a3a17a1e1a16bd07"
+    },
+    "predictions": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_challenger_slot_002_oof/residual_v3_logit_oof_predictions.jsonl",
+      "sha256": "6c245e5e68683fdce16717ca28b0a79b86c8a7c6bfbc05cbba6da9b99cfd48ca"
+    },
+    "report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_challenger_slot_002_oof/residual_v3_logit_oof_report.json",
+      "sha256": "383104a77c8385615d242b2e7d6612a95d6ac63212df2e9d52c3e844cc7a9966"
+    },
+    "report_markdown": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_challenger_slot_002_oof/residual_v3_logit_oof_report.md",
+      "sha256": "d2cc9f5485f56d9fed3b1c7e0e27b7ddf681721e056d08787838c56fc7208adf"
+    }
+  },
+  "candidate_budget_exhausted": true,
+  "candidate_freeze_allowed": false,
+  "candidate_implementation": {
+    "path": "src/bigan/v8/polymarket/cost_aware_residual_v3_logit.py",
+    "sha256": "d9d0128a24acf16d483301e579e70fba3788e8056901343f68706fa28da76e1d"
+  },
+  "candidate_role": "challenger",
+  "created_at": "2026-08-09T10:09:48Z",
+  "development_only_forever": true,
+  "evaluation_executed_exactly_once": true,
+  "immutable_gate_implementation": {
+    "path": "src/bigan/v8/polymarket/cost_aware_residual.py",
+    "sha256": "491a329f708a16d5aecdd952552cbff3fa13d8f7446bfe3e0c78fade3b36f78c"
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v3",
+  "next_stage_authorization_required_even_if_all_gates_pass": true,
+  "prior_slot_result": {
+    "failed_gates": [
+      "every_chronological_block_candidate_total_gte_zero",
+      "every_chronological_block_paired_delta_total_gte_zero",
+      "prospective_power_required_market_count_lte_2000"
+    ],
+    "manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_primary_slot_001_oof/residual_v3_oof_manifest.json",
+      "sha256": "554bf4c4922ec85a4a959f825634c9c3f061bd04a9592bd3ee48bd7a3595dfd8"
+    },
+    "report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_primary_slot_001_oof/residual_v3_oof_report.json",
+      "sha256": "aece8fa20dc1954cbe1571c14348e2ab88ba3856cd342e1a73713b8fb01a5a84"
+    }
+  },
+  "promotion_evidence_eligible": false,
+  "protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_challenger_slot_002_protocol.json",
+    "sha256": "acaa85b576a90a9ae20e39a53800dcef858240710312b32187d180392ac646a8"
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-logit-offset-residual-oof-manifest-v3",
+  "slot_id": "residual-v3-challenger-slot-002",
+  "source_commit": "e1df0bb46b7daa36bec84dbcb38e2ff34140b44b"
+}

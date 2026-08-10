@@ -1,0 +1,80 @@
+{
+  "artifact_sidecar_hashes_verified": true,
+  "candidate_algorithm_or_parameter_mutation_detected": false,
+  "created_at": "2026-08-10T11:05:24Z",
+  "development_only_forever": true,
+  "frozen_artifacts": {
+    "dataset_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_oof/residual_v5_challenger_development_dataset_rows.jsonl",
+      "sha256": "39594eef3d14f37dd818652ab4753fd64a9acac4517c71e5bfb65b3c5f0c33c1"
+    },
+    "fold_audits": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_oof/residual_v5_challenger_oof_fold_audits.jsonl",
+      "sha256": "76a3cfcb76bcd7986818cc017f452d7b8dda27cd2b6de01e7b20b445fc4299da"
+    },
+    "manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_oof/residual_v5_challenger_oof_manifest.json",
+      "sha256": "71711e0a42792855069b3b713dabffc47a1d05b345491889376fc25dd254979a"
+    },
+    "market_results": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_oof/residual_v5_challenger_oof_market_results.jsonl",
+      "sha256": "1b3b64503e870087d527703abc9f2178c6d7c5bb9bca1b138cac51f985aac8d9"
+    },
+    "predictions": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_oof/residual_v5_challenger_oof_predictions.jsonl",
+      "sha256": "5b1ec88b252777055ccd7f023081d9c3cf1e81890d9421ee20af8a7be74794d3"
+    },
+    "report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_oof/residual_v5_challenger_oof_report.json",
+      "sha256": "3740b63959f9206be678d045621488a0e4354d4b7e2c40862850f6fbfcc9c164"
+    },
+    "report_markdown": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_oof/residual_v5_challenger_oof_report.md",
+      "sha256": "2dcc9444df176095d1a9893ede308350d4416a585092207355fb7f8bdc961666"
+    }
+  },
+  "independent_reconstruction": {
+    "all_gates_passed": false,
+    "candidate_and_baseline_population_reconciled": true,
+    "candidate_report_rebuilt_from_frozen_market_rows": true,
+    "fold_count": 6,
+    "frozen_report_semantically_equal": true,
+    "gate_results_recomputed": true,
+    "market_count": 600,
+    "markdown_reproduced": true,
+    "prediction_row_count": 2400,
+    "shared_bootstrap_indices_reproduced": true
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v5",
+  "protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_protocol.json",
+    "sha256": "5483aeb573517eb66443368302d2aa8d4fbcc6d3ead97e1199b7edb1c2e56730"
+  },
+  "reconciliation_passed": true,
+  "report_result": {
+    "failed_gates": [
+      "prospective_power_required_market_count_lte_2000"
+    ],
+    "prospective_power_required_market_count": 2598
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-v5-independent-reconciliation-audit-v1",
+  "verifier_limitation": {
+    "candidate_artifacts_modified": false,
+    "description": "the frozen built-in verifier maps the challenger row to the v1 schema without supplying the legacy target_or_future_label_used_for_fit field",
+    "independent_audit_method": "assert current_or_future_label_used_for_corrector=false, add the semantically equivalent legacy field in memory only, then run the immutable v1 population validator and rebuild the report",
+    "runtime_or_model_behavior_affected": false
+  }
+}

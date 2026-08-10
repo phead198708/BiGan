@@ -1,0 +1,62 @@
+{
+  "created_at": "2026-08-09T06:00:00Z",
+  "future_promotion_evidence_rule": "only_strictly_later_never_opened_markets_captured_after_candidate_freeze_are_eligible",
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v1",
+  "populations": {
+    "confirmatory_v2_opened_population": {
+      "market_count": 800,
+      "outcomes_opened": true,
+      "promotion_evidence_eligible": false,
+      "role": "development_only_forever",
+      "sources": {
+        "evaluation_rows": {
+          "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/confirmatory_market_evaluation_rows.jsonl",
+          "sha256": "1bd6e2fe4ae3d8f867976fe490fb79e32a784f7266950a269d83495264c580c7"
+        },
+        "official_settlement_rows": {
+          "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/official_settlement_rows.jsonl",
+          "sha256": "4f1f62051283e56bb2b14217a39815a2889df0507a2b813e20e380bfe49c0d35"
+        },
+        "raw_capture_recovery_bundle_manifest": {
+          "path": "examples/v8/polymarket_artifacts/raw_archives/sha256/5deddaabd9d4ec9d979dfe47f77dd01ee6671c708154588b7325ae8325638639/bundle_manifest.json",
+          "sha256": "aab5c7187cdce4f7b6e2f9c5ed08b3a1f79b3c0d72c75fdf017384254c388d72"
+        },
+        "terminal_diagnostic_scored_rows": {
+          "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/terminal_diagnostic_002/terminal_diagnostic_scored_rows.jsonl",
+          "sha256": "b8867ff511251a8505e480dcef413e1ff18cb98b72a28969772147b6d3b809ed"
+        }
+      }
+    },
+    "prior_distribution_population": {
+      "market_count": 113,
+      "outcomes_opened": true,
+      "promotion_evidence_eligible": false,
+      "role": "development_only_forever",
+      "source": {
+        "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_development_distribution_shift_reference.json",
+        "sha256": "cc2134ef5518c2b8fc8d48b1969ade0d55affef8fd690a6abffb438e9063037b"
+      }
+    },
+    "prior_rolling_origin_effect_population": {
+      "market_count": 73,
+      "outcomes_opened": true,
+      "promotion_evidence_eligible": false,
+      "role": "development_only_forever",
+      "source": {
+        "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/development_paired_planning_rows.jsonl",
+        "sha256": "d7f670e2c367a01dab4055603077f6b31c751b41a1a2a42cdcb1c3733ea2fb83"
+      }
+    }
+  },
+  "registry_frozen": true,
+  "safety": {
+    "capital_at_risk": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-development-data-registry-v1"
+}

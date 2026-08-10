@@ -1,0 +1,240 @@
+{
+  "action_policy": {
+    "NO_TRADE_if_no_positive_prediction": true,
+    "NO_TRADE_unit_pnl": 0.0,
+    "accept_if": "highest_side_prediction>0",
+    "decision_order": "chronological",
+    "fixed_acceptance_threshold": 0.0,
+    "one_trade_maximum_per_market": true,
+    "side_tie_break_order": [
+      "UP",
+      "DOWN"
+    ],
+    "threshold_search_allowed": false
+  },
+  "baseline": {
+    "candidate_and_baseline_population_must_match": true,
+    "candidate_and_baseline_share_bootstrap_indices": true,
+    "matched_global_baseline_behavior_is_frozen": true,
+    "policy": "HOLD_TO_SETTLEMENT"
+  },
+  "bootstrap": {
+    "NO_TRADE_participates_as_zero": true,
+    "candidate_and_baseline_share_indices": true,
+    "confidence": 0.975,
+    "lower_quantile": 0.025,
+    "method": "market_level_paired_percentile_bootstrap",
+    "resamples": 10000,
+    "seed": 26401,
+    "unit": "unique_market"
+  },
+  "candidate_budget": {
+    "maximum_total_slots": 2,
+    "slot_budget_may_be_increased": false,
+    "slots_consumed_before_run": 0,
+    "slots_remaining_after_run": 1,
+    "this_slot_ordinal": 1
+  },
+  "candidate_role": "primary",
+  "cost_stress": {
+    "action_selection_reused_from_base_cost": true,
+    "formula": "gross_price_edge-multiplier*total_cost_relative_to_mid",
+    "multipliers": [
+      1.2,
+      1.5,
+      2.0
+    ]
+  },
+  "created_at": "2026-08-09T08:18:25Z",
+  "dataset": {
+    "decision_rows_per_market": 2,
+    "development_only_forever": true,
+    "market_count": 800,
+    "population_order": "frozen_confirmatory_capture_manifest_order",
+    "side_decision_row_count": 3200,
+    "sides_per_decision": 2
+  },
+  "development_discipline": {
+    "challenger_requires_separate_preregistration": true,
+    "hyperparameter_search_allowed": false,
+    "one_candidate_this_slot": true,
+    "post_result_mutation_allowed": false,
+    "route_side_missingness_or_outlier_filtering_allowed": false,
+    "threshold_search_allowed": false
+  },
+  "development_only_forever": true,
+  "feature_contract": {
+    "base_feature_count": 54,
+    "feature_search_allowed": false,
+    "market_horizon_seconds": 900,
+    "missing_values_encoded_as_zero": false,
+    "native_missing_value": "nan",
+    "ordered_feature_count": 108,
+    "ordered_feature_names_sha256": "a61ef8953a2801d3e404d376261f306846cae5a4bf3ef3c97918572c48720e89",
+    "shared_side_symmetric_model": true,
+    "side_identity_feature_allowed": false,
+    "source_contract_reused_without_feature_addition_or_removal": true
+  },
+  "forbidden": [
+    "mutation_of_parent_v1_gate_or_threshold",
+    "mutation_of_parent_v1_failed_report_or_manifest",
+    "candidate_slot_budget_increase",
+    "failed_moe_v2_candidate_reuse",
+    "deterministic_expert_or_route_selection",
+    "hyperparameter_or_threshold_grid_search",
+    "route_side_missingness_or_outlier_filtering",
+    "post_result_candidate_mutation",
+    "opened_development_data_as_promotion_evidence",
+    "paper_live_wallet_write_or_capital_risk"
+  ],
+  "gates": {
+    "absolute_market_bootstrap_97_5pct_lcb_gt_zero": true,
+    "all_cost_stress_candidate_totals_gte_zero": true,
+    "all_cost_stress_paired_delta_totals_gte_zero": true,
+    "every_chronological_block_candidate_total_gte_zero": true,
+    "every_chronological_block_paired_delta_total_gte_zero": true,
+    "largest_positive_delta_removed_total_gte_zero": true,
+    "largest_winner_removed_candidate_total_gte_zero": true,
+    "paired_delta_market_bootstrap_97_5pct_lcb_gt_zero": true,
+    "population_and_leakage_reconciliation": true,
+    "prospective_power_required_market_count_lte_2000": true,
+    "stable_score_to_realized_pnl_ordering": true
+  },
+  "hypothesis": {
+    "change": "replace unanchored direct action-value extrapolation with one pooled side-symmetric market-implied probability residual followed by deterministic UP/DOWN pair coherence",
+    "expected_mechanism": "the causal selected midpoint supplies a stable probability anchor, the model learns only settlement-probability residual, and pair normalization prevents incoherent simultaneous side overvaluation before frozen execution costs are deducted",
+    "reason": "v1 candidates had positive aggregate edge but failed a chronological block and the conservative N cap; anchoring and pair coherence target temporal extrapolation variance without changing gates, thresholds, features, population, costs, or baseline"
+  },
+  "inputs": {
+    "baseline_decision_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/baseline_decision_rows.jsonl",
+      "sha256": "49ee6bdd7a3caccb824af8dd3645d3f42a9342b81a766412dfe7ed42f21f8006"
+    },
+    "candidate_implementation": {
+      "path": "src/bigan/v8/polymarket/cost_aware_residual_v2.py",
+      "sha256": "e9f570667c4d7fcc4e477bbfbd26ba1161aadb56bbeb7be096dad4e3338b4947"
+    },
+    "confirmatory_capture_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/confirmatory_capture_manifest.json",
+      "sha256": "a7d82694b9b4a798f382b6d086f74dda2fa7a296f0870f193fcc00e9192be4ff"
+    },
+    "confirmatory_market_evaluation_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/confirmatory_market_evaluation_rows.jsonl",
+      "sha256": "1bd6e2fe4ae3d8f867976fe490fb79e32a784f7266950a269d83495264c580c7"
+    },
+    "development_data_registry": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v2/development_data_registry.json",
+      "sha256": "9a673326169cfac94801591dbcc562e17bf94004304ffa53167cff079e26e4c4"
+    },
+    "gate_implementation": {
+      "path": "src/bigan/v8/polymarket/cost_aware_residual.py",
+      "sha256": "491a329f708a16d5aecdd952552cbff3fa13d8f7446bfe3e0c78fade3b36f78c"
+    },
+    "lineage_authorization": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v2/lineage_authorization.json",
+      "sha256": "c73d335c262c8ed3075b51b2da6e37159d014dd5957e6eb430cc41602396a284"
+    },
+    "matched_global_baseline_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_matched_global_baseline_contract.json",
+      "sha256": "1f26fc5cc39c9f52241bd40d09efe6530e88dcabad696f3a1df494944302bff5"
+    },
+    "parent_cost_and_action_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_cost_and_action_contract.json",
+      "sha256": "7a2d2f170cd6b042188f8282014dfbfb7d379e49085bd00807aace1881d7bf43"
+    },
+    "parent_feature_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_feature_contract.json",
+      "sha256": "dbc6e5e000a79548c5e5c74a38366ede4fe112fd3157850b8e3571599ef642bc"
+    },
+    "parent_v1_terminal_review": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v1/residual_development_terminal_review.json",
+      "sha256": "e5f21667e351630bbe1a0e68c146d43287e830892c9a1f3d2b2e45825d7e81e0"
+    },
+    "raw_capture_recovery_bundle_manifest": {
+      "path": "examples/v8/polymarket_artifacts/raw_archives/sha256/5deddaabd9d4ec9d979dfe47f77dd01ee6671c708154588b7325ae8325638639/bundle_manifest.json",
+      "sha256": "aab5c7187cdce4f7b6e2f9c5ed08b3a1f79b3c0d72c75fdf017384254c388d72"
+    },
+    "terminal_diagnostic_scored_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/terminal_diagnostic_002/terminal_diagnostic_scored_rows.jsonl",
+      "sha256": "b8867ff511251a8505e480dcef413e1ff18cb98b72a28969772147b6d3b809ed"
+    }
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v2",
+  "model": {
+    "family": "pooled_side_symmetric_market_anchored_probability_residual_xgboost",
+    "fixed_num_boost_round": 128,
+    "model_selection_or_early_stopping_performed": false,
+    "parameters": {
+      "colsample_bytree": 1.0,
+      "eta": 0.03,
+      "eval_metric": "rmse",
+      "gamma": 0.0,
+      "max_bin": 64,
+      "max_depth": 2,
+      "min_child_weight": 16.0,
+      "nthread": 1,
+      "objective": "reg:squarederror",
+      "reg_alpha": 0.0,
+      "reg_lambda": 20.0,
+      "seed": 26421,
+      "subsample": 1.0,
+      "tree_method": "hist"
+    },
+    "route_or_expert_allowed": false
+  },
+  "pair_coherence": {
+    "anchor": "decision_time_selected_mid",
+    "clip_epsilon": 1e-06,
+    "missing_anchor_behavior": "fail_closed_NO_TRADE_in_runtime",
+    "missing_values_encoded_as_zero": false,
+    "normalization": "UP_DOWN_probabilities_sum_to_one_per_decision",
+    "normalization_happens_before_cost_subtraction": true
+  },
+  "promotion_evidence_eligible": false,
+  "prospective_power": {
+    "confidence": 0.975,
+    "effect_haircut": 0.5,
+    "maximum_market_count": 2000,
+    "required_n_rule": "max_absolute_and_paired_plugin_normal_approximation",
+    "target_power": 0.8
+  },
+  "rolling_origin": {
+    "future_market_used_for_fit": false,
+    "initial_training_market_count": 200,
+    "market_grouped": true,
+    "market_order": "frozen_capture_order",
+    "oof_market_count": 600,
+    "strictly_prior_market_labels_only": true,
+    "target_block_count": 6,
+    "target_block_size": 100
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-market-anchored-residual-oof-protocol-v2",
+  "slot_id": "residual-v2-primary-slot-001",
+  "state": {
+    "candidate_frozen": false,
+    "fresh_confirmatory_collection_started": false,
+    "fresh_outcomes_opened": false,
+    "live_shadow_started": false,
+    "training_started": false
+  },
+  "target": {
+    "NO_TRADE_value": 0.0,
+    "action_value_formula": "pair_normalized_clipped_selected_mid_plus_predicted_probability_residual-entry_ask-frozen_fees-slippage-liquidity_impact",
+    "execution_policy": "HOLD_TO_SETTLEMENT",
+    "post_close_training_label_only": true,
+    "regression_label": "settlement_payout-selected_mid"
+  }
+}
