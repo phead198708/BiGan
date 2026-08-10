@@ -28,6 +28,8 @@ from bigan.v8.polymarket.residual_promotion_release_readiness import (
     CONTRACT_SCHEMA_VERSION,
     IMPLEMENTATION_REPOSITORY_PATH,
     OPERATIONAL_ROLLBACK_SCHEMA_VERSION,
+    PHASE6_AUTHORIZATION_SCHEMA_VERSION,
+    PHASE6_AUTHORIZATION_TEMPLATE_SCHEMA_VERSION,
     PREFLIGHT_SCHEMA_VERSION,
     SECURITY_REVIEW_SCHEMA_VERSION,
     SHADOW_SCHEMA_VERSION,
@@ -40,9 +42,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG = (
     REPO_ROOT / "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1"
 )
-CONTRACT = CONFIG / "micro_live_preapproval_contract_v4.json"
-PREFLIGHT = CONFIG / "micro_live_preapproval_preflight_report_v4.json"
-AUTHORIZATION_TEMPLATE = CONFIG / "micro_live_authorization_template_v4.json"
+CONTRACT = CONFIG / "micro_live_preapproval_contract_v5.json"
+PREFLIGHT = CONFIG / "micro_live_preapproval_preflight_report_v5.json"
+AUTHORIZATION_TEMPLATE = CONFIG / "micro_live_authorization_template_v5.json"
+PHASE6_AUTHORIZATION_TEMPLATE = CONFIG / "phase6_zero_capital_authorization_template.json"
 HISTORICAL_ARTIFACTS = (
     CONFIG / "micro_live_preapproval_contract.json",
     CONFIG / "micro_live_preapproval_preflight_report.json",
@@ -53,6 +56,9 @@ HISTORICAL_ARTIFACTS = (
     CONFIG / "micro_live_preapproval_contract_v3.json",
     CONFIG / "micro_live_preapproval_preflight_report_v3.json",
     CONFIG / "micro_live_authorization_template_v3.json",
+    CONFIG / "micro_live_preapproval_contract_v4.json",
+    CONFIG / "micro_live_preapproval_preflight_report_v4.json",
+    CONFIG / "micro_live_authorization_template_v4.json",
 )
 
 
@@ -120,6 +126,8 @@ def _complete_evidence(contract: dict[str, object]) -> dict[str, dict[str, objec
                 "schema_version": SHADOW_SCHEMA_VERSION,
                 "lineage_id": contract["lineage_id"],
                 "candidate_id": contract["candidate_id"],
+                "implementation": dict(contract["shadow_evidence_implementation"]),
+                "cli": dict(contract["shadow_evidence_cli"]),
                 "candidate_bundle_sha256": bundle_sha,
                 "population_manifest_sha256": population_sha,
                 "candidate_row_count": 2_500,
@@ -139,6 +147,8 @@ def _complete_evidence(contract: dict[str, object]) -> dict[str, dict[str, objec
                 "schema_version": OPERATIONAL_ROLLBACK_SCHEMA_VERSION,
                 "lineage_id": contract["lineage_id"],
                 "candidate_id": contract["candidate_id"],
+                "implementation": dict(contract["operational_rollback_evidence_implementation"]),
+                "cli": dict(contract["operational_rollback_evidence_cli"]),
                 "candidate_bundle_sha256": bundle_sha,
                 "functional_rollback_report_sha256": functional_sha,
                 "rollback_target": "NO_TRADE",
@@ -167,15 +177,38 @@ def _complete_evidence(contract: dict[str, object]) -> dict[str, dict[str, objec
             }
         ),
     }
-    evidence["phase6_report"] = _phase6_report(contract)
+    phase6_authorization = _closed(
+        {
+            "schema_version": PHASE6_AUTHORIZATION_SCHEMA_VERSION,
+            "lineage_id": contract["lineage_id"],
+            "candidate_id": contract["candidate_id"],
+            "authorization_scope": "post_confirmation_phase6_zero_capital_only",
+            "candidate_bundle_sha256": bundle_sha,
+            "supersedes_template": dict(contract["phase6_zero_capital_authorization_template"]),
+            "fresh_evaluation_manifest_payload_sha256": canonical_json_sha256(
+                evidence["evaluation_manifest"]
+            ),
+            "phase6_zero_capital_authorized": True,
+            "requested_capital_fraction": 0.0,
+            "rollout_step_index": 0,
+            "explicit_human_zero_capital_approval_recorded": True,
+            "authorization_record_executable": True,
+            "collection_authorization_reused": False,
+            "micro_live_authorized": False,
+        }
+    )
+    evidence["phase6_authorization"] = phase6_authorization
+    evidence["phase6_report"] = _phase6_report(contract, phase6_authorization)
     return evidence
 
 
-def _phase6_report(contract: dict[str, object]) -> dict[str, object]:
+def _phase6_report(
+    contract: dict[str, object], phase6_authorization: dict[str, object]
+) -> dict[str, object]:
     identity = dict(contract["phase6_candidate_identity"])
     candidate_id = str(contract["candidate_id"])
     bundle_sha = str(identity["model_sha256"])
-    authorization_sha = dict(contract["zero_capital_authorization"])["sha256"]
+    authorization_sha = canonical_json_sha256(phase6_authorization)
 
     def stage(
         name: str,
@@ -274,7 +307,7 @@ def test_frozen_contract_and_sidecars_reconcile() -> None:
     contract = _json(CONTRACT)
     assert contract["schema_version"] == CONTRACT_SCHEMA_VERSION
     assert dict(contract["supersedes_preapproval_contract"])["path"].endswith(
-        "/micro_live_preapproval_contract_v3.json"
+        "/micro_live_preapproval_contract_v4.json"
     )
     assert dict(contract["finalization_feature_envelope_correction"])["path"].endswith(
         "/finalization_feature_envelope_correction.json"
@@ -285,12 +318,23 @@ def test_frozen_contract_and_sidecars_reconcile() -> None:
     assert dict(contract["promotion_outcome_authorization_template"])["path"].endswith(
         "/promotion_outcome_evaluation_authorization_template_v4.json"
     )
+    assert dict(contract["phase6_zero_capital_authorization_template"])["path"].endswith(
+        "/phase6_zero_capital_authorization_template.json"
+    )
+    assert dict(contract["collection_authorization_not_valid_for_phase6"])["path"].endswith(
+        "/manual_collection_authorization_v3.json"
+    )
     validate_release_readiness_contract(
         contract,
         repository_root=REPO_ROOT,
         expected_implementation_sha256=sha256_file(REPO_ROOT / IMPLEMENTATION_REPOSITORY_PATH),
     )
-    for path in (CONTRACT, PREFLIGHT, AUTHORIZATION_TEMPLATE):
+    for path in (
+        CONTRACT,
+        PREFLIGHT,
+        AUTHORIZATION_TEMPLATE,
+        PHASE6_AUTHORIZATION_TEMPLATE,
+    ):
         sidecar = path.with_suffix(path.suffix + ".sha256")
         assert sidecar.read_text(encoding="utf-8").strip() == sha256_file(path)
     for path in HISTORICAL_ARTIFACTS:
@@ -367,6 +411,12 @@ def test_complete_technical_evidence_can_only_request_human_go_no_go() -> None:
             True,
             "security_review",
         ),
+        (
+            "phase6_authorization",
+            "collection_authorization_reused",
+            True,
+            "phase6_zero_capital_pipeline",
+        ),
     ),
 )
 def test_any_failed_or_premature_evidence_stays_no_go(
@@ -437,7 +487,7 @@ def test_authorization_template_is_non_executable_and_empty() -> None:
     template = _json(AUTHORIZATION_TEMPLATE)
     assert template["schema_version"] == AUTHORIZATION_TEMPLATE_SCHEMA_VERSION
     assert dict(template["supersedes_authorization_template"])["path"].endswith(
-        "/micro_live_authorization_template_v3.json"
+        "/micro_live_authorization_template_v4.json"
     )
     assert template["requested_initial_capital_fraction"] == 0.01
     assert template["explicit_human_approval_recorded"] is False
@@ -445,6 +495,22 @@ def test_authorization_template_is_non_executable_and_empty() -> None:
     assert template["micro_live_started"] is False
     assert template["executable"] is False
     assert set(template["required_evidence_hashes"].values()) == {None}
+    assert template["wallet_signing_allowed"] is False
+    assert template["polymarket_write_allowed"] is False
+    assert template["capital_at_risk"] is False
+    assert template["safety"] == SAFETY
+
+
+def test_phase6_authorization_template_is_separate_and_non_executable() -> None:
+    template = _json(PHASE6_AUTHORIZATION_TEMPLATE)
+    assert template["schema_version"] == PHASE6_AUTHORIZATION_TEMPLATE_SCHEMA_VERSION
+    assert template["authorization_scope"] == ("post_confirmation_phase6_zero_capital_only")
+    assert template["phase6_zero_capital_authorized"] is False
+    assert template["fresh_evaluation_manifest_payload_sha256"] is None
+    assert template["explicit_human_zero_capital_approval_recorded"] is False
+    assert template["authorization_record_executable"] is False
+    assert template["collection_authorization_reused"] is False
+    assert template["micro_live_authorized"] is False
     assert template["wallet_signing_allowed"] is False
     assert template["polymarket_write_allowed"] is False
     assert template["capital_at_risk"] is False
@@ -470,6 +536,10 @@ def test_exact_future_evidence_hashes_and_one_shot_output(tmp_path: Path) -> Non
         "path": report_path.name,
         "sha256": sha256_file(report_path),
     }
+    evidence["phase6_authorization"]["fresh_evaluation_manifest_payload_sha256"] = (
+        canonical_json_sha256(evidence["evaluation_manifest"])
+    )
+    evidence["phase6_report"] = _phase6_report(contract, evidence["phase6_authorization"])
     for name, payload in evidence.items():
         if name == "evaluation_report":
             continue

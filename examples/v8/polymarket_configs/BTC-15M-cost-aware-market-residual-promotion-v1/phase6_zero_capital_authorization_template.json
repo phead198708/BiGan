@@ -1,0 +1,40 @@
+{
+  "authorization_record_executable": false,
+  "authorization_scope": "post_confirmation_phase6_zero_capital_only",
+  "authorized_record_schema_version": "bigan-btc-15m-residual-promotion-phase6-zero-capital-authorization-v1",
+  "candidate_bundle_sha256": "7a5b872b5a2a010a0868bf7d22fb4bdc39a941dd04464bb53890d34aa1846b3e",
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "capital_at_risk": false,
+  "collection_authorization": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/manual_collection_authorization_v3.json",
+    "sha256": "ce1e218b641484eda713b84704b727ed0d720d01eaaff8056bca01a42dd109b7"
+  },
+  "collection_authorization_reused": false,
+  "created_at": "2026-08-10T17:30:00+00:00",
+  "explicit_human_zero_capital_approval_recorded": false,
+  "fresh_confirmation_required_before_authorization": true,
+  "fresh_evaluation_manifest_payload_sha256": null,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "live_trading_allowed": false,
+  "micro_live_authorized": false,
+  "phase6_zero_capital_authorized": false,
+  "polymarket_write_allowed": false,
+  "requested_capital_fraction": 0.0,
+  "rollout_step_index": 0,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-phase6-zero-capital-authorization-template-v1",
+  "template_is_executable": false,
+  "wallet_signing_allowed": false
+}
