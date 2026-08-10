@@ -46,6 +46,10 @@ CONTRACT = CONFIG / "micro_live_preapproval_contract_v5.json"
 PREFLIGHT = CONFIG / "micro_live_preapproval_preflight_report_v5.json"
 AUTHORIZATION_TEMPLATE = CONFIG / "micro_live_authorization_template_v5.json"
 PHASE6_AUTHORIZATION_TEMPLATE = CONFIG / "phase6_zero_capital_authorization_template.json"
+OPERATIONAL_ROLLBACK = CONFIG / "operational_rollback_drill_report.json"
+OPERATIONAL_RECONCILIATION = (
+    CONFIG / "micro_live_preapproval_operational_reconciliation_v1.json"
+)
 HISTORICAL_ARTIFACTS = (
     CONFIG / "micro_live_preapproval_contract.json",
     CONFIG / "micro_live_preapproval_preflight_report.json",
@@ -362,6 +366,77 @@ def test_current_preflight_is_explicitly_blocked() -> None:
     assert report["wallet_signing_allowed"] is False
     assert report["polymarket_write_allowed"] is False
     assert report["capital_at_risk"] is False
+    assert report["safety"] == SAFETY
+
+
+def test_operational_rollback_preapproval_reconciliation_is_additive_and_blocked() -> None:
+    contract = _json(CONTRACT)
+    historical = _json(PREFLIGHT)
+    operational = _json(OPERATIONAL_ROLLBACK)
+    report = _json(OPERATIONAL_RECONCILIATION)
+    sidecar = OPERATIONAL_RECONCILIATION.with_suffix(
+        OPERATIONAL_RECONCILIATION.suffix + ".sha256"
+    )
+
+    assert sidecar.read_text(encoding="utf-8").strip() == sha256_file(
+        OPERATIONAL_RECONCILIATION
+    )
+    for field, expected_path in (
+        ("preapproval_contract", CONTRACT),
+        ("historical_v5_preflight_preserved", PREFLIGHT),
+        ("operational_rollback_evidence", OPERATIONAL_ROLLBACK),
+    ):
+        descriptor = dict(report[field])
+        assert descriptor == {
+            "path": expected_path.relative_to(REPO_ROOT).as_posix(),
+            "sha256": sha256_file(expected_path),
+        }
+    generator = dict(report["generator"])
+    generator_path = REPO_ROOT / str(generator["path"])
+    assert generator["sha256"] == sha256_file(generator_path)
+
+    expected_assessment = assess_micro_live_preapproval(
+        contract=contract,
+        evidence={"operational_rollback": operational},
+        created_at=str(report["created_at"]),
+    )
+    assert report["assessment"] == expected_assessment
+    assert historical["technical_checks"]["operational_rollback"] is False
+    assert expected_assessment["technical_checks"] == {
+        "fresh_confirmation": False,
+        "functional_rollback": True,
+        "operational_rollback": True,
+        "phase6_zero_capital_pipeline": False,
+        "runtime_parity": True,
+        "security_review": False,
+        "shadow_stability_and_monitoring": False,
+    }
+    assert report["completed_since_v5"] == ["operational_rollback"]
+    assert report["remaining_release_checks"] == [
+        "fresh_confirmation",
+        "phase6_zero_capital_pipeline",
+        "security_review",
+        "shadow_stability_and_monitoring",
+    ]
+    assert expected_assessment["ready_to_request_micro_live_approval"] is False
+    assert expected_assessment["micro_live_authorized"] is False
+    for field in (
+        "fresh_population_accessed",
+        "fresh_outcomes_accessed",
+        "settlement_accessed",
+        "pnl_accessed",
+        "paper_run_started",
+        "phase6_zero_capital_authorized",
+        "security_review_passed",
+        "micro_live_authorized",
+        "live_trading_allowed",
+        "wallet_signing_allowed",
+        "polymarket_write_allowed",
+        "capital_at_risk",
+    ):
+        assert report[field] is False
+    assert report["historical_artifacts_modified"] is False
+    assert report["candidate_behavior_changed"] is False
     assert report["safety"] == SAFETY
 
 
