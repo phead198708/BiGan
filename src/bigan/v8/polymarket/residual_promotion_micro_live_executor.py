@@ -210,9 +210,11 @@ class MicroLiveExecutor:
             **intent_core,
             "intent_id": intent_id,
             "client_order_id": client_order_id,
+            "submitted_at_ts_ms": now_ts_ms,
+            "operator_heartbeat_ts_ms": operator_heartbeat_ts_ms,
             "authorization_payload_sha256": self.authorization.authorization_payload_sha256,
         }
-        self._append_event("ORDER_PREPARED", request)
+        self._append_event("ORDER_PREPARED", request, event_ts_ms=now_ts_ms)
         try:
             response = dict(self.transport.submit_order(copy.deepcopy(request)))
             disposition = self._validate_submission_response(request, response)
@@ -223,6 +225,7 @@ class MicroLiveExecutor:
                     "client_order_id": client_order_id,
                     "error_type": exc.__class__.__name__,
                 },
+                event_ts_ms=now_ts_ms,
             )
             self.engage_kill_switch(
                 reason="order_submission_unknown",
@@ -230,13 +233,13 @@ class MicroLiveExecutor:
             )
             raise MicroLiveExecutionError("order submission became unknown; kill switch engaged") from exc
         if disposition["status"] == "REJECTED":
-            self._append_event("ORDER_REJECTED", disposition)
+            self._append_event("ORDER_REJECTED", disposition, event_ts_ms=now_ts_ms)
             return {
                 "status": "ORDER_REJECTED",
                 "client_order_id": client_order_id,
                 "transport_called": True,
             }
-        self._append_event("ORDER_ACKNOWLEDGED", disposition)
+        self._append_event("ORDER_ACKNOWLEDGED", disposition, event_ts_ms=now_ts_ms)
         self._reconcile_view()
         return {
             "status": "ORDER_ACKNOWLEDGED",
@@ -299,7 +302,7 @@ class MicroLiveExecutor:
         if fill_qty * fill_price + fee > view["cash_usd"]:
             self.engage_kill_switch(reason="fill_cash_cap_exceeded", now_ts_ms=now_ts_ms)
             raise MicroLiveExecutionError("fill would make authorized cash negative")
-        self._append_event("FILL_RECORDED", payload)
+        self._append_event("FILL_RECORDED", payload, event_ts_ms=now_ts_ms)
         snapshot = self.reconciliation_snapshot()
         return {"status": "FILL_RECORDED", "fill_id": fill_id, "snapshot": snapshot}
 
@@ -341,6 +344,7 @@ class MicroLiveExecutor:
                     transport_event_sha256, "order close transport event"
                 ),
             },
+            event_ts_ms=now_ts_ms,
         )
         return {"status": event_type, "client_order_id": client_order_id}
 
@@ -397,7 +401,7 @@ class MicroLiveExecutor:
                 now_ts_ms=now_ts_ms,
             )
             raise MicroLiveExecutionError("open order cannot settle before cancellation")
-        self._append_event("SETTLEMENT_RECORDED", payload)
+        self._append_event("SETTLEMENT_RECORDED", payload, event_ts_ms=now_ts_ms)
         return {
             "status": "SETTLEMENT_RECORDED",
             "settlement_id": settlement_id,
@@ -416,6 +420,7 @@ class MicroLiveExecutor:
             self._append_event(
                 "KILL_SWITCH_ENGAGED",
                 {"reason": reason, "engaged_at_ts_ms": now_ts_ms},
+                event_ts_ms=now_ts_ms,
             )
             view = self._reconcile_view()
         canceled: list[str] = []
@@ -443,6 +448,7 @@ class MicroLiveExecutor:
                         "client_order_id": request["client_order_id"],
                         "transport_event_sha256": canonical_json_sha256(response),
                     },
+                    event_ts_ms=now_ts_ms,
                 )
                 canceled.append(str(request["client_order_id"]))
             except Exception as exc:
@@ -452,6 +458,7 @@ class MicroLiveExecutor:
                         "client_order_id": request["client_order_id"],
                         "error_type": exc.__class__.__name__,
                     },
+                    event_ts_ms=now_ts_ms,
                 )
                 unknown.append(str(request["client_order_id"]))
         return {
@@ -593,11 +600,21 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError("order response identity mismatch")
         return dict(response)
 
-    def _append_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
+    def _append_event(
+        self,
+        event_type: str,
+        payload: Mapping[str, Any],
+        *,
+        event_ts_ms: int,
+    ) -> None:
         if event_type not in _EVENT_TYPES:
             raise MicroLiveExecutionError("micro-live event type is invalid")
+        _require_positive_timestamp(event_ts_ms, "event")
+        if self._events and event_ts_ms < self._events[-1]["event_ts_ms"]:
+            raise MicroLiveExecutionError("micro-live event timestamp regressed")
         core = {
             "sequence": len(self._events) + 1,
+            "event_ts_ms": event_ts_ms,
             "previous_event_sha256": (
                 self._events[-1]["event_sha256"] if self._events else GENESIS
             ),
@@ -608,9 +625,11 @@ class MicroLiveExecutor:
 
     def _verify_event_chain(self) -> None:
         previous = GENESIS
+        previous_ts_ms = 0
         for expected_sequence, event in enumerate(self._events, start=1):
             if set(event) != {
                 "sequence",
+                "event_ts_ms",
                 "previous_event_sha256",
                 "event_type",
                 "payload",
@@ -620,19 +639,30 @@ class MicroLiveExecutor:
             core = {key: value for key, value in event.items() if key != "event_sha256"}
             if not (
                 event["sequence"] == expected_sequence
+                and isinstance(event["event_ts_ms"], int)
+                and not isinstance(event["event_ts_ms"], bool)
+                and event["event_ts_ms"] > 0
+                and event["event_ts_ms"] >= previous_ts_ms
                 and event["previous_event_sha256"] == previous
                 and event["event_type"] in _EVENT_TYPES
                 and isinstance(event["payload"], Mapping)
                 and event["event_sha256"] == canonical_json_sha256(core)
             ):
                 raise MicroLiveExecutionError("micro-live event chain is invalid")
-            self._validate_event_payload(str(event["event_type"]), event["payload"])
+            self._validate_event_payload(
+                str(event["event_type"]),
+                event["payload"],
+                event_ts_ms=int(event["event_ts_ms"]),
+            )
             previous = str(event["event_sha256"])
+            previous_ts_ms = int(event["event_ts_ms"])
 
     def _validate_event_payload(
         self,
         event_type: str,
         payload_value: Mapping[str, Any],
+        *,
+        event_ts_ms: int,
     ) -> None:
         payload = dict(payload_value)
         if event_type == "ORDER_PREPARED":
@@ -645,6 +675,8 @@ class MicroLiveExecutor:
                 "slug",
                 "market_family",
                 "decision_ts_ms",
+                "submitted_at_ts_ms",
+                "operator_heartbeat_ts_ms",
                 "selected_action",
                 "token_id",
                 "token_side",
@@ -684,6 +716,8 @@ class MicroLiveExecutor:
                 if key
                 not in {
                     "authorization_payload_sha256",
+                    "submitted_at_ts_ms",
+                    "operator_heartbeat_ts_ms",
                     "intent_id",
                     "client_order_id",
                 }
@@ -709,6 +743,18 @@ class MicroLiveExecutor:
                 and payload.get("slug") == signal["slug"]
                 and payload.get("market_family") == signal["market_family"]
                 and payload.get("decision_ts_ms") == signal["decision_ts_ms"]
+                and payload.get("submitted_at_ts_ms") == event_ts_ms
+                and isinstance(payload.get("operator_heartbeat_ts_ms"), int)
+                and not isinstance(payload.get("operator_heartbeat_ts_ms"), bool)
+                and self.authorization.authorized_at_ts_ms
+                <= event_ts_ms
+                < self.authorization.expires_at_ts_ms
+                and signal["decision_ts_ms"] <= event_ts_ms
+                and event_ts_ms - signal["decision_ts_ms"]
+                <= self.authorization.maximum_signal_age_ms
+                and payload["operator_heartbeat_ts_ms"] <= event_ts_ms
+                and event_ts_ms - payload["operator_heartbeat_ts_ms"]
+                <= self.authorization.maximum_operator_heartbeat_age_ms
                 and isinstance(payload.get("token_id"), str)
                 and _TOKEN_ID.fullmatch(payload["token_id"]) is not None
                 and payload.get("token_side")

@@ -523,7 +523,9 @@ def _authorization(
     authorization_id = canonical_json_sha256(identity)
     command = (
         "APPROVE BTC-15M-cost-aware-market-residual-promotion-v1 MICRO-LIVE "
-        f"authorization_id={authorization_id} capital_fraction=0.01"
+        f"authorization_id={authorization_id} capital_base_usd=1000 "
+        "maximum_notional_usd=10.00 maximum_open_orders=2 "
+        f"capital_fraction=0.01 expires_at_ts_ms={identity['expires_at_ts_ms']}"
     )
     comment_url = "https://github.com/phead198708/BiGan/issues/264#issuecomment-99001"
     github_path = evidence_root / "human_approval_github_payload.json"
@@ -820,6 +822,14 @@ def test_signal_envelope_tampering_and_outcome_fields_fail_closed(
     with pytest.raises(MicroLiveExecutionError, match="identity or safety"):
         executor.submit_signal(**outcome_opened)
 
+    off_schedule = _signal(
+        candidate_bundle_sha256=verified.candidate_bundle_sha256,
+        decision_ts_ms=AUTHORIZED_AT_TS_MS + 300_001,
+        observed_at_ts_ms=AUTHORIZED_AT_TS_MS + 300_001,
+    )
+    with pytest.raises(MicroLiveExecutionError, match="frozen schedule"):
+        executor.submit_signal(**off_schedule)
+
     assert transport.submit_calls == []
     assert transport.cancel_calls == []
 
@@ -1048,6 +1058,32 @@ def test_rehashed_tampered_state_still_fails_closed(
         )
 
 
+def test_rehashed_event_timestamp_regression_still_fails_closed(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    executor = MicroLiveExecutor(verified, transport=FakeTransport())
+    executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    state = executor.export_state()
+    state["events"][1]["event_ts_ms"] = state["events"][0]["event_ts_ms"] - 1
+    previous = "GENESIS"
+    for event in state["events"]:
+        event["previous_event_sha256"] = previous
+        core = {key: value for key, value in event.items() if key != "event_sha256"}
+        event["event_sha256"] = canonical_json_sha256(core)
+        previous = event["event_sha256"]
+    payload = {key: value for key, value in state.items() if key != "state_sha256"}
+    state["state_sha256"] = canonical_json_sha256(payload)
+    with pytest.raises(MicroLiveExecutionError, match="event chain"):
+        MicroLiveExecutor.restore(
+            authorization=verified,
+            transport=FakeTransport(),
+            state=state,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     (
@@ -1108,6 +1144,14 @@ def test_human_approval_owner_and_timestamp_are_exact(
             evidence_root=authorized_fixture["evidence_root"],
             now_ts_ms=NOW_TS_MS,
         )
+
+    approval_descriptor = authorized_fixture["authorization"]["human_approval"][
+        "github_comment_payload"
+    ]
+    github = _json(authorized_fixture["evidence_root"] / approval_descriptor["path"])
+    assert "capital_base_usd=1000" in github["body"]
+    assert "maximum_notional_usd=10.00" in github["body"]
+    assert "maximum_open_orders=2" in github["body"]
 
     changed = copy.deepcopy(authorized_fixture["authorization"])
     changed["created_at"] = "2026-09-21T00:00:01Z"

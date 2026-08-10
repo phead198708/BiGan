@@ -165,7 +165,11 @@ def verify_micro_live_authorization(
     )
     candidate_sha = dict(authorization["candidate_bundle"])["sha256"]
     if not (
-        dict(template.get("preapproval_contract") or {})
+        dict(contract.get("candidate_bundle") or {})
+        == dict(authorization["candidate_bundle"])
+        and contract.get("lineage_id") == LINEAGE_ID
+        and contract.get("candidate_id") == CANDIDATE_ID
+        and dict(template.get("preapproval_contract") or {})
         == dict(authorization["preapproval_contract"])
         and template.get("candidate_id") == CANDIDATE_ID
         and template.get("micro_live_authorized") is False
@@ -245,6 +249,10 @@ def verify_micro_live_authorization(
         evidence_base=evidence_base,
         authorization_id=authorization_id,
         authorized_at_ts_ms=int(authorized_at),
+        expires_at_ts_ms=int(expires_at),
+        capital_base_usd=capital_base,
+        maximum_notional_usd=maximum_notional,
+        maximum_open_orders=int(maximum_open_orders),
     )
     if not (
         authorization.get("explicit_human_approval_recorded") is True
@@ -358,6 +366,10 @@ def _validate_human_approval(
     evidence_base: Path,
     authorization_id: str,
     authorized_at_ts_ms: int,
+    expires_at_ts_ms: int,
+    capital_base_usd: Decimal,
+    maximum_notional_usd: Decimal,
+    maximum_open_orders: int,
 ) -> None:
     if set(approval) != {
         "github_login",
@@ -395,7 +407,10 @@ def _validate_human_approval(
         raise MicroLiveAuthorizationError("human micro-live approval provenance is invalid")
     expected_command = (
         f"APPROVE {LINEAGE_ID} MICRO-LIVE authorization_id={authorization_id} "
-        "capital_fraction=0.01"
+        f"capital_base_usd={capital_base_usd} "
+        f"maximum_notional_usd={maximum_notional_usd} "
+        f"maximum_open_orders={maximum_open_orders} capital_fraction=0.01 "
+        f"expires_at_ts_ms={expires_at_ts_ms}"
     )
     github = _verified_evidence_json(
         evidence_base, dict(approval.get("github_comment_payload") or {})
