@@ -21,6 +21,7 @@ from bigan.v8.polymarket.cost_aware_residual_v4 import (
     require_v4_candidate_implementation_binding,
     validate_residual_v4_protocol,
     validate_v4_lineage_authorization,
+    verify_frozen_residual_v4_oof,
 )
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 from bigan.v8.polymarket.regime_adaptive_lineage import REPO_ROOT
@@ -195,6 +196,23 @@ def test_convex_probability_blend_preserves_pair_coherence_and_frozen_costs() ->
 
 def test_v4_all_safety_permissions_remain_false() -> None:
     assert all(value is False for value in SAFETY.values())
+
+
+def test_frozen_primary_oof_rebuilds_fail_closed_without_unlock() -> None:
+    result = verify_frozen_residual_v4_oof()
+    assert result["verification_passed"] is True
+    assert result["all_gates_passed"] is False
+    assert result["failed_gates"] == [
+        "every_chronological_block_paired_delta_total_gte_zero",
+        "prospective_power_required_market_count_lte_2000",
+    ]
+    assert result["remaining_candidate_slots"] == 1
+    assert result["oof_market_count"] == 600
+    assert result["manifest_sha256"] == (
+        "219e87c5929760ea476f18e9b1936bec96bc9b560f73c11c65655d26da6217b8"
+    )
+    assert result["actual_executing_module_binding_verified"] is True
+    assert result["safety"] == SAFETY
 
 
 def _synthetic_row(side: str, *, entry_ask: float) -> dict:
