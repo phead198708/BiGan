@@ -19,6 +19,15 @@ from bigan.v8.polymarket.challenge_model_15m_training import (
     side_symmetric_features,
 )
 from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.corpus.contracts import (
+    BinanceBTCCandle,
+    PolymarketChainlinkPrice,
+    PolymarketCorpusBookSnapshot,
+    PolymarketCorpusBuildConfig,
+    PolymarketCorpusMarket,
+    PolymarketCorpusTrade,
+)
+from bigan.v8.polymarket.corpus.features import build_polymarket_corpus_feature_rows
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 from bigan.v8.polymarket.regime_adaptive_candidate_evaluation import FEATURE_NAMES
 
@@ -92,6 +101,72 @@ class PooledResidualRuntime:
                 selected_action="NO_TRADE",
                 fail_closed_reasons=[str(exc) or exc.__class__.__name__],
             )
+
+
+def build_pooled_residual_feature_row_as_of(
+    *,
+    market: PolymarketCorpusMarket,
+    book_snapshots: Sequence[PolymarketCorpusBookSnapshot],
+    trades: Sequence[PolymarketCorpusTrade],
+    btc_candles: Sequence[BinanceBTCCandle],
+    chainlink_prices: Sequence[PolymarketChainlinkPrice],
+    decision_ts: int,
+) -> dict[str, Any]:
+    """Build one canonical row from only inputs available by ``decision_ts``."""
+
+    decision = int(decision_ts)
+    if market.market_family != MARKET_FAMILY or market.horizon_ms != MARKET_HORIZON_MS:
+        raise ValueError("runtime market is not BTC 15m")
+    if not market.market_start_ts <= decision < market.market_end_ts:
+        raise ValueError("runtime decision timestamp is outside the market")
+    if (decision - market.market_start_ts) % 300_000 != 0:
+        raise ValueError("runtime decision timestamp is off the frozen five-minute grid")
+    books = tuple(
+        row
+        for row in book_snapshots
+        if row.market_id == market.market_id
+        and row.ts <= decision
+        and row.available_at_ts <= decision
+    )
+    causal_trades = tuple(
+        row
+        for row in trades
+        if row.market_id == market.market_id
+        and row.ts <= decision
+        and row.available_at_ts <= decision
+    )
+    candles = tuple(
+        row
+        for row in btc_candles
+        if row.ts <= decision and row.available_at_ts <= decision
+    )
+    chainlink = tuple(
+        row
+        for row in chainlink_prices
+        if row.source_ts <= decision and row.available_at_ts <= decision
+    )
+    config = PolymarketCorpusBuildConfig(
+        input_dir=Path("/__bigan_in_memory_residual_runtime__"),
+        output_dir=Path("/__bigan_in_memory_residual_runtime__"),
+        market_families=(MARKET_FAMILY,),
+        sample_interval_seconds={MARKET_FAMILY: 300},
+        min_time_to_close_seconds=0,
+        include_trade_labels=True,
+        include_settlement_labels=False,
+        overwrite_existing=False,
+    )
+    rows = build_polymarket_corpus_feature_rows(
+        markets=(market,),
+        book_snapshots=books,
+        trades=causal_trades,
+        btc_candles=candles,
+        chainlink_prices=chainlink,
+        config=config,
+    )
+    matches = [row.to_dict() for row in rows if row.decision_ts == decision]
+    if len(matches) != 1:
+        raise ValueError("exact causal residual runtime feature row is unavailable")
+    return matches[0]
 
 
 def load_pooled_residual_runtime(
@@ -423,5 +498,6 @@ __all__ = [
     "PooledResidualRuntime",
     "PooledResidualRuntimeError",
     "RUNTIME_RESULT_SCHEMA_VERSION",
+    "build_pooled_residual_feature_row_as_of",
     "load_pooled_residual_runtime",
 ]

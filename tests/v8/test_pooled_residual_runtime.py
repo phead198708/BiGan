@@ -16,6 +16,12 @@ from bigan.v8.polymarket.challenge_model_15m_training import (
     side_symmetric_features,
 )
 from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.corpus.contracts import (
+    BinanceBTCCandle,
+    PolymarketChainlinkPrice,
+    PolymarketCorpusBookSnapshot,
+    PolymarketCorpusMarket,
+)
 from bigan.v8.polymarket.cost_aware_residual_v4_stacking import (
     DEFAULT_OUTPUT_DIR as V4_CHALLENGER_OUTPUT_DIR,
 )
@@ -24,6 +30,7 @@ from bigan.v8.polymarket.pooled_residual_runtime import (
     ACTIONS,
     BUNDLE_SCHEMA_VERSION,
     PooledResidualRuntimeError,
+    build_pooled_residual_feature_row_as_of,
     load_pooled_residual_runtime,
 )
 from bigan.v8.polymarket.regime_adaptive_candidate_evaluation import FEATURE_NAMES
@@ -88,6 +95,36 @@ def test_standard_corpus_feature_row_needs_no_start_or_end_extension(
     row.pop("market_start_ts")
     row.pop("market_end_ts")
     result = runtime.score_feature_row(row, observed_at_ts=1_000_500)
+    assert result["model_scored"] is True
+    assert result["fail_closed"] is False
+
+
+def test_as_of_stream_builder_ignores_future_inputs_and_scores_exact_row(
+    tmp_path: Path,
+) -> None:
+    runtime, _ = _runtime_fixture(tmp_path)
+    market, books, candles, chainlink, decision_ts = _causal_stream_fixture()
+    without_future = build_pooled_residual_feature_row_as_of(
+        market=market,
+        book_snapshots=books[:-2],
+        trades=(),
+        btc_candles=candles[:-1],
+        chainlink_prices=chainlink[:-1],
+        decision_ts=decision_ts,
+    )
+    with_future = build_pooled_residual_feature_row_as_of(
+        market=market,
+        book_snapshots=books,
+        trades=(),
+        btc_candles=candles,
+        chainlink_prices=chainlink,
+        decision_ts=decision_ts,
+    )
+    assert with_future == without_future
+    assert with_future["max_input_ts"] <= decision_ts
+    assert with_future["available_at_ts"] <= decision_ts
+    assert with_future["feature_cutoff_ts"] <= decision_ts
+    result = runtime.score_feature_row(with_future, observed_at_ts=decision_ts + 500)
     assert result["model_scored"] is True
     assert result["fail_closed"] is False
 
@@ -389,6 +426,121 @@ def _feature_row() -> dict:
         "features": raw,
         "feature_provenance": provenance,
     }
+
+
+def _causal_stream_fixture() -> tuple:
+    start = 10_000_000
+    decision = start + 300_000
+    end = start + 900_000
+    market = PolymarketCorpusMarket(
+        market_id="stream-btc-15m",
+        condition_id="condition-stream-btc-15m",
+        slug="btc-updown-15m-stream",
+        market_family="btc_updown_15m",
+        horizon_ms=900_000,
+        market_start_ts=start,
+        market_end_ts=end,
+        settlement_ts=end,
+        up_token_id="up-token",
+        down_token_id="down-token",
+        reference_price_source="polymarket_rtds_chainlink",
+        settlement_rule="btc_usd_at_close_gte_start",
+        raw_market_sha256="a" * 64,
+        trade_collection_mode="outcome_blind_stream",
+        trade_stream_started_at_ts=start,
+        trade_stream_ended_at_ts=decision,
+        trade_stream_continuity_passed=True,
+        trade_stream_timestamp_causality_violation_count=0,
+        trade_api_request_failed=False,
+        trade_rest_rows_truncated=False,
+        trade_full_round_coverage_complete=True,
+        trade_tape_censored=False,
+    )
+    books = []
+    for outcome, token, bid, ask in (
+        ("UP", "up-token", 0.50, 0.52),
+        ("DOWN", "down-token", 0.48, 0.50),
+    ):
+        books.append(
+            PolymarketCorpusBookSnapshot(
+                market_id=market.market_id,
+                token_id=token,
+                outcome=outcome,
+                ts=decision - 500,
+                available_at_ts=decision - 400,
+                bid_price=bid,
+                ask_price=ask,
+                mid_price=(bid + ask) / 2.0,
+                bid_size=20.0,
+                ask_size=20.0,
+                liquidity_depth=1_000.0,
+            )
+        )
+    for outcome, token in (("UP", "up-token"), ("DOWN", "down-token")):
+        books.append(
+            PolymarketCorpusBookSnapshot(
+                market_id=market.market_id,
+                token_id=token,
+                outcome=outcome,
+                ts=decision + 1,
+                available_at_ts=decision + 1,
+                bid_price=0.01,
+                ask_price=0.99,
+                mid_price=0.50,
+                bid_size=1.0,
+                ask_size=1.0,
+                liquidity_depth=1.0,
+            )
+        )
+    candles = []
+    candle_ts = start - 900_000
+    index = 0
+    while candle_ts < decision:
+        price = 60_000.0 + index
+        candles.append(
+            BinanceBTCCandle(
+                ts=candle_ts,
+                available_at_ts=candle_ts + 60_000,
+                open_price=price,
+                high_price=price + 1.0,
+                low_price=price - 1.0,
+                close_price=price + 0.5,
+                volume=1.0,
+                timeframe_ms=60_000,
+            )
+        )
+        candle_ts += 60_000
+        index += 1
+    candles.append(
+        BinanceBTCCandle(
+            ts=decision,
+            available_at_ts=decision + 60_000,
+            open_price=1_000_000.0,
+            high_price=1_000_001.0,
+            low_price=999_999.0,
+            close_price=1_000_000.5,
+            volume=1.0,
+            timeframe_ms=60_000,
+        )
+    )
+    chainlink = [
+        PolymarketChainlinkPrice(
+            source_ts=start,
+            available_at_ts=start,
+            price=60_000.0,
+        ),
+        PolymarketChainlinkPrice(
+            source_ts=decision - 1,
+            available_at_ts=decision - 1,
+            price=60_020.0,
+        ),
+        PolymarketChainlinkPrice(
+            source_ts=decision + 1,
+            available_at_ts=decision + 1,
+            price=1_000_000.0,
+        ),
+    ]
+    return market, tuple(books), tuple(candles), tuple(chainlink), decision
 
 
 def _descriptor(path: Path, root: Path) -> dict[str, str]:
