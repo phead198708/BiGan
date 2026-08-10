@@ -1,0 +1,102 @@
+{
+  "automatic_live_unlock": false,
+  "candidate_bundle": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/bundle_manifest.json",
+    "sha256": "7a5b872b5a2a010a0868bf7d22fb4bdc39a941dd04464bb53890d34aa1846b3e"
+  },
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "capital_exposed": false,
+  "created_at": "2026-08-10T15:30:00+00:00",
+  "deterministic_recovery_passed": true,
+  "development_fixture_only": true,
+  "development_fixture_sha256": "77abc5ad6a41c66a19d1407aa8102408cfd259cdf09446c62575810d58416389",
+  "fresh_confirmation_passed": false,
+  "fresh_population_used": false,
+  "frozen_runtime_parity": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/offline_live_parity_report.json",
+    "sha256": "a0aceffe6e1c73110732d11ea0ada288b6eb0658c74b201c8042e3eecbb52943"
+  },
+  "healthy_projection_sha256": "ef582b4e0ffaaad0448abd7c1db40b9e9049f8e642665504b837231c9f80175d",
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "micro_live_authorized": false,
+  "outcomes_accessed": false,
+  "phase6_passed": false,
+  "pnl_accessed": false,
+  "polymarket_write_attempted": false,
+  "ready_to_request_micro_live_approval": false,
+  "recovered_projection_sha256": "ef582b4e0ffaaad0448abd7c1db40b9e9049f8e642665504b837231c9f80175d",
+  "rollback_cases": [
+    {
+      "case": "market_identity_guard",
+      "fail_closed": true,
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "model_scored": false,
+      "passed": true,
+      "selected_action": "NO_TRADE"
+    },
+    {
+      "case": "decision_staleness_guard",
+      "fail_closed": true,
+      "fail_closed_reasons": [
+        "runtime decision input is stale"
+      ],
+      "model_scored": false,
+      "passed": true,
+      "selected_action": "NO_TRADE"
+    },
+    {
+      "case": "source_staleness_guard",
+      "fail_closed": true,
+      "fail_closed_reasons": [
+        "runtime source input is stale"
+      ],
+      "model_scored": false,
+      "passed": true,
+      "selected_action": "NO_TRADE"
+    },
+    {
+      "case": "causality_guard",
+      "fail_closed": true,
+      "fail_closed_reasons": [
+        "runtime input violates causality"
+      ],
+      "model_scored": false,
+      "passed": true,
+      "selected_action": "NO_TRADE"
+    },
+    {
+      "case": "missing_input_guard",
+      "fail_closed": true,
+      "fail_closed_reasons": [
+        "paired executable cost input is invalid"
+      ],
+      "model_scored": false,
+      "passed": true,
+      "selected_action": "NO_TRADE"
+    }
+  ],
+  "rollback_target": "NO_TRADE",
+  "runtime_implementation": {
+    "path": "src/bigan/v8/polymarket/residual_promotion_v1.py",
+    "sha256": "e908062eca0cd3aca3706b3d5aa16fb3368abcf92956e4c22a39a723a255d962"
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-zero-capital-rollback-drill-v1",
+  "settlement_accessed": false,
+  "technical_rollback_drill_passed": true,
+  "wallet_signing_attempted": false
+}
