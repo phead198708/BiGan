@@ -756,18 +756,21 @@ def _execution_features(
         ]
         if len(matches) != 1:
             raise ValueError("decision execution feature row did not reconcile")
-        source = matches[0]
-    result = {
-        name: float(source[name])
-        for name in (
-            "up_ask",
-            "up_bid",
-            "up_liquidity_depth",
-            "down_ask",
-            "down_bid",
-            "down_liquidity_depth",
-        )
-    }
+        source = dict(matches[0].get("features") or {})
+    required = (
+        "up_ask",
+        "up_bid",
+        "up_liquidity_depth",
+        "down_ask",
+        "down_bid",
+        "down_liquidity_depth",
+    )
+    if any(name not in source for name in required):
+        raise ValueError("decision execution feature envelope is incomplete")
+    try:
+        result = {name: float(source[name]) for name in required}
+    except (TypeError, ValueError) as exc:
+        raise ValueError("decision execution features are not numeric") from exc
     for side in ("up", "down"):
         ask = result[f"{side}_ask"]
         bid = result[f"{side}_bid"]

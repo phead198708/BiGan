@@ -42,13 +42,16 @@ CONFIG = (
     / "examples/v8/polymarket_configs/"
     "BTC-15M-cost-aware-market-residual-promotion-v1"
 )
-CONTRACT = CONFIG / "micro_live_preapproval_contract_v2.json"
-PREFLIGHT = CONFIG / "micro_live_preapproval_preflight_report_v2.json"
-AUTHORIZATION_TEMPLATE = CONFIG / "micro_live_authorization_template_v2.json"
-HISTORICAL_V1_ARTIFACTS = (
+CONTRACT = CONFIG / "micro_live_preapproval_contract_v3.json"
+PREFLIGHT = CONFIG / "micro_live_preapproval_preflight_report_v3.json"
+AUTHORIZATION_TEMPLATE = CONFIG / "micro_live_authorization_template_v3.json"
+HISTORICAL_ARTIFACTS = (
     CONFIG / "micro_live_preapproval_contract.json",
     CONFIG / "micro_live_preapproval_preflight_report.json",
     CONFIG / "micro_live_authorization_template.json",
+    CONFIG / "micro_live_preapproval_contract_v2.json",
+    CONFIG / "micro_live_preapproval_preflight_report_v2.json",
+    CONFIG / "micro_live_authorization_template_v2.json",
 )
 
 
@@ -269,6 +272,12 @@ def _phase6_report(contract: dict[str, object]) -> dict[str, object]:
 def test_frozen_contract_and_sidecars_reconcile() -> None:
     contract = _json(CONTRACT)
     assert contract["schema_version"] == CONTRACT_SCHEMA_VERSION
+    assert dict(contract["supersedes_preapproval_contract"])["path"].endswith(
+        "/micro_live_preapproval_contract_v2.json"
+    )
+    assert dict(contract["finalization_feature_envelope_correction"])[
+        "path"
+    ].endswith("/finalization_feature_envelope_correction.json")
     validate_release_readiness_contract(
         contract,
         repository_root=REPO_ROOT,
@@ -279,7 +288,7 @@ def test_frozen_contract_and_sidecars_reconcile() -> None:
     for path in (CONTRACT, PREFLIGHT, AUTHORIZATION_TEMPLATE):
         sidecar = path.with_suffix(path.suffix + ".sha256")
         assert sidecar.read_text(encoding="utf-8").strip() == sha256_file(path)
-    for path in HISTORICAL_V1_ARTIFACTS:
+    for path in HISTORICAL_ARTIFACTS:
         sidecar = path.with_suffix(path.suffix + ".sha256")
         assert sidecar.read_text(encoding="utf-8").strip() == sha256_file(path)
 
@@ -426,6 +435,9 @@ def test_static_byte_drift_fails_closed() -> None:
 def test_authorization_template_is_non_executable_and_empty() -> None:
     template = _json(AUTHORIZATION_TEMPLATE)
     assert template["schema_version"] == AUTHORIZATION_TEMPLATE_SCHEMA_VERSION
+    assert dict(template["supersedes_authorization_template"])["path"].endswith(
+        "/micro_live_authorization_template_v2.json"
+    )
     assert template["requested_initial_capital_fraction"] == 0.01
     assert template["explicit_human_approval_recorded"] is False
     assert template["micro_live_authorized"] is False

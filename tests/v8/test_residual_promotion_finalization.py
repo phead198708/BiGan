@@ -9,6 +9,7 @@ from bigan.v8.polymarket.challenge_development_lane import sha256_file
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 from bigan.v8.polymarket.residual_promotion_collection import canonical_attempt_hash
 from bigan.v8.polymarket.residual_promotion_finalization import (
+    _execution_features,
     _validate_quality_contract,
     freeze_exact_outcome_blind_population,
     select_exact_population,
@@ -59,6 +60,48 @@ def test_production_quality_contract_preserves_native_missingness() -> None:
     _validate_quality_contract(
         {"quality": _production_quality()}, validation_fixture_only=False
     )
+
+
+def test_production_execution_features_use_frozen_feature_envelope() -> None:
+    execution = {
+        "up_ask": 0.47,
+        "up_bid": 0.46,
+        "up_liquidity_depth": 15_022.94,
+        "down_ask": 0.54,
+        "down_bid": 0.53,
+        "down_liquidity_depth": 15_022.94,
+    }
+    row = {
+        "market_id": "market-1",
+        "decision_ts": 1_900_000_000_001,
+        "features": {**execution, "btc_return_1m": -0.001},
+    }
+    assert _execution_features(
+        feature_rows=[row],
+        market_id="market-1",
+        decision_ts=1_900_000_000_001,
+        validation_fixture_only=False,
+    ) == execution
+
+
+def test_production_execution_features_missing_envelope_fails_closed() -> None:
+    row = {
+        "market_id": "market-1",
+        "decision_ts": 1_900_000_000_001,
+        "up_ask": 0.47,
+        "up_bid": 0.46,
+        "up_liquidity_depth": 15_022.94,
+        "down_ask": 0.54,
+        "down_bid": 0.53,
+        "down_liquidity_depth": 15_022.94,
+    }
+    with pytest.raises(ValueError, match="feature envelope is incomplete"):
+        _execution_features(
+            feature_rows=[row],
+            market_id="market-1",
+            decision_ts=1_900_000_000_001,
+            validation_fixture_only=False,
+        )
 
 
 @pytest.mark.parametrize(

@@ -28,16 +28,16 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
 )
 
 CONTRACT_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-micro-live-preapproval-contract-v2"
+    "bigan-btc-15m-residual-promotion-micro-live-preapproval-contract-v3"
 )
 PREFLIGHT_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-micro-live-preapproval-preflight-v2"
+    "bigan-btc-15m-residual-promotion-micro-live-preapproval-preflight-v3"
 )
 ASSESSMENT_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-micro-live-preapproval-assessment-v2"
+    "bigan-btc-15m-residual-promotion-micro-live-preapproval-assessment-v3"
 )
 AUTHORIZATION_TEMPLATE_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-micro-live-authorization-template-v2"
+    "bigan-btc-15m-residual-promotion-micro-live-authorization-template-v3"
 )
 SHADOW_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-shadow-stability-report-v1"
@@ -65,10 +65,13 @@ FUNCTIONAL_ROLLBACK_REPOSITORY_PATH = (
     f"{CONFIG_REPOSITORY_PATH}/zero_capital_rollback_drill_report.json"
 )
 EVALUATION_CONTRACT_REPOSITORY_PATH = (
-    f"{CONFIG_REPOSITORY_PATH}/promotion_evaluation_execution_contract_v2.json"
+    f"{CONFIG_REPOSITORY_PATH}/promotion_evaluation_execution_contract_v3.json"
 )
-FINALIZATION_CORRECTION_REPOSITORY_PATH = (
+FINALIZATION_NATIVE_MISSINGNESS_CORRECTION_REPOSITORY_PATH = (
     f"{CONFIG_REPOSITORY_PATH}/finalization_native_missingness_correction.json"
+)
+FINALIZATION_FEATURE_ENVELOPE_CORRECTION_REPOSITORY_PATH = (
+    f"{CONFIG_REPOSITORY_PATH}/finalization_feature_envelope_correction.json"
 )
 PHASE6_PIPELINE_REPOSITORY_PATH = "src/bigan/v8/phase6/pipeline.py"
 PHASE6_CONTRACTS_REPOSITORY_PATH = "src/bigan/v8/phase6/contracts.py"
@@ -76,10 +79,10 @@ ZERO_CAPITAL_AUTHORIZATION_REPOSITORY_PATH = (
     f"{CONFIG_REPOSITORY_PATH}/manual_collection_authorization_v3.json"
 )
 HISTORICAL_PREAPPROVAL_CONTRACT_REPOSITORY_PATH = (
-    f"{CONFIG_REPOSITORY_PATH}/micro_live_preapproval_contract.json"
+    f"{CONFIG_REPOSITORY_PATH}/micro_live_preapproval_contract_v2.json"
 )
 HISTORICAL_MICRO_LIVE_TEMPLATE_REPOSITORY_PATH = (
-    f"{CONFIG_REPOSITORY_PATH}/micro_live_authorization_template.json"
+    f"{CONFIG_REPOSITORY_PATH}/micro_live_authorization_template_v2.json"
 )
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MAX_INITIAL_CAPITAL_FRACTION = 0.01
@@ -96,9 +99,9 @@ def freeze_release_readiness_contract(
 
     root = Path(repository_root).resolve()
     config = root / CONFIG_REPOSITORY_PATH
-    contract_path = config / "micro_live_preapproval_contract_v2.json"
-    preflight_path = config / "micro_live_preapproval_preflight_report_v2.json"
-    template_path = config / "micro_live_authorization_template_v2.json"
+    contract_path = config / "micro_live_preapproval_contract_v3.json"
+    preflight_path = config / "micro_live_preapproval_preflight_report_v3.json"
+    template_path = config / "micro_live_authorization_template_v3.json"
     for path in (contract_path, preflight_path, template_path):
         if path.exists():
             raise FileExistsError(f"release readiness artifact already exists: {path.name}")
@@ -144,7 +147,10 @@ def freeze_release_readiness_contract(
             root, EVALUATION_CONTRACT_REPOSITORY_PATH
         ),
         "finalization_native_missingness_correction": _repository_descriptor(
-            root, FINALIZATION_CORRECTION_REPOSITORY_PATH
+            root, FINALIZATION_NATIVE_MISSINGNESS_CORRECTION_REPOSITORY_PATH
+        ),
+        "finalization_feature_envelope_correction": _repository_descriptor(
+            root, FINALIZATION_FEATURE_ENVELOPE_CORRECTION_REPOSITORY_PATH
         ),
         "phase6_pipeline": _repository_descriptor(
             root, PHASE6_PIPELINE_REPOSITORY_PATH
@@ -314,6 +320,7 @@ def validate_release_readiness_contract(
         "functional_rollback_drill",
         "promotion_evaluation_contract",
         "finalization_native_missingness_correction",
+        "finalization_feature_envelope_correction",
         "phase6_pipeline",
         "phase6_contracts",
         "zero_capital_authorization",

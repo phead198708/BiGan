@@ -239,6 +239,19 @@ def validate_evaluation_execution_contract(
         "gate_implementation",
         "runtime_parity_report",
     }
+    revision = contract.get("contract_revision")
+    if revision == "native_missingness_reconciliation_v2":
+        bound.update({"finalization_correction", "supersedes_execution_contract"})
+    elif revision == "feature_envelope_reconciliation_v3":
+        bound.update(
+            {
+                "finalization_correction",
+                "finalization_feature_envelope_correction",
+                "supersedes_execution_contract",
+            }
+        )
+    elif revision is not None:
+        raise ValueError("unknown promotion evaluation contract revision")
     for name in bound:
         _verify_descriptor(dict(contract.get(name) or {}), repository_root=root)
     if dict(contract["implementation"])["path"] != IMPLEMENTATION_REPOSITORY_PATH:
