@@ -300,6 +300,33 @@ def test_raw_capture_byte_drift_fails_closed(tmp_path: Path) -> None:
         )
 
 
+def test_extra_frozen_file_fails_closed(tmp_path: Path) -> None:
+    attempts = [
+        _attempt(tmp_path, index=1, valid=True),
+        _attempt(tmp_path, index=2, valid=True),
+    ]
+    _write_chain(tmp_path, attempts)
+    result = freeze_exact_outcome_blind_population(
+        service_root=tmp_path,
+        repository_root=REPO_ROOT,
+        authorization_path=AUTHORIZATION,
+        collector_protocol_path=COLLECTOR_PROTOCOL,
+        target_market_count=2,
+        validation_fixture_only=True,
+    )
+    extra = tmp_path / "exact_population_freeze/unregistered.json"
+    _write_json(extra, {"unexpected": True})
+    with pytest.raises(ValueError, match="directory file set mismatch"):
+        validate_frozen_population(
+            freeze_dir=tmp_path / "exact_population_freeze",
+            service_root=tmp_path,
+            repository_root=REPO_ROOT,
+            expected_manifest_sha256=result["manifest"]["sha256"],
+            target_market_count=2,
+            validation_fixture_only=True,
+        )
+
+
 def test_repository_implementation_drift_fails_closed(tmp_path: Path) -> None:
     attempts = [
         _attempt(tmp_path, index=1, valid=True),

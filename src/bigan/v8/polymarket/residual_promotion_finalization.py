@@ -331,6 +331,23 @@ def validate_frozen_population(
     root = Path(service_root).resolve()
     repo = Path(repository_root).resolve()
     directory = Path(freeze_dir).resolve()
+    expected_filenames = {
+        "exact_population_manifest.json",
+        "exact_population_manifest.json.sha256",
+        "exact_population_rows.jsonl",
+        "exact_population_rows.jsonl.sha256",
+        "candidate_decision_rows.jsonl",
+        "candidate_decision_rows.jsonl.sha256",
+        "baseline_decision_rows.jsonl",
+        "baseline_decision_rows.jsonl.sha256",
+        "raw_capture_index.jsonl",
+        "raw_capture_index.jsonl.sha256",
+    }
+    actual_filenames = {
+        path.name for path in directory.iterdir() if path.is_file()
+    }
+    if actual_filenames != expected_filenames:
+        raise ValueError("exact population freeze directory file set mismatch")
     manifest_path = directory / "exact_population_manifest.json"
     if sha256_file(manifest_path) != expected_manifest_sha256:
         raise ValueError("exact population manifest SHA-256 mismatch")
