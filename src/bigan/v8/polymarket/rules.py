@@ -313,7 +313,12 @@ def _resolved_outcome(
 def _infer_comparator(raw_rule_text: str) -> PolymarketComparator:
     normalized = " ".join(raw_rule_text.lower().replace("_", " ").split())
     tokens = set(normalized.split())
-    if ">=" in normalized or "greater than or equal" in normalized or "gte" in tokens:
+    if (
+        ">=" in normalized
+        or "greater than or equal" in normalized
+        or "at least" in normalized
+        or "gte" in tokens
+    ):
         return "close_gte_open"
     if (
         "greater than" in normalized

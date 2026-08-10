@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 import orjson
@@ -18,6 +21,7 @@ import websockets
 from bigan.ingestion.message_types import (
     BestBidAskEvent,
     BookEvent,
+    LastTradePriceEvent,
     MarketResolvedEvent,
     PriceChangeEvent,
     UnknownEvent,
@@ -27,6 +31,14 @@ from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.corpus import BTC_UPDOWN_MARKET_HORIZONS_MS
 from bigan.v8.polymarket.corpus.contracts import safety_fields
 from bigan.v8.polymarket.recorder.contracts import PolymarketRealCorpusRecorderConfig
+from bigan.v8.polymarket.recorder.market_identity_cache import (
+    GAMMA_MARKET_IDENTITY_CACHE_FALLBACK_SOURCE_TYPE,
+    GammaMarketIdentityCache,
+    GammaMarketIdentityCacheError,
+)
+from bigan.v8.polymarket.recorder.orderbook_state import (
+    full_decision_window_orderbook_coverage,
+)
 
 BTC_UPDOWN_SLUG_PATTERN = re.compile(r"^btc-updown-(5m|15m|1h)-(\d+)$")
 BTC_UPDOWN_FAMILY_BY_SLUG = {
@@ -41,10 +53,31 @@ BTC_UPDOWN_SLUG_HORIZON_BY_FAMILY = {
 }
 DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 POLYMARKET_CLOB_WS_SOURCE_CHANNEL = "polymarket_clob_ws_market"
+READ_ONLY_PUBLIC_HTTP_USER_AGENT = (
+    "bigan-v8-polymarket-real-corpus-readonly/1.0"
+)
+READ_ONLY_PUBLIC_HTTP_ACCEPT = "application/json"
 BTC_FEATURE_SOURCE_COINBASE = "coinbase_btc_usd"
 BTC_FEATURE_SOURCE_KRAKEN = "kraken_xbt_usd"
 BTC_FEATURE_SOURCE_BINANCE = "binance_btcusdt"
 DEFAULT_BTC_FEATURE_SOURCE_ORDER = ("coinbase", "kraken", "binance")
+GAMMA_PRIMARY_MARKET_IDENTITY_SOURCE_TYPE = "gamma_primary"
+DATA_API_CLOB_MARKET_IDENTITY_SOURCE_TYPE = (
+    "data_api_recent_trade_clob_verified"
+)
+DATA_API_MARKET_IDENTITY_DISCOVERY_LIMIT = 500
+_ACTIVE_GAMMA_PREFETCH_CACHE_PATHS: set[str] = set()
+_ACTIVE_GAMMA_PREFETCH_LOCK = threading.Lock()
+
+
+def _read_only_json_headers(*, include_content_type: bool = False) -> dict[str, str]:
+    headers = {
+        "Accept": READ_ONLY_PUBLIC_HTTP_ACCEPT,
+        "User-Agent": READ_ONLY_PUBLIC_HTTP_USER_AGENT,
+    }
+    if include_content_type:
+        headers["Content-Type"] = "application/json"
+    return headers
 
 
 class RealCorpusPublicProviderError(RuntimeError):
@@ -149,25 +182,59 @@ class PolymarketPublicHTTPRealCorpusProvider:
         btc_feature_source_order: tuple[str, ...] = DEFAULT_BTC_FEATURE_SOURCE_ORDER,
         max_markets: int = 3,
         recent_trade_limit: int = 250,
+        recent_trade_max_pages: int = 5,
         timeout_seconds: float = 15.0,
         http_timeout_seconds: float | None = None,
         orderbook_snapshot_interval_seconds: float = 1.0,
-        seed_rest_orderbooks_before_stream: bool = True,
+        orderbook_ws_initial_complete_book_timeout_seconds: float = 15.0,
+        rest_fallback_collection_seconds: float = 0.0,
+        seed_rest_orderbooks_before_stream: bool = False,
         current_time_ms: int | None = None,
         fetch_json: Callable[[str], Any] | None = None,
         orderbook_source: PolymarketOrderBookSource | None = None,
         use_rest_orderbooks: bool = False,
+        market_identity_cache_path: Path | str | None = None,
+        market_identity_cache_max_age_seconds: float = 7_200.0,
+        gamma_market_identity_prefetch_round_count: int = 0,
+        clob_identity_revalidation_max_attempts: int = 3,
+        clob_identity_revalidation_retry_seconds: float = 0.25,
     ) -> None:
         if max_markets <= 0:
             raise ValueError("max_markets must be positive")
         if recent_trade_limit <= 0:
             raise ValueError("recent_trade_limit must be positive")
+        if recent_trade_max_pages <= 0:
+            raise ValueError("recent_trade_max_pages must be positive")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         if http_timeout_seconds is not None and http_timeout_seconds <= 0:
             raise ValueError("http_timeout_seconds must be positive")
         if orderbook_snapshot_interval_seconds <= 0:
             raise ValueError("orderbook_snapshot_interval_seconds must be positive")
+        if orderbook_ws_initial_complete_book_timeout_seconds <= 0:
+            raise ValueError(
+                "orderbook_ws_initial_complete_book_timeout_seconds must be positive"
+            )
+        if rest_fallback_collection_seconds < 0:
+            raise ValueError("rest_fallback_collection_seconds must be non-negative")
+        if market_identity_cache_max_age_seconds <= 0:
+            raise ValueError("market_identity_cache_max_age_seconds must be positive")
+        if gamma_market_identity_prefetch_round_count < 0:
+            raise ValueError(
+                "gamma_market_identity_prefetch_round_count must be non-negative"
+            )
+        if clob_identity_revalidation_max_attempts <= 0:
+            raise ValueError(
+                "clob_identity_revalidation_max_attempts must be positive"
+            )
+        if clob_identity_revalidation_retry_seconds < 0:
+            raise ValueError(
+                "clob_identity_revalidation_retry_seconds must be non-negative"
+            )
+        if seed_rest_orderbooks_before_stream:
+            raise ValueError(
+                "pre-stream REST orderbook seeding is disabled; REST is fallback-only"
+            )
         source_order = tuple(dict.fromkeys(source.strip().lower() for source in btc_feature_source_order))
         unsupported_sources = set(source_order) - {"coinbase", "kraken", "binance"}
         if unsupported_sources:
@@ -190,12 +257,42 @@ class PolymarketPublicHTTPRealCorpusProvider:
         self.btc_feature_source_order = source_order
         self.max_markets = max_markets
         self.recent_trade_limit = recent_trade_limit
+        self.recent_trade_max_pages = recent_trade_max_pages
         self.timeout_seconds = timeout_seconds
         self.http_timeout_seconds = timeout_seconds if http_timeout_seconds is None else http_timeout_seconds
         self.orderbook_snapshot_interval_seconds = orderbook_snapshot_interval_seconds
+        self.orderbook_ws_initial_complete_book_timeout_seconds = (
+            orderbook_ws_initial_complete_book_timeout_seconds
+        )
+        self.rest_fallback_collection_seconds = rest_fallback_collection_seconds
         self.seed_rest_orderbooks_before_stream = seed_rest_orderbooks_before_stream
         self.current_time_ms = current_time_ms
         self._fetch_json = fetch_json
+        self.gamma_market_identity_prefetch_round_count = (
+            gamma_market_identity_prefetch_round_count
+        )
+        self.clob_identity_revalidation_max_attempts = (
+            clob_identity_revalidation_max_attempts
+        )
+        self.clob_identity_revalidation_retry_seconds = (
+            clob_identity_revalidation_retry_seconds
+        )
+        self._last_gamma_market_identity_prefetch_report: dict[str, Any] = {
+            "prefetch_enabled": False,
+            "requested_slug_count": 0,
+            "stored_slug_count": 0,
+            "reason_codes": ["gamma_market_identity_prefetch_not_run"],
+            **safety_fields(),
+        }
+        self.market_identity_cache = (
+            None
+            if market_identity_cache_path is None
+            else GammaMarketIdentityCache(
+                market_identity_cache_path,
+                max_age_seconds=market_identity_cache_max_age_seconds,
+                current_time_ms=current_time_ms,
+            )
+        )
         if orderbook_source is not None:
             self.orderbook_source = orderbook_source
         elif use_rest_orderbooks:
@@ -205,6 +302,9 @@ class PolymarketPublicHTTPRealCorpusProvider:
                 ws_url=clob_ws_url,
                 timeout_seconds=timeout_seconds,
                 snapshot_interval_seconds=orderbook_snapshot_interval_seconds,
+                initial_complete_book_timeout_seconds=(
+                    orderbook_ws_initial_complete_book_timeout_seconds
+                ),
             )
 
     def market_rows(
@@ -212,23 +312,311 @@ class PolymarketPublicHTTPRealCorpusProvider:
         config: PolymarketRealCorpusRecorderConfig,
     ) -> list[dict[str, Any]]:
         slugs = self.market_slugs or self._discover_current_btc_updown_slugs(config)
-        rows = []
+        rows: list[dict[str, Any]] = []
+        primary_success = False
         for slug in slugs[: self.max_markets]:
-            payloads = self._fetch_gamma_market_payloads(slug)
-            rows.extend(
-                row
-                for row in (
-                    self._normalize_gamma_market_payload(payload, config)
-                    for payload in payloads
+            fetched_at_ts = self._current_time_ms()
+            fallback_reason_codes: tuple[str, ...] = ()
+            try:
+                payloads = self._fetch_gamma_market_payloads(slug)
+            except RealCorpusPublicProviderError as exc:
+                if not _gamma_cache_fallback_allowed(exc.reason_codes):
+                    raise
+                payloads = []
+                fallback_reason_codes = exc.reason_codes
+            if payloads:
+                normalized = [
+                    row
+                    for row in (
+                        self._normalize_gamma_market_payload(payload, config)
+                        for payload in payloads
+                    )
+                    if row is not None and row["slug"] == slug
+                ]
+                if len(normalized) > 1:
+                    raise RealCorpusPublicProviderError(
+                        "Gamma returned multiple identities for one exact slug.",
+                        reason_codes=("gamma_market_identity_ambiguous",),
+                    )
+                if len(normalized) == 1:
+                    primary_success = True
+                    rows.extend(
+                        _annotate_market_identity(
+                            row,
+                            source_type=GAMMA_PRIMARY_MARKET_IDENTITY_SOURCE_TYPE,
+                            fetched_at_ts=fetched_at_ts,
+                            cache_fallback=False,
+                            fallback_reason_codes=(),
+                            cache_entry_sha256=None,
+                            cache_age_ms=None,
+                            clob_validation=None,
+                        )
+                        for row in normalized
+                    )
+                    continue
+                fallback_reason_codes = (
+                    "real_public_collection_empty_market_discovery",
                 )
-                if row is not None
+            elif not fallback_reason_codes:
+                fallback_reason_codes = (
+                    "real_public_collection_empty_market_discovery",
+                )
+            try:
+                rows.append(
+                    self._market_row_from_data_api_clob_fallback(
+                        slug=slug,
+                        config=config,
+                        fetched_at_ts=fetched_at_ts,
+                        fallback_reason_codes=fallback_reason_codes,
+                    )
+                )
+                continue
+            except RealCorpusPublicProviderError as exc:
+                fallback_reason_codes = tuple(
+                    dict.fromkeys((*fallback_reason_codes, *exc.reason_codes))
+                )
+            rows.append(
+                self._market_row_from_identity_cache(
+                    slug=slug,
+                    config=config,
+                    decision_ts=self._current_time_ms(),
+                    fallback_reason_codes=fallback_reason_codes,
+                )
             )
         if not rows:
             raise RealCorpusPublicProviderError(
                 "No BTC UP/DOWN Gamma markets could be normalized from public data.",
                 reason_codes=("real_public_collection_empty_market_discovery",),
             )
+        if primary_success:
+            self._start_gamma_market_identity_prefetch(
+                config=config,
+                base_slugs=slugs,
+            )
         return rows[: self.max_markets]
+
+    def _market_row_from_data_api_clob_fallback(
+        self,
+        *,
+        slug: str,
+        config: PolymarketRealCorpusRecorderConfig,
+        fetched_at_ts: int,
+        fallback_reason_codes: tuple[str, ...],
+    ) -> dict[str, Any]:
+        params = urllib.parse.urlencode(
+            {"limit": max(self.recent_trade_limit, DATA_API_MARKET_IDENTITY_DISCOVERY_LIMIT)}
+        )
+        payload = self._get_json(f"{self.data_trades_endpoint}?{params}")
+        if not isinstance(payload, list):
+            raise RealCorpusPublicProviderError(
+                "Data API market identity discovery returned an invalid payload.",
+                reason_codes=("data_api_market_identity_invalid_payload",),
+            )
+        exact_rows = [
+            dict(row)
+            for row in payload
+            if isinstance(row, dict) and str(row.get("slug") or "") == slug
+        ]
+        if not exact_rows:
+            raise RealCorpusPublicProviderError(
+                "Data API recent trades did not contain the exact current market slug.",
+                reason_codes=("data_api_market_identity_exact_slug_missing",),
+            )
+        causal_rows = [
+            row
+            for row in exact_rows
+            if 0 < _trade_timestamp_millis(row) <= fetched_at_ts
+        ]
+        if not causal_rows:
+            raise RealCorpusPublicProviderError(
+                "Data API exact-slug trades were not available by identity decision time.",
+                reason_codes=("data_api_market_identity_noncausal_trade_rows",),
+            )
+        condition_ids = {
+            str(row.get("conditionId") or row.get("condition_id") or "")
+            for row in causal_rows
+            if str(row.get("conditionId") or row.get("condition_id") or "")
+        }
+        if len(condition_ids) != 1:
+            reason = (
+                "data_api_market_identity_condition_missing"
+                if not condition_ids
+                else "data_api_market_identity_condition_ambiguous"
+            )
+            raise RealCorpusPublicProviderError(
+                "Data API exact-slug trades did not identify one condition id.",
+                reason_codes=(reason,),
+            )
+        condition_id = next(iter(condition_ids))
+        clob_payload = self._get_json(
+            f"{self.clob_market_endpoint}/{urllib.parse.quote(condition_id, safe='')}"
+        )
+        if not isinstance(clob_payload, dict):
+            raise RealCorpusPublicProviderError(
+                "CLOB market identity fallback returned an invalid payload.",
+                reason_codes=("data_api_clob_market_identity_invalid_payload",),
+            )
+        row = self._normalize_clob_market_payload(
+            dict(clob_payload),
+            config,
+        )
+        if row is None:
+            raise RealCorpusPublicProviderError(
+                "CLOB market identity fallback could not normalize the exact market.",
+                reason_codes=("data_api_clob_market_identity_normalization_failed",),
+            )
+        if row["slug"] != slug:
+            raise RealCorpusPublicProviderError(
+                "CLOB market identity fallback returned a different slug.",
+                reason_codes=("data_api_clob_market_identity_slug_mismatch",),
+            )
+        if row["condition_id"] != condition_id:
+            raise RealCorpusPublicProviderError(
+                "CLOB market identity fallback returned a different condition id.",
+                reason_codes=("data_api_clob_market_identity_condition_mismatch",),
+            )
+        discovery_projection = [
+            {
+                "slug": slug,
+                "condition_id": condition_id,
+                "asset": str(row_.get("asset") or ""),
+                "outcome": str(row_.get("outcome") or ""),
+                "timestamp": row_.get("timestamp"),
+            }
+            for row_ in causal_rows
+        ]
+        clob_validation = {
+            "passed": True,
+            "condition_id": condition_id,
+            "slug": slug,
+            "up_token_id": row["up_token_id"],
+            "down_token_id": row["down_token_id"],
+            "clob_market_payload_sha256": canonical_json_sha256(clob_payload),
+            "data_api_discovery_projection_sha256": canonical_json_sha256(
+                discovery_projection
+            ),
+            "data_api_exact_slug_trade_count": len(causal_rows),
+            "data_api_latest_trade_ts": max(
+                _trade_timestamp_millis(row_) for row_ in causal_rows
+            ),
+            "retry_policy_relaxed_identity_checks": False,
+        }
+        annotated = _annotate_market_identity(
+            row,
+            source_type=DATA_API_CLOB_MARKET_IDENTITY_SOURCE_TYPE,
+            fetched_at_ts=fetched_at_ts,
+            cache_fallback=False,
+            fallback_reason_codes=fallback_reason_codes,
+            cache_entry_sha256=None,
+            cache_age_ms=None,
+            clob_validation=clob_validation,
+        )
+        annotated["market_identity_clob_revalidation_passed"] = True
+        annotated["market_identity_clob_revalidation"] = clob_validation
+        annotated["market_identity_data_api_discovery_used"] = True
+        return annotated
+
+    def prefetch_gamma_market_identities(
+        self,
+        *,
+        config: PolymarketRealCorpusRecorderConfig,
+        base_slugs: tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        """Synchronously prefetch deterministic future slugs for diagnostics/tests."""
+
+        cache = self.market_identity_cache
+        requested_count = self.gamma_market_identity_prefetch_round_count
+        if cache is None or requested_count <= 0:
+            report = {
+                "prefetch_enabled": False,
+                "requested_slug_count": 0,
+                "stored_slug_count": 0,
+                "reason_codes": ["gamma_market_identity_prefetch_disabled"],
+                **safety_fields(),
+            }
+            self._last_gamma_market_identity_prefetch_report = report
+            return report
+        current_slugs = base_slugs or self._discover_current_btc_updown_slugs(config)
+        future_slugs = self._future_btc_updown_slugs(
+            config=config,
+            base_slugs=current_slugs,
+            round_count=requested_count,
+        )
+        stored_slugs: list[str] = []
+        reason_codes: list[str] = []
+        for slug in future_slugs:
+            try:
+                payloads = self._fetch_gamma_market_payloads(slug)
+            except RealCorpusPublicProviderError as exc:
+                reason_codes.extend(exc.reason_codes)
+                break
+            if not payloads:
+                reason_codes.append("gamma_market_identity_prefetch_empty")
+                break
+            fetched_at_ts = self._current_time_ms()
+            normalized_rows = [
+                row
+                for row in (
+                    self._normalize_gamma_market_payload(
+                        payload,
+                        config,
+                        allow_future_market=True,
+                    )
+                    for payload in payloads
+                )
+                if row is not None and row["slug"] == slug
+            ]
+            if len(normalized_rows) != 1:
+                reason_codes.append(
+                    "gamma_market_identity_prefetch_not_exactly_one_market"
+                )
+                break
+            row = normalized_rows[0]
+            try:
+                cache.store_prefetched_payload(
+                    payload=dict(row["raw_public_payload"]),
+                    slug=row["slug"],
+                    market_family=row["market_family"],
+                    market_start_ts=int(row["market_start_ts"]),
+                    market_end_ts=int(row["market_end_ts"]),
+                    condition_id=row["condition_id"],
+                    up_token_id=row["up_token_id"],
+                    down_token_id=row["down_token_id"],
+                    reference_price_source=row["reference_price_source"],
+                    settlement_rule=row["settlement_rule"],
+                    fetched_at_ts=fetched_at_ts,
+                    source_endpoint=self.gamma_markets_endpoint,
+                )
+            except GammaMarketIdentityCacheError as exc:
+                reason_codes.extend(exc.reason_codes)
+                break
+            stored_slugs.append(slug)
+        report = {
+            "prefetch_enabled": True,
+            "requested_slug_count": len(future_slugs),
+            "stored_slug_count": len(stored_slugs),
+            "stored_slugs": stored_slugs,
+            "reason_codes": sorted(set(reason_codes)),
+            "cache_report": cache.report(),
+            **safety_fields(),
+        }
+        self._last_gamma_market_identity_prefetch_report = report
+        return report
+
+    def market_identity_cache_report(self) -> dict[str, Any]:
+        if self.market_identity_cache is None:
+            return {
+                "cache_enabled": False,
+                "cache_path": None,
+                "cache_entry_count": 0,
+                **safety_fields(),
+            }
+        report = self.market_identity_cache.report()
+        report["cache_enabled"] = True
+        report["last_prefetch_report"] = dict(
+            self._last_gamma_market_identity_prefetch_report
+        )
+        return report
 
     def orderbook_rows(
         self,
@@ -236,11 +624,254 @@ class PolymarketPublicHTTPRealCorpusProvider:
         config: PolymarketRealCorpusRecorderConfig,
     ) -> list[dict[str, Any]]:
         if self.orderbook_source is not None:
-            rows = self._orderbook_rows_from_stream_source(markets, config)
-            if rows:
-                return rows
-            return self._orderbook_rows_from_source(markets)
+            fallback_applied = False
+            try:
+                rows = self._orderbook_rows_from_stream_source(markets, config)
+                if not rows:
+                    rows = self._orderbook_rows_from_source(markets)
+            except RealCorpusPublicProviderError as exc:
+                rows = self._rest_orderbook_fallback(
+                    markets,
+                    reason_codes=exc.reason_codes,
+                )
+                fallback_applied = True
+            else:
+                rows = _annotate_orderbook_rows(
+                    rows,
+                    source_type="polymarket_clob_websocket",
+                    rest_fallback=False,
+                    fallback_reason_codes=(),
+                )
+            expected_token_ids = set(_token_ids_for_markets(markets))
+            observed_token_ids = {str(row.get("token_id") or "") for row in rows}
+            missing_token_ids = expected_token_ids - observed_token_ids
+            if missing_token_ids:
+                fallback_rows = self._rest_orderbook_fallback(
+                    markets,
+                    reason_codes=(
+                        "polymarket_clob_ws_missing_token_orderbook",
+                    ),
+                )
+                fallback_applied = True
+                if self.rest_fallback_collection_seconds > 0:
+                    # Synchronized REST snapshots establish new complete paired
+                    # timestamps without backdating a missing token onto an
+                    # earlier partial WebSocket observation.
+                    rows.extend(fallback_rows)
+                else:
+                    rows.extend(
+                        row
+                        for row in fallback_rows
+                        if str(row.get("token_id") or "")
+                        in missing_token_ids
+                    )
+            remaining_missing_token_ids = expected_token_ids - {
+                str(row.get("token_id") or "") for row in rows
+            }
+            if remaining_missing_token_ids:
+                raise RealCorpusPublicProviderError(
+                    "WebSocket orderbook rows and REST fallback did not cover all tokens.",
+                    reason_codes=(
+                        "polymarket_clob_ws_and_rest_orderbook_coverage_incomplete",
+                    ),
+                )
+            rows = _with_orderbook_collection_end(rows)
+            if self._full_window_coverage_required():
+                coverage = self._orderbook_window_coverage(
+                    markets=markets,
+                    rows=rows,
+                    config=config,
+                )
+                if not coverage["passed"] and not fallback_applied:
+                    rows.extend(
+                        self._rest_orderbook_fallback(
+                            markets,
+                            reason_codes=(
+                                "polymarket_clob_ws_window_coverage_incomplete",
+                            ),
+                        )
+                    )
+                    fallback_applied = True
+                    rows = _with_orderbook_collection_end(rows)
+                    coverage = self._orderbook_window_coverage(
+                        markets=markets,
+                        rows=rows,
+                        config=config,
+                    )
+                if not coverage["passed"]:
+                    raise RealCorpusPublicProviderError(
+                        "WebSocket orderbook rows and REST fallback did not "
+                        "cover the full causal decision window.",
+                        reason_codes=tuple(
+                            dict.fromkeys(
+                                (
+                                    "polymarket_clob_ws_and_rest_window_coverage_incomplete",
+                                    *coverage["reason_codes"],
+                                )
+                            )
+                        ),
+                    )
+                rows = _annotate_orderbook_window_coverage(
+                    rows,
+                    coverage_by_market=coverage["by_market"],
+                    fallback_applied=fallback_applied,
+                )
+            return rows
         return self._orderbook_rows_from_rest(markets)
+
+    def _full_window_coverage_required(self) -> bool:
+        return (
+            self.rest_fallback_collection_seconds > 0
+            and getattr(
+                self.orderbook_source,
+                "continuous_window_coverage_required",
+                False,
+            )
+            is True
+        )
+
+    def _orderbook_window_coverage(
+        self,
+        *,
+        markets: list[dict[str, Any]],
+        rows: list[dict[str, Any]],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> dict[str, Any]:
+        policy = config.resolved_sampling_policy_seconds()
+        by_market = {
+            str(market["market_id"]): full_decision_window_orderbook_coverage(
+                market=market,
+                book_rows=rows,
+                sample_interval_seconds=policy[str(market["market_family"])],
+            )
+            for market in markets
+        }
+        reason_codes = sorted(
+            {
+                str(reason)
+                for report in by_market.values()
+                for reason in report[
+                    "orderbook_window_coverage_reason_codes"
+                ]
+            }
+        )
+        return {
+            "passed": bool(by_market)
+            and all(
+                report[
+                    "orderbook_full_decision_window_coverage_passed"
+                ]
+                is True
+                for report in by_market.values()
+            ),
+            "reason_codes": reason_codes,
+            "by_market": by_market,
+        }
+
+    def _rest_orderbook_fallback(
+        self,
+        markets: list[dict[str, Any]],
+        *,
+        reason_codes: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        fallback_reason_codes = list(reason_codes)
+        try:
+            if self.rest_fallback_collection_seconds > 0:
+                rows, collection_reason_codes = (
+                    self._raw_orderbook_rows_from_rest_window(markets)
+                )
+                fallback_reason_codes.extend(collection_reason_codes)
+            else:
+                rows = self._raw_orderbook_rows_from_rest(markets)
+        except RealCorpusPublicProviderError as exc:
+            raise RealCorpusPublicProviderError(
+                "WebSocket orderbook collection and REST fallback both failed.",
+                reason_codes=tuple(
+                    dict.fromkeys((*fallback_reason_codes, *exc.reason_codes))
+                ),
+            ) from exc
+        if not rows:
+            raise RealCorpusPublicProviderError(
+                "WebSocket orderbook collection failed and REST fallback was empty.",
+                reason_codes=tuple(
+                    dict.fromkeys(
+                        (
+                            *fallback_reason_codes,
+                            "polymarket_clob_rest_fallback_empty",
+                        )
+                    )
+                ),
+            )
+        return _with_orderbook_collection_end(
+            _annotate_orderbook_rows(
+                rows,
+                source_type="polymarket_clob_rest_fallback",
+                rest_fallback=True,
+                fallback_reason_codes=tuple(dict.fromkeys(fallback_reason_codes)),
+            )
+        )
+
+    def _raw_orderbook_rows_from_rest_window(
+        self,
+        markets: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+        if not markets:
+            return [], ()
+        market_end_ts = min(int(market["market_end_ts"]) for market in markets)
+        remaining_market_ms = market_end_ts - self._current_time_ms()
+        if remaining_market_ms <= 0:
+            raise RealCorpusPublicProviderError(
+                "REST orderbook fallback cannot start after the market closed.",
+                reason_codes=("polymarket_clob_rest_fallback_market_closed",),
+            )
+        collection_seconds = min(
+            self.rest_fallback_collection_seconds,
+            remaining_market_ms / 1000.0,
+        )
+        deadline = time.monotonic() + collection_seconds
+        rows: list[dict[str, Any]] = []
+        failure_reason_codes: list[str] = []
+        snapshot_index = 0
+        while True:
+            snapshot_index += 1
+            request_started_at_ts = self._current_time_ms()
+            try:
+                snapshot_rows = self._raw_orderbook_rows_from_rest(markets)
+            except RealCorpusPublicProviderError as exc:
+                failure_reason_codes.extend(exc.reason_codes)
+                snapshot_rows = []
+            observed_at_ts = self._current_time_ms()
+            if observed_at_ts >= market_end_ts:
+                failure_reason_codes.append(
+                    "polymarket_clob_rest_fallback_snapshot_after_market_close"
+                )
+                break
+            for row in snapshot_rows:
+                available_at_ts = max(
+                    int(row.get("available_at_ts") or row["ts"]),
+                    observed_at_ts,
+                )
+                rows.append(
+                    {
+                        **row,
+                        "available_at_ts": available_at_ts,
+                        "rest_fallback_snapshot_index": snapshot_index,
+                        "rest_fallback_request_started_at_ts": (
+                            request_started_at_ts
+                        ),
+                        "rest_fallback_observed_at_ts": observed_at_ts,
+                    }
+                )
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                break
+            time.sleep(
+                min(
+                    self.orderbook_snapshot_interval_seconds,
+                    remaining_seconds,
+                )
+            )
+        return rows, tuple(dict.fromkeys(failure_reason_codes))
 
     def _orderbook_rows_from_stream_source(
         self,
@@ -252,11 +883,6 @@ class PolymarketPublicHTTPRealCorpusProvider:
         if not callable(snapshot_getter):
             return []
         rows: list[dict[str, Any]] = []
-        if self.seed_rest_orderbooks_before_stream and isinstance(
-            self.orderbook_source,
-            PolymarketCLOBWebSocketOrderBookSource,
-        ):
-            rows.extend(self._raw_orderbook_rows_from_rest(markets))
         snapshots = snapshot_getter(_token_ids_for_markets(markets))
         for payloads in snapshots:
             for market in markets:
@@ -299,7 +925,14 @@ class PolymarketPublicHTTPRealCorpusProvider:
         return _with_orderbook_collection_end(rows)
 
     def _orderbook_rows_from_rest(self, markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return _with_orderbook_collection_end(self._raw_orderbook_rows_from_rest(markets))
+        return _with_orderbook_collection_end(
+            _annotate_orderbook_rows(
+                self._raw_orderbook_rows_from_rest(markets),
+                source_type="polymarket_clob_rest_explicit",
+                rest_fallback=False,
+                fallback_reason_codes=(),
+            )
+        )
 
     def _raw_orderbook_rows_from_rest(self, markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -329,18 +962,117 @@ class PolymarketPublicHTTPRealCorpusProvider:
     ) -> list[dict[str, Any]]:
         del config
         rows: list[dict[str, Any]] = []
+        stream_payload_getter = getattr(self.orderbook_source, "trade_payloads", None)
+        stream_report_getter = getattr(
+            self.orderbook_source,
+            "trade_collection_report",
+            None,
+        )
+        stream_payloads = (
+            list(stream_payload_getter(_token_ids_for_markets(markets)))
+            if callable(stream_payload_getter)
+            else []
+        )
+        stream_report = (
+            dict(stream_report_getter()) if callable(stream_report_getter) else {}
+        )
         by_condition = {str(market["condition_id"]): market for market in markets}
         for condition_id, market in by_condition.items():
+            market_stream_payloads = [
+                payload
+                for payload in stream_payloads
+                if str(payload.get("market") or "") == condition_id
+            ]
+            try:
+                rest_payloads, rest_report = self._paginated_trade_payloads(
+                    condition_id=condition_id,
+                    market=market,
+                )
+            except RealCorpusPublicProviderError as exc:
+                rest_payloads = []
+                rest_report = _failed_paginated_trade_report(
+                    collection_ts=self._current_time_ms(),
+                    requested_limit=self.recent_trade_limit,
+                    max_pages=self.recent_trade_max_pages,
+                    reason_codes=exc.reason_codes,
+                )
+            normalized_rows: list[dict[str, Any]] = []
+            for trade in [*market_stream_payloads, *rest_payloads]:
+                row = self._normalize_trade_payload(
+                    market=market,
+                    payload=trade,
+                    rest_collection_ts=int(rest_report["collection_ts"]),
+                )
+                if row is not None:
+                    normalized_rows.append(row)
+            normalized_rows = _deduplicate_trade_rows(normalized_rows)
+            collection_report = _trade_collection_report_for_market(
+                market=market,
+                stream_report=stream_report,
+                stream_row_count=sum(
+                    row.get("trade_source_type") == "polymarket_clob_websocket_market"
+                    for row in normalized_rows
+                ),
+                rest_report=rest_report,
+                merged_row_count=len(normalized_rows),
+            )
+            market.update(collection_report)
+            rows.extend(
+                {**row, **collection_report}
+                for row in normalized_rows
+            )
+        return rows
+
+    def _paginated_trade_payloads(
+        self,
+        *,
+        condition_id: str,
+        market: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        page_counts: list[int] = []
+        collection_ts = self._current_time_ms()
+        exhausted = False
+        for page_index in range(self.recent_trade_max_pages):
+            offset = page_index * self.recent_trade_limit
             params = urllib.parse.urlencode(
-                {"market": condition_id, "limit": self.recent_trade_limit}
+                {
+                    "market": condition_id,
+                    "limit": self.recent_trade_limit,
+                    "offset": offset,
+                }
             )
             payload = self._get_json(f"{self.data_trades_endpoint}?{params}")
-            trades = payload if isinstance(payload, list) else []
-            for trade in trades:
-                row = self._normalize_trade_payload(market=market, payload=trade)
-                if row is not None:
-                    rows.append(row)
-        return rows
+            page = payload if isinstance(payload, list) else []
+            page_counts.append(len(page))
+            payloads.extend(dict(row) for row in page if isinstance(row, dict))
+            if len(page) < self.recent_trade_limit:
+                exhausted = True
+                break
+        normalized_timestamps = [
+            _trade_payload_timestamp_ms(row)
+            for row in payloads
+        ]
+        normalized_timestamps = [timestamp for timestamp in normalized_timestamps if timestamp > 0]
+        oldest_ts = min(normalized_timestamps, default=None)
+        newest_ts = max(normalized_timestamps, default=None)
+        reached_market_start = (
+            oldest_ts is not None and oldest_ts <= int(market["market_start_ts"])
+        )
+        truncated = not exhausted and not reached_market_start
+        return payloads, {
+            "collection_ts": collection_ts,
+            "page_count": len(page_counts),
+            "page_row_counts": page_counts,
+            "requested_limit": self.recent_trade_limit,
+            "max_pages": self.recent_trade_max_pages,
+            "returned_count": len(payloads),
+            "oldest_ts": oldest_ts,
+            "newest_ts": newest_ts,
+            "pagination_exhausted": exhausted,
+            "reached_market_start": reached_market_start,
+            "rows_truncated": truncated,
+        }
 
     def btc_feature_candle_rows(
         self,
@@ -663,6 +1395,273 @@ class PolymarketPublicHTTPRealCorpusProvider:
             slugs.append(f"btc-updown-{horizon_name}-{start_epoch_seconds}")
         return tuple(slugs)
 
+    def _future_btc_updown_slugs(
+        self,
+        *,
+        config: PolymarketRealCorpusRecorderConfig,
+        base_slugs: tuple[str, ...],
+        round_count: int,
+    ) -> tuple[str, ...]:
+        family_by_base_slug: dict[str, str] = {}
+        for slug in base_slugs:
+            match = BTC_UPDOWN_SLUG_PATTERN.match(slug)
+            if match is None:
+                continue
+            family = BTC_UPDOWN_FAMILY_BY_SLUG[match.group(1)]
+            if family in config.market_families:
+                family_by_base_slug[slug] = family
+        rows: list[str] = []
+        for slug, family in family_by_base_slug.items():
+            match = BTC_UPDOWN_SLUG_PATTERN.match(slug)
+            if match is None:
+                continue
+            start_seconds = int(match.group(2))
+            horizon_seconds = BTC_UPDOWN_MARKET_HORIZONS_MS[family] // 1000
+            horizon_name = BTC_UPDOWN_SLUG_HORIZON_BY_FAMILY[family]
+            rows.extend(
+                f"btc-updown-{horizon_name}-{start_seconds + offset * horizon_seconds}"
+                for offset in range(1, round_count + 1)
+            )
+        return tuple(dict.fromkeys(rows))
+
+    def _start_gamma_market_identity_prefetch(
+        self,
+        *,
+        config: PolymarketRealCorpusRecorderConfig,
+        base_slugs: tuple[str, ...],
+    ) -> None:
+        cache = self.market_identity_cache
+        if (
+            cache is None
+            or self.gamma_market_identity_prefetch_round_count <= 0
+            or self.market_slugs
+        ):
+            return
+        cache_key = str(cache.path)
+        with _ACTIVE_GAMMA_PREFETCH_LOCK:
+            if cache_key in _ACTIVE_GAMMA_PREFETCH_CACHE_PATHS:
+                return
+            _ACTIVE_GAMMA_PREFETCH_CACHE_PATHS.add(cache_key)
+
+        def worker() -> None:
+            try:
+                self.prefetch_gamma_market_identities(
+                    config=config,
+                    base_slugs=base_slugs,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._last_gamma_market_identity_prefetch_report = {
+                    "prefetch_enabled": True,
+                    "requested_slug_count": (
+                        self.gamma_market_identity_prefetch_round_count
+                    ),
+                    "stored_slug_count": 0,
+                    "reason_codes": [
+                        "gamma_market_identity_prefetch_unexpected_error"
+                    ],
+                    "details": str(exc),
+                    **safety_fields(),
+                }
+            finally:
+                with _ACTIVE_GAMMA_PREFETCH_LOCK:
+                    _ACTIVE_GAMMA_PREFETCH_CACHE_PATHS.discard(cache_key)
+
+        threading.Thread(
+            target=worker,
+            name="gamma-market-identity-prefetch",
+            daemon=True,
+        ).start()
+
+    def _market_row_from_identity_cache(
+        self,
+        *,
+        slug: str,
+        config: PolymarketRealCorpusRecorderConfig,
+        decision_ts: int,
+        fallback_reason_codes: tuple[str, ...],
+    ) -> dict[str, Any]:
+        cache = self.market_identity_cache
+        if cache is None:
+            raise RealCorpusPublicProviderError(
+                "Gamma market discovery failed and no identity cache is configured.",
+                reason_codes=tuple(
+                    dict.fromkeys(
+                        (
+                            *fallback_reason_codes,
+                            "gamma_market_identity_cache_not_configured",
+                        )
+                    )
+                ),
+            )
+        match = BTC_UPDOWN_SLUG_PATTERN.match(slug)
+        if match is None:
+            raise RealCorpusPublicProviderError(
+                "Gamma cache fallback received an unsupported market slug.",
+                reason_codes=("gamma_market_identity_cache_slug_mismatch",),
+            )
+        family = BTC_UPDOWN_FAMILY_BY_SLUG[match.group(1)]
+        start_ts = int(match.group(2)) * 1000
+        end_ts = start_ts + BTC_UPDOWN_MARKET_HORIZONS_MS[family]
+        try:
+            entry = cache.lookup(
+                slug=slug,
+                decision_ts=decision_ts,
+                expected_market_family=family,
+                expected_market_start_ts=start_ts,
+                expected_market_end_ts=end_ts,
+            )
+        except GammaMarketIdentityCacheError as exc:
+            raise RealCorpusPublicProviderError(
+                "Gamma market discovery failed and cache fallback was rejected.",
+                reason_codes=tuple(
+                    dict.fromkeys((*fallback_reason_codes, *exc.reason_codes))
+                ),
+            ) from exc
+        row = self._normalize_gamma_market_payload(
+            dict(entry["identity_payload"]),
+            config,
+        )
+        if row is None or row["slug"] != slug:
+            raise RealCorpusPublicProviderError(
+                "Gamma cache payload could not normalize to the current market.",
+                reason_codes=tuple(
+                    dict.fromkeys(
+                        (
+                            *fallback_reason_codes,
+                            "gamma_market_identity_cache_normalization_failed",
+                        )
+                    )
+                ),
+            )
+        cached_identity = (
+            str(entry["condition_id"]),
+            str(entry["up_token_id"]),
+            str(entry["down_token_id"]),
+            int(entry["market_start_ts"]),
+            int(entry["market_end_ts"]),
+        )
+        normalized_identity = (
+            str(row["condition_id"]),
+            str(row["up_token_id"]),
+            str(row["down_token_id"]),
+            int(row["market_start_ts"]),
+            int(row["market_end_ts"]),
+        )
+        if normalized_identity != cached_identity:
+            raise RealCorpusPublicProviderError(
+                "Gamma cache entry fields disagree with its raw payload.",
+                reason_codes=(
+                    "gamma_market_identity_cache_payload_identity_mismatch",
+                ),
+            )
+        clob_validation = self._validate_cached_identity_against_clob(row)
+        return _annotate_market_identity(
+            row,
+            source_type=GAMMA_MARKET_IDENTITY_CACHE_FALLBACK_SOURCE_TYPE,
+            fetched_at_ts=int(entry["fetched_at_ts"]),
+            cache_fallback=True,
+            fallback_reason_codes=fallback_reason_codes,
+            cache_entry_sha256=str(entry["cache_entry_sha256"]),
+            cache_age_ms=int(entry["cache_age_ms"]),
+            clob_validation=clob_validation,
+        )
+
+    def _validate_cached_identity_against_clob(
+        self,
+        market: dict[str, Any],
+    ) -> dict[str, Any]:
+        condition_id = str(market["condition_id"])
+        payload: Any = None
+        retry_reason_codes: list[str] = []
+        attempt_count = 0
+        for attempt_count in range(
+            1,
+            self.clob_identity_revalidation_max_attempts + 1,
+        ):
+            try:
+                payload = self._get_json(
+                    f"{self.clob_market_endpoint}/{condition_id}"
+                )
+                break
+            except RealCorpusPublicProviderError as exc:
+                retry_reason_codes.extend(exc.reason_codes)
+                if (
+                    not _gamma_cache_fallback_allowed(exc.reason_codes)
+                    or attempt_count
+                    >= self.clob_identity_revalidation_max_attempts
+                ):
+                    raise RealCorpusPublicProviderError(
+                        "Cached Gamma identity could not be revalidated through CLOB.",
+                        reason_codes=tuple(
+                            dict.fromkeys(
+                                (
+                                    *retry_reason_codes,
+                                    "gamma_market_identity_cache_clob_revalidation_failed",
+                                )
+                            )
+                        ),
+                    ) from exc
+                if self.clob_identity_revalidation_retry_seconds:
+                    time.sleep(
+                        self.clob_identity_revalidation_retry_seconds
+                    )
+        if not isinstance(payload, dict):
+            raise RealCorpusPublicProviderError(
+                "CLOB market identity payload is invalid.",
+                reason_codes=(
+                    "gamma_market_identity_cache_clob_revalidation_failed",
+                    "gamma_market_identity_cache_invalid_clob_market_payload",
+                ),
+            )
+        payload_condition_id = str(
+            payload.get("condition_id")
+            or payload.get("conditionId")
+            or payload.get("market")
+            or ""
+        )
+        if payload_condition_id and payload_condition_id != condition_id:
+            raise RealCorpusPublicProviderError(
+                "Cached Gamma condition id disagrees with CLOB.",
+                reason_codes=(
+                    "gamma_market_identity_cache_clob_condition_mismatch",
+                ),
+            )
+        payload_slug = str(
+            payload.get("market_slug") or payload.get("slug") or ""
+        )
+        if payload_slug and payload_slug != market["slug"]:
+            raise RealCorpusPublicProviderError(
+                "Cached Gamma slug disagrees with CLOB.",
+                reason_codes=("gamma_market_identity_cache_clob_slug_mismatch",),
+            )
+        token_by_outcome = _clob_token_by_up_down_outcome(payload.get("tokens"))
+        if token_by_outcome is None:
+            raise RealCorpusPublicProviderError(
+                "CLOB market identity lacks an exact UP/DOWN token mapping.",
+                reason_codes=(
+                    "gamma_market_identity_cache_clob_tokens_missing",
+                ),
+            )
+        if (
+            token_by_outcome["UP"] != market["up_token_id"]
+            or token_by_outcome["DOWN"] != market["down_token_id"]
+        ):
+            raise RealCorpusPublicProviderError(
+                "Cached Gamma token ids disagree with CLOB.",
+                reason_codes=("gamma_market_identity_cache_clob_token_mismatch",),
+            )
+        return {
+            "passed": True,
+            "condition_id": condition_id,
+            "slug": market["slug"],
+            "up_token_id": market["up_token_id"],
+            "down_token_id": market["down_token_id"],
+            "clob_market_payload_sha256": canonical_json_sha256(payload),
+            "attempt_count": attempt_count,
+            "retry_reason_codes": list(dict.fromkeys(retry_reason_codes)),
+            "retry_policy_relaxed_identity_checks": False,
+        }
+
     def _fetch_gamma_market_payloads(self, slug: str) -> list[dict[str, Any]]:
         params = urllib.parse.urlencode({"slug": slug})
         payload = self._get_json(f"{self.gamma_markets_endpoint}?{params}")
@@ -695,14 +1694,14 @@ class PolymarketPublicHTTPRealCorpusProvider:
         request = urllib.request.Request(
             self.clob_books_endpoint,
             data=json.dumps([{"token_id": token_id} for token_id in token_ids]).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "bigan-v8-polymarket-real-corpus-readonly/1.0",
-            },
+            headers=_read_only_json_headers(include_content_type=True),
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=self.http_timeout_seconds,
+            ) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except Exception:
             return {}
@@ -715,6 +1714,8 @@ class PolymarketPublicHTTPRealCorpusProvider:
         self,
         payload: dict[str, Any],
         config: PolymarketRealCorpusRecorderConfig,
+        *,
+        allow_future_market: bool = False,
     ) -> dict[str, Any] | None:
         slug = str(payload.get("slug") or payload.get("market_slug") or "")
         match = BTC_UPDOWN_SLUG_PATTERN.match(slug)
@@ -727,7 +1728,11 @@ class PolymarketPublicHTTPRealCorpusProvider:
         horizon_ms = BTC_UPDOWN_MARKET_HORIZONS_MS[family]
         end_ts = start_ts + horizon_ms
         now_ms = self._current_time_ms()
-        if not self.market_slugs and not (start_ts <= now_ms < end_ts):
+        if (
+            not allow_future_market
+            and not self.market_slugs
+            and not (start_ts <= now_ms < end_ts)
+        ):
             return None
         outcomes = _json_list(payload.get("outcomes"))
         token_ids = _json_list(payload.get("clobTokenIds"))
@@ -761,6 +1766,60 @@ class PolymarketPublicHTTPRealCorpusProvider:
             row["reference_price_at_start"] = reference_price_start
             row["reference_price_start_source_type"] = "gamma_market_payload"
         return row
+
+    def _normalize_clob_market_payload(
+        self,
+        payload: dict[str, Any],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> dict[str, Any] | None:
+        slug = str(payload.get("market_slug") or payload.get("slug") or "")
+        match = BTC_UPDOWN_SLUG_PATTERN.match(slug)
+        if not match:
+            return None
+        family = BTC_UPDOWN_FAMILY_BY_SLUG[match.group(1)]
+        if family not in config.market_families:
+            return None
+        start_ts = int(match.group(2)) * 1000
+        horizon_ms = BTC_UPDOWN_MARKET_HORIZONS_MS[family]
+        end_ts = start_ts + horizon_ms
+        now_ms = self._current_time_ms()
+        if not (start_ts <= now_ms < end_ts):
+            return None
+        condition_id = str(
+            payload.get("condition_id") or payload.get("conditionId") or ""
+        )
+        token_by_outcome = _clob_token_by_up_down_outcome(payload.get("tokens"))
+        if not condition_id or token_by_outcome is None:
+            return None
+        if payload.get("active") is not True or payload.get("closed") is True:
+            return None
+        if payload.get("enable_order_book") is not True:
+            return None
+        if payload.get("accepting_orders") is not True:
+            return None
+        settlement_rule = str(
+            payload.get("description") or payload.get("question") or ""
+        ).strip()
+        reference_source = _reference_price_source_from_clob_payload(payload)
+        if not settlement_rule or not reference_source:
+            return None
+        return {
+            "market_id": condition_id,
+            "condition_id": condition_id,
+            "slug": slug,
+            "market_family": family,
+            "horizon_ms": horizon_ms,
+            "market_start_ts": start_ts,
+            "market_end_ts": end_ts,
+            "settlement_ts": _settlement_ts(payload, default=end_ts + 60_000),
+            "up_token_id": token_by_outcome["UP"],
+            "down_token_id": token_by_outcome["DOWN"],
+            "reference_price_source": reference_source,
+            "settlement_rule": settlement_rule,
+            "raw_market_sha256": canonical_json_sha256(payload),
+            "raw_public_payload": payload,
+            **safety_fields(),
+        }
 
     def _normalize_book_payload(
         self,
@@ -799,6 +1858,7 @@ class PolymarketPublicHTTPRealCorpusProvider:
         *,
         market: dict[str, Any],
         payload: dict[str, Any],
+        rest_collection_ts: int,
     ) -> dict[str, Any] | None:
         token_id = str(payload.get("asset") or payload.get("token_id") or "")
         outcome = _expected_outcome_for_token(market=market, token_id=token_id)
@@ -808,18 +1868,33 @@ class PolymarketPublicHTTPRealCorpusProvider:
         size = _optional_float(payload.get("size"))
         if price is None or size is None:
             return None
-        timestamp = int(float(payload.get("timestamp") or 0) * 1000)
+        timestamp = _trade_payload_timestamp_ms(payload)
         if timestamp <= 0:
             return None
+        source_type = str(
+            payload.get("trade_source_type") or "polymarket_data_api_rest"
+        )
+        receive_time = int(payload.get("receive_time") or 0)
+        available_at_ts = (
+            max(timestamp, receive_time)
+            if source_type == "polymarket_clob_websocket_market"
+            else max(timestamp, rest_collection_ts)
+        )
         return {
             "market_id": market["market_id"],
             "token_id": token_id,
             "outcome": outcome,
             "ts": timestamp,
-            "available_at_ts": timestamp,
+            "available_at_ts": available_at_ts,
             "price": price,
             "size": size,
             "side": str(payload.get("side") or "").upper(),
+            "transaction_hash": (
+                str(payload.get("transaction_hash") or payload.get("transactionHash") or "")
+                or None
+            ),
+            "trade_source_type": source_type,
+            "trade_source_receive_time": receive_time or None,
             **safety_fields(),
         }
 
@@ -903,11 +1978,40 @@ class PolymarketPublicHTTPRealCorpusProvider:
             return self._fetch_json(url)
         request = urllib.request.Request(
             url,
-            headers={"User-Agent": "bigan-v8-polymarket-real-corpus-readonly/1.0"},
+            headers=_read_only_json_headers(),
             method="GET",
         )
-        with urllib.request.urlopen(request, timeout=self.http_timeout_seconds) as response:
-            return json.loads(response.read().decode("utf-8"))
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=self.http_timeout_seconds) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except TimeoutError as exc:
+            raise RealCorpusPublicProviderError(
+                "Read-only public HTTP request timed out.",
+                reason_codes=("read_only_public_http_timeout",),
+            ) from exc
+        except urllib.error.HTTPError as exc:
+            status = int(getattr(exc, "code", 0) or 0)
+            reason_code = (
+                "read_only_public_http_server_error"
+                if status >= 500
+                else "read_only_public_http_error"
+            )
+            raise RealCorpusPublicProviderError(
+                f"Read-only public HTTP request failed with status {status}.",
+                reason_codes=(reason_code,),
+            ) from exc
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", None)
+            if isinstance(reason, TimeoutError) or "timed out" in str(exc).lower():
+                raise RealCorpusPublicProviderError(
+                    "Read-only public HTTP request timed out.",
+                    reason_codes=("read_only_public_http_timeout",),
+                ) from exc
+            raise RealCorpusPublicProviderError(
+                "Read-only public HTTP transport failed.",
+                reason_codes=("read_only_public_http_transport_error",),
+            ) from exc
 
     def _current_time_ms(self) -> int:
         return self.current_time_ms if self.current_time_ms is not None else int(time.time() * 1000)
@@ -918,6 +2022,7 @@ class PolymarketCLOBWebSocketOrderBookSource:
 
     read_only = True
     write_capable = False
+    continuous_window_coverage_required = True
     paper_only = True
     capital_at_risk = False
     broker_exchange_write_enabled = False
@@ -933,19 +2038,42 @@ class PolymarketCLOBWebSocketOrderBookSource:
         ws_url: str = DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
         timeout_seconds: float = 15.0,
         snapshot_interval_seconds: float = 1.0,
+        initial_complete_book_timeout_seconds: float = 15.0,
+        snapshot_stall_timeout_seconds: float | None = None,
         custom_feature_enabled: bool = True,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         if snapshot_interval_seconds <= 0:
             raise ValueError("snapshot_interval_seconds must be positive")
+        if initial_complete_book_timeout_seconds <= 0:
+            raise ValueError(
+                "initial_complete_book_timeout_seconds must be positive"
+            )
+        if (
+            snapshot_stall_timeout_seconds is not None
+            and snapshot_stall_timeout_seconds <= 0
+        ):
+            raise ValueError("snapshot_stall_timeout_seconds must be positive")
         if not ws_url.strip():
             raise ValueError("ws_url is required")
         self.ws_url = ws_url
         self.timeout_seconds = timeout_seconds
         self.snapshot_interval_seconds = snapshot_interval_seconds
+        self.initial_complete_book_timeout_seconds = (
+            initial_complete_book_timeout_seconds
+        )
+        self.snapshot_stall_timeout_seconds = (
+            max(5.0, snapshot_interval_seconds * 3.0)
+            if snapshot_stall_timeout_seconds is None
+            else snapshot_stall_timeout_seconds
+        )
         self.custom_feature_enabled = custom_feature_enabled
         self._last_market_resolution_payloads: dict[str, dict[str, Any]] = {}
+        self._last_trade_payloads: list[dict[str, Any]] = []
+        self._last_trade_collection_report: dict[str, Any] = (
+            _empty_ws_trade_collection_report()
+        )
 
     def book_payloads(self, token_ids: tuple[str, ...]) -> dict[str, dict[str, Any]]:
         token_ids = tuple(dict.fromkeys(str(token_id) for token_id in token_ids if str(token_id)))
@@ -987,6 +2115,19 @@ class PolymarketCLOBWebSocketOrderBookSource:
             return {}
         return dict(self._last_market_resolution_payloads)
 
+    def trade_payloads(self, token_ids: tuple[str, ...]) -> list[dict[str, Any]]:
+        target_tokens = {
+            str(token_id) for token_id in token_ids if str(token_id)
+        }
+        return [
+            dict(payload)
+            for payload in self._last_trade_payloads
+            if str(payload.get("asset") or "") in target_tokens
+        ]
+
+    def trade_collection_report(self) -> dict[str, Any]:
+        return dict(self._last_trade_collection_report)
+
     async def _collect_book_payloads(
         self,
         token_ids: tuple[str, ...],
@@ -995,6 +2136,7 @@ class PolymarketCLOBWebSocketOrderBookSource:
         book_payloads: dict[str, dict[str, Any]] = {}
         fallback_payloads: dict[str, dict[str, Any]] = {}
         resolution_payloads: dict[str, dict[str, Any]] = {}
+        trade_payloads: list[dict[str, Any]] = []
         deadline = time.monotonic() + self.timeout_seconds
         connection_error: Exception | None = None
         while time.monotonic() < deadline and set(book_payloads) != target_tokens:
@@ -1030,6 +2172,7 @@ class PolymarketCLOBWebSocketOrderBookSource:
                                 book_payloads=book_payloads,
                                 fallback_payloads=fallback_payloads,
                                 resolution_payloads=resolution_payloads,
+                                trade_payloads=trade_payloads,
                             )
             except Exception as exc:  # noqa: BLE001
                 connection_error = exc
@@ -1048,6 +2191,7 @@ class PolymarketCLOBWebSocketOrderBookSource:
                 reason_codes=("polymarket_clob_ws_no_orderbooks",),
             )
         self._last_market_resolution_payloads = dict(resolution_payloads)
+        self._last_trade_payloads = _deduplicate_trade_payloads(trade_payloads)
         return {token_id: merged[token_id] for token_id in token_ids if token_id in merged}
 
     async def _collect_book_payload_snapshots(
@@ -1068,19 +2212,58 @@ class PolymarketCLOBWebSocketOrderBookSource:
         book_payloads: dict[str, dict[str, Any]] = {}
         fallback_payloads: dict[str, dict[str, Any]] = {}
         resolution_payloads: dict[str, dict[str, Any]] = {}
+        trade_payloads: list[dict[str, Any]] = []
         snapshots: list[dict[str, dict[str, Any]]] = []
-        deadline = time.monotonic() + self.timeout_seconds
-        next_snapshot_at = time.monotonic()
+        started_at = time.monotonic()
+        collection_started_at_ts = int(time.time() * 1000)
+        deadline = started_at + self.timeout_seconds
+        initial_complete_book_deadline = min(
+            deadline,
+            started_at + self.initial_complete_book_timeout_seconds,
+        )
+        next_snapshot_at = started_at
         connection_error: Exception | None = None
+        connection_count = 0
+        reconnect_count = 0
+        complete_book_observed = False
+        last_snapshot_at = started_at
         while time.monotonic() < deadline:
+            active_deadline = (
+                deadline
+                if complete_book_observed
+                else initial_complete_book_deadline
+            )
+            if complete_book_observed:
+                stall_deadline = (
+                    last_snapshot_at + self.snapshot_stall_timeout_seconds
+                )
+                if time.monotonic() >= stall_deadline:
+                    raise RealCorpusPublicProviderError(
+                        "CLOB websocket snapshot stream stalled after a "
+                        "complete book was observed.",
+                        reason_codes=(
+                            "polymarket_clob_ws_snapshot_stream_stalled",
+                        ),
+                    )
+                active_deadline = min(active_deadline, stall_deadline)
+            if time.monotonic() >= active_deadline:
+                break
             try:
+                open_timeout = max(
+                    0.001,
+                    min(10.0, active_deadline - time.monotonic()),
+                )
                 async with websockets.connect(
                     self.ws_url,
                     ping_interval=None,
                     ping_timeout=None,
                     close_timeout=5,
                     max_size=2**24,
+                    open_timeout=open_timeout,
                 ) as ws:
+                    connection_count += 1
+                    if connection_count > 1:
+                        reconnect_count += 1
                     await ws.send(
                         orjson.dumps(
                             {
@@ -1091,8 +2274,18 @@ class PolymarketCLOBWebSocketOrderBookSource:
                         )
                     )
                     while time.monotonic() < deadline:
+                        active_deadline = (
+                            deadline
+                            if complete_book_observed
+                            else initial_complete_book_deadline
+                        )
+                        if time.monotonic() >= active_deadline:
+                            break
                         now = time.monotonic()
-                        timeout = max(0.001, min(deadline, next_snapshot_at) - now)
+                        timeout = max(
+                            0.001,
+                            min(active_deadline, next_snapshot_at) - now,
+                        )
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
                         except TimeoutError:
@@ -1107,11 +2300,14 @@ class PolymarketCLOBWebSocketOrderBookSource:
                                     book_payloads=book_payloads,
                                     fallback_payloads=fallback_payloads,
                                     resolution_payloads=resolution_payloads,
+                                    trade_payloads=trade_payloads,
                                 )
                         if time.monotonic() >= next_snapshot_at:
                             merged = dict(fallback_payloads)
                             merged.update(book_payloads)
                             if merged:
+                                if target_tokens.issubset(merged):
+                                    complete_book_observed = True
                                 observation_time_ms = int(time.time() * 1000)
                                 snapshots.append(
                                     _observed_snapshot_payloads(
@@ -1120,22 +2316,69 @@ class PolymarketCLOBWebSocketOrderBookSource:
                                         observation_time_ms=observation_time_ms,
                                     )
                                 )
+                                last_snapshot_at = time.monotonic()
                             next_snapshot_at = (
                                 time.monotonic() + self.snapshot_interval_seconds
                             )
             except Exception as exc:  # noqa: BLE001
                 connection_error = exc
-                await _sleep_until_reconnect(deadline)
+                reconnect_deadline = (
+                    deadline
+                    if complete_book_observed
+                    else initial_complete_book_deadline
+                )
+                if complete_book_observed:
+                    reconnect_deadline = min(
+                        reconnect_deadline,
+                        last_snapshot_at
+                        + self.snapshot_stall_timeout_seconds,
+                    )
+                await _sleep_until_reconnect(reconnect_deadline)
 
+        collection_ended_at_ts = int(time.time() * 1000)
+        self._last_trade_payloads = _deduplicate_trade_payloads(trade_payloads)
+        self._last_trade_collection_report = {
+            "trade_collection_mode": "polymarket_clob_websocket_market",
+            "trade_stream_started_at_ts": collection_started_at_ts,
+            "trade_stream_ended_at_ts": collection_ended_at_ts,
+            "trade_stream_connection_count": connection_count,
+            "trade_stream_reconnect_count": reconnect_count,
+            "trade_stream_continuity_passed": (
+                connection_count == 1 and connection_error is None
+            ),
+            "trade_stream_event_count": len(trade_payloads),
+            "trade_stream_unique_event_count": len(self._last_trade_payloads),
+            "trade_stream_duplicate_event_count": (
+                len(trade_payloads) - len(self._last_trade_payloads)
+            ),
+            "trade_stream_timestamp_causality_violation_count": sum(
+                int(payload.get("timestamp_ms") or 0)
+                > int(payload.get("receive_time") or 0)
+                for payload in self._last_trade_payloads
+            ),
+            "trade_stream_reason_codes": (
+                []
+                if connection_count == 1 and connection_error is None
+                else ["polymarket_clob_ws_trade_stream_continuity_not_proven"]
+            ),
+            **safety_fields(),
+        }
         if not snapshots:
             if connection_error is not None:
                 raise RealCorpusPublicProviderError(
-                    f"CLOB websocket orderbook snapshot collection failed: {connection_error}",
-                    reason_codes=("polymarket_clob_ws_orderbook_collection_failed",),
+                    "CLOB websocket did not establish a complete initial orderbook "
+                    f"before the bounded timeout: {connection_error}",
+                    reason_codes=(
+                        "polymarket_clob_ws_initial_complete_book_timeout",
+                        "polymarket_clob_ws_orderbook_collection_failed",
+                    ),
                 ) from connection_error
             raise RealCorpusPublicProviderError(
-                "CLOB websocket emitted no orderbook snapshots before timeout.",
-                reason_codes=("polymarket_clob_ws_no_orderbooks",),
+                "CLOB websocket emitted no complete initial orderbook before timeout.",
+                reason_codes=(
+                    "polymarket_clob_ws_initial_complete_book_timeout",
+                    "polymarket_clob_ws_no_orderbooks",
+                ),
             )
         return snapshots, resolution_payloads
 
@@ -1148,6 +2391,7 @@ class PolymarketCLOBWebSocketOrderBookSource:
         book_payloads: dict[str, dict[str, Any]],
         fallback_payloads: dict[str, dict[str, Any]],
         resolution_payloads: dict[str, dict[str, Any]] | None = None,
+        trade_payloads: list[dict[str, Any]] | None = None,
     ) -> None:
         normalized_payload = _market_ws_payload_for_parse(
             payload=payload,
@@ -1193,6 +2437,16 @@ class PolymarketCLOBWebSocketOrderBookSource:
                 if top_payload is not None:
                     fallback_payloads[change.asset_id] = top_payload
             return
+        if isinstance(event, LastTradePriceEvent) and trade_payloads is not None:
+            if event.asset_id in target_tokens:
+                trade_payloads.append(
+                    _last_trade_event_payload(
+                        event,
+                        receive_time_ms=receive_time_ms,
+                        transaction_hash=payload.get("transaction_hash"),
+                    )
+                )
+            return
         if isinstance(event, MarketResolvedEvent) and resolution_payloads is not None:
             resolution_payload = _market_resolved_event_payload(event)
             if resolution_payload is None:
@@ -1221,6 +2475,114 @@ def _with_orderbook_collection_end(rows: list[dict[str, Any]]) -> list[dict[str,
         return []
     collection_end_ts = max(int(row.get("available_at_ts") or row["ts"]) for row in rows)
     return [dict(row, collection_end_ts=collection_end_ts) for row in rows]
+
+
+def _annotate_orderbook_rows(
+    rows: list[dict[str, Any]],
+    *,
+    source_type: str,
+    rest_fallback: bool,
+    fallback_reason_codes: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            **row,
+            "orderbook_source_type": source_type,
+            "orderbook_rest_fallback_used": rest_fallback,
+            "orderbook_fallback_reason_codes": list(fallback_reason_codes),
+        }
+        for row in rows
+    ]
+
+
+def _annotate_orderbook_window_coverage(
+    rows: list[dict[str, Any]],
+    *,
+    coverage_by_market: dict[str, dict[str, Any]],
+    fallback_applied: bool,
+) -> list[dict[str, Any]]:
+    annotated: list[dict[str, Any]] = []
+    for row in rows:
+        coverage = coverage_by_market.get(str(row.get("market_id") or ""))
+        if coverage is None:
+            annotated.append(dict(row))
+            continue
+        annotated.append(
+            {
+                **row,
+                "orderbook_full_window_coverage_required": True,
+                "orderbook_full_decision_window_coverage_passed": (
+                    coverage[
+                        "orderbook_full_decision_window_coverage_passed"
+                    ]
+                ),
+                "orderbook_window_coverage_reason_codes": list(
+                    coverage["orderbook_window_coverage_reason_codes"]
+                ),
+                "orderbook_expected_decision_pair_count": int(
+                    coverage["orderbook_expected_decision_pair_count"]
+                ),
+                "orderbook_observed_decision_pair_count": int(
+                    coverage["orderbook_observed_decision_pair_count"]
+                ),
+                "orderbook_last_required_decision_ts": coverage[
+                    "orderbook_last_required_decision_ts"
+                ],
+                "orderbook_latest_covered_decision_ts": coverage[
+                    "orderbook_latest_covered_decision_ts"
+                ],
+                "orderbook_observed_collection_end_ts": coverage[
+                    "orderbook_observed_collection_end_ts"
+                ],
+                "orderbook_window_coverage_fallback_applied": (
+                    fallback_applied
+                ),
+            }
+        )
+    return annotated
+
+
+def _annotate_market_identity(
+    row: dict[str, Any],
+    *,
+    source_type: str,
+    fetched_at_ts: int,
+    cache_fallback: bool,
+    fallback_reason_codes: tuple[str, ...],
+    cache_entry_sha256: str | None,
+    cache_age_ms: int | None,
+    clob_validation: dict[str, Any] | None,
+) -> dict[str, Any]:
+    annotated = {
+        **row,
+        "market_identity_source_type": source_type,
+        "market_identity_fetched_at_ts": fetched_at_ts,
+        "market_identity_cache_fallback_used": cache_fallback,
+        "market_identity_cache_fallback_reason_codes": list(
+            fallback_reason_codes
+        ),
+        "market_identity_cache_entry_sha256": cache_entry_sha256,
+        "market_identity_cache_age_ms": cache_age_ms,
+        "market_identity_cache_provenance_valid": True,
+        "market_identity_clob_revalidation_required": cache_fallback,
+        "market_identity_clob_revalidation_passed": (
+            bool(clob_validation and clob_validation.get("passed"))
+            if cache_fallback
+            else None
+        ),
+        "market_identity_clob_revalidation": clob_validation,
+        "market_identity_live_orderbook_validation_required": True,
+    }
+    return annotated
+
+
+def _gamma_cache_fallback_allowed(reason_codes: tuple[str, ...]) -> bool:
+    allowed = {
+        "read_only_public_http_timeout",
+        "read_only_public_http_transport_error",
+        "read_only_public_http_server_error",
+    }
+    return bool(set(reason_codes) & allowed)
 
 
 def _decode_market_ws_payloads(raw: bytes | str) -> list[dict[str, Any]]:
@@ -1262,11 +2624,225 @@ def _infer_market_ws_event_type(payload: dict[str, Any]) -> str | None:
         return "market_resolved"
     if "price_changes" in payload:
         return "price_change"
+    if (
+        "asset_id" in payload
+        and "price" in payload
+        and "size" in payload
+        and "side" in payload
+    ):
+        return "last_trade_price"
     if "asset_id" in payload and "bids" in payload and ("asks" in payload or "ask" in payload):
         return "book"
     if "asset_id" in payload and ("best_bid" in payload or "best_ask" in payload):
         return "best_bid_ask"
     return None
+
+
+def _empty_ws_trade_collection_report() -> dict[str, Any]:
+    return {
+        "trade_collection_mode": "not_collected",
+        "trade_stream_started_at_ts": None,
+        "trade_stream_ended_at_ts": None,
+        "trade_stream_connection_count": 0,
+        "trade_stream_reconnect_count": 0,
+        "trade_stream_continuity_passed": False,
+        "trade_stream_event_count": 0,
+        "trade_stream_unique_event_count": 0,
+        "trade_stream_duplicate_event_count": 0,
+        "trade_stream_timestamp_causality_violation_count": 0,
+        "trade_stream_reason_codes": ["trade_stream_not_collected"],
+        **safety_fields(),
+    }
+
+
+def _failed_paginated_trade_report(
+    *,
+    collection_ts: int,
+    requested_limit: int,
+    max_pages: int,
+    reason_codes: tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        "collection_ts": collection_ts,
+        "page_count": 0,
+        "page_row_counts": [],
+        "requested_limit": requested_limit,
+        "max_pages": max_pages,
+        "returned_count": 0,
+        "oldest_ts": None,
+        "newest_ts": None,
+        "pagination_exhausted": False,
+        "reached_market_start": False,
+        "rows_truncated": False,
+        "request_failed": True,
+        "reason_codes": list(reason_codes),
+    }
+
+
+def _last_trade_event_payload(
+    event: LastTradePriceEvent,
+    *,
+    receive_time_ms: int,
+    transaction_hash: Any,
+) -> dict[str, Any]:
+    return {
+        "market": event.market,
+        "asset": event.asset_id,
+        "timestamp_ms": int(event.timestamp),
+        "receive_time": int(event.receive_time or receive_time_ms),
+        "price": str(event.price),
+        "size": str(event.size),
+        "side": str(event.side.value),
+        "transaction_hash": str(transaction_hash or "") or None,
+        "trade_source_type": "polymarket_clob_websocket_market",
+    }
+
+
+def _trade_payload_timestamp_ms(payload: dict[str, Any]) -> int:
+    raw = payload.get("timestamp_ms")
+    if raw is None:
+        raw = payload.get("timestamp")
+    if raw is None:
+        raw = payload.get("ts")
+    try:
+        timestamp = int(float(raw or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return timestamp * 1000 if 0 < timestamp < 10_000_000_000 else timestamp
+
+
+def _trade_payload_identity(payload: dict[str, Any]) -> str:
+    transaction_hash = str(
+        payload.get("transaction_hash") or payload.get("transactionHash") or ""
+    ).strip()
+    if transaction_hash:
+        return f"transaction:{transaction_hash.lower()}"
+    return "fields:" + canonical_json_sha256(
+        {
+            "market": str(
+                payload.get("market")
+                or payload.get("conditionId")
+                or payload.get("market_id")
+                or ""
+            ),
+            "asset": str(payload.get("asset") or payload.get("token_id") or ""),
+            "timestamp_ms": _trade_payload_timestamp_ms(payload),
+            "price": str(payload.get("price") or ""),
+            "size": str(payload.get("size") or ""),
+            "side": str(payload.get("side") or "").upper(),
+        }
+    )
+
+
+def _deduplicate_trade_payloads(
+    payloads: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    deduplicated: dict[str, dict[str, Any]] = {}
+    for payload in payloads:
+        identity = _trade_payload_identity(payload)
+        previous = deduplicated.get(identity)
+        if previous is None or int(payload.get("receive_time") or 0) < int(
+            previous.get("receive_time") or 0
+        ):
+            deduplicated[identity] = dict(payload)
+    return sorted(
+        deduplicated.values(),
+        key=lambda row: (
+            _trade_payload_timestamp_ms(row),
+            str(row.get("asset") or row.get("token_id") or ""),
+            _trade_payload_identity(row),
+        ),
+    )
+
+
+def _deduplicate_trade_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduplicated: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        identity = _trade_payload_identity(row)
+        previous = deduplicated.get(identity)
+        if previous is None or (
+            previous.get("trade_source_type") != "polymarket_clob_websocket_market"
+            and row.get("trade_source_type") == "polymarket_clob_websocket_market"
+        ):
+            deduplicated[identity] = dict(row)
+    return sorted(
+        deduplicated.values(),
+        key=lambda row: (
+            int(row["ts"]),
+            int(row["available_at_ts"]),
+            str(row["token_id"]),
+            _trade_payload_identity(row),
+        ),
+    )
+
+
+def _trade_collection_report_for_market(
+    *,
+    market: dict[str, Any],
+    stream_report: dict[str, Any],
+    stream_row_count: int,
+    rest_report: dict[str, Any],
+    merged_row_count: int,
+) -> dict[str, Any]:
+    stream_started_at_ts = stream_report.get("trade_stream_started_at_ts")
+    stream_ended_at_ts = stream_report.get("trade_stream_ended_at_ts")
+    continuity_passed = stream_report.get("trade_stream_continuity_passed") is True
+    full_round_coverage = bool(
+        continuity_passed
+        and stream_started_at_ts is not None
+        and stream_ended_at_ts is not None
+        and int(stream_started_at_ts) <= int(market["market_start_ts"])
+        and int(stream_ended_at_ts) >= int(market["market_end_ts"])
+    )
+    reason_codes = list(stream_report.get("trade_stream_reason_codes") or [])
+    if stream_started_at_ts is None:
+        reason_codes.append("trade_stream_unavailable")
+    elif int(stream_started_at_ts) > int(market["market_start_ts"]):
+        reason_codes.append("trade_stream_started_after_market_start")
+    if stream_ended_at_ts is None or int(stream_ended_at_ts) < int(market["market_end_ts"]):
+        reason_codes.append("trade_stream_ended_before_market_close")
+    if rest_report.get("rows_truncated") is True:
+        reason_codes.append("trade_data_api_pagination_truncated")
+    if rest_report.get("request_failed") is True:
+        reason_codes.extend(str(reason) for reason in rest_report.get("reason_codes") or [])
+        reason_codes.append("trade_data_api_reconciliation_failed")
+    tape_censored = not full_round_coverage and (
+        rest_report.get("rows_truncated") is True
+        or rest_report.get("request_failed") is True
+    )
+    return {
+        "trade_collection_mode": (
+            "clob_websocket_plus_data_api_paginated_reconciliation"
+            if stream_started_at_ts is not None
+            else "data_api_paginated_rest_fallback"
+        ),
+        "trade_stream_started_at_ts": stream_started_at_ts,
+        "trade_stream_ended_at_ts": stream_ended_at_ts,
+        "trade_stream_continuity_passed": continuity_passed,
+        "trade_stream_timestamp_causality_violation_count": int(
+            stream_report.get(
+                "trade_stream_timestamp_causality_violation_count"
+            )
+            or 0
+        ),
+        "trade_stream_row_count": stream_row_count,
+        "trade_api_requested_limit": int(rest_report["requested_limit"]),
+        "trade_api_collection_ts": int(rest_report["collection_ts"]),
+        "trade_api_page_count": int(rest_report["page_count"]),
+        "trade_api_page_row_counts": list(rest_report["page_row_counts"]),
+        "trade_api_returned_count": int(rest_report["returned_count"]),
+        "trade_api_oldest_ts": rest_report.get("oldest_ts"),
+        "trade_api_newest_ts": rest_report.get("newest_ts"),
+        "trade_api_pagination_exhausted": rest_report.get("pagination_exhausted") is True,
+        "trade_api_reached_market_start": rest_report.get("reached_market_start") is True,
+        "trade_api_request_failed": rest_report.get("request_failed") is True,
+        "trade_rest_rows_truncated": rest_report.get("rows_truncated") is True,
+        "trade_merged_row_count": merged_row_count,
+        "trade_full_round_coverage_complete": full_round_coverage,
+        "trade_coverage_complete_for_feature_window": full_round_coverage,
+        "trade_tape_censored": tape_censored,
+        "trade_collection_reason_codes": sorted(set(reason_codes)),
+    }
 
 
 def _book_event_payload(event: BookEvent) -> dict[str, Any]:
@@ -1382,6 +2958,61 @@ def _token_by_up_down_outcome(
         elif normalized == "DOWN":
             token_by_outcome["DOWN"] = str(token_id)
     return token_by_outcome if set(token_by_outcome) == {"UP", "DOWN"} else None
+
+
+def _clob_token_by_up_down_outcome(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, list):
+        return None
+    outcomes: list[str] = []
+    token_ids: list[str] = []
+    for token in value:
+        if not isinstance(token, dict):
+            continue
+        outcome = str(
+            token.get("outcome")
+            or token.get("name")
+            or token.get("label")
+            or ""
+        )
+        token_id = str(
+            token.get("token_id")
+            or token.get("tokenId")
+            or token.get("asset_id")
+            or ""
+        )
+        if outcome and token_id:
+            outcomes.append(outcome)
+            token_ids.append(token_id)
+    return _token_by_up_down_outcome(outcomes=outcomes, token_ids=token_ids)
+
+
+def _trade_timestamp_millis(payload: dict[str, Any]) -> int:
+    raw_value = payload.get("timestamp")
+    try:
+        timestamp = int(float(raw_value))
+    except (TypeError, ValueError):
+        return 0
+    return timestamp if timestamp >= 10_000_000_000 else timestamp * 1000
+
+
+def _reference_price_source_from_clob_payload(payload: dict[str, Any]) -> str:
+    explicit = str(
+        payload.get("resolutionSource")
+        or payload.get("resolution_source")
+        or ""
+    ).strip()
+    if explicit:
+        return explicit
+    settlement_text = "\n".join(
+        str(payload.get(field_name) or "")
+        for field_name in ("description", "question")
+    )
+    match = re.search(
+        r"https://data\.chain\.link/streams/btc-usd(?:\b|/)",
+        settlement_text,
+        flags=re.IGNORECASE,
+    )
+    return "https://data.chain.link/streams/btc-usd" if match else ""
 
 
 def _settlement_ts(payload: dict[str, Any], *, default: int) -> int:
