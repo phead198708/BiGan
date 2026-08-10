@@ -20,7 +20,7 @@ from bigan.v8.polymarket.residual_promotion_evaluation import (  # noqa: E402
 from bigan.v8.polymarket.residual_promotion_v1 import LINEAGE_ID  # noqa: E402
 
 CONFIG = ROOT / "examples/v8/polymarket_configs" / LINEAGE_ID
-EXECUTION_CONTRACT = CONFIG / "promotion_evaluation_execution_contract_v2.json"
+EXECUTION_CONTRACT = CONFIG / "promotion_evaluation_execution_contract_v3.json"
 
 
 def _parser() -> argparse.ArgumentParser:

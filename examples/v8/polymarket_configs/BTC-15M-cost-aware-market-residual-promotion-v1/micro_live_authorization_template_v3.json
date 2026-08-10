@@ -1,0 +1,42 @@
+{
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "capital_at_risk": false,
+  "created_at": "2026-08-10T16:40:00+00:00",
+  "executable": false,
+  "explicit_human_approval_recorded": false,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "micro_live_authorized": false,
+  "micro_live_started": false,
+  "polymarket_write_allowed": false,
+  "preapproval_contract": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/micro_live_preapproval_contract_v3.json",
+    "sha256": "9d484864a091ed31d52c30b789b72cd2b7b3761169e9a81165af799553871139"
+  },
+  "requested_initial_capital_fraction": 0.01,
+  "required_evidence_hashes": {
+    "fresh_evaluation_manifest_sha256": null,
+    "operational_rollback_report_sha256": null,
+    "phase6_release_manifest_sha256": null,
+    "preapproval_assessment_sha256": null,
+    "security_review_report_sha256": null
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-micro-live-authorization-template-v3",
+  "supersedes_authorization_template": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/micro_live_authorization_template_v2.json",
+    "sha256": "cf1a1bd4b704fb689737bba1b016a858980b976d992a764453a693a7411bdf58"
+  },
+  "wallet_signing_allowed": false
+}

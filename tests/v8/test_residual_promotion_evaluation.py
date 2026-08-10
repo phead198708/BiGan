@@ -184,11 +184,14 @@ def test_dry_run_is_deterministic_and_emits_no_gate_or_promotion_result() -> Non
 
 
 def test_frozen_execution_contract_and_dry_run_artifacts_reconcile() -> None:
-    old_contract_path = CONFIG / "promotion_evaluation_execution_contract.json"
-    assert old_contract_path.with_suffix(".json.sha256").read_text().strip() == (
-        sha256_file(old_contract_path)
-    )
-    contract_path = CONFIG / "promotion_evaluation_execution_contract_v2.json"
+    for old_contract_path in (
+        CONFIG / "promotion_evaluation_execution_contract.json",
+        CONFIG / "promotion_evaluation_execution_contract_v2.json",
+    ):
+        assert old_contract_path.with_suffix(".json.sha256").read_text().strip() == (
+            sha256_file(old_contract_path)
+        )
+    contract_path = CONFIG / "promotion_evaluation_execution_contract_v3.json"
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     validate_evaluation_execution_contract(contract, repository_root=REPO_ROOT)
     assert contract_path.with_suffix(".json.sha256").read_text().strip() == sha256_file(
@@ -202,13 +205,16 @@ def test_frozen_execution_contract_and_dry_run_artifacts_reconcile() -> None:
     )
 
 
-def test_evaluation_entrypoint_is_bound_to_corrective_v2_contract() -> None:
+def test_evaluation_entrypoint_is_bound_to_corrective_v3_contract() -> None:
     contract_path = evaluation_cli.EXECUTION_CONTRACT
-    assert contract_path == CONFIG / "promotion_evaluation_execution_contract_v2.json"
+    assert contract_path == CONFIG / "promotion_evaluation_execution_contract_v3.json"
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
-    assert contract["contract_revision"] == "native_missingness_reconciliation_v2"
+    assert contract["contract_revision"] == "feature_envelope_reconciliation_v3"
     assert contract["finalization_correction"]["path"].endswith(
         "/finalization_native_missingness_correction.json"
+    )
+    assert contract["finalization_feature_envelope_correction"]["path"].endswith(
+        "/finalization_feature_envelope_correction.json"
     )
     assert contract_path.with_suffix(".json.sha256").read_text().strip() == (
         sha256_file(contract_path)
@@ -216,7 +222,7 @@ def test_evaluation_entrypoint_is_bound_to_corrective_v2_contract() -> None:
     validate_evaluation_execution_contract(contract, repository_root=REPO_ROOT)
 
 
-def test_evaluation_cli_passes_corrective_v2_contract_to_one_shot_runner(
+def test_evaluation_cli_passes_corrective_v3_contract_to_one_shot_runner(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     captured: dict = {}
@@ -259,7 +265,7 @@ def test_evaluation_cli_passes_corrective_v2_contract_to_one_shot_runner(
 
 def test_execution_contract_implementation_drift_fails_closed() -> None:
     contract = json.loads(
-        (CONFIG / "promotion_evaluation_execution_contract_v2.json").read_text(
+        (CONFIG / "promotion_evaluation_execution_contract_v3.json").read_text(
             encoding="utf-8"
         )
     )
@@ -268,14 +274,28 @@ def test_execution_contract_implementation_drift_fails_closed() -> None:
         validate_evaluation_execution_contract(contract, repository_root=REPO_ROOT)
 
 
-def test_outcome_authorization_template_is_not_executable() -> None:
-    old_template = CONFIG / "promotion_outcome_evaluation_authorization_template.json"
-    assert old_template.with_suffix(".json.sha256").read_text().strip() == (
-        sha256_file(old_template)
+def test_execution_contract_correction_child_drift_fails_closed() -> None:
+    contract = json.loads(
+        (CONFIG / "promotion_evaluation_execution_contract_v3.json").read_text(
+            encoding="utf-8"
+        )
     )
+    contract["finalization_feature_envelope_correction"]["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="descriptor SHA-256 mismatch"):
+        validate_evaluation_execution_contract(contract, repository_root=REPO_ROOT)
+
+
+def test_outcome_authorization_template_is_not_executable() -> None:
+    for old_template in (
+        CONFIG / "promotion_outcome_evaluation_authorization_template.json",
+        CONFIG / "promotion_outcome_evaluation_authorization_template_v2.json",
+    ):
+        assert old_template.with_suffix(".json.sha256").read_text().strip() == (
+            sha256_file(old_template)
+        )
     template = json.loads(
         (
-            CONFIG / "promotion_outcome_evaluation_authorization_template_v2.json"
+            CONFIG / "promotion_outcome_evaluation_authorization_template_v3.json"
         ).read_text(encoding="utf-8")
     )
     with pytest.raises(ValueError, match="authorization is invalid"):
@@ -308,4 +328,28 @@ def test_finalization_native_missingness_correction_is_outcome_blind() -> None:
         "finalizer_requires_nonnegative_integer_missing_counts": True,
         "finalizer_requires_missing_count_sum_reconciliation": True,
         "finalizer_requires_all_existing_quality_observations_true": True,
+    }
+
+
+def test_finalization_feature_envelope_correction_is_outcome_blind() -> None:
+    path = CONFIG / "finalization_feature_envelope_correction.json"
+    correction = json.loads(path.read_text(encoding="utf-8"))
+    assert path.with_suffix(".json.sha256").read_text().strip() == sha256_file(path)
+    observation = correction["outcome_blind_observation"]
+    assert observation["quality_valid"] is True
+    assert observation["feature_row_schema"]["execution_feature_envelope"] == (
+        "features"
+    )
+    assert observation["outcomes_accessed"] is False
+    assert observation["settlement_accessed"] is False
+    assert observation["pnl_accessed"] is False
+    assert correction["correction"] == {
+        "collector_quality_eligibility_changed": False,
+        "population_selection_changed": False,
+        "model_prediction_behavior_changed": False,
+        "execution_values_changed": False,
+        "statistical_gate_changed": False,
+        "finalizer_reads_frozen_features_envelope": True,
+        "required_execution_fields_unchanged": True,
+        "missing_or_nonnumeric_execution_fields_fail_closed": True,
     }
