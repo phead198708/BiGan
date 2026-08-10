@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
+from copy import deepcopy
 
 import numpy as np
 import pytest
@@ -10,11 +12,13 @@ from bigan.v8.polymarket.cost_aware_residual_v4 import (
     IMMUTABLE_GATE_IMPLEMENTATION,
 )
 from bigan.v8.polymarket.cost_aware_residual_v4_stacking import (
+    DEFAULT_PROTOCOL,
     META_REGULARIZATION,
     STRUCTURAL_CHANGE,
     fit_fixed_l2_logistic_stacker,
     require_stacking_candidate_implementation_binding,
     soft_stacking_action_values,
+    validate_stacking_challenger_protocol,
 )
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 from bigan.v8.polymarket.regime_adaptive_lineage import REPO_ROOT
@@ -108,6 +112,43 @@ def test_stacking_contract_is_structural_and_search_free() -> None:
     assert STRUCTURAL_CHANGE["route_side_missingness_or_outlier_filter_added"] is False
     assert META_REGULARIZATION == 20.0
     assert all(value is False for value in SAFETY.values())
+
+
+def test_frozen_stacking_protocol_exactly_binds_final_slot() -> None:
+    assert sha256_file(DEFAULT_PROTOCOL) == (
+        "4ffcbca46a876ed1e3611ada214625a43f61d81deacdb5284db986933c844f24"
+    )
+    payload = json.loads(DEFAULT_PROTOCOL.read_text(encoding="utf-8"))
+    validate_stacking_challenger_protocol(payload)
+    assert payload["inputs"]["candidate_implementation"]["sha256"] == (
+        "904175ff2a2272e41a903bf53798ed72df32d3dffa076e9350d7dcfb09c9ae60"
+    )
+    assert payload["candidate_budget"] == {
+        "maximum_total_slots": 2,
+        "slot_budget_may_be_increased": False,
+        "slots_consumed_before_run": 1,
+        "slots_remaining_after_run": 0,
+        "this_slot_ordinal": 2,
+    }
+    assert payload["state"] == {
+        "candidate_frozen": False,
+        "fresh_collection_started": False,
+        "fresh_outcomes_opened": False,
+        "live_shadow_started": False,
+        "promotion_started": False,
+        "training_started": False,
+    }
+    assert all(value is False for value in payload["safety"].values())
+
+
+def test_frozen_stacking_protocol_rejects_candidate_module_swap() -> None:
+    payload = json.loads(DEFAULT_PROTOCOL.read_text(encoding="utf-8"))
+    swapped = deepcopy(payload)
+    swapped["inputs"]["candidate_implementation"] = dict(
+        IMMUTABLE_GATE_IMPLEMENTATION
+    )
+    with pytest.raises(ValueError, match="candidate_implementation_exact_binding"):
+        validate_stacking_challenger_protocol(swapped, verify_artifacts=False)
 
 
 def _synthetic_row(side: str, entry_ask: float) -> dict:

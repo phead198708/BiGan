@@ -1,0 +1,343 @@
+{
+  "action_policy": {
+    "NO_TRADE_if_no_positive_prediction": true,
+    "NO_TRADE_unit_pnl": 0.0,
+    "accept_if": "highest_side_prediction>0",
+    "decision_order": "chronological",
+    "fixed_acceptance_threshold": 0.0,
+    "one_trade_maximum_per_market": true,
+    "side_tie_break_order": [
+      "UP",
+      "DOWN"
+    ],
+    "threshold_search_allowed": false
+  },
+  "baseline": {
+    "candidate_and_baseline_population_must_match": true,
+    "candidate_and_baseline_share_bootstrap_indices": true,
+    "matched_global_baseline_behavior_is_frozen": true,
+    "policy": "HOLD_TO_SETTLEMENT"
+  },
+  "bootstrap": {
+    "NO_TRADE_participates_as_zero": true,
+    "candidate_and_baseline_share_indices": true,
+    "confidence": 0.975,
+    "lower_quantile": 0.025,
+    "method": "market_level_paired_percentile_bootstrap",
+    "resamples": 10000,
+    "seed": 26401,
+    "unit": "unique_market"
+  },
+  "candidate_budget": {
+    "maximum_total_slots": 2,
+    "slot_budget_may_be_increased": false,
+    "slots_consumed_before_run": 1,
+    "slots_remaining_after_run": 0,
+    "this_slot_ordinal": 2
+  },
+  "candidate_role": "challenger",
+  "cost_stress": {
+    "action_selection_reused_from_base_cost": true,
+    "formula": "gross_price_edge-multiplier*total_cost_relative_to_mid",
+    "multipliers": [
+      1.2,
+      1.5,
+      2.0
+    ]
+  },
+  "created_at": "2026-08-10T03:05:32Z",
+  "dataset": {
+    "decision_rows_per_market": 2,
+    "development_only_forever": true,
+    "market_count": 800,
+    "population_order": "frozen_confirmatory_capture_manifest_order",
+    "side_decision_row_count": 3200,
+    "sides_per_decision": 2
+  },
+  "development_discipline": {
+    "additional_candidate_allowed": false,
+    "feature_search_allowed": false,
+    "hyperparameter_search_allowed": false,
+    "meta_regularization_search_allowed": false,
+    "one_candidate_this_slot": true,
+    "post_result_mutation_allowed": false,
+    "route_side_missingness_or_outlier_filtering_allowed": false,
+    "threshold_search_allowed": false
+  },
+  "development_only_forever": true,
+  "feature_contract": {
+    "base_feature_count": 54,
+    "decision_time_causal_inputs_only": true,
+    "feature_search_allowed": false,
+    "market_horizon_seconds": 900,
+    "missing_values_encoded_as_zero": false,
+    "native_missing_value": "nan",
+    "ordered_feature_count": 108,
+    "ordered_feature_names_sha256": "a61ef8953a2801d3e404d376261f306846cae5a4bf3ef3c97918572c48720e89",
+    "shared_side_symmetric_model": true,
+    "side_identity_feature_allowed": false,
+    "source_contract_reused_without_feature_addition_or_removal": true
+  },
+  "forbidden": [
+    "mutation_of_existing_gate_or_threshold",
+    "mutation_of_zero_acceptance_threshold",
+    "mutation_of_N_max_2000",
+    "mutation_of_cost_model_baseline_or_population",
+    "mutation_of_v1_v2_v3_or_primary_failed_artifacts",
+    "candidate_slot_budget_increase",
+    "base_meta_parameter_or_threshold_grid_search",
+    "route_side_missingness_or_outlier_filtering",
+    "post_result_candidate_mutation",
+    "opened_development_data_as_promotion_evidence",
+    "fresh_collection_outcome_opening_or_live_shadow",
+    "paper_live_wallet_write_promotion_or_capital_risk"
+  ],
+  "gates": {
+    "absolute_market_bootstrap_97_5pct_lcb_gt_zero": true,
+    "all_cost_stress_candidate_totals_gte_zero": true,
+    "all_cost_stress_paired_delta_totals_gte_zero": true,
+    "every_chronological_block_candidate_total_gte_zero": true,
+    "every_chronological_block_paired_delta_total_gte_zero": true,
+    "largest_positive_delta_removed_total_gte_zero": true,
+    "largest_winner_removed_candidate_total_gte_zero": true,
+    "paired_delta_market_bootstrap_97_5pct_lcb_gt_zero": true,
+    "population_and_leakage_reconciliation": true,
+    "prospective_power_required_market_count_lte_2000": true,
+    "stable_score_to_realized_pnl_ordering": true
+  },
+  "hypothesis": {
+    "change": "replace aggregate prior-loss Hedge weighting with a nested rolling-origin L2 logistic soft stacker trained only on inner-OOF base probability logits",
+    "expected_mechanism": "market-level calibration can shrink or amplify the two pair-coherent pooled probabilities smoothly using only strictly prior inner-OOF evidence, reducing false-positive action variance while preserving the zero threshold and avoiding hard expert routing",
+    "reason": "slot 1 improved required N only from 3043 to 2999 and failed first-block paired delta because near-equal aggregate weights did not learn market-level calibration; this final structurally distinct candidate targets that limitation without tuning"
+  },
+  "inputs": {
+    "baseline_decision_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/baseline_decision_rows.jsonl",
+      "sha256": "49ee6bdd7a3caccb824af8dd3645d3f42a9342b81a766412dfe7ed42f21f8006"
+    },
+    "candidate_implementation": {
+      "path": "src/bigan/v8/polymarket/cost_aware_residual_v4_stacking.py",
+      "sha256": "904175ff2a2272e41a903bf53798ed72df32d3dffa076e9350d7dcfb09c9ae60"
+    },
+    "confirmatory_capture_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/confirmatory_capture_manifest.json",
+      "sha256": "a7d82694b9b4a798f382b6d086f74dda2fa7a296f0870f193fcc00e9192be4ff"
+    },
+    "confirmatory_market_evaluation_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/confirmatory_market_evaluation_rows.jsonl",
+      "sha256": "1bd6e2fe4ae3d8f867976fe490fb79e32a784f7266950a269d83495264c580c7"
+    },
+    "development_data_registry": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v4/development_data_registry.json",
+      "sha256": "63882e20a57392ca3760491fc94df1c0def9a4f98f0b64b00fc93a4f971bbec4"
+    },
+    "gate_implementation": {
+      "path": "src/bigan/v8/polymarket/cost_aware_residual.py",
+      "sha256": "491a329f708a16d5aecdd952552cbff3fa13d8f7446bfe3e0c78fade3b36f78c"
+    },
+    "lineage_authorization": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v4/lineage_authorization.json",
+      "sha256": "763c4c89bf424f707b5f907dede9f0819ba832a23ed4978ee034f7a87e3d3b69"
+    },
+    "logit_base_implementation": {
+      "path": "src/bigan/v8/polymarket/cost_aware_residual_v3_logit.py",
+      "sha256": "d9d0128a24acf16d483301e579e70fba3788e8056901343f68706fa28da76e1d"
+    },
+    "matched_global_baseline_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_matched_global_baseline_contract.json",
+      "sha256": "1f26fc5cc39c9f52241bd40d09efe6530e88dcabad696f3a1df494944302bff5"
+    },
+    "parent_cost_and_action_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_cost_and_action_contract.json",
+      "sha256": "7a2d2f170cd6b042188f8282014dfbfb7d379e49085bd00807aace1881d7bf43"
+    },
+    "parent_feature_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_feature_contract.json",
+      "sha256": "dbc6e5e000a79548c5e5c74a38366ede4fe112fd3157850b8e3571599ef642bc"
+    },
+    "parent_v3_binding_audit": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_frozen_artifact_binding_audit.json",
+      "sha256": "7f1e336642cebdd4fba76a68671ba33cbcc3ed896e2281fb835be7e84721bb85"
+    },
+    "parent_v3_terminal_review": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v3/residual_v3_development_terminal_review.json",
+      "sha256": "1a38ad26eebd795cc0a5f2746fd19b0479d85bdb57027ef6b0e3cade0bda4bae"
+    },
+    "primary_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v4/residual_v4_primary_slot_001_oof/residual_v4_oof_manifest.json",
+      "sha256": "219e87c5929760ea476f18e9b1936bec96bc9b560f73c11c65655d26da6217b8"
+    },
+    "primary_report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v4/residual_v4_primary_slot_001_oof/residual_v4_oof_report.json",
+      "sha256": "35c06dfe05587fe0b40ebb7fb261ccb0171969e67a56fb14148a4c0fdadcf690"
+    },
+    "raw_capture_recovery_bundle_manifest": {
+      "path": "examples/v8/polymarket_artifacts/raw_archives/sha256/5deddaabd9d4ec9d979dfe47f77dd01ee6671c708154588b7325ae8325638639/bundle_manifest.json",
+      "sha256": "aab5c7187cdce4f7b6e2f9c5ed08b3a1f79b3c0d72c75fdf017384254c388d72"
+    },
+    "residual_base_implementation": {
+      "path": "src/bigan/v8/polymarket/cost_aware_residual_v2.py",
+      "sha256": "e9f570667c4d7fcc4e477bbfbd26ba1161aadb56bbeb7be096dad4e3338b4947"
+    },
+    "terminal_diagnostic_scored_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/terminal_diagnostic_002/terminal_diagnostic_scored_rows.jsonl",
+      "sha256": "b8867ff511251a8505e480dcef413e1ff18cb98b72a28969772147b6d3b809ed"
+    }
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v4",
+  "model": {
+    "base_learners": {
+      "logit_offset_binomial": {
+        "family": "binomial_xgboost_with_market_logit_base_margin",
+        "fixed_num_boost_round": 128,
+        "parameters": {
+          "colsample_bytree": 1.0,
+          "eta": 0.03,
+          "eval_metric": "logloss",
+          "gamma": 0.0,
+          "max_bin": 64,
+          "max_depth": 2,
+          "min_child_weight": 16.0,
+          "nthread": 1,
+          "objective": "binary:logistic",
+          "reg_alpha": 0.0,
+          "reg_lambda": 20.0,
+          "seed": 26421,
+          "subsample": 1.0,
+          "tree_method": "hist"
+        }
+      },
+      "probability_residual": {
+        "family": "market_anchored_probability_residual_xgboost",
+        "fixed_num_boost_round": 128,
+        "parameters": {
+          "colsample_bytree": 1.0,
+          "eta": 0.03,
+          "eval_metric": "rmse",
+          "gamma": 0.0,
+          "max_bin": 64,
+          "max_depth": 2,
+          "min_child_weight": 16.0,
+          "nthread": 1,
+          "objective": "reg:squarederror",
+          "reg_alpha": 0.0,
+          "reg_lambda": 20.0,
+          "seed": 26421,
+          "subsample": 1.0,
+          "tree_method": "hist"
+        }
+      }
+    },
+    "family": "nested_rolling_origin_l2_logistic_soft_stacking",
+    "meta_learner": {
+      "family": "l2_penalized_binomial_logistic_regression",
+      "features": [
+        "intercept",
+        "logit_probability_residual_probability",
+        "logit_logit_offset_probability"
+      ],
+      "intercept_penalized": false,
+      "max_iterations": 64,
+      "regularization": 20.0,
+      "solver": "deterministic_newton_raphson",
+      "tolerance": 1e-10
+    },
+    "model_selection_or_early_stopping_performed": false,
+    "route_or_expert_filtering_allowed": false
+  },
+  "nested_stacking": {
+    "base_and_meta_parameter_search_allowed": false,
+    "hard_routing_or_expert_selection_allowed": false,
+    "inner_initial_training_market_count": 100,
+    "inner_method": "expanding_window_market_grouped_rolling_origin",
+    "inner_oof_predictions_only_for_meta_fit": true,
+    "inner_target_block_market_count": 100,
+    "outer_method": "frozen_six_block_rolling_origin",
+    "outer_target_or_future_label_used_for_meta_fit": false
+  },
+  "pair_coherence": {
+    "base_probabilities_pair_normalized_before_meta_fit": true,
+    "cost_subtraction_happens_after_pair_normalization": true,
+    "missing_anchor_behavior": "fail_closed_NO_TRADE_in_runtime",
+    "missing_values_encoded_as_zero": false,
+    "probability_clip_epsilon": 0.000001,
+    "stacking_probability_pair_normalized_before_cost": true
+  },
+  "prior_slot_result": {
+    "failed_gates": [
+      "every_chronological_block_paired_delta_total_gte_zero",
+      "prospective_power_required_market_count_lte_2000"
+    ],
+    "manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v4/residual_v4_primary_slot_001_oof/residual_v4_oof_manifest.json",
+      "sha256": "219e87c5929760ea476f18e9b1936bec96bc9b560f73c11c65655d26da6217b8"
+    },
+    "report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v4/residual_v4_primary_slot_001_oof/residual_v4_oof_report.json",
+      "sha256": "35c06dfe05587fe0b40ebb7fb261ccb0171969e67a56fb14148a4c0fdadcf690"
+    }
+  },
+  "promotion_evidence_eligible": false,
+  "prospective_power": {
+    "confidence": 0.975,
+    "effect_haircut": 0.5,
+    "maximum_market_count": 2000,
+    "required_n_rule": "max_absolute_and_paired_plugin_normal_approximation",
+    "target_power": 0.8
+  },
+  "rolling_origin": {
+    "future_market_used_for_fit": false,
+    "initial_training_market_count": 200,
+    "market_grouped": true,
+    "market_order": "frozen_capture_order",
+    "oof_market_count": 600,
+    "strictly_prior_market_labels_only": true,
+    "target_block_count": 6,
+    "target_block_size": 100
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-nested-soft-stacking-oof-protocol-v4",
+  "slot_id": "residual-v4-challenger-slot-002",
+  "state": {
+    "candidate_frozen": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false,
+    "live_shadow_started": false,
+    "promotion_started": false,
+    "training_started": false
+  },
+  "structural_change": {
+    "changed_component": "ensemble_combiner_and_calibration_training_design",
+    "cost_baseline_population_or_gate_changed": false,
+    "expected_mechanism": "strictly_prior inner-OOF base predictions let a fixed regularized pooled stacker learn smooth market-level calibration without hard routing, while pair normalization and frozen cost subtraction preserve action semantics",
+    "from": "horizon_adaptive_hedge_weights_from_prior_oof_aggregate_binary_log_loss",
+    "parameter_weight_or_threshold_search_performed": false,
+    "reason": "slot_1_required_2999_markets_and_failed_the_first_paired_chronological_block;_aggregate_hedge_loss_did_not_learn_market_level_calibration",
+    "route_side_missingness_or_outlier_filter_added": false,
+    "threshold_changed": false,
+    "to": "nested_rolling_origin_l2_logistic_soft_stacker_on_base_probability_logits"
+  },
+  "target": {
+    "NO_TRADE_value": 0.0,
+    "action_value_formula": "pair_normalized_nested_soft_stacking_probability-entry_ask-frozen_fees-slippage-liquidity_impact",
+    "base_labels": {
+      "logit_offset_binomial": "settlement_payout",
+      "probability_residual": "settlement_payout-selected_mid"
+    },
+    "execution_policy": "HOLD_TO_SETTLEMENT",
+    "meta_label": "settlement_payout",
+    "post_close_training_label_only": true
+  }
+}
