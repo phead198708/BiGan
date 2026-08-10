@@ -232,12 +232,34 @@ def _validated_runtime_matrix(
 ) -> tuple[np.ndarray, int]:
     if feature_row.get("market_family") != MARKET_FAMILY:
         raise ValueError("runtime market is not BTC 15m")
-    market_start_ts = int(feature_row["market_start_ts"])
-    market_end_ts = int(feature_row["market_end_ts"])
+    if int(feature_row["horizon_ms"]) != MARKET_HORIZON_MS:
+        raise ValueError("runtime market horizon is not 900 seconds")
     decision_ts = int(feature_row["decision_ts"])
     max_input_ts = int(feature_row["max_input_ts"])
-    if market_end_ts - market_start_ts != MARKET_HORIZON_MS:
+    raw = dict(feature_row.get("features") or {})
+    market_age_seconds = float(raw["market_age_seconds"])
+    time_to_close_seconds = float(raw["time_to_close_seconds"])
+    if (
+        not math.isfinite(market_age_seconds)
+        or not math.isfinite(time_to_close_seconds)
+        or market_age_seconds < 0.0
+        or time_to_close_seconds < 0.0
+        or not math.isclose(
+            market_age_seconds + time_to_close_seconds,
+            MARKET_HORIZON_MS / 1000.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    ):
         raise ValueError("runtime market horizon is not 900 seconds")
+    market_start_ts = decision_ts - round(market_age_seconds * 1000.0)
+    market_end_ts = decision_ts + round(time_to_close_seconds * 1000.0)
+    if "market_start_ts" in feature_row and int(feature_row["market_start_ts"]) != (
+        market_start_ts
+    ):
+        raise ValueError("runtime market start disagrees with decision-time features")
+    if "market_end_ts" in feature_row and int(feature_row["market_end_ts"]) != market_end_ts:
+        raise ValueError("runtime market end disagrees with decision-time features")
     if not market_start_ts <= decision_ts <= market_end_ts:
         raise ValueError("runtime decision timestamp is outside the market")
     if int(observed_at_ts) < decision_ts:

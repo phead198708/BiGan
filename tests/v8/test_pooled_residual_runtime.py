@@ -80,6 +80,18 @@ def test_manifest_resolution_is_repository_relative_not_cwd(
     assert runtime.manifest_sha256 == fixture["manifest_sha"]
 
 
+def test_standard_corpus_feature_row_needs_no_start_or_end_extension(
+    tmp_path: Path,
+) -> None:
+    runtime, _ = _runtime_fixture(tmp_path)
+    row = _feature_row()
+    row.pop("market_start_ts")
+    row.pop("market_end_ts")
+    result = runtime.score_feature_row(row, observed_at_ts=1_000_500)
+    assert result["model_scored"] is True
+    assert result["fail_closed"] is False
+
+
 @pytest.mark.parametrize(
     "mutation",
     ["manifest_sha", "model_sha", "path_escape", "failed_candidate"],
@@ -133,7 +145,7 @@ def test_invalid_or_stale_input_always_returns_no_trade(
     if mutation == "wrong_family":
         row["market_family"] = "btc_updown_5m"
     elif mutation == "wrong_horizon":
-        row["market_end_ts"] = row["market_start_ts"] + 300_000
+        row["horizon_ms"] = 300_000
     elif mutation == "future_input":
         row["max_input_ts"] = row["decision_ts"] + 1
     elif mutation == "stale_decision":
@@ -367,6 +379,7 @@ def _feature_row() -> dict:
     return {
         "market_id": "synthetic-btc-15m",
         "market_family": "btc_updown_15m",
+        "horizon_ms": 900_000,
         "market_start_ts": 700_000,
         "market_end_ts": 1_600_000,
         "decision_ts": 1_000_000,
