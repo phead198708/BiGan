@@ -11,6 +11,7 @@ from bigan.v8.polymarket.cost_aware_residual_v4_stacking import (
 )
 from bigan.v8.polymarket.residual_v4_terminal_review import (
     build_residual_v4_terminal_review,
+    verify_residual_v4_terminal_review,
 )
 
 
@@ -94,3 +95,17 @@ def test_v4_terminal_review_rejects_source_artifact_omission() -> None:
             challenger=challenger,
             source_descriptors=descriptors,
         )
+
+
+def test_frozen_v4_terminal_review_rebuilds_with_all_permissions_false() -> None:
+    result = verify_residual_v4_terminal_review()
+    assert result["verification_passed"] is True
+    assert result["review_sha256"] == (
+        "85102e916f7304090ab203fb4d0128f88aa5157fd71f2ec4dec80e4ad8abbd74"
+    )
+    assert result["phase_1_terminal_failed"] is True
+    assert result["candidate_budget_exhausted"] is True
+    assert result["candidate_freeze_allowed"] is False
+    assert result["live_shadow_start_allowed"] is False
+    assert result["fresh_collection_authorized"] is False
+    assert all(value is False for value in result["safety"].values())
