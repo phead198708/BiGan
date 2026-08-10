@@ -143,9 +143,13 @@ def _walk_candidate_implementation_descriptors(
     pointer: tuple[str, ...] = (),
 ) -> Iterable[tuple[str, Mapping[str, Any]]]:
     if isinstance(value, Mapping):
-        descriptor = value.get("candidate_implementation")
-        if isinstance(descriptor, Mapping):
-            yield "/" + "/".join((*pointer, "candidate_implementation")), descriptor
+        descriptor_keys = ["candidate_implementation"]
+        if pointer and pointer[-1] == "inputs":
+            descriptor_keys.append("implementation")
+        for descriptor_key in descriptor_keys:
+            descriptor = value.get(descriptor_key)
+            if isinstance(descriptor, Mapping):
+                yield "/" + "/".join((*pointer, descriptor_key)), descriptor
         for key, child in value.items():
             yield from _walk_candidate_implementation_descriptors(
                 child,

@@ -85,7 +85,9 @@ def test_frozen_evidence_and_candidate_bindings_are_explicit() -> None:
         assert any(binding["kind"] == "frozen_reconciliation" for binding in frozen)
         assert candidate_bindings
         assert all(
-            binding["descriptor_json_pointer"].endswith("/candidate_implementation")
+            binding["descriptor_json_pointer"].endswith(
+                ("/candidate_implementation", "/inputs/implementation")
+            )
             for binding in candidate_bindings
         )
 
