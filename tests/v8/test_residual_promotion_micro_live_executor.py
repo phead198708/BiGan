@@ -43,12 +43,14 @@ from bigan.v8.polymarket.residual_promotion_release_readiness import (
     PHASE6_AUTHORIZATION_SCHEMA_VERSION,
     SHADOW_SCHEMA_VERSION,
 )
-from bigan.v8.polymarket.residual_promotion_release_readiness_v6 import (
+from bigan.v8.polymarket.residual_promotion_release_readiness_v7 import (
     CONTRACT_REPOSITORY_PATH,
-    run_micro_live_preapproval_assessment_v6,
+    run_micro_live_preapproval_assessment_v7,
 )
 from bigan.v8.polymarket.residual_promotion_security_review import (
     ATTESTATION_SCHEMA_VERSION,
+)
+from bigan.v8.polymarket.residual_promotion_security_review_v2 import (
     CANDIDATE_BUNDLE_REPOSITORY_PATH,
     PROTOCOL_REPOSITORY_PATH,
     REPORT_SCHEMA_VERSION,
@@ -66,7 +68,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = (
     "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1"
 )
-AUTHORIZATION_TEMPLATE_PATH = f"{CONFIG_PATH}/micro_live_authorization_template_v6.json"
+AUTHORIZATION_TEMPLATE_PATH = f"{CONFIG_PATH}/micro_live_authorization_template_v7.json"
 AUTHORIZED_AT_TS_MS = 1_789_948_800_000
 NOW_TS_MS = AUTHORIZED_AT_TS_MS + 301_000
 
@@ -178,7 +180,7 @@ def authorized_fixture(tmp_path_factory: pytest.TempPathFactory) -> dict[str, An
     evidence = _complete_evidence(root, contract)
     descriptors = _write_evidence(evidence_root, evidence)
     assessment_path = evidence_root / "preapproval_assessment.json"
-    assessment = run_micro_live_preapproval_assessment_v6(
+    assessment = run_micro_live_preapproval_assessment_v7(
         repository_root=root,
         contract_path=root / CONTRACT_REPOSITORY_PATH,
         expected_contract_sha256=sha256_file(root / CONTRACT_REPOSITORY_PATH),

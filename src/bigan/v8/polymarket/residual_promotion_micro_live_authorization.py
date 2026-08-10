@@ -17,11 +17,11 @@ from typing import Any
 
 from bigan.v8.polymarket.challenge_development_lane import sha256_file
 from bigan.v8.polymarket.contracts import canonical_json_sha256
-from bigan.v8.polymarket.residual_promotion_release_readiness_v6 import (
+from bigan.v8.polymarket.residual_promotion_release_readiness_v7 import (
     ASSESSMENT_SCHEMA_VERSION,
     CONTRACT_REPOSITORY_PATH,
-    assess_micro_live_preapproval_v6,
-    validate_release_readiness_contract_v6,
+    assess_micro_live_preapproval_v7,
+    validate_release_readiness_contract_v7,
 )
 from bigan.v8.polymarket.residual_promotion_v1 import (
     CANDIDATE_ID,
@@ -47,7 +47,7 @@ CANDIDATE_BUNDLE_REPOSITORY_PATH = (
     f"{CONFIG_REPOSITORY_PATH}/candidate_bundle/bundle_manifest.json"
 )
 AUTHORIZATION_TEMPLATE_REPOSITORY_PATH = (
-    f"{CONFIG_REPOSITORY_PATH}/micro_live_authorization_template_v6.json"
+    f"{CONFIG_REPOSITORY_PATH}/micro_live_authorization_template_v7.json"
 )
 MAXIMUM_INITIAL_CAPITAL_FRACTION = Decimal("0.01")
 MAXIMUM_AUTHORIZATION_DURATION_MS = 86_400_000
@@ -154,7 +154,7 @@ def verify_micro_live_authorization(
 
     template = _verified_repository_json(root, AUTHORIZATION_TEMPLATE_REPOSITORY_PATH)
     contract = _verified_repository_json(root, CONTRACT_REPOSITORY_PATH)
-    validate_release_readiness_contract_v6(contract, repository_root=root)
+    validate_release_readiness_contract_v7(contract, repository_root=root)
     _verify_repository_descriptor(
         root,
         dict(authorization.get("supersedes_template") or {}),
@@ -355,7 +355,7 @@ def _load_and_reconcile_evidence(
             raise MicroLiveAuthorizationError(
                 f"micro-live evidence binding mismatch: {authorization_name}"
             )
-    expected = assess_micro_live_preapproval_v6(
+    expected = assess_micro_live_preapproval_v7(
         contract=contract,
         evidence=evidence_payloads,
         repository_root=repository_root,

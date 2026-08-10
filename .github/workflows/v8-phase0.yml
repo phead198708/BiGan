@@ -67,6 +67,7 @@ jobs:
             tests/v8/test_residual_promotion_rollback.py \
             tests/v8/test_residual_promotion_release_readiness.py \
             tests/v8/test_residual_promotion_security_review.py \
+            tests/v8/test_residual_promotion_security_review_v2.py \
             tests/v8/test_residual_promotion_runtime.py \
             tests/v8/test_residual_promotion_micro_live_executor.py \
             tests/v8/test_residual_promotion_release_evidence.py \
