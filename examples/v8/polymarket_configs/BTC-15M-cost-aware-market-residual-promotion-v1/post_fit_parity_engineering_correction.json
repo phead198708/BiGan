@@ -1,0 +1,39 @@
+{
+  "architecture_feature_threshold_training_or_gate_changed": false,
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "corrected_implementation": {
+    "path": "src/bigan/v8/polymarket/residual_promotion_v1.py",
+    "sha256": "947fa2c8ccd9c2090a135b52f206e7eb2e45230bb4c5a73ad82f5e9efe173bba"
+  },
+  "corrected_source_commit": "b8efb9c761c048a39f8fa5eb2826a75a5e334ced",
+  "correction": "use_frozen_side_raw_name_mapping_for_provenance_fixture",
+  "created_at": "2026-08-10T14:20:00+00:00",
+  "failure_stage": "post_fit_offline_live_parity_fixture_provenance_construction",
+  "fresh_outcomes_accessed": false,
+  "frozen_bundle_manifest": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/bundle_manifest.json",
+    "sha256": "7a5b872b5a2a010a0868bf7d22fb4bdc39a941dd04464bb53890d34aa1846b3e"
+  },
+  "frozen_model_hashes": {
+    "logit_offset_model": "2cc3ed350ccebc6a645981eb3586eb35288f39eb8d1d9df093f21f9c7ba8638c",
+    "probability_residual_model": "bf032141ea5cf2ce0b72b20c87bf09239c4ecf09167407f47392e2e7dace24d8"
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "model_bytes_changed_by_correction": false,
+  "model_fit_completed_before_failure": true,
+  "model_refit_allowed": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-v1-post-fit-parity-engineering-correction"
+}

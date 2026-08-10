@@ -1,0 +1,42 @@
+{
+  "authorization_scope": "zero_capital_read_only_outcome_blind_capture_only",
+  "authorization_source": "explicit_user_authorization_for_issue_264_promotion_program",
+  "candidate_bundle": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/bundle_manifest.json",
+    "sha256": "7a5b872b5a2a010a0868bf7d22fb4bdc39a941dd04464bb53890d34aa1846b3e"
+  },
+  "collector_protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/prospective_collector_protocol.json",
+    "sha256": "e5b925dd000141563d441458cf966fe69d8f4833bb198465fc7f35e250678ffe"
+  },
+  "created_at": "2026-08-10T14:04:51.410228+00:00",
+  "fresh_collection_authorized": true,
+  "fresh_collection_started": false,
+  "fresh_outcomes_opened": false,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "maximum_attempts": 3000,
+  "reporting_contract": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/prospective_reporting_contract.json",
+    "sha256": "ba6f36b48c392ae1e85e9af61b1b9a51e1111cf4dd6958437d99dc2fc1295d64"
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-v1-manual-collection-authorization",
+  "statistical_protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/prospective_statistical_protocol.json",
+    "sha256": "d8b8af9afc2d7d79124e89ec5d92fefea46b1c35b510fbd4612f626df7fac4d1"
+  },
+  "target_quality_valid_market_count": 2500,
+  "wallet_order_write_or_capital_authorized": false
+}

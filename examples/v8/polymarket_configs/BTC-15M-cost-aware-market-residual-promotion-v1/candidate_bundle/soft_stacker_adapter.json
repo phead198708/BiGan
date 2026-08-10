@@ -1,0 +1,40 @@
+{
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "coefficient_order": [
+    "intercept",
+    "logit_probability_residual_probability",
+    "logit_logit_offset_probability"
+  ],
+  "coefficients": [
+    1.5610300620850233e-15,
+    0.1940559044480409,
+    0.8040059073019176
+  ],
+  "max_iterations": 64,
+  "meta_fit_audit": {
+    "meta_feature_rows": 2800,
+    "meta_features_sha256": "b36a3722c0c45d4567e14931d334f2b542212f58bf3fa670e94eb3ee497d7587",
+    "meta_labels_sha256": "df47b71a40443d380fc603eb600aa68a9510da7cd3de69512915f57b8e2a985b",
+    "nested_oof_market_ids_sha256": "d5e78fa7b2fab3001f5552107b6c00a8083f7ec5069acef0dc34c3f80135aa07",
+    "nested_oof_training_market_count": 700
+  },
+  "pair_normalize_after_stacker": true,
+  "probability_clip_epsilon": 1e-06,
+  "regularization": 20.0,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-v1-soft-stacker-adapter",
+  "threshold_or_parameter_search_performed": false,
+  "tolerance": 1e-10
+}

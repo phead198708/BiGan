@@ -1,0 +1,77 @@
+{
+  "candidate_bytes_frozen": true,
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "candidate_source_freeze": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_source_freeze_manifest.json",
+    "sha256": "3ece0080bfcf6ee44af27968db88983c4c5fd751b7b1bf966cf28c85f52f1b04"
+  },
+  "children": {
+    "calibration_action_adapter": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/calibration_action_adapter.json",
+      "sha256": "e820fbe60635b697ffca831bb07d9c9b5d88e785c09db667514d7f802dc94781"
+    },
+    "feature_schema": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/feature_schema.json",
+      "sha256": "52f3a4f1d0a3d87f625aad5087cee6386583426ca8b1f581c323d509cd0209b1"
+    },
+    "logit_offset_model": {
+      "fixed_num_boost_round": 128,
+      "format": "xgboost_ubj",
+      "objective": "binary:logistic",
+      "ordered_feature_names_sha256": "a61ef8953a2801d3e404d376261f306846cae5a4bf3ef3c97918572c48720e89",
+      "parameters_sha256": "d3653f8ea723429a179d7f82cec44352482d944a1c3c80f4652386a08f9382c8",
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/logit_offset_model.ubj",
+      "sha256": "2cc3ed350ccebc6a645981eb3586eb35288f39eb8d1d9df093f21f9c7ba8638c",
+      "xgboost_version": "3.2.0"
+    },
+    "probability_residual_model": {
+      "fixed_num_boost_round": 128,
+      "format": "xgboost_ubj",
+      "objective": "reg:squarederror",
+      "ordered_feature_names_sha256": "a61ef8953a2801d3e404d376261f306846cae5a4bf3ef3c97918572c48720e89",
+      "parameters_sha256": "a332661cd265107c99559bd347fa5a4989c69c70d86dba384a513e2dac2e9953",
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/probability_residual_model.ubj",
+      "sha256": "bf032141ea5cf2ce0b72b20c87bf09239c4ecf09167407f47392e2e7dace24d8",
+      "xgboost_version": "3.2.0"
+    },
+    "soft_stacker_adapter": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/soft_stacker_adapter.json",
+      "sha256": "dbdee446f26b201699ec3c7c7a75c82628c841dfc96a39f84da502ed72449515"
+    }
+  },
+  "development_market_count": 800,
+  "development_population_sha256": "0d22cbdfe0b718d603fefac10a164ffd6154d5c64dee40a6c8e298c7908d5e6e",
+  "final_fit_protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/final_fit_protocol.json",
+    "sha256": "8759242c4ddf7b48bc811addea524060b242c2b34052b04488f7fcbb84b58ce7"
+  },
+  "fit_executed_exactly_once": true,
+  "fresh_outcomes_accessed": false,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "model_graph": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/model_graph.json",
+    "sha256": "d7a3a50ea5ecf894f9bac6fdb7f85e5178c181bfe2a9928682e62fcee684ce80"
+  },
+  "paper_or_live_execution_allowed": false,
+  "pre_fit_engineering_correction": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/pre_fit_engineering_correction.json",
+    "sha256": "29715471c5929d10831e01a74558021f8f08e4b1af9f37b29de08f988e462d12"
+  },
+  "promotion_evidence_eligible": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-v1-candidate-freeze",
+  "single_candidate_slot_consumed": true,
+  "source_commit": "1a8c9450b20f409435ed6f66356c35122b6dd8c6"
+}

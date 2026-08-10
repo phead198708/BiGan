@@ -1,0 +1,156 @@
+{
+  "action_policy": {
+    "NO_TRADE_if_no_positive_prediction": true,
+    "NO_TRADE_unit_pnl": 0.0,
+    "accept_if": "highest_side_prediction>0",
+    "decision_order": "chronological",
+    "fixed_acceptance_threshold": 0.0,
+    "one_trade_maximum_per_market": true,
+    "side_tie_break_order": [
+      "UP",
+      "DOWN"
+    ],
+    "threshold_search_allowed": false
+  },
+  "authorization": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/lineage_authorization.json",
+    "sha256": "4f25943d39725d32d64acc25796ff75c03c3f52bb2445c13843e03ffb0539fd2"
+  },
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "candidate_source_freeze": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_source_freeze_manifest.json",
+    "sha256": "3ece0080bfcf6ee44af27968db88983c4c5fd751b7b1bf966cf28c85f52f1b04"
+  },
+  "created_at": "2026-08-10T14:00:00+00:00",
+  "development_dataset": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v4/residual_v4_challenger_slot_002_oof/residual_v4_stacking_development_dataset_rows.jsonl",
+    "sha256": "d7f9d0dac1a6f9c4cb2101fc771360b2c05377168c280523721aee4294df4fab"
+  },
+  "feature_contract": {
+    "base_feature_count": 54,
+    "decision_time_causal_inputs_only": true,
+    "feature_search_allowed": false,
+    "market_horizon_seconds": 900,
+    "missing_values_encoded_as_zero": false,
+    "native_missing_value": "nan",
+    "ordered_feature_count": 108,
+    "ordered_feature_names_sha256": "a61ef8953a2801d3e404d376261f306846cae5a4bf3ef3c97918572c48720e89",
+    "shared_side_symmetric_model": true,
+    "side_identity_feature_allowed": false,
+    "source_contract_reused_without_feature_addition_or_removal": true
+  },
+  "final_fit": {
+    "base_models_fit_on_all_opened_development_rows": true,
+    "fit_exactly_once": true,
+    "market_count": 800,
+    "meta_fit_method": "expanding_market_grouped_inner_oof_100_then_7x100",
+    "meta_fit_oof_market_count": 700,
+    "meta_fit_side_decision_row_count": 2800,
+    "model_selection_or_early_stopping": false,
+    "parameter_or_threshold_search": false,
+    "side_decision_row_count": 3200
+  },
+  "fresh_outcomes_accessed": false,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "model": {
+    "base_learners": {
+      "logit_offset_binomial": {
+        "family": "binomial_xgboost_with_market_logit_base_margin",
+        "fixed_num_boost_round": 128,
+        "parameters": {
+          "colsample_bytree": 1.0,
+          "eta": 0.03,
+          "eval_metric": "logloss",
+          "gamma": 0.0,
+          "max_bin": 64,
+          "max_depth": 2,
+          "min_child_weight": 16.0,
+          "nthread": 1,
+          "objective": "binary:logistic",
+          "reg_alpha": 0.0,
+          "reg_lambda": 20.0,
+          "seed": 26421,
+          "subsample": 1.0,
+          "tree_method": "hist"
+        }
+      },
+      "probability_residual": {
+        "family": "market_anchored_probability_residual_xgboost",
+        "fixed_num_boost_round": 128,
+        "parameters": {
+          "colsample_bytree": 1.0,
+          "eta": 0.03,
+          "eval_metric": "rmse",
+          "gamma": 0.0,
+          "max_bin": 64,
+          "max_depth": 2,
+          "min_child_weight": 16.0,
+          "nthread": 1,
+          "objective": "reg:squarederror",
+          "reg_alpha": 0.0,
+          "reg_lambda": 20.0,
+          "seed": 26421,
+          "subsample": 1.0,
+          "tree_method": "hist"
+        }
+      }
+    },
+    "family": "nested_rolling_origin_l2_logistic_soft_stacking",
+    "meta_learner": {
+      "family": "l2_penalized_binomial_logistic_regression",
+      "features": [
+        "intercept",
+        "logit_probability_residual_probability",
+        "logit_logit_offset_probability"
+      ],
+      "intercept_penalized": false,
+      "max_iterations": 64,
+      "regularization": 20.0,
+      "solver": "deterministic_newton_raphson",
+      "tolerance": 1e-10
+    },
+    "model_selection_or_early_stopping_performed": false,
+    "route_or_expert_filtering_allowed": false
+  },
+  "outputs": {
+    "logit_model_format": "xgboost_ubj",
+    "repository_local_hash_bound_bundle": true,
+    "residual_model_format": "xgboost_ubj",
+    "stacker_coefficients_format": "canonical_json"
+  },
+  "pair_coherence": {
+    "base_probabilities_pair_normalized_before_meta_fit": true,
+    "cost_subtraction_happens_after_pair_normalization": true,
+    "missing_anchor_behavior": "fail_closed_NO_TRADE_in_runtime",
+    "missing_values_encoded_as_zero": false,
+    "probability_clip_epsilon": 1e-06,
+    "stacking_probability_pair_normalized_before_cost": true
+  },
+  "promotion_evidence_eligible": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-v1-final-fit-protocol",
+  "source_commit": "3351e01633816f30fc3e4e2bb0bc1338541d150e",
+  "target": {
+    "NO_TRADE_value": 0.0,
+    "action_value_formula": "pair_normalized_nested_soft_stacking_probability-entry_ask-frozen_fees-slippage-liquidity_impact",
+    "base_labels": {
+      "logit_offset_binomial": "settlement_payout",
+      "probability_residual": "settlement_payout-selected_mid"
+    },
+    "execution_policy": "HOLD_TO_SETTLEMENT",
+    "meta_label": "settlement_payout",
+    "post_close_training_label_only": true
+  }
+}

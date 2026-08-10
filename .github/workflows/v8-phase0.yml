@@ -56,3 +56,6 @@ jobs:
             -q
           python -m bigan.v8.integration_closure verify-all \
             examples/v8/integration_closure --root .
+
+      - name: Run residual promotion v1 frozen runtime and recorder gates
+        run: python -m pytest tests/v8/test_residual_promotion_v1.py -q

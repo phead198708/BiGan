@@ -1,0 +1,44 @@
+{
+  "accept_if": "highest_side_action_value>0",
+  "actions": [
+    "NO_TRADE",
+    "BUY_UP_HOLD",
+    "BUY_DOWN_HOLD"
+  ],
+  "architecture": "fixed_v4_two_base_probability_models_plus_l2_logistic_soft_stacker",
+  "base_pair_normalization": true,
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "complement_quote_proxy_allowed": false,
+  "cost_subtraction_after_pair_normalization": true,
+  "decision_order": "chronological_first_positive_decision",
+  "execution_policy": "HOLD_TO_SETTLEMENT",
+  "fees": 0.0002,
+  "fixed_acceptance_threshold": 0.0,
+  "liquidity_impact": "0.00005_if_depth_positive_else_0.001",
+  "one_trade_maximum_per_market": true,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-v1-calibration-action-adapter",
+  "side_tie_break_order": [
+    "UP",
+    "DOWN"
+  ],
+  "slippage": "max(0.0001,(executable_ask-executable_bid)/2)",
+  "source_cost_contract": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_cost_and_action_contract.json",
+    "sha256": "7a2d2f170cd6b042188f8282014dfbfb7d379e49085bd00807aace1881d7bf43"
+  },
+  "stacker_pair_normalization": true,
+  "unit_sizing": true
+}
