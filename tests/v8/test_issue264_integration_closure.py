@@ -57,7 +57,10 @@ def test_extra_changed_path_fails_closed() -> None:
         if entry["destination_path"] == ".github/workflows/v8-phase0.yml"
     )
     payload["entries"].remove(removable)
-    with pytest.raises(IntegrationClosureError, match="closure inventory mismatch"):
+    with pytest.raises(
+        IntegrationClosureError,
+        match="source catalog does not reconcile|closure inventory mismatch",
+    ):
         verify_integration_closure_payload(payload, root=ROOT)
 
 
