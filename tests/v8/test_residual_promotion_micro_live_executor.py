@@ -6,6 +6,7 @@ import ast
 import copy
 import json
 import shutil
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,10 @@ from bigan.v8.polymarket.residual_promotion_security_review import (
     REQUIRED_SCOPE_COMPONENT_PATHS,
     SCOPE_SCHEMA_VERSION,
 )
+from bigan.v8.polymarket.residual_promotion_v1 import (
+    SOURCE_DATASET,
+    _runtime_fixture_from_public_rows,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = (
@@ -64,6 +69,67 @@ CONFIG_PATH = (
 AUTHORIZATION_TEMPLATE_PATH = f"{CONFIG_PATH}/micro_live_authorization_template_v6.json"
 AUTHORIZED_AT_TS_MS = 1_789_948_800_000
 NOW_TS_MS = AUTHORIZED_AT_TS_MS + 301_000
+
+
+def _base_feature_and_signal() -> tuple[dict[str, Any], dict[str, Any]]:
+    rows = [
+        json.loads(line)
+        for line in SOURCE_DATASET.read_text(encoding="utf-8").splitlines()[:2]
+    ]
+    fixture = _runtime_fixture_from_public_rows(rows)
+    feature_row = copy.deepcopy(fixture["live_feature_row"])
+    decision_ts_ms = AUTHORIZED_AT_TS_MS + 300_000
+    feature_row.update(
+        {
+            "market_id": "0x" + "1" * 64,
+            "decision_ts": decision_ts_ms,
+            "available_at_ts": decision_ts_ms,
+            "feature_cutoff_ts": decision_ts_ms,
+            "max_input_ts": decision_ts_ms,
+        }
+    )
+    for provenance in dict(feature_row["feature_provenance"]).values():
+        provenance["available_at_ts"] = decision_ts_ms
+        provenance["max_input_ts"] = decision_ts_ms
+    parity_path = (
+        REPO_ROOT
+        / "examples/v8/polymarket_configs/"
+        "BTC-15M-cost-aware-market-residual-promotion-v1/"
+        "candidate_bundle/offline_live_parity_report.json"
+    )
+    parity = json.loads(parity_path.read_text(encoding="utf-8"))["live_projection"]
+    raw = dict(feature_row["features"])
+    signal = {
+        "schema_version": SIGNAL_SCHEMA_VERSION,
+        "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+        "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+        "candidate_bundle_sha256": "placeholder",
+        "market_id": feature_row["market_id"],
+        "slug": "btc-updown-15m-1789948800",
+        "market_family": "BTC-15M",
+        "decision_ts_ms": decision_ts_ms,
+        "observed_at_ts_ms": decision_ts_ms,
+        "action_values": parity["action_values"],
+        "executable_asks": {
+            "UP": str(raw["up_ask"]),
+            "DOWN": str(raw["down_ask"]),
+        },
+        "up_token_id": "67890",
+        "down_token_id": "12345",
+        "selected_action": parity["selected_action"],
+        "model_scored": parity["model_scored"],
+        "fail_closed": parity["fail_closed"],
+        "fail_closed_reasons": [],
+        "decision_influenced_collection": False,
+        "outcomes_accessed": False,
+        "settlement_accessed": False,
+        "pnl_accessed": False,
+        "safety": dict(SAFETY),
+    }
+    return feature_row, signal
+
+
+BASE_FEATURE_ROW, BASE_SIGNAL_PAYLOAD = _base_feature_and_signal()
 
 
 class FakeTransport:
@@ -611,44 +677,47 @@ def _verified(fixture: dict[str, Any]):
 
 
 def _signal(**overrides: Any) -> dict[str, Any]:
-    signal_payload = {
-        "schema_version": SIGNAL_SCHEMA_VERSION,
-        "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
-        "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
-        "candidate_bundle_sha256": "placeholder",
-        "market_id": "0x" + "1" * 64,
-        "slug": "btc-updown-15m-1789948800",
-        "market_family": "BTC-15M",
-        "decision_ts_ms": AUTHORIZED_AT_TS_MS + 300_000,
-        "observed_at_ts_ms": AUTHORIZED_AT_TS_MS + 300_000,
-        "action_values": {
-            "NO_TRADE": 0.0,
-            "BUY_UP_HOLD": -0.05,
-            "BUY_DOWN_HOLD": 0.05,
-        },
-        "executable_asks": {"UP": "0.55", "DOWN": "0.40"},
-        "up_token_id": "67890",
-        "down_token_id": "12345",
-        "selected_action": "BUY_DOWN_HOLD",
-        "model_scored": True,
-        "fail_closed": False,
-        "fail_closed_reasons": [],
-        "decision_influenced_collection": False,
-        "outcomes_accessed": False,
-        "settlement_accessed": False,
-        "pnl_accessed": False,
-        "safety": dict(SAFETY),
-    }
+    signal_payload = copy.deepcopy(BASE_SIGNAL_PAYLOAD)
+    feature_row = copy.deepcopy(BASE_FEATURE_ROW)
     payload = {
         "signal_payload": signal_payload,
+        "feature_row": feature_row,
         "now_ts_ms": NOW_TS_MS,
         "operator_heartbeat_ts_ms": NOW_TS_MS - 50,
     }
     for key, value in overrides.items():
         if key in signal_payload:
             signal_payload[key] = value
+            if key == "market_id":
+                feature_row["market_id"] = value
         else:
             payload[key] = value
+    return payload
+
+
+def _bind_signal_to_runtime(
+    payload: dict[str, Any],
+    runtime: Any,
+) -> dict[str, Any]:
+    signal = payload["signal_payload"]
+    feature_row = payload["feature_row"]
+    result = runtime.score_feature_row(
+        feature_row,
+        observed_at_ts=signal["observed_at_ts_ms"],
+    )
+    for name in (
+        "action_values",
+        "selected_action",
+        "model_scored",
+        "fail_closed",
+        "fail_closed_reasons",
+    ):
+        signal[name] = result[name]
+    raw = feature_row["features"]
+    signal["executable_asks"] = {
+        "UP": str(raw["up_ask"]),
+        "DOWN": str(raw["down_ask"]),
+    }
     return payload
 
 
@@ -743,12 +812,7 @@ def test_conflicting_duplicate_engages_kill_switch_and_cancels_open_order(
     executor.submit_signal(**signal)
     conflict = _signal(
         candidate_bundle_sha256=verified.candidate_bundle_sha256,
-        selected_action="BUY_UP_HOLD",
-        action_values={
-            "NO_TRADE": 0.0,
-            "BUY_UP_HOLD": 0.05,
-            "BUY_DOWN_HOLD": -0.05,
-        },
+        down_token_id="54321",
     )
     with pytest.raises(MicroLiveExecutionError, match="conflicting duplicate"):
         executor.submit_signal(**conflict)
@@ -772,16 +836,12 @@ def test_allowlist_no_trade_candidate_and_token_contract_block_without_transport
                 market_family="ETH-15M",
             )
         )
-    no_trade = _signal(
-        candidate_bundle_sha256=verified.candidate_bundle_sha256,
-        selected_action="NO_TRADE",
-        action_values={
-            "NO_TRADE": 0.0,
-            "BUY_UP_HOLD": -0.02,
-            "BUY_DOWN_HOLD": -0.01,
-        },
+    failed_closed = _signal(
+        candidate_bundle_sha256=verified.candidate_bundle_sha256
     )
-    assert executor.submit_signal(**no_trade)["reason"] == "signal_selected_no_trade"
+    failed_closed["feature_row"]["max_input_ts"] -= 10_000
+    failed_closed = _bind_signal_to_runtime(failed_closed, verified.runtime)
+    assert executor.submit_signal(**failed_closed)["reason"] == "signal_failed_closed"
     with pytest.raises(MicroLiveExecutionError, match="identity or safety"):
         executor.submit_signal(
             **_signal(candidate_bundle_sha256="0" * 64)
@@ -808,6 +868,17 @@ def test_signal_envelope_tampering_and_outcome_fields_fail_closed(
     with pytest.raises(MicroLiveExecutionError, match="zero-threshold decision"):
         executor.submit_signal(**mismatched)
 
+    internally_coherent_but_fabricated = _signal(
+        candidate_bundle_sha256=verified.candidate_bundle_sha256,
+        action_values={
+            "NO_TRADE": 0.0,
+            "BUY_UP_HOLD": -0.25,
+            "BUY_DOWN_HOLD": 0.25,
+        },
+    )
+    with pytest.raises(MicroLiveExecutionError, match="does not match frozen runtime"):
+        executor.submit_signal(**internally_coherent_but_fabricated)
+
     outcome_bearing = _signal(
         candidate_bundle_sha256=verified.candidate_bundle_sha256
     )
@@ -821,6 +892,13 @@ def test_signal_envelope_tampering_and_outcome_fields_fail_closed(
     )
     with pytest.raises(MicroLiveExecutionError, match="identity or safety"):
         executor.submit_signal(**outcome_opened)
+
+    outcome_feature = _signal(
+        candidate_bundle_sha256=verified.candidate_bundle_sha256
+    )
+    outcome_feature["feature_row"]["settlement_price"] = 1.0
+    with pytest.raises(MicroLiveExecutionError, match="forbidden field"):
+        executor.submit_signal(**outcome_feature)
 
     off_schedule = _signal(
         candidate_bundle_sha256=verified.candidate_bundle_sha256,
@@ -863,12 +941,18 @@ def test_open_order_and_authorization_lifetime_notional_caps(
 
     lifetime_transport = FakeTransport()
     lifetime = MicroLiveExecutor(verified, transport=lifetime_transport)
-    for index in range(1, 11):
+    selected_side = (
+        "UP"
+        if BASE_SIGNAL_PAYLOAD["selected_action"] == "BUY_UP_HOLD"
+        else "DOWN"
+    )
+    unit_notional = Decimal(BASE_SIGNAL_PAYLOAD["executable_asks"][selected_side])
+    allowed_count = int(verified.maximum_notional_usd // unit_notional)
+    for index in range(1, allowed_count + 1):
         result = lifetime.submit_signal(
             **_signal(
                 candidate_bundle_sha256=verified.candidate_bundle_sha256,
                 market_id=f"0x{index:064x}",
-                executable_asks={"UP": "0.98", "DOWN": "0.99"},
                 up_token_id=str(20_000 + index * 2),
                 down_token_id=str(20_001 + index * 2),
             )
@@ -883,14 +967,13 @@ def test_open_order_and_authorization_lifetime_notional_caps(
     capped = lifetime.submit_signal(
         **_signal(
             candidate_bundle_sha256=verified.candidate_bundle_sha256,
-            market_id=f"0x{11:064x}",
-            executable_asks={"UP": "0.98", "DOWN": "0.99"},
-            up_token_id="20022",
-            down_token_id="20023",
+            market_id=f"0x{allowed_count + 1:064x}",
+            up_token_id=str(20_000 + (allowed_count + 1) * 2),
+            down_token_id=str(20_001 + (allowed_count + 1) * 2),
         )
     )
     assert capped["reason"] == "authorization_notional_cap_exceeded"
-    assert len(lifetime_transport.submit_calls) == 10
+    assert len(lifetime_transport.submit_calls) == allowed_count
 
 
 def test_stale_heartbeat_kills_and_cancels_existing_order(

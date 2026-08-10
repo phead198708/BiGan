@@ -22,7 +22,11 @@ from bigan.v8.polymarket.residual_promotion_micro_live_authorization import (
     authorization_capability_is_verified,
     verify_micro_live_authorization,
 )
-from bigan.v8.polymarket.residual_promotion_v1 import CANDIDATE_ID, LINEAGE_ID
+from bigan.v8.polymarket.residual_promotion_v1 import (
+    CANDIDATE_ID,
+    LINEAGE_ID,
+    ResidualPromotionRuntime,
+)
 
 STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v1"
 SIGNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-execution-signal-v1"
@@ -34,6 +38,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SLUG = re.compile(r"^btc-updown-15m-[1-9][0-9]*$")
 _CONDITION_ID = re.compile(r"^0x[0-9a-f]{64}$")
 _TOKEN_ID = re.compile(r"^[1-9][0-9]*$")
+_FORBIDDEN_FEATURE_KEY_TOKENS = ("outcome", "settlement", "resolution", "pnl")
 _EVENT_TYPES = {
     "ORDER_PREPARED",
     "ORDER_ACKNOWLEDGED",
@@ -95,6 +100,13 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError("micro-live authorization capability is unverified")
         if transport is None:
             raise MicroLiveExecutionError("micro-live transport capability is missing")
+        if not (
+            authorization.runtime.lineage_id == LINEAGE_ID
+            and authorization.runtime.candidate_id == CANDIDATE_ID
+            and authorization.runtime.manifest_sha256
+            == authorization.candidate_bundle_sha256
+        ):
+            raise MicroLiveExecutionError("micro-live runtime capability is mismatched")
         self.authorization = authorization
         self.transport = transport
         self._events = [copy.deepcopy(dict(event)) for event in events]
@@ -118,6 +130,7 @@ class MicroLiveExecutor:
         self,
         *,
         signal_payload: Mapping[str, Any],
+        feature_row: Mapping[str, Any],
         now_ts_ms: int,
         operator_heartbeat_ts_ms: int,
     ) -> dict[str, Any]:
@@ -126,6 +139,11 @@ class MicroLiveExecutor:
         signal = _validated_candidate_signal(
             signal_payload,
             expected_candidate_bundle_sha256=self.authorization.candidate_bundle_sha256,
+        )
+        features = _validated_runtime_binding(
+            signal=signal,
+            feature_row=feature_row,
+            runtime=self.authorization.runtime,
         )
         decision_ts_ms = int(signal["decision_ts_ms"])
         self._validate_clock(
@@ -182,6 +200,8 @@ class MicroLiveExecutor:
             "notional_usd": str(notional),
             "signal_payload_sha256": signal_payload_sha256,
             "signal_payload": signal,
+            "feature_row_sha256": canonical_json_sha256(features),
+            "feature_row": features,
         }
         intent_id = canonical_json_sha256(intent_core)
         client_order_id = intent_id
@@ -206,7 +226,7 @@ class MicroLiveExecutor:
         if view["open_order_count"] >= self.authorization.maximum_open_orders:
             return _blocked("maximum_open_orders_reached")
 
-        request = {
+        prepared = {
             **intent_core,
             "intent_id": intent_id,
             "client_order_id": client_order_id,
@@ -214,10 +234,33 @@ class MicroLiveExecutor:
             "operator_heartbeat_ts_ms": operator_heartbeat_ts_ms,
             "authorization_payload_sha256": self.authorization.authorization_payload_sha256,
         }
-        self._append_event("ORDER_PREPARED", request, event_ts_ms=now_ts_ms)
+        self._append_event("ORDER_PREPARED", prepared, event_ts_ms=now_ts_ms)
+        transport_request = {
+            key: prepared[key]
+            for key in (
+                "authorization_id",
+                "authorization_payload_sha256",
+                "candidate_bundle_sha256",
+                "business_key",
+                "market_id",
+                "slug",
+                "market_family",
+                "decision_ts_ms",
+                "selected_action",
+                "token_id",
+                "token_side",
+                "limit_price",
+                "quantity",
+                "notional_usd",
+                "signal_payload_sha256",
+                "intent_id",
+                "client_order_id",
+                "submitted_at_ts_ms",
+            )
+        }
         try:
-            response = dict(self.transport.submit_order(copy.deepcopy(request)))
-            disposition = self._validate_submission_response(request, response)
+            response = dict(self.transport.submit_order(copy.deepcopy(transport_request)))
+            disposition = self._validate_submission_response(transport_request, response)
         except Exception as exc:
             self._append_event(
                 "ORDER_SUBMISSION_UNKNOWN",
@@ -685,6 +728,8 @@ class MicroLiveExecutor:
                 "notional_usd",
                 "signal_payload_sha256",
                 "signal_payload",
+                "feature_row_sha256",
+                "feature_row",
                 "intent_id",
                 "client_order_id",
             }
@@ -701,6 +746,11 @@ class MicroLiveExecutor:
             signal = _validated_candidate_signal(
                 payload.get("signal_payload"),
                 expected_candidate_bundle_sha256=self.authorization.candidate_bundle_sha256,
+            )
+            feature_row = _validated_runtime_binding(
+                signal=signal,
+                feature_row=payload.get("feature_row"),
+                runtime=self.authorization.runtime,
             )
             market_id = payload.get("market_id")
             business_key = canonical_json_sha256(
@@ -764,6 +814,8 @@ class MicroLiveExecutor:
                 and payload.get("limit_price")
                 == dict(signal["executable_asks"])[payload["token_side"]]
                 and payload.get("signal_payload_sha256") == canonical_json_sha256(signal)
+                and payload.get("feature_row_sha256")
+                == canonical_json_sha256(feature_row)
                 and payload.get("business_key") == business_key
                 and payload.get("intent_id") == intent_id
                 and payload.get("client_order_id") == intent_id
@@ -1167,6 +1219,105 @@ def _validated_candidate_signal(
     else:
         raise MicroLiveExecutionError("candidate signal scoring state is invalid")
     return signal
+
+
+def _validated_runtime_binding(
+    *,
+    signal: Mapping[str, Any],
+    feature_row: Any,
+    runtime: ResidualPromotionRuntime,
+) -> dict[str, Any]:
+    if not isinstance(feature_row, Mapping):
+        raise MicroLiveExecutionError("candidate feature row is not an object")
+    features = copy.deepcopy(dict(feature_row))
+    _reject_forbidden_feature_keys(features)
+    if not (
+        features.get("market_id") == signal["market_id"]
+        and features.get("market_family") == "btc_updown_15m"
+        and features.get("horizon_ms") == 900_000
+        and features.get("decision_ts") == signal["decision_ts_ms"]
+    ):
+        raise MicroLiveExecutionError("candidate feature row identity is invalid")
+    raw = features.get("features")
+    if not isinstance(raw, Mapping):
+        raise MicroLiveExecutionError("candidate raw feature mapping is absent")
+    try:
+        raw_asks = {
+            "UP": _numeric_decimal(raw.get("up_ask"), "UP feature ask"),
+            "DOWN": _numeric_decimal(raw.get("down_ask"), "DOWN feature ask"),
+        }
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise MicroLiveExecutionError("candidate raw executable asks are invalid") from exc
+    signal_asks = {
+        side: _positive_decimal(
+            dict(signal["executable_asks"])[side],
+            f"{side} signal ask",
+        )
+        for side in ("UP", "DOWN")
+    }
+    if raw_asks != signal_asks:
+        raise MicroLiveExecutionError("candidate signal ask does not match feature row")
+    result = runtime.score_feature_row(
+        features,
+        observed_at_ts=int(signal["observed_at_ts_ms"]),
+    )
+    supplied_projection = {
+        "action_values": signal["action_values"],
+        "selected_action": signal["selected_action"],
+        "model_scored": signal["model_scored"],
+        "fail_closed": signal["fail_closed"],
+        "fail_closed_reasons": signal["fail_closed_reasons"],
+    }
+    expected_projection = {
+        name: result[name]
+        for name in (
+            "action_values",
+            "selected_action",
+            "model_scored",
+            "fail_closed",
+            "fail_closed_reasons",
+        )
+    }
+    if not (
+        canonical_json_sha256(supplied_projection)
+        == canonical_json_sha256(expected_projection)
+        and result.get("lineage_id") == LINEAGE_ID
+        and result.get("candidate_id") == CANDIDATE_ID
+        and result.get("market_id") == signal["market_id"]
+        and result.get("decision_ts") == signal["decision_ts_ms"]
+        and result.get("observed_at_ts") == signal["observed_at_ts_ms"]
+        and result.get("manifest_sha256") == signal["candidate_bundle_sha256"]
+        and result.get("outcomes_accessed") is False
+        and result.get("settlement_accessed") is False
+        and result.get("pnl_accessed") is False
+    ):
+        raise MicroLiveExecutionError("candidate signal does not match frozen runtime")
+    return features
+
+
+def _reject_forbidden_feature_keys(value: Any, path: str = "") -> None:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if not isinstance(key, str):
+                raise MicroLiveExecutionError("candidate feature key is not a string")
+            lowered = key.lower()
+            if any(token in lowered for token in _FORBIDDEN_FEATURE_KEY_TOKENS):
+                raise MicroLiveExecutionError(
+                    f"candidate feature row contains forbidden field: {path}{key}"
+                )
+            _reject_forbidden_feature_keys(nested, f"{path}{key}.")
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            _reject_forbidden_feature_keys(nested, f"{path}{index}.")
+
+
+def _numeric_decimal(value: Any, label: str) -> Decimal:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise MicroLiveExecutionError(f"{label} is invalid")
+    parsed = Decimal(str(value))
+    if not parsed.is_finite() or parsed <= 0 or parsed >= 1:
+        raise MicroLiveExecutionError(f"{label} is outside the binary range")
+    return parsed
 
 
 def _positive_decimal(value: Any, label: str) -> Decimal:

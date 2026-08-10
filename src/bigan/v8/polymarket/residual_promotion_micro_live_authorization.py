@@ -23,7 +23,13 @@ from bigan.v8.polymarket.residual_promotion_release_readiness_v6 import (
     assess_micro_live_preapproval_v6,
     validate_release_readiness_contract_v6,
 )
-from bigan.v8.polymarket.residual_promotion_v1 import CANDIDATE_ID, LINEAGE_ID
+from bigan.v8.polymarket.residual_promotion_v1 import (
+    CANDIDATE_ID,
+    LINEAGE_ID,
+    ResidualPromotionError,
+    ResidualPromotionRuntime,
+    load_residual_promotion_runtime,
+)
 
 AUTHORIZATION_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v1"
@@ -86,6 +92,7 @@ class VerifiedMicroLiveAuthorization:
     maximum_operator_heartbeat_age_ms: int
     market_allowlist: tuple[str, ...]
     allowed_actions: tuple[str, ...]
+    runtime: ResidualPromotionRuntime
     _seal: object
 
 
@@ -176,6 +183,22 @@ def verify_micro_live_authorization(
         and template.get("executable") is False
     ):
         raise MicroLiveAuthorizationError("micro-live template binding is invalid")
+    try:
+        runtime = load_residual_promotion_runtime(
+            manifest_path=CANDIDATE_BUNDLE_REPOSITORY_PATH,
+            expected_manifest_sha256=str(candidate_sha),
+            repository_root=root,
+        )
+    except ResidualPromotionError as exc:
+        raise MicroLiveAuthorizationError(
+            "micro-live frozen runtime failed to load"
+        ) from exc
+    if not (
+        runtime.lineage_id == LINEAGE_ID
+        and runtime.candidate_id == CANDIDATE_ID
+        and runtime.manifest_sha256 == candidate_sha
+    ):
+        raise MicroLiveAuthorizationError("micro-live frozen runtime binding is invalid")
 
     capital_base = _positive_decimal(authorization.get("capital_base_usd"), "capital base")
     fraction = _positive_decimal(
@@ -281,6 +304,7 @@ def verify_micro_live_authorization(
         maximum_operator_heartbeat_age_ms=MAXIMUM_OPERATOR_HEARTBEAT_AGE_MS,
         market_allowlist=MARKET_ALLOWLIST,
         allowed_actions=ALLOWED_ACTIONS,
+        runtime=runtime,
         _seal=_VERIFICATION_SEAL,
     )
 
