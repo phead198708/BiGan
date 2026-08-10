@@ -26,6 +26,7 @@ from bigan.v8.polymarket.challenge_model_15m_training import (
     BASE_FEATURE_NAMES,
     GLOBAL_RAW_DEPENDENCIES,
     SIDE_RAW_SUFFIXES,
+    _side_raw_name,
     side_symmetric_features,
 )
 from bigan.v8.polymarket.contracts import canonical_json_sha256
@@ -690,6 +691,15 @@ def freeze_prospective_program(
         expected_manifest_sha256=bundle_sha,
         repository_root=root,
     )
+    parity_path = bundle_path.parent / "offline_live_parity_report.json"
+    parity = _verified_json(parity_path)
+    if not (
+        parity.get("candidate_id") == CANDIDATE_ID
+        and parity.get("prediction_and_decision_parity") is True
+        and parity.get("fresh_outcomes_accessed") is False
+        and dict(parity.get("safety") or {}) == SAFETY
+    ):
+        raise ResidualPromotionError("offline/live parity report is invalid")
     collector_path = _repo_file(
         collector_implementation_path, root, "collector implementation"
     )
@@ -723,6 +733,7 @@ def freeze_prospective_program(
         "feature_contract": _descriptor(FEATURE_CONTRACT, root),
         "cost_contract": _descriptor(COST_CONTRACT, root),
         "reporting_contract": _descriptor(reporting_path, root),
+        "runtime_parity_report": _descriptor(parity_path, root),
         "population": {
             "target_quality_valid_market_count": TARGET_MARKETS,
             "maximum_attempts": MAXIMUM_ATTEMPTS,
@@ -820,6 +831,117 @@ def freeze_prospective_program(
         "fresh_outcomes_opened": False,
         "safety": dict(SAFETY),
     }
+
+
+def prepare_post_fit_parity_correction(
+    *,
+    repository_root: Path | str = REPO_ROOT,
+    corrected_source_commit: str,
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    """Freeze a fixture-only correction without changing final-fit model bytes."""
+
+    root = Path(repository_root).resolve()
+    if not HEX_GIT_SHA.fullmatch(corrected_source_commit):
+        raise ResidualPromotionError("corrected source commit must be a full Git SHA")
+    config = root / "examples/v8/polymarket_configs" / LINEAGE_ID
+    bundle_path = config / "candidate_bundle/bundle_manifest.json"
+    manifest = _verified_json(bundle_path)
+    if (bundle_path.parent / "offline_live_parity_report.json").exists():
+        raise ResidualPromotionError("parity report already exists")
+    load_residual_promotion_runtime(
+        manifest_path=bundle_path,
+        expected_manifest_sha256=sha256_file(bundle_path),
+        repository_root=root,
+    )
+    correction_path = config / "post_fit_parity_engineering_correction.json"
+    payload = {
+        "schema_version": f"{SCHEMA_VERSION}-post-fit-parity-engineering-correction",
+        "lineage_id": LINEAGE_ID,
+        "candidate_id": CANDIDATE_ID,
+        "created_at": created_at or datetime.now(UTC).isoformat(),
+        "corrected_source_commit": corrected_source_commit,
+        "corrected_implementation": _descriptor(root / IMPLEMENTATION_PATH, root),
+        "frozen_bundle_manifest": _descriptor(bundle_path, root),
+        "frozen_model_hashes": {
+            name: descriptor["sha256"]
+            for name, descriptor in dict(manifest["artifacts"]).items()
+            if name.endswith("_model")
+        },
+        "failure_stage": "post_fit_offline_live_parity_fixture_provenance_construction",
+        "correction": "use_frozen_side_raw_name_mapping_for_provenance_fixture",
+        "model_fit_completed_before_failure": True,
+        "model_refit_allowed": False,
+        "model_bytes_changed_by_correction": False,
+        "architecture_feature_threshold_training_or_gate_changed": False,
+        "fresh_outcomes_accessed": False,
+        "safety": dict(SAFETY),
+    }
+    _write_frozen_json(correction_path, payload)
+    return _descriptor(correction_path, root)
+
+
+def complete_post_fit_parity(
+    *, repository_root: Path | str = REPO_ROOT
+) -> dict[str, Any]:
+    """Complete parity against the already-frozen bundle without refitting."""
+
+    root = Path(repository_root).resolve()
+    config = root / "examples/v8/polymarket_configs" / LINEAGE_ID
+    correction_path = config / "post_fit_parity_engineering_correction.json"
+    correction = _verified_json(correction_path)
+    bundle_descriptor = dict(correction.get("frozen_bundle_manifest") or {})
+    bundle_path = _verify_descriptor(bundle_descriptor, root, "frozen bundle")
+    manifest = _verified_json(bundle_path)
+    current_model_hashes = {
+        name: descriptor["sha256"]
+        for name, descriptor in dict(manifest["artifacts"]).items()
+        if name.endswith("_model")
+    }
+    if not (
+        correction.get("model_refit_allowed") is False
+        and correction.get("model_bytes_changed_by_correction") is False
+        and correction.get("fresh_outcomes_accessed") is False
+        and correction.get("frozen_model_hashes") == current_model_hashes
+        and dict(correction.get("safety") or {}) == SAFETY
+    ):
+        raise ResidualPromotionError("post-fit parity correction is invalid")
+    runtime = load_residual_promotion_runtime(
+        manifest_path=bundle_path,
+        expected_manifest_sha256=bundle_descriptor["sha256"],
+        repository_root=root,
+    )
+    public_rows = _load_jsonl(SOURCE_DATASET)
+    fixture = _runtime_fixture_from_public_rows(public_rows[:2])
+    live = runtime.score_feature_row(
+        fixture["live_feature_row"], observed_at_ts=fixture["observed_at_ts"]
+    )
+    offline = runtime.score_offline_side_rows(
+        fixture["side_rows"],
+        market_id=fixture["live_feature_row"]["market_id"],
+        decision_ts=fixture["live_feature_row"]["decision_ts"],
+        observed_at_ts=fixture["observed_at_ts"],
+    )
+    if _parity_projection(live) != _parity_projection(offline):
+        raise ResidualPromotionError("offline/live deterministic parity failed")
+    parity_path = bundle_path.parent / "offline_live_parity_report.json"
+    _write_frozen_json(
+        parity_path,
+        {
+            "schema_version": f"{SCHEMA_VERSION}-offline-live-parity",
+            "candidate_id": CANDIDATE_ID,
+            "fixture_sha256": canonical_json_sha256(fixture),
+            "offline_projection": _parity_projection(offline),
+            "live_projection": _parity_projection(live),
+            "prediction_and_decision_parity": True,
+            "frozen_bundle_manifest": bundle_descriptor,
+            "post_fit_correction": _descriptor(correction_path, root),
+            "model_refit_performed": False,
+            "fresh_outcomes_accessed": False,
+            "safety": dict(SAFETY),
+        },
+    )
+    return _descriptor(parity_path, root)
 
 
 def validate_final_fit_protocol(
@@ -1149,8 +1271,8 @@ def _runtime_fixture_from_public_rows(
     down = dict(rows[1]["features"])
     raw: dict[str, Any] = {"horizon_ms": MARKET_HORIZON_MS}
     for suffix in SIDE_RAW_SUFFIXES:
-        raw[f"up_{suffix}"] = up[f"selected_{suffix}"]
-        raw[f"down_{suffix}"] = down[f"selected_{suffix}"]
+        raw[_side_raw_name("up", suffix)] = up[f"selected_{suffix}"]
+        raw[_side_raw_name("down", suffix)] = down[f"selected_{suffix}"]
     raw.update(
         {
             "up_down_ask_sum": up["paired_ask_sum"],
@@ -1189,7 +1311,7 @@ def _runtime_fixture_from_public_rows(
             name: {"available_at_ts": decision_ts, "max_input_ts": decision_ts}
             for name in (
                 {
-                    f"{side}_{suffix}"
+                    _side_raw_name(side, suffix)
                     for side in ("up", "down")
                     for suffix in SIDE_RAW_SUFFIXES
                 }
@@ -1450,9 +1572,11 @@ __all__ = [
     "ResidualPromotionRuntime",
     "TARGET_MARKETS",
     "freeze_prospective_program",
+    "complete_post_fit_parity",
     "load_matched_baseline",
     "load_residual_promotion_runtime",
     "prepare_pre_fit_engineering_correction",
+    "prepare_post_fit_parity_correction",
     "prepare_pretraining_freeze",
     "run_final_fit",
     "score_matched_baseline",

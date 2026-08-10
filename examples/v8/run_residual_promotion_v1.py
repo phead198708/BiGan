@@ -15,8 +15,10 @@ if str(SRC) not in sys.path:
 from bigan.v8.polymarket.challenge_development_lane import sha256_file  # noqa: E402
 from bigan.v8.polymarket.residual_promotion_v1 import (  # noqa: E402
     CONFIG_DIR,
+    complete_post_fit_parity,
     freeze_prospective_program,
     load_residual_promotion_runtime,
+    prepare_post_fit_parity_correction,
     prepare_pre_fit_engineering_correction,
     prepare_pretraining_freeze,
     run_final_fit,
@@ -33,6 +35,10 @@ def _parser() -> argparse.ArgumentParser:
     correction = commands.add_parser("pre-fit-correction")
     correction.add_argument("--corrected-source-commit", required=True)
     correction.add_argument("--created-at")
+    post_fit_correction = commands.add_parser("post-fit-parity-correction")
+    post_fit_correction.add_argument("--corrected-source-commit", required=True)
+    post_fit_correction.add_argument("--created-at")
+    commands.add_parser("complete-parity")
     final_fit = commands.add_parser("final-fit")
     final_fit.add_argument("--source-commit", required=True)
     final_fit.add_argument(
@@ -78,6 +84,14 @@ def main() -> int:
             corrected_source_commit=args.corrected_source_commit,
             created_at=args.created_at,
         )
+    elif args.command == "post-fit-parity-correction":
+        report = prepare_post_fit_parity_correction(
+            repository_root=ROOT,
+            corrected_source_commit=args.corrected_source_commit,
+            created_at=args.created_at,
+        )
+    elif args.command == "complete-parity":
+        report = complete_post_fit_parity(repository_root=ROOT)
     elif args.command == "final-fit":
         protocol_sha = args.protocol_sha256 or sha256_file(args.protocol)
         report = run_final_fit(
