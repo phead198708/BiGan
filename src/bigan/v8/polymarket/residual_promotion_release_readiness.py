@@ -28,16 +28,16 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
 )
 
 CONTRACT_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-micro-live-preapproval-contract-v1"
+    "bigan-btc-15m-residual-promotion-micro-live-preapproval-contract-v2"
 )
 PREFLIGHT_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-micro-live-preapproval-preflight-v1"
+    "bigan-btc-15m-residual-promotion-micro-live-preapproval-preflight-v2"
 )
 ASSESSMENT_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-micro-live-preapproval-assessment-v1"
+    "bigan-btc-15m-residual-promotion-micro-live-preapproval-assessment-v2"
 )
 AUTHORIZATION_TEMPLATE_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-micro-live-authorization-template-v1"
+    "bigan-btc-15m-residual-promotion-micro-live-authorization-template-v2"
 )
 SHADOW_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-shadow-stability-report-v1"
@@ -65,12 +65,21 @@ FUNCTIONAL_ROLLBACK_REPOSITORY_PATH = (
     f"{CONFIG_REPOSITORY_PATH}/zero_capital_rollback_drill_report.json"
 )
 EVALUATION_CONTRACT_REPOSITORY_PATH = (
-    f"{CONFIG_REPOSITORY_PATH}/promotion_evaluation_execution_contract.json"
+    f"{CONFIG_REPOSITORY_PATH}/promotion_evaluation_execution_contract_v2.json"
+)
+FINALIZATION_CORRECTION_REPOSITORY_PATH = (
+    f"{CONFIG_REPOSITORY_PATH}/finalization_native_missingness_correction.json"
 )
 PHASE6_PIPELINE_REPOSITORY_PATH = "src/bigan/v8/phase6/pipeline.py"
 PHASE6_CONTRACTS_REPOSITORY_PATH = "src/bigan/v8/phase6/contracts.py"
 ZERO_CAPITAL_AUTHORIZATION_REPOSITORY_PATH = (
     f"{CONFIG_REPOSITORY_PATH}/manual_collection_authorization_v3.json"
+)
+HISTORICAL_PREAPPROVAL_CONTRACT_REPOSITORY_PATH = (
+    f"{CONFIG_REPOSITORY_PATH}/micro_live_preapproval_contract.json"
+)
+HISTORICAL_MICRO_LIVE_TEMPLATE_REPOSITORY_PATH = (
+    f"{CONFIG_REPOSITORY_PATH}/micro_live_authorization_template.json"
 )
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MAX_INITIAL_CAPITAL_FRACTION = 0.01
@@ -87,9 +96,9 @@ def freeze_release_readiness_contract(
 
     root = Path(repository_root).resolve()
     config = root / CONFIG_REPOSITORY_PATH
-    contract_path = config / "micro_live_preapproval_contract.json"
-    preflight_path = config / "micro_live_preapproval_preflight_report.json"
-    template_path = config / "micro_live_authorization_template.json"
+    contract_path = config / "micro_live_preapproval_contract_v2.json"
+    preflight_path = config / "micro_live_preapproval_preflight_report_v2.json"
+    template_path = config / "micro_live_authorization_template_v2.json"
     for path in (contract_path, preflight_path, template_path):
         if path.exists():
             raise FileExistsError(f"release readiness artifact already exists: {path.name}")
@@ -134,6 +143,9 @@ def freeze_release_readiness_contract(
         "promotion_evaluation_contract": _repository_descriptor(
             root, EVALUATION_CONTRACT_REPOSITORY_PATH
         ),
+        "finalization_native_missingness_correction": _repository_descriptor(
+            root, FINALIZATION_CORRECTION_REPOSITORY_PATH
+        ),
         "phase6_pipeline": _repository_descriptor(
             root, PHASE6_PIPELINE_REPOSITORY_PATH
         ),
@@ -145,6 +157,9 @@ def freeze_release_readiness_contract(
         ),
         "readiness_implementation": _repository_descriptor(
             root, IMPLEMENTATION_REPOSITORY_PATH
+        ),
+        "supersedes_preapproval_contract": _repository_descriptor(
+            root, HISTORICAL_PREAPPROVAL_CONTRACT_REPOSITORY_PATH
         ),
         "phase6_candidate_identity": {
             "candidate_run_id": CANDIDATE_ID,
@@ -247,6 +262,9 @@ def freeze_release_readiness_contract(
         "preapproval_contract": _repository_descriptor(
             root, contract_path.relative_to(root).as_posix()
         ),
+        "supersedes_authorization_template": _repository_descriptor(
+            root, HISTORICAL_MICRO_LIVE_TEMPLATE_REPOSITORY_PATH
+        ),
         "required_evidence_hashes": {
             "preapproval_assessment_sha256": None,
             "fresh_evaluation_manifest_sha256": None,
@@ -295,10 +313,12 @@ def validate_release_readiness_contract(
         "runtime_parity",
         "functional_rollback_drill",
         "promotion_evaluation_contract",
+        "finalization_native_missingness_correction",
         "phase6_pipeline",
         "phase6_contracts",
         "zero_capital_authorization",
         "readiness_implementation",
+        "supersedes_preapproval_contract",
     ):
         _verify_repository_descriptor(root, contract.get(field))
     implementation = dict(contract.get("readiness_implementation") or {})
@@ -312,6 +332,7 @@ def validate_release_readiness_contract(
     security = dict(future.get("security_review") or {})
     phase6_zero = dict(future.get("phase6_zero_capital") or {})
     identity = dict(contract.get("phase6_candidate_identity") or {})
+    historical = dict(contract.get("supersedes_preapproval_contract") or {})
     if not (
         contract.get("schema_version") == CONTRACT_SCHEMA_VERSION
         and contract.get("lineage_id") == LINEAGE_ID
@@ -362,6 +383,8 @@ def validate_release_readiness_contract(
         and phase6_zero.get("requested_capital_fraction") == 0.0
         and phase6_zero.get("existing_zero_capital_authorization_required") is True
         and identity.get("candidate_run_id") == CANDIDATE_ID
+        and historical.get("path")
+        == HISTORICAL_PREAPPROVAL_CONTRACT_REPOSITORY_PATH
         and _looks_like_sha256(identity.get("model_sha256"))
         and _looks_like_sha256(identity.get("policy_dataset_hash"))
         and _looks_like_sha256(identity.get("split_hash"))
