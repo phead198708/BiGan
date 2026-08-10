@@ -46,16 +46,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--authorization",
         type=Path,
-        default=CONFIG / "manual_collection_authorization_v2.json",
+        default=CONFIG / "manual_collection_authorization_v3.json",
     )
     parser.add_argument(
         "--collector-protocol",
         type=Path,
-        default=CONFIG / "prospective_collector_protocol_v2.json",
+        default=CONFIG / "prospective_collector_protocol_v3.json",
     )
     parser.add_argument("--http-timeout-seconds", type=float, default=20.0)
     parser.add_argument("--capture-timeout-seconds", type=float, default=930.0)
     parser.add_argument("--snapshot-interval-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--rest-fallback-collection-seconds", type=float, default=5.0
+    )
     parser.add_argument("--max-round-start-lag-seconds", type=float, default=30.0)
     parser.add_argument(
         "--clob-ws-url", default=DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL
@@ -111,6 +114,7 @@ def _collect(
         root,
         validation=validation,
         resumed_attempt_count=len(existing),
+        rest_fallback_collection_seconds=args.rest_fallback_collection_seconds,
     )
     while not progress["collection_complete"] and not progress["attempt_cap_exhausted"]:
         scheduled_start = _wait_for_round_start(
@@ -128,6 +132,9 @@ def _collect(
                 timeout_seconds=args.capture_timeout_seconds,
                 http_timeout_seconds=args.http_timeout_seconds,
                 orderbook_snapshot_interval_seconds=args.snapshot_interval_seconds,
+                rest_fallback_collection_seconds=(
+                    args.rest_fallback_collection_seconds
+                ),
             )
             config = PolymarketRealCorpusRecorderConfig(
                 run_id=run_id,
@@ -233,8 +240,19 @@ def _write_start_record(
     *,
     validation: dict[str, Any],
     resumed_attempt_count: int,
+    rest_fallback_collection_seconds: float,
 ) -> None:
-    path = root / "collection_start_record.json"
+    authorization_schema = str(validation["authorization_schema_version"])
+    coverage_corrected = authorization_schema.endswith("authorization-v3")
+    path = root / (
+        "collection_resume_record_v3.json"
+        if coverage_corrected
+        else "collection_start_record.json"
+    )
+    if coverage_corrected:
+        prior = root / "collection_start_record.json"
+        if not prior.is_file() or resumed_attempt_count != 1:
+            raise ValueError("coverage-corrected resume audit boundary mismatch")
     if path.exists():
         previous = json.loads(path.read_text(encoding="utf-8"))
         if not (
@@ -246,7 +264,11 @@ def _write_start_record(
             raise ValueError("existing collection start record binding mismatch")
         return
     payload = {
-        "schema_version": "bigan-btc-15m-residual-promotion-start-v1",
+        "schema_version": (
+            "bigan-btc-15m-residual-promotion-resume-v3"
+            if coverage_corrected
+            else "bigan-btc-15m-residual-promotion-start-v1"
+        ),
         "lineage_id": LINEAGE_ID,
         "started_at": datetime.now(UTC).isoformat(),
         "collector_pid": os.getpid(),
@@ -256,6 +278,13 @@ def _write_start_record(
         "target_quality_valid_market_count": TARGET_MARKETS,
         "maximum_attempts": MAXIMUM_ATTEMPTS,
         "resumed_attempt_count": resumed_attempt_count,
+        "prior_attempts_preserved": coverage_corrected,
+        "coverage_instrumentation_corrected": coverage_corrected,
+        "rest_fallback_collection_seconds": (
+            float(rest_fallback_collection_seconds)
+            if coverage_corrected
+            else None
+        ),
         "fresh_collection_started": True,
         "fresh_outcomes_opened": False,
         "zero_capital_read_only": True,

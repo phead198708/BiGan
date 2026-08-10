@@ -70,9 +70,22 @@ def validate_collection_authorization(
         / LINEAGE_ID
         / "collector_pre_attempt_engineering_correction.json"
     )
-    is_corrected = authorization.get("schema_version") == (
-        "bigan-btc-15m-residual-promotion-v1-manual-collection-authorization-v2"
+    coverage_correction_file = (
+        root
+        / "examples/v8/polymarket_configs"
+        / LINEAGE_ID
+        / "collector_coverage_instrumentation_correction.json"
     )
+    authorization_schema = authorization.get("schema_version")
+    is_corrected = authorization_schema in {
+        "bigan-btc-15m-residual-promotion-v1-manual-collection-authorization-v2",
+        "bigan-btc-15m-residual-promotion-v1-manual-collection-authorization-v3",
+    }
+    is_coverage_corrected = authorization_schema == (
+        "bigan-btc-15m-residual-promotion-v1-manual-collection-authorization-v3"
+    )
+    if coverage_correction_file.exists() and not is_coverage_corrected:
+        raise ValueError("collection authorization is superseded by coverage correction")
     if correction_file.exists() and not is_corrected:
         raise ValueError("manual collection authorization is superseded fail-closed")
     if not (
@@ -126,15 +139,44 @@ def validate_collection_authorization(
             is True
             and dict(correction.get("safety") or {}) == SAFETY
             and collector.get("schema_version")
-            == "bigan-btc-15m-residual-promotion-v1-collector-protocol-v2"
+            in {
+                "bigan-btc-15m-residual-promotion-v1-collector-protocol-v2",
+                "bigan-btc-15m-residual-promotion-v1-collector-protocol-v3",
+            }
             and collector.get("collector_engineering_correction")
             == correction_descriptor
             and collector.get("chainlink_rtds_background_collector_required") is True
             and collector.get("chainlink_rtds_injected_into_capture") is True
-            and authorization.get("prior_attempts_consumed") == 0
+            and authorization.get("prior_attempts_consumed")
+            == (1 if is_coverage_corrected else 0)
             and authorization.get("prior_fresh_outcomes_opened") is False
         ):
             raise ValueError("corrected collection authorization is invalid")
+        if is_coverage_corrected:
+            coverage_correction = _verified_json(coverage_correction_file)
+            coverage_descriptor = dict(
+                authorization.get("collector_coverage_instrumentation_correction")
+                or {}
+            )
+            if not (
+                coverage_descriptor.get("path")
+                == coverage_correction_file.relative_to(root).as_posix()
+                and coverage_descriptor.get("sha256")
+                == sha256_file(coverage_correction_file)
+                and coverage_correction.get("prior_attempts_consumed") == 1
+                and coverage_correction.get("prior_quality_valid_market_count") == 0
+                and coverage_correction.get("fresh_outcomes_accessed") is False
+                and coverage_correction.get("gate_threshold_or_model_changed") is False
+                and coverage_correction.get("failed_attempt_preserved") is True
+                and collector.get("schema_version")
+                == "bigan-btc-15m-residual-promotion-v1-collector-protocol-v3"
+                and collector.get("collector_coverage_instrumentation_correction")
+                == coverage_descriptor
+                and collector.get("rest_fallback_collection_seconds") == 5.0
+                and collector.get("full_window_coverage_measurement_required") is True
+                and authorization.get("prior_attempts_consumed") == 1
+            ):
+                raise ValueError("coverage-corrected collection authorization is invalid")
         bindings = dict(collector.get("implementation_bindings") or {})
         if set(bindings) != {
             "collector_cli",
@@ -157,6 +199,7 @@ def validate_collection_authorization(
     load_matched_baseline(repository_root=root)
     return {
         "authorization_sha256": sha256_file(authorization_file),
+        "authorization_schema_version": authorization_schema,
         "collector_protocol_sha256": sha256_file(collector_file),
         "runtime": runtime,
         "bundle": bundle,
