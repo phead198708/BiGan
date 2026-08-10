@@ -9,6 +9,7 @@ from bigan.v8.polymarket.challenge_development_lane import sha256_file
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 from bigan.v8.polymarket.residual_promotion_collection import canonical_attempt_hash
 from bigan.v8.polymarket.residual_promotion_finalization import (
+    _validate_quality_contract,
     freeze_exact_outcome_blind_population,
     select_exact_population,
     validate_frozen_population,
@@ -22,6 +23,62 @@ COLLECTOR_PROTOCOL = CONFIG / "prospective_collector_protocol_v3.json"
 BUNDLE_SHA = (
     "7a5b872b5a2a010a0868bf7d22fb4bdc39a941dd04464bb53890d34aa1846b3e"
 )
+
+
+def _production_quality(*, missing_count: int = 12) -> dict:
+    missing_counts = (
+        {
+            "selected_recent_trade_volume": 4,
+            "opposite_recent_trade_volume": 4,
+            "selected_minus_opposite_recent_trade_volume": 4,
+        }
+        if missing_count == 12
+        else {}
+    )
+    return {
+        "quality_valid": True,
+        "quality_observations": {
+            "book_capture_complete": True,
+            "chainlink_capture_complete": True,
+            "market_identity_complete": True,
+            "paired_executable_asks_complete": True,
+            "provider_capture_complete": True,
+        },
+        "invalid_reason_codes": [],
+        "observed_decision_count": 2,
+        "paired_executable_ask_decision_count": 2,
+        "btc_feature_complete_decision_count": 2,
+        "causality_violation_count": 0,
+        "missing_feature_count": missing_count,
+        "missing_feature_counts": missing_counts,
+        "missing_values_encoded_as_zero": False,
+    }
+
+
+def test_production_quality_contract_preserves_native_missingness() -> None:
+    _validate_quality_contract(
+        {"quality": _production_quality()}, validation_fixture_only=False
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"missing_feature_count": 11},
+        {"missing_feature_counts": {"selected_recent_trade_volume": 11}},
+        {"missing_feature_counts": {"selected_recent_trade_volume": -1}},
+        {"missing_values_encoded_as_zero": True},
+    ),
+)
+def test_production_quality_missingness_mismatch_fails_closed(
+    mutation: dict,
+) -> None:
+    quality = _production_quality()
+    quality.update(mutation)
+    with pytest.raises(ValueError, match="internally inconsistent"):
+        _validate_quality_contract(
+            {"quality": quality}, validation_fixture_only=False
+        )
 
 
 def _write_json(path: Path, payload: dict) -> None:

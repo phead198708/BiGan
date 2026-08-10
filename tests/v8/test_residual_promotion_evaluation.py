@@ -182,7 +182,11 @@ def test_dry_run_is_deterministic_and_emits_no_gate_or_promotion_result() -> Non
 
 
 def test_frozen_execution_contract_and_dry_run_artifacts_reconcile() -> None:
-    contract_path = CONFIG / "promotion_evaluation_execution_contract.json"
+    old_contract_path = CONFIG / "promotion_evaluation_execution_contract.json"
+    assert old_contract_path.with_suffix(".json.sha256").read_text().strip() == (
+        sha256_file(old_contract_path)
+    )
+    contract_path = CONFIG / "promotion_evaluation_execution_contract_v2.json"
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     validate_evaluation_execution_contract(contract, repository_root=REPO_ROOT)
     assert contract_path.with_suffix(".json.sha256").read_text().strip() == sha256_file(
@@ -198,7 +202,7 @@ def test_frozen_execution_contract_and_dry_run_artifacts_reconcile() -> None:
 
 def test_execution_contract_implementation_drift_fails_closed() -> None:
     contract = json.loads(
-        (CONFIG / "promotion_evaluation_execution_contract.json").read_text(
+        (CONFIG / "promotion_evaluation_execution_contract_v2.json").read_text(
             encoding="utf-8"
         )
     )
@@ -208,9 +212,13 @@ def test_execution_contract_implementation_drift_fails_closed() -> None:
 
 
 def test_outcome_authorization_template_is_not_executable() -> None:
+    old_template = CONFIG / "promotion_outcome_evaluation_authorization_template.json"
+    assert old_template.with_suffix(".json.sha256").read_text().strip() == (
+        sha256_file(old_template)
+    )
     template = json.loads(
         (
-            CONFIG / "promotion_outcome_evaluation_authorization_template.json"
+            CONFIG / "promotion_outcome_evaluation_authorization_template_v2.json"
         ).read_text(encoding="utf-8")
     )
     with pytest.raises(ValueError, match="authorization is invalid"):
@@ -219,3 +227,28 @@ def test_outcome_authorization_template_is_not_executable() -> None:
             execution_contract=template["execution_contract"],
             population_manifest_sha256="0" * 64,
         )
+
+
+def test_finalization_native_missingness_correction_is_outcome_blind() -> None:
+    path = CONFIG / "finalization_native_missingness_correction.json"
+    correction = json.loads(path.read_text(encoding="utf-8"))
+    assert path.with_suffix(".json.sha256").read_text().strip() == sha256_file(path)
+    observation = correction["outcome_blind_observation"]
+    assert observation["quality_valid"] is True
+    assert observation["missing_feature_count"] == 12
+    assert sum(observation["missing_feature_counts"].values()) == 12
+    assert observation["missing_values_encoded_as_zero"] is False
+    assert observation["outcomes_accessed"] is False
+    assert observation["settlement_accessed"] is False
+    assert observation["pnl_accessed"] is False
+    assert correction["correction"] == {
+        "collector_quality_eligibility_changed": False,
+        "population_selection_changed": False,
+        "model_prediction_behavior_changed": False,
+        "statistical_gate_changed": False,
+        "native_missing_values_remain_nan": True,
+        "missing_values_encoded_as_zero": False,
+        "finalizer_requires_nonnegative_integer_missing_counts": True,
+        "finalizer_requires_missing_count_sum_reconciliation": True,
+        "finalizer_requires_all_existing_quality_observations_true": True,
+    }

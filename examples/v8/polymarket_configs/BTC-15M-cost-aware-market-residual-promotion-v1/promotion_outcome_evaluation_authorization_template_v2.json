@@ -1,0 +1,40 @@
+{
+  "authorization_template_revision": "native_missingness_reconciliation_v2",
+  "collection_start_record_sha256": null,
+  "evaluation_exactly_once_authorized": false,
+  "execution_contract": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/promotion_evaluation_execution_contract_v2.json",
+    "sha256": "b2e3543aabdaf09a046035da44054d63c11fd3ef26027fad6192efbd5ea87e2f"
+  },
+  "finalization_correction": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/finalization_native_missingness_correction.json",
+    "sha256": "dad32168f7aab0b63195129d29d59ab917d57ff2390332091cf16194f3127876"
+  },
+  "fresh_outcome_access_authorized": false,
+  "interim_evaluation_authorized": false,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "official_settlement_ingestion_authorized": false,
+  "paper_live_wallet_write_or_capital_authorized": false,
+  "population_manifest_sha256": null,
+  "rerun_authorized": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-outcome-evaluation-authorization-template-v1",
+  "service_root_id": "BTC-15M-cost-aware-market-residual-promotion-v1-coverage-corrected-v3",
+  "supersedes_authorization_template": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/promotion_outcome_evaluation_authorization_template.json",
+    "sha256": "ffbd01c869e4e224f1d0e0a0da017a2e5a30b178ef0f567b513fdea556aa34cb"
+  },
+  "template_is_executable": false
+}

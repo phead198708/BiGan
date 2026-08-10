@@ -587,6 +587,21 @@ def _validate_quality_contract(
     if validation_fixture_only:
         return
     observations = dict(quality.get("quality_observations") or {})
+    missing_feature_count = quality.get("missing_feature_count")
+    missing_feature_counts = dict(quality.get("missing_feature_counts") or {})
+    missing_counts_valid = bool(
+        isinstance(missing_feature_count, int)
+        and not isinstance(missing_feature_count, bool)
+        and missing_feature_count >= 0
+        and all(
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+            for value in missing_feature_counts.values()
+        )
+        and sum(missing_feature_counts.values()) == missing_feature_count
+        and (missing_feature_count > 0 or not missing_feature_counts)
+    )
     if not observations or any(value is not True for value in observations.values()):
         raise ValueError("quality-valid attempt has an unsatisfied observation")
     if not (
@@ -595,7 +610,7 @@ def _validate_quality_contract(
         and int(quality.get("paired_executable_ask_decision_count") or 0) > 0
         and int(quality.get("btc_feature_complete_decision_count") or 0) > 0
         and int(quality.get("causality_violation_count") or 0) == 0
-        and int(quality.get("missing_feature_count") or 0) == 0
+        and missing_counts_valid
         and quality.get("missing_values_encoded_as_zero") is False
     ):
         raise ValueError("quality-valid attempt is internally inconsistent")

@@ -42,9 +42,14 @@ CONFIG = (
     / "examples/v8/polymarket_configs/"
     "BTC-15M-cost-aware-market-residual-promotion-v1"
 )
-CONTRACT = CONFIG / "micro_live_preapproval_contract.json"
-PREFLIGHT = CONFIG / "micro_live_preapproval_preflight_report.json"
-AUTHORIZATION_TEMPLATE = CONFIG / "micro_live_authorization_template.json"
+CONTRACT = CONFIG / "micro_live_preapproval_contract_v2.json"
+PREFLIGHT = CONFIG / "micro_live_preapproval_preflight_report_v2.json"
+AUTHORIZATION_TEMPLATE = CONFIG / "micro_live_authorization_template_v2.json"
+HISTORICAL_V1_ARTIFACTS = (
+    CONFIG / "micro_live_preapproval_contract.json",
+    CONFIG / "micro_live_preapproval_preflight_report.json",
+    CONFIG / "micro_live_authorization_template.json",
+)
 
 
 def _json(path: Path) -> dict[str, object]:
@@ -272,6 +277,9 @@ def test_frozen_contract_and_sidecars_reconcile() -> None:
         ),
     )
     for path in (CONTRACT, PREFLIGHT, AUTHORIZATION_TEMPLATE):
+        sidecar = path.with_suffix(path.suffix + ".sha256")
+        assert sidecar.read_text(encoding="utf-8").strip() == sha256_file(path)
+    for path in HISTORICAL_V1_ARTIFACTS:
         sidecar = path.with_suffix(path.suffix + ".sha256")
         assert sidecar.read_text(encoding="utf-8").strip() == sha256_file(path)
 

@@ -1,0 +1,48 @@
+{
+  "automatic_live_unlock": false,
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "capital_at_risk": false,
+  "created_at": "2026-08-10T16:10:00+00:00",
+  "evidence_sha256": {},
+  "explicit_human_approval_recorded": false,
+  "failed_or_missing_checks": [
+    "fresh_confirmation",
+    "operational_rollback",
+    "phase6_zero_capital_pipeline",
+    "security_review",
+    "shadow_stability_and_monitoring"
+  ],
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "micro_live_authorized": false,
+  "micro_live_started": false,
+  "phase6_one_percent_live_stage_executed": false,
+  "phase6_zero_capital_pipeline_passed": false,
+  "polymarket_write_allowed": false,
+  "ready_to_request_micro_live_approval": false,
+  "requested_initial_capital_fraction": 0.01,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-micro-live-preapproval-preflight-v2",
+  "status": "NO_GO_PREREQUISITES_INCOMPLETE",
+  "technical_checks": {
+    "fresh_confirmation": false,
+    "functional_rollback": true,
+    "operational_rollback": false,
+    "phase6_zero_capital_pipeline": false,
+    "runtime_parity": true,
+    "security_review": false,
+    "shadow_stability_and_monitoring": false
+  },
+  "wallet_signing_allowed": false
+}
