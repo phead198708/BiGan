@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ from bigan.v8.polymarket.residual_promotion_evaluation import (
     dry_run_evaluation_pipeline,
     validate_evaluation_execution_contract,
 )
+from examples.v8 import run_residual_promotion_evaluation as evaluation_cli
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROTOCOL = json.loads(
@@ -197,6 +199,61 @@ def test_frozen_execution_contract_and_dry_run_artifacts_reconcile() -> None:
     assert frozen_report == dry_run_evaluation_pipeline(protocol=PROTOCOL)
     assert report_path.with_suffix(".json.sha256").read_text().strip() == sha256_file(
         report_path
+    )
+
+
+def test_evaluation_entrypoint_is_bound_to_corrective_v2_contract() -> None:
+    contract_path = evaluation_cli.EXECUTION_CONTRACT
+    assert contract_path == CONFIG / "promotion_evaluation_execution_contract_v2.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    assert contract["contract_revision"] == "native_missingness_reconciliation_v2"
+    assert contract["finalization_correction"]["path"].endswith(
+        "/finalization_native_missingness_correction.json"
+    )
+    assert contract_path.with_suffix(".json.sha256").read_text().strip() == (
+        sha256_file(contract_path)
+    )
+    validate_evaluation_execution_contract(contract, repository_root=REPO_ROOT)
+
+
+def test_evaluation_cli_passes_corrective_v2_contract_to_one_shot_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict = {}
+
+    def _capture(**kwargs: object) -> dict:
+        captured.update(kwargs)
+        return {"evaluation_invoked": True}
+
+    monkeypatch.setattr(evaluation_cli, "run_authorized_promotion_evaluation", _capture)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_residual_promotion_evaluation.py",
+            "evaluate",
+            "--service-root",
+            str(tmp_path / "service"),
+            "--freeze-dir",
+            str(tmp_path / "freeze"),
+            "--population-manifest-sha256",
+            "1" * 64,
+            "--settlements",
+            str(tmp_path / "settlements.jsonl"),
+            "--settlements-sha256",
+            "2" * 64,
+            "--authorization",
+            str(tmp_path / "authorization.json"),
+            "--authorization-sha256",
+            "3" * 64,
+            "--output-dir",
+            str(tmp_path / "output"),
+        ],
+    )
+    assert evaluation_cli.main() == 0
+    assert captured["execution_contract_path"] == evaluation_cli.EXECUTION_CONTRACT
+    assert captured["expected_execution_contract_sha256"] == sha256_file(
+        evaluation_cli.EXECUTION_CONTRACT
     )
 
 
