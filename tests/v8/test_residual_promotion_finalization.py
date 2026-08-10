@@ -17,8 +17,8 @@ from bigan.v8.polymarket.residual_promotion_v1 import LINEAGE_ID
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG = REPO_ROOT / "examples/v8/polymarket_configs" / LINEAGE_ID
-AUTHORIZATION = CONFIG / "manual_collection_authorization_v2.json"
-COLLECTOR_PROTOCOL = CONFIG / "prospective_collector_protocol_v2.json"
+AUTHORIZATION = CONFIG / "manual_collection_authorization_v3.json"
+COLLECTOR_PROTOCOL = CONFIG / "prospective_collector_protocol_v3.json"
 BUNDLE_SHA = (
     "7a5b872b5a2a010a0868bf7d22fb4bdc39a941dd04464bb53890d34aa1846b3e"
 )
