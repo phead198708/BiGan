@@ -617,11 +617,9 @@ def verify_integration_closure_set(
         layer_paths = {
             entry["destination_path"] for entry in payload["entries"]
         } | self_paths
-        overlap = all_paths & layer_paths
-        if overlap:
-            raise IntegrationClosureError(
-                "duplicate paths across closure layers: " + ", ".join(sorted(overlap))
-            )
+        # A later layer may deliberately modify a path from an earlier layer (for
+        # example, extending CI after residual tests arrive). Each layer still
+        # has a unique destination inventory and exact source/destination bytes.
         all_paths.update(layer_paths)
 
     root_base = ordered[0]["payload"]["base"]["commit"]
