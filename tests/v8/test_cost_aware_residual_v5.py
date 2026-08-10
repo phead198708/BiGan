@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from bigan.v8.polymarket.cost_aware_residual import _load_json
+from bigan.v8.polymarket import cost_aware_residual_v5 as primary_v5
+from bigan.v8.polymarket import cost_aware_residual_v5_challenger as challenger_v5
+from bigan.v8.polymarket.cost_aware_residual import _load_json, _load_jsonl
 from bigan.v8.polymarket.cost_aware_residual_v5 import (
     DEFAULT_PROTOCOL,
     FIXED_NUM_BOOST_ROUND,
@@ -25,6 +27,8 @@ from bigan.v8.polymarket.cost_aware_residual_v5_challenger import (
 )
 from bigan.v8.polymarket.moe_collection_observability import FEATURE_NAMES
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
+from bigan.v8.polymarket.moe_terminal_diagnostic import _assert_semantically_equal
+from bigan.v8.polymarket.regime_adaptive_lineage import REPO_ROOT
 
 
 def _fixture() -> tuple[list[dict], list[dict], list[str], dict]:
@@ -208,3 +212,61 @@ def test_v5_final_slot_protocol_preserves_candidate_and_gate_bytes() -> None:
     assert protocol["structural_change"]["candidate_algorithm_changed"] is False
     assert protocol["model"] == _load_json(Path(DEFAULT_PROTOCOL))["model"]
     assert protocol["gates"] == _load_json(Path(DEFAULT_PROTOCOL))["gates"]
+
+
+def test_v5_terminal_report_is_independently_reconciled_and_fail_closed() -> None:
+    root = Path(REPO_ROOT)
+    protocol = _load_json(Path(CHALLENGER_PROTOCOL))
+    output = root / (
+        "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/"
+        "residual_v5_challenger_slot_002_oof"
+    )
+    manifest = _load_json(output / "residual_v5_challenger_oof_manifest.json")
+    predictions = _load_jsonl(output / "residual_v5_challenger_oof_predictions.jsonl")
+    folds = _load_jsonl(output / "residual_v5_challenger_oof_fold_audits.jsonl")
+    markets = _load_jsonl(output / "residual_v5_challenger_oof_market_results.jsonl")
+    assert all(row["current_or_future_label_used_for_corrector"] is False for row in predictions)
+    compatibility_predictions = [
+        challenger_v5._replace_schema(
+            {**row, "target_or_future_label_used_for_fit": False},
+            primary_v5.PREDICTION_SCHEMA_VERSION,
+        )
+        for row in predictions
+    ]
+    primary_v5._validate_population(
+        predictions=compatibility_predictions,
+        fold_audits=[
+            challenger_v5._replace_schema(row, primary_v5.FOLD_SCHEMA_VERSION)
+            for row in folds
+        ],
+        market_results=[
+            challenger_v5._replace_schema(row, primary_v5.MARKET_RESULT_SCHEMA_VERSION)
+            for row in markets
+        ],
+        protocol=protocol,
+    )
+    rebuilt = challenger_v5._build_report(
+        protocol=protocol,
+        protocol_sha256=(
+            "5483aeb573517eb66443368302d2aa8d4fbcc6d3ead97e1199b7edb1c2e56730"
+        ),
+        source_commit=manifest["source_commit"],
+        market_results=markets,
+        fold_audits=folds,
+    )
+    frozen = _load_json(output / "residual_v5_challenger_oof_report.json")
+    _assert_semantically_equal(rebuilt, frozen, path="test_v5_terminal_reconciliation")
+    terminal = _load_json(
+        root
+        / (
+            "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/"
+            "residual_v5_development_terminal_review.json"
+        )
+    )
+    assert frozen["failed_gates"] == ["prospective_power_required_market_count_lte_2000"]
+    assert frozen["prospective_power"]["required_market_count"] == 2598
+    assert terminal["phase_1_terminal_failed"] is True
+    assert terminal["candidate_budget_exhausted"] is True
+    assert terminal["candidate_selected"] is None
+    assert terminal["candidate_freeze_allowed"] is False
+    assert terminal["safety"] == SAFETY

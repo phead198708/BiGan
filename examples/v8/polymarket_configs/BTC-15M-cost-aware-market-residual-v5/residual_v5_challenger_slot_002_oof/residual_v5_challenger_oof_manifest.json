@@ -1,0 +1,80 @@
+{
+  "additional_candidate_allowed": false,
+  "artifacts": {
+    "dataset_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_oof/residual_v5_challenger_development_dataset_rows.jsonl",
+      "sha256": "39594eef3d14f37dd818652ab4753fd64a9acac4517c71e5bfb65b3c5f0c33c1"
+    },
+    "fold_audits": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_oof/residual_v5_challenger_oof_fold_audits.jsonl",
+      "sha256": "76a3cfcb76bcd7986818cc017f452d7b8dda27cd2b6de01e7b20b445fc4299da"
+    },
+    "market_results": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_oof/residual_v5_challenger_oof_market_results.jsonl",
+      "sha256": "1b3b64503e870087d527703abc9f2178c6d7c5bb9bca1b138cac51f985aac8d9"
+    },
+    "predictions": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_oof/residual_v5_challenger_oof_predictions.jsonl",
+      "sha256": "5b1ec88b252777055ccd7f023081d9c3cf1e81890d9421ee20af8a7be74794d3"
+    },
+    "report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_oof/residual_v5_challenger_oof_report.json",
+      "sha256": "3740b63959f9206be678d045621488a0e4354d4b7e2c40862850f6fbfcc9c164"
+    },
+    "report_markdown": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_oof/residual_v5_challenger_oof_report.md",
+      "sha256": "2dcc9444df176095d1a9893ede308350d4416a585092207355fb7f8bdc961666"
+    }
+  },
+  "candidate_budget_exhausted": true,
+  "candidate_freeze_allowed": false,
+  "candidate_implementation": {
+    "path": "src/bigan/v8/polymarket/cost_aware_residual_v5_challenger.py",
+    "sha256": "df936704c7d429ab11a106527c6a6355a1335ef58907d9c6a0e4f38c8de23af6"
+  },
+  "candidate_role": "challenger",
+  "created_at": "2026-08-10T10:59:14Z",
+  "development_only_forever": true,
+  "evaluation_executed_exactly_once": true,
+  "immutable_gate_implementation": {
+    "path": "src/bigan/v8/polymarket/cost_aware_residual.py",
+    "sha256": "491a329f708a16d5aecdd952552cbff3fa13d8f7446bfe3e0c78fade3b36f78c"
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v5",
+  "next_stage_authorization_required_even_if_all_gates_pass": true,
+  "primary_candidate_implementation": {
+    "path": "src/bigan/v8/polymarket/cost_aware_residual_v5.py",
+    "sha256": "daf9da7efeba997a077e21bca5b600aed4fe1c52b2bd37c966a7592d680080cb"
+  },
+  "prior_slot_failure": {
+    "artifact": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_primary_slot_001_execution_failure.json",
+      "sha256": "7fdf02f4b42c84ff2667f630876e32c6c7db9f94b12b160bb35345079e3a51a3"
+    },
+    "candidate_metrics_computed": false,
+    "failure_stage": "corrector_feature_schema_validation_before_first_model_fit",
+    "gate_evaluation_performed": false,
+    "slot_consumed": true
+  },
+  "promotion_evidence_eligible": false,
+  "protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_challenger_slot_002_protocol.json",
+    "sha256": "5483aeb573517eb66443368302d2aa8d4fbcc6d3ead97e1199b7edb1c2e56730"
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-prequential-market-residual-oof-manifest-v5-slot2",
+  "slot_id": "residual-v5-challenger-slot-002",
+  "source_commit": "d32db6cf12d130cb532bf4b000fc03dc199e046d"
+}
