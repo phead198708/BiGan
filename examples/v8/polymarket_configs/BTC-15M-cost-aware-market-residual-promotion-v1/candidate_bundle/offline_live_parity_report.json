@@ -1,0 +1,77 @@
+{
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "fixture_sha256": "77abc5ad6a41c66a19d1407aa8102408cfd259cdf09446c62575810d58416389",
+  "fresh_outcomes_accessed": false,
+  "frozen_bundle_manifest": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/bundle_manifest.json",
+    "sha256": "7a5b872b5a2a010a0868bf7d22fb4bdc39a941dd04464bb53890d34aa1846b3e"
+  },
+  "live_projection": {
+    "action_values": {
+      "BUY_DOWN_HOLD": 0.0010315960918330092,
+      "BUY_UP_HOLD": -0.021531596091833083,
+      "NO_TRADE": 0.0
+    },
+    "fail_closed": false,
+    "model_scored": true,
+    "probabilities": {
+      "logit_offset": {
+        "DOWN": 0.4327843248628397,
+        "UP": 0.5672156751371603
+      },
+      "probability_residual": {
+        "DOWN": 0.4502016086143139,
+        "UP": 0.549798391385686
+      },
+      "soft_stacker": {
+        "DOWN": 0.436281596091833,
+        "UP": 0.5637184039081669
+      }
+    },
+    "selected_action": "BUY_DOWN_HOLD"
+  },
+  "model_refit_performed": false,
+  "offline_projection": {
+    "action_values": {
+      "BUY_DOWN_HOLD": 0.0010315960918330092,
+      "BUY_UP_HOLD": -0.021531596091833083,
+      "NO_TRADE": 0.0
+    },
+    "fail_closed": false,
+    "model_scored": true,
+    "probabilities": {
+      "logit_offset": {
+        "DOWN": 0.4327843248628397,
+        "UP": 0.5672156751371603
+      },
+      "probability_residual": {
+        "DOWN": 0.4502016086143139,
+        "UP": 0.549798391385686
+      },
+      "soft_stacker": {
+        "DOWN": 0.436281596091833,
+        "UP": 0.5637184039081669
+      }
+    },
+    "selected_action": "BUY_DOWN_HOLD"
+  },
+  "post_fit_correction": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/post_fit_parity_engineering_correction.json",
+    "sha256": "0243ccb06f93cf2f80ecb142484aa18a7d97e3d51589acaf32fcfff0589be6be"
+  },
+  "prediction_and_decision_parity": true,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-v1-offline-live-parity"
+}
