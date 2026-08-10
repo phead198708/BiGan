@@ -30,11 +30,17 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
     TARGET_MARKETS,
 )
 
-CONTRACT_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-preapproval-contract-v4"
-PREFLIGHT_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-preapproval-preflight-v4"
-ASSESSMENT_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-preapproval-assessment-v4"
+CONTRACT_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-preapproval-contract-v5"
+PREFLIGHT_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-preapproval-preflight-v5"
+ASSESSMENT_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-preapproval-assessment-v5"
 AUTHORIZATION_TEMPLATE_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-micro-live-authorization-template-v4"
+    "bigan-btc-15m-residual-promotion-micro-live-authorization-template-v5"
+)
+PHASE6_AUTHORIZATION_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-phase6-zero-capital-authorization-v1"
+)
+PHASE6_AUTHORIZATION_TEMPLATE_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-phase6-zero-capital-authorization-template-v1"
 )
 SHADOW_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-shadow-stability-report-v1"
 OPERATIONAL_ROLLBACK_SCHEMA_VERSION = (
@@ -69,14 +75,24 @@ FINALIZATION_FEATURE_ENVELOPE_CORRECTION_REPOSITORY_PATH = (
 )
 PHASE6_PIPELINE_REPOSITORY_PATH = "src/bigan/v8/phase6/pipeline.py"
 PHASE6_CONTRACTS_REPOSITORY_PATH = "src/bigan/v8/phase6/contracts.py"
-ZERO_CAPITAL_AUTHORIZATION_REPOSITORY_PATH = (
+SHADOW_EVIDENCE_IMPLEMENTATION_REPOSITORY_PATH = (
+    "src/bigan/v8/polymarket/residual_promotion_release_evidence.py"
+)
+SHADOW_EVIDENCE_CLI_REPOSITORY_PATH = "examples/v8/run_residual_promotion_shadow_stability.py"
+OPERATIONAL_ROLLBACK_CLI_REPOSITORY_PATH = (
+    "examples/v8/run_residual_promotion_operational_rollback.py"
+)
+COLLECTION_AUTHORIZATION_REPOSITORY_PATH = (
     f"{CONFIG_REPOSITORY_PATH}/manual_collection_authorization_v3.json"
 )
+PHASE6_AUTHORIZATION_TEMPLATE_REPOSITORY_PATH = (
+    f"{CONFIG_REPOSITORY_PATH}/phase6_zero_capital_authorization_template.json"
+)
 HISTORICAL_PREAPPROVAL_CONTRACT_REPOSITORY_PATH = (
-    f"{CONFIG_REPOSITORY_PATH}/micro_live_preapproval_contract_v3.json"
+    f"{CONFIG_REPOSITORY_PATH}/micro_live_preapproval_contract_v4.json"
 )
 HISTORICAL_MICRO_LIVE_TEMPLATE_REPOSITORY_PATH = (
-    f"{CONFIG_REPOSITORY_PATH}/micro_live_authorization_template_v3.json"
+    f"{CONFIG_REPOSITORY_PATH}/micro_live_authorization_template_v4.json"
 )
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MAX_INITIAL_CAPITAL_FRACTION = 0.01
@@ -93,9 +109,9 @@ def freeze_release_readiness_contract(
 
     root = Path(repository_root).resolve()
     config = root / CONFIG_REPOSITORY_PATH
-    contract_path = config / "micro_live_preapproval_contract_v4.json"
-    preflight_path = config / "micro_live_preapproval_preflight_report_v4.json"
-    template_path = config / "micro_live_authorization_template_v4.json"
+    contract_path = config / "micro_live_preapproval_contract_v5.json"
+    preflight_path = config / "micro_live_preapproval_preflight_report_v5.json"
+    template_path = config / "micro_live_authorization_template_v5.json"
     for path in (contract_path, preflight_path, template_path):
         if path.exists():
             raise FileExistsError(f"release readiness artifact already exists: {path.name}")
@@ -116,6 +132,9 @@ def freeze_release_readiness_contract(
     outcome_authorization_template = _verified_repository_json(
         root, OUTCOME_AUTHORIZATION_TEMPLATE_REPOSITORY_PATH
     )
+    phase6_authorization_template = _verified_repository_json(
+        root, PHASE6_AUTHORIZATION_TEMPLATE_REPOSITORY_PATH
+    )
     validate_settlement_ingestion_contract(settlement_contract, repository_root=root)
     if not (
         bundle.get("lineage_id") == LINEAGE_ID
@@ -133,6 +152,17 @@ def freeze_release_readiness_contract(
         and outcome_authorization_template.get("authorization_record_executable") is False
         and outcome_authorization_template.get("template_is_executable") is False
         and outcome_authorization_template.get("safety") == SAFETY
+        and phase6_authorization_template.get("schema_version")
+        == PHASE6_AUTHORIZATION_TEMPLATE_SCHEMA_VERSION
+        and phase6_authorization_template.get("lineage_id") == LINEAGE_ID
+        and phase6_authorization_template.get("candidate_id") == CANDIDATE_ID
+        and phase6_authorization_template.get("phase6_zero_capital_authorized") is False
+        and phase6_authorization_template.get("authorization_record_executable") is False
+        and phase6_authorization_template.get("template_is_executable") is False
+        and phase6_authorization_template.get("wallet_signing_allowed") is False
+        and phase6_authorization_template.get("polymarket_write_allowed") is False
+        and phase6_authorization_template.get("capital_at_risk") is False
+        and phase6_authorization_template.get("safety") == SAFETY
     ):
         raise ValueError("static release-readiness evidence is invalid")
 
@@ -163,8 +193,21 @@ def freeze_release_readiness_contract(
         ),
         "phase6_pipeline": _repository_descriptor(root, PHASE6_PIPELINE_REPOSITORY_PATH),
         "phase6_contracts": _repository_descriptor(root, PHASE6_CONTRACTS_REPOSITORY_PATH),
-        "zero_capital_authorization": _repository_descriptor(
-            root, ZERO_CAPITAL_AUTHORIZATION_REPOSITORY_PATH
+        "shadow_evidence_implementation": _repository_descriptor(
+            root, SHADOW_EVIDENCE_IMPLEMENTATION_REPOSITORY_PATH
+        ),
+        "shadow_evidence_cli": _repository_descriptor(root, SHADOW_EVIDENCE_CLI_REPOSITORY_PATH),
+        "operational_rollback_evidence_implementation": _repository_descriptor(
+            root, SHADOW_EVIDENCE_IMPLEMENTATION_REPOSITORY_PATH
+        ),
+        "operational_rollback_evidence_cli": _repository_descriptor(
+            root, OPERATIONAL_ROLLBACK_CLI_REPOSITORY_PATH
+        ),
+        "collection_authorization_not_valid_for_phase6": _repository_descriptor(
+            root, COLLECTION_AUTHORIZATION_REPOSITORY_PATH
+        ),
+        "phase6_zero_capital_authorization_template": _repository_descriptor(
+            root, PHASE6_AUTHORIZATION_TEMPLATE_REPOSITORY_PATH
         ),
         "readiness_implementation": _repository_descriptor(root, IMPLEMENTATION_REPOSITORY_PATH),
         "supersedes_preapproval_contract": _repository_descriptor(
@@ -214,7 +257,9 @@ def freeze_release_readiness_contract(
                 "all_stage_gates_must_pass": True,
                 "rollout_step_index": 0,
                 "requested_capital_fraction": 0.0,
-                "existing_zero_capital_authorization_required": True,
+                "separate_post_confirmation_authorization_required": True,
+                "collection_authorization_reuse_forbidden": True,
+                "wallet_write_or_capital_authorized": False,
             },
         },
         "phase6_preapproval_semantics": {
@@ -229,6 +274,7 @@ def freeze_release_readiness_contract(
         "approval_order": [
             "official_settlement_population_ingested_once",
             "fresh_confirmation_passes_exactly_once",
+            "explicit_zero_capital_phase6_authorization_after_fresh_confirmation",
             "runtime_parity_reconciles",
             "shadow_stability_and_monitoring_pass",
             "functional_and_operational_rollback_pass",
@@ -273,6 +319,7 @@ def freeze_release_readiness_contract(
             "preapproval_assessment_sha256": None,
             "fresh_evaluation_manifest_sha256": None,
             "phase6_release_manifest_sha256": None,
+            "phase6_zero_capital_authorization_sha256": None,
             "operational_rollback_report_sha256": None,
             "security_review_report_sha256": None,
         },
@@ -319,7 +366,12 @@ def validate_release_readiness_contract(
         "finalization_feature_envelope_correction",
         "phase6_pipeline",
         "phase6_contracts",
-        "zero_capital_authorization",
+        "shadow_evidence_implementation",
+        "shadow_evidence_cli",
+        "operational_rollback_evidence_implementation",
+        "operational_rollback_evidence_cli",
+        "collection_authorization_not_valid_for_phase6",
+        "phase6_zero_capital_authorization_template",
         "readiness_implementation",
         "supersedes_preapproval_contract",
     ):
@@ -342,17 +394,29 @@ def validate_release_readiness_contract(
     outcome_template = _verified_repository_json(
         root, OUTCOME_AUTHORIZATION_TEMPLATE_REPOSITORY_PATH
     )
+    phase6_template = _verified_repository_json(root, PHASE6_AUTHORIZATION_TEMPLATE_REPOSITORY_PATH)
+    phase6_template_descriptor = _repository_descriptor(
+        root, PHASE6_AUTHORIZATION_TEMPLATE_REPOSITORY_PATH
+    )
+    collection_authorization_descriptor = _repository_descriptor(
+        root, COLLECTION_AUTHORIZATION_REPOSITORY_PATH
+    )
     validate_settlement_ingestion_contract(settlement_contract, repository_root=root)
     if not (
         contract.get("schema_version") == CONTRACT_SCHEMA_VERSION
         and contract.get("lineage_id") == LINEAGE_ID
         and contract.get("candidate_id") == CANDIDATE_ID
+        and _pair(contract.get("phase6_zero_capital_authorization_template"))
+        == _pair(phase6_template_descriptor)
+        and _pair(contract.get("collection_authorization_not_valid_for_phase6"))
+        == _pair(collection_authorization_descriptor)
         and implementation.get("path") == IMPLEMENTATION_REPOSITORY_PATH
         and implementation.get("sha256") == expected_implementation_sha256
         and order
         == [
             "official_settlement_population_ingested_once",
             "fresh_confirmation_passes_exactly_once",
+            "explicit_zero_capital_phase6_authorization_after_fresh_confirmation",
             "runtime_parity_reconciles",
             "shadow_stability_and_monitoring_pass",
             "functional_and_operational_rollback_pass",
@@ -390,7 +454,9 @@ def validate_release_readiness_contract(
         and phase6_zero.get("all_stage_gates_must_pass") is True
         and phase6_zero.get("rollout_step_index") == 0
         and phase6_zero.get("requested_capital_fraction") == 0.0
-        and phase6_zero.get("existing_zero_capital_authorization_required") is True
+        and phase6_zero.get("separate_post_confirmation_authorization_required") is True
+        and phase6_zero.get("collection_authorization_reuse_forbidden") is True
+        and phase6_zero.get("wallet_write_or_capital_authorized") is False
         and identity.get("candidate_run_id") == CANDIDATE_ID
         and historical.get("path") == HISTORICAL_PREAPPROVAL_CONTRACT_REPOSITORY_PATH
         and _looks_like_sha256(identity.get("model_sha256"))
@@ -408,6 +474,16 @@ def validate_release_readiness_contract(
         and outcome_template.get("authorization_record_executable") is False
         and outcome_template.get("template_is_executable") is False
         and outcome_template.get("safety") == SAFETY
+        and phase6_template.get("schema_version") == PHASE6_AUTHORIZATION_TEMPLATE_SCHEMA_VERSION
+        and phase6_template.get("lineage_id") == LINEAGE_ID
+        and phase6_template.get("candidate_id") == CANDIDATE_ID
+        and phase6_template.get("phase6_zero_capital_authorized") is False
+        and phase6_template.get("authorization_record_executable") is False
+        and phase6_template.get("template_is_executable") is False
+        and phase6_template.get("wallet_signing_allowed") is False
+        and phase6_template.get("polymarket_write_allowed") is False
+        and phase6_template.get("capital_at_risk") is False
+        and phase6_template.get("safety") == SAFETY
         and dict(contract.get("safety") or {}) == SAFETY
     ):
         raise ValueError("release readiness contract is invalid")
@@ -427,6 +503,7 @@ def assess_micro_live_preapproval(
         "shadow_stability",
         "operational_rollback",
         "security_review",
+        "phase6_authorization",
         "phase6_report",
     }
     extra = sorted(set(evidence) - expected)
@@ -587,6 +664,9 @@ def _shadow_passes(evidence: Mapping[str, Mapping[str, Any]], contract: Mapping[
     bundle_sha = dict(contract.get("candidate_bundle") or {}).get("sha256")
     return bool(
         report.get("schema_version") == SHADOW_SCHEMA_VERSION
+        and _pair(report.get("implementation"))
+        == _pair(contract.get("shadow_evidence_implementation"))
+        and _pair(report.get("cli")) == _pair(contract.get("shadow_evidence_cli"))
         and report.get("lineage_id") == LINEAGE_ID
         and report.get("candidate_id") == CANDIDATE_ID
         and report.get("candidate_bundle_sha256") == bundle_sha
@@ -632,6 +712,9 @@ def _operational_rollback_passes(
     maximum = max(map(float, measurements)) if valid_measurements else math.inf
     return bool(
         report.get("schema_version") == OPERATIONAL_ROLLBACK_SCHEMA_VERSION
+        and _pair(report.get("implementation"))
+        == _pair(contract.get("operational_rollback_evidence_implementation"))
+        and _pair(report.get("cli")) == _pair(contract.get("operational_rollback_evidence_cli"))
         and report.get("lineage_id") == LINEAGE_ID
         and report.get("candidate_id") == CANDIDATE_ID
         and report.get("candidate_bundle_sha256") == bundle_sha
@@ -682,10 +765,11 @@ def _phase6_zero_capital_passes(
     evidence: Mapping[str, Mapping[str, Any]], contract: Mapping[str, Any]
 ) -> bool:
     report = dict(evidence.get("phase6_report") or {})
+    authorization = dict(evidence.get("phase6_authorization") or {})
+    evaluation_manifest = dict(evidence.get("evaluation_manifest") or {})
     identity = dict(contract.get("phase6_candidate_identity") or {})
-    expected_authorization_sha = dict(contract.get("zero_capital_authorization") or {}).get(
-        "sha256"
-    )
+    authorization_template = dict(contract.get("phase6_zero_capital_authorization_template") or {})
+    authorization_payload_sha256 = canonical_json_sha256(authorization)
     report_identity = dict(report.get("candidate_identity") or {})
     stage_gates = list(report.get("stage_gates") or [])
     rollback_gate = dict(report.get("rollback_gate") or {})
@@ -700,6 +784,26 @@ def _phase6_zero_capital_passes(
     acceptance = dict(report.get("acceptance_criteria") or {})
     return bool(
         report.get("phase") == PHASE6_CICD_PHASE
+        and authorization.get("schema_version") == PHASE6_AUTHORIZATION_SCHEMA_VERSION
+        and authorization.get("lineage_id") == LINEAGE_ID
+        and authorization.get("candidate_id") == CANDIDATE_ID
+        and authorization.get("authorization_scope") == "post_confirmation_phase6_zero_capital_only"
+        and authorization.get("candidate_bundle_sha256") == identity.get("model_sha256")
+        and _pair(authorization.get("supersedes_template")) == _pair(authorization_template)
+        and authorization.get("fresh_evaluation_manifest_payload_sha256")
+        == canonical_json_sha256(evaluation_manifest)
+        and authorization.get("phase6_zero_capital_authorized") is True
+        and authorization.get("requested_capital_fraction") == 0.0
+        and authorization.get("rollout_step_index") == 0
+        and authorization.get("explicit_human_zero_capital_approval_recorded") is True
+        and authorization.get("authorization_record_executable") is True
+        and authorization.get("collection_authorization_reused") is False
+        and authorization.get("micro_live_authorized") is False
+        and authorization.get("live_trading_allowed") is False
+        and authorization.get("wallet_signing_allowed") is False
+        and authorization.get("polymarket_write_allowed") is False
+        and authorization.get("capital_at_risk") is False
+        and _safety_is_closed(authorization)
         and report.get("passed") is True
         and report.get("deployment_status") == "approved_for_staged_live"
         and report.get("candidate_run_id") == CANDIDATE_ID
@@ -720,7 +824,7 @@ def _phase6_zero_capital_passes(
         and float(rollback_gate.get("max_observed_latency_ms", math.inf)) <= MAX_ROLLBACK_LATENCY_MS
         and release.get("manual_approval_required") is True
         and live_metadata.get("manual_approval_recorded") is True
-        and live_metadata.get("zero_capital_authorization_sha256") == expected_authorization_sha
+        and live_metadata.get("zero_capital_authorization_sha256") == authorization_payload_sha256
         and live_metadata.get("rollout_step_index") == 0
         and live_metadata.get("requested_capital_fraction") == 0.0
         and live_metadata.get("capital_at_risk") is False
@@ -746,6 +850,14 @@ def _descriptor_matches(value: Any, expected_path: str) -> bool:
     return bool(
         descriptor.get("path") == expected_path and _looks_like_sha256(descriptor.get("sha256"))
     )
+
+
+def _pair(value: Any) -> dict[str, str]:
+    descriptor = dict(value or {})
+    return {
+        "path": str(descriptor.get("path") or ""),
+        "sha256": str(descriptor.get("sha256") or ""),
+    }
 
 
 def _repository_descriptor(root: Path, relative_path: str) -> dict[str, str]:
