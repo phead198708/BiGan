@@ -18,7 +18,7 @@
   },
   "collector_implementation": {
     "path": "examples/v8/run_residual_promotion_v1_collector.py",
-    "sha256": "fab27f9637f5b63fd5d0eaa4ad6d193b7c0724eddcadee54d0003572d751f6a5"
+    "sha256": "af2fcd7dcec87ebbc2960e3853e947ea0b628a4f1add50da50090342f8ad43ff"
   },
   "created_at": "2026-08-10T15:07:14Z",
   "fresh_outcomes_accessed": false,
@@ -30,11 +30,11 @@
     },
     "collection_ledger": {
       "path": "src/bigan/v8/polymarket/residual_promotion_collection.py",
-      "sha256": "0db210d229e942d4aea6fbedb33846331a3722868635276806d56b8ab770b388"
+      "sha256": "8bc51f1b98b062991c2c3f417e2730f1fc68cd343bb484781c1bacd3bd9f71db"
     },
     "collector_cli": {
       "path": "examples/v8/run_residual_promotion_v1_collector.py",
-      "sha256": "fab27f9637f5b63fd5d0eaa4ad6d193b7c0724eddcadee54d0003572d751f6a5"
+      "sha256": "af2fcd7dcec87ebbc2960e3853e947ea0b628a4f1add50da50090342f8ad43ff"
     },
     "live_round_finalizer": {
       "path": "src/bigan/v8/polymarket/live/operator.py",

@@ -15,7 +15,7 @@
   },
   "collector_protocol": {
     "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/prospective_collector_protocol_v3.json",
-    "sha256": "93a155cd914f226e0d9c8dcdf3199933954535ac7b21ac0ac9083e8ff5a7327d"
+    "sha256": "b9fb1291297d597b6e3bb35f409f4de198c4d87c2a9c2d79947a19649415be7a"
   },
   "created_at": "2026-08-10T15:07:14Z",
   "fresh_collection_authorized": true,
