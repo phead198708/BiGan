@@ -1,0 +1,107 @@
+{
+  "assessment": {
+    "automatic_live_unlock": false,
+    "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+    "capital_at_risk": false,
+    "created_at": "2026-08-10T21:10:40Z",
+    "evidence_sha256": {
+      "operational_rollback": "d02e7e91073c22331a4b330a2411b44656e774a8ed5438cb03bfe38b3bfde4d9"
+    },
+    "explicit_human_approval_recorded": false,
+    "failed_or_missing_checks": [
+      "fresh_confirmation",
+      "phase6_zero_capital_pipeline",
+      "security_review",
+      "shadow_stability_and_monitoring"
+    ],
+    "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+    "micro_live_authorized": false,
+    "micro_live_started": false,
+    "phase6_one_percent_live_stage_executed": false,
+    "phase6_zero_capital_pipeline_passed": false,
+    "polymarket_write_allowed": false,
+    "ready_to_request_micro_live_approval": false,
+    "requested_initial_capital_fraction": 0.01,
+    "safety": {
+      "#134_resume_allowed": false,
+      "#146_start_allowed": false,
+      "capital_at_risk": false,
+      "freeze_ready": false,
+      "live_trading_allowed": false,
+      "paper_candidate_allowed": false,
+      "polymarket_write_allowed": false,
+      "promotion_evidence_eligible": false,
+      "source_model_candidate_eligible": false,
+      "v8_execution_handoff_allowed": false,
+      "wallet_signing_allowed": false
+    },
+    "schema_version": "bigan-btc-15m-residual-promotion-micro-live-preapproval-assessment-v5",
+    "status": "NO_GO_PREREQUISITES_INCOMPLETE",
+    "technical_checks": {
+      "fresh_confirmation": false,
+      "functional_rollback": true,
+      "operational_rollback": true,
+      "phase6_zero_capital_pipeline": false,
+      "runtime_parity": true,
+      "security_review": false,
+      "shadow_stability_and_monitoring": false
+    },
+    "wallet_signing_allowed": false
+  },
+  "candidate_behavior_changed": false,
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "capital_at_risk": false,
+  "completed_since_v5": [
+    "operational_rollback"
+  ],
+  "created_at": "2026-08-10T21:10:40Z",
+  "fresh_outcomes_accessed": false,
+  "fresh_population_accessed": false,
+  "generator": {
+    "path": "examples/v8/freeze_residual_promotion_operational_preflight_reconciliation.py",
+    "sha256": "d5f9e32008164716545db097b0b25534bdfa713dd5a89d65e6d8b7e4105e443e"
+  },
+  "historical_artifacts_modified": false,
+  "historical_v5_preflight_preserved": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/micro_live_preapproval_preflight_report_v5.json",
+    "sha256": "a1314ab05edaa0a3e3a11a11d0ceec697e8cc09d6160f6b7b8412a0eaa7b69f7"
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "live_trading_allowed": false,
+  "micro_live_authorized": false,
+  "operational_rollback_evidence": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/operational_rollback_drill_report.json",
+    "sha256": "2ded6e98ba341f755bf3733493f102fe642597524fdf2d6989d422d9f4d7b5fa"
+  },
+  "paper_run_started": false,
+  "phase6_zero_capital_authorized": false,
+  "pnl_accessed": false,
+  "polymarket_write_allowed": false,
+  "preapproval_contract": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/micro_live_preapproval_contract_v5.json",
+    "sha256": "8af60d18dc1dd0bece115515f22f953302686bda602dda4754f7a4d5699fa946"
+  },
+  "remaining_release_checks": [
+    "fresh_confirmation",
+    "phase6_zero_capital_pipeline",
+    "security_review",
+    "shadow_stability_and_monitoring"
+  ],
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-operational-preapproval-reconciliation-v1",
+  "security_review_passed": false,
+  "settlement_accessed": false,
+  "wallet_signing_allowed": false
+}
