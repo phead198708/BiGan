@@ -325,6 +325,16 @@ def build_integration_closure_manifest(
         entries.append(entry)
 
     entries.sort(key=lambda item: item["destination_path"])
+    used_source_keys = {
+        (entry["source_pr"], entry["source_ref"], entry["source_commit"])
+        for entry in entries
+    }
+    used_sources = [
+        source
+        for source in sources
+        if (source["source_pr"], source["source_ref"], source["source_commit"])
+        in used_source_keys
+    ]
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "closure_id": closure_id,
@@ -333,7 +343,7 @@ def build_integration_closure_manifest(
         "destination_ref": destination_ref,
         "base": {"ref": base_ref, "commit": base_commit},
         "generation_head": str(_git(root, "rev-parse", "HEAD")).strip(),
-        "source_catalog": sources,
+        "source_catalog": used_sources,
         "self_paths": sorted(excluded),
         "entries": entries,
         "frozen_evidence_bindings": _artifact_bindings(entries),
@@ -396,6 +406,33 @@ def _validate_structure(payload: Mapping[str, Any]) -> None:
     ]
     if len(source_keys) != len(set(source_keys)):
         raise IntegrationClosureError("duplicate source/destination entry in closure")
+    catalog = payload.get("source_catalog")
+    if not isinstance(catalog, list) or not catalog:
+        raise IntegrationClosureError("source_catalog must be non-empty")
+    catalog_keys: list[tuple[int, str, str]] = []
+    for source in catalog:
+        if not isinstance(source, Mapping):
+            raise IntegrationClosureError("source_catalog entries must be objects")
+        source_pr = source.get("source_pr")
+        source_ref = source.get("source_ref")
+        source_commit = source.get("source_commit")
+        if not isinstance(source_pr, int) or source_pr <= 0:
+            raise IntegrationClosureError("invalid source PR")
+        if not isinstance(source_ref, str) or not source_ref:
+            raise IntegrationClosureError("invalid source ref")
+        if not isinstance(source_commit, str) or not HEX_40_OR_64.fullmatch(
+            source_commit
+        ):
+            raise IntegrationClosureError("invalid source commit")
+        catalog_keys.append((source_pr, source_ref, source_commit))
+    if len(catalog_keys) != len(set(catalog_keys)):
+        raise IntegrationClosureError("duplicate source catalog entry")
+    entry_source_keys = {
+        (entry.get("source_pr"), entry.get("source_ref"), entry.get("source_commit"))
+        for entry in entries
+    }
+    if entry_source_keys != set(catalog_keys):
+        raise IntegrationClosureError("source catalog does not reconcile with entries")
     self_paths_raw = payload.get("self_paths")
     if not isinstance(self_paths_raw, list) or len(self_paths_raw) != 2:
         raise IntegrationClosureError(

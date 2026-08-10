@@ -68,6 +68,13 @@ def test_missing_declared_path_fails_closed() -> None:
         verify_integration_closure_payload(payload, root=ROOT)
 
 
+def test_duplicate_or_extra_source_catalog_fails_closed() -> None:
+    payload = _payload()
+    payload["source_catalog"].append(copy.deepcopy(payload["source_catalog"][0]))
+    with pytest.raises(IntegrationClosureError, match="duplicate source catalog"):
+        verify_integration_closure_payload(payload, root=ROOT)
+
+
 def test_frozen_evidence_and_candidate_bindings_are_explicit() -> None:
     payloads = [json.loads(path.read_text()) for path in _manifest_paths()]
     frozen = [
