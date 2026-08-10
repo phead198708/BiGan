@@ -508,9 +508,12 @@ def verify_integration_closure_payload(
             "source_git_blob_oid": _git_blob_oid(root, source_commit, source_path),
             "source_git_mode": _git_mode(root, source_commit, source_path),
             "source_content_sha256": _sha256(source_bytes),
+            # Check content before Git metadata so an explicitly corrupted
+            # content pin reports the semantic byte-drift failure even when a
+            # later working-tree commit legitimately changed the same path.
+            "destination_sha256": _sha256(destination_bytes),
             "destination_git_blob_oid": destination_blob_oid,
             "destination_git_mode": destination_mode,
-            "destination_sha256": _sha256(destination_bytes),
         }
         for field, actual in checks.items():
             if entry.get(field) != actual:
@@ -691,23 +694,22 @@ def verify_integration_closure_set(
         all_paths.update(layer_paths)
 
     root_base = ordered[0]["payload"]["base"]["commit"]
-    actual_paths = set(_changed_paths(root, root_base, "HEAD"))
+    # A closure set describes the exact history ending at the last closure
+    # manifest commit. Later mainline work must not be treated as an undeclared
+    # import into that already-closed historical layer.
+    closure_head = ordered[-1]["manifest_commit"]
+    actual_paths = set(_changed_paths(root, root_base, closure_head))
     missing = sorted(all_paths - actual_paths)
     extra = sorted(actual_paths - all_paths)
     if missing or extra:
         raise IntegrationClosureError(
             f"global closure inventory mismatch; missing={missing}, extra={extra}"
         )
-    final_tree_drift = _changed_paths(root, ordered[-1]["manifest_commit"], "HEAD")
-    if final_tree_drift:
-        raise IntegrationClosureError(
-            "unclosed changes after final closure manifest: "
-            + ", ".join(final_tree_drift)
-        )
     return {
         "closure_ids": [layer["payload"]["closure_id"] for layer in ordered],
         "entry_count": sum(layer["report"]["entry_count"] for layer in ordered),
         "layer_count": len(ordered),
+        "verified_through_commit": closure_head,
         "verification_passed": True,
     }
 
