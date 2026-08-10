@@ -62,5 +62,6 @@ jobs:
           python -m pytest \
             tests/v8/test_residual_promotion_v1.py \
             tests/v8/test_residual_promotion_finalization.py \
+            tests/v8/test_residual_promotion_evaluation.py \
             tests/v8/test_polymarket_async_settlement.py \
             -q

@@ -183,6 +183,16 @@ def test_freezes_and_revalidates_outcome_blind_fixture(tmp_path: Path) -> None:
     assert validation["exact_market_count"] == 2
     assert validation["candidate_decision_row_count"] == 2
     assert validation["baseline_decision_row_count"] == 2
+    candidate_rows = [
+        json.loads(line)
+        for line in (
+            tmp_path / "exact_population_freeze/candidate_decision_rows.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(candidate_rows) == 2
+    assert candidate_rows[0]["selected_side"] == "UP"
+    assert candidate_rows[0]["execution_features"]["up_ask"] == 0.55
+    assert candidate_rows[0]["execution_features_sha256"]
     manifest = json.loads(
         (tmp_path / "exact_population_freeze/exact_population_manifest.json").read_text()
     )
