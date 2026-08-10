@@ -7,11 +7,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from bigan.v8.polymarket.challenge_development_lane import sha256_file
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.residual_promotion_evaluation import (
+    _validate_evaluation_authorization,
     build_market_results,
     build_promotion_report,
     dry_run_evaluation_pipeline,
+    validate_evaluation_execution_contract,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +25,11 @@ PROTOCOL = json.loads(
         / "BTC-15M-cost-aware-market-residual-promotion-v1"
         / "prospective_statistical_protocol.json"
     ).read_text(encoding="utf-8")
+)
+CONFIG = (
+    REPO_ROOT
+    / "examples/v8/polymarket_configs"
+    / "BTC-15M-cost-aware-market-residual-promotion-v1"
 )
 
 
@@ -171,3 +179,43 @@ def test_dry_run_is_deterministic_and_emits_no_gate_or_promotion_result() -> Non
     assert first["current_confirmatory_outcomes_accessed"] is False
     assert first["current_confirmatory_pnl_accessed"] is False
     assert first["automatic_promotion_or_live_unlock"] is False
+
+
+def test_frozen_execution_contract_and_dry_run_artifacts_reconcile() -> None:
+    contract_path = CONFIG / "promotion_evaluation_execution_contract.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    validate_evaluation_execution_contract(contract, repository_root=REPO_ROOT)
+    assert contract_path.with_suffix(".json.sha256").read_text().strip() == sha256_file(
+        contract_path
+    )
+    report_path = CONFIG / "promotion_evaluation_dry_run_report.json"
+    frozen_report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert frozen_report == dry_run_evaluation_pipeline(protocol=PROTOCOL)
+    assert report_path.with_suffix(".json.sha256").read_text().strip() == sha256_file(
+        report_path
+    )
+
+
+def test_execution_contract_implementation_drift_fails_closed() -> None:
+    contract = json.loads(
+        (CONFIG / "promotion_evaluation_execution_contract.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    contract["implementation"]["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="descriptor SHA-256 mismatch"):
+        validate_evaluation_execution_contract(contract, repository_root=REPO_ROOT)
+
+
+def test_outcome_authorization_template_is_not_executable() -> None:
+    template = json.loads(
+        (
+            CONFIG / "promotion_outcome_evaluation_authorization_template.json"
+        ).read_text(encoding="utf-8")
+    )
+    with pytest.raises(ValueError, match="authorization is invalid"):
+        _validate_evaluation_authorization(
+            template,
+            execution_contract=template["execution_contract"],
+            population_manifest_sha256="0" * 64,
+        )

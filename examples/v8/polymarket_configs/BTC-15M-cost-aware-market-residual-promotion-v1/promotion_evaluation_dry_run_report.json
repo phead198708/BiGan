@@ -1,0 +1,30 @@
+{
+  "automatic_promotion_or_live_unlock": false,
+  "chronological_halves_exercised": true,
+  "cost_stress_exercised": true,
+  "current_confirmatory_outcomes_accessed": false,
+  "current_confirmatory_pnl_accessed": false,
+  "current_confirmatory_settlement_accessed": false,
+  "five_blocks_exercised": true,
+  "gate_results_emitted": false,
+  "largest_winner_removal_exercised": true,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "population_alignment_passed": true,
+  "promotion_or_pass_result_emitted": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-residual-promotion-evaluation-dry-run-v1",
+  "shared_bootstrap_indices_sha256": "02cbd457714e846cae07f414316e8ba1ea53ed5d39ea7702d9758897f842a50d",
+  "synthetic_only": true
+}
