@@ -161,12 +161,10 @@ def _sidecar_target(root: Path, path: str) -> str | None:
     if not path.endswith(".sha256"):
         return None
     stem = path[: -len(".sha256")]
-    direct = root / stem
-    if direct.is_file():
-        return stem
-    json_target = root / f"{stem}.json"
-    if json_target.is_file():
-        return f"{stem}.json"
+    for suffix in ("", ".json", ".jsonl", ".md", ".txt", ".ubj"):
+        candidate = f"{stem}{suffix}"
+        if (root / candidate).is_file():
+            return candidate
     raise IntegrationClosureError(f"cannot resolve sidecar target: {path}")
 
 
