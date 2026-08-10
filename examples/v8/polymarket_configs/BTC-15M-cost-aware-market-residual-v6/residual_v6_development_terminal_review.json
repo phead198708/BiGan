@@ -1,0 +1,134 @@
+{
+  "authorization": {
+    "candidate_slot_budget_maximum": 2,
+    "fresh_collection_authorized": false,
+    "fresh_outcome_opening_authorized": false,
+    "lineage_authorization": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v6/lineage_authorization.json",
+      "sha256": "b8fba0aff704d492fc898b535f9cb1cb3112ea628789eba57e557f7fe3436c85"
+    },
+    "narrow_main_integration_preparation_authorized": true,
+    "outcome_aware_development_on_registered_data_only": true,
+    "shadow_paper_live_wallet_write_promotion_or_capital_authorized": false
+  },
+  "candidate_budget_exhausted": true,
+  "candidate_freeze_allowed": false,
+  "candidate_selected": null,
+  "conclusion": "neither authorized v6 candidate satisfied every immutable gate; dynamic stopping lost bootstrap significance, while lower-quantile proposal gating restored positive LCBs but failed one chronological block and required N=3778 above N_max=2000; v6 is terminal failed and no third candidate is permitted",
+  "created_at": "2026-08-10T12:53:00Z",
+  "development_only_forever": true,
+  "failed_artifacts_mutable": false,
+  "gate_or_threshold_change_allowed": false,
+  "independent_reconciliation": {
+    "artifact": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v6/residual_v6_independent_reconciliation_audit.json",
+      "sha256": "3b0e06f44a504233033c9028fee8685e9c968eccd1e3592e3e76af329d098594"
+    },
+    "reconciliation_passed": true
+  },
+  "invariants": {
+    "N_max": 2000,
+    "baseline_changed": false,
+    "candidate_or_baseline_population_changed": false,
+    "cost_model_changed": false,
+    "failed_parent_or_current_artifact_changed": false,
+    "gate_set_changed": false,
+    "grid_or_threshold_search_performed": false,
+    "missing_values_encoded_as_zero": false,
+    "population_filtering_performed": false,
+    "route_side_missingness_or_outlier_filtering_performed": false,
+    "zero_acceptance_threshold": 0.0
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v6",
+  "next_stage": {
+    "additional_v6_candidate_allowed": false,
+    "candidate_freeze_allowed": false,
+    "fresh_collection_allowed": false,
+    "new_lineage_requires_explicit_user_authorization": true,
+    "promotion_or_execution_allowed": false
+  },
+  "phase_1_terminal_failed": true,
+  "promotion_evidence_eligible": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-cost-aware-residual-v6-terminal-review-v1",
+  "slots": {
+    "slot_1": {
+      "all_gates_passed": false,
+      "candidate_accepted_market_count": 582,
+      "candidate_bootstrap_97_5pct_lcb": -0.01859738541666664,
+      "candidate_largest_winner_removed_total_unit_net_pnl": 7.925250000000008,
+      "candidate_total_unit_net_pnl": 8.815000000000008,
+      "failed_gates": [
+        "absolute_market_bootstrap_97_5pct_lcb_gt_zero",
+        "paired_delta_market_bootstrap_97_5pct_lcb_gt_zero",
+        "every_chronological_block_candidate_total_gte_zero",
+        "every_chronological_block_paired_delta_total_gte_zero",
+        "stable_score_to_realized_pnl_ordering",
+        "prospective_power_required_market_count_lte_2000"
+      ],
+      "manifest": {
+        "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v6/residual_v6_primary_slot_001_oof/residual_v6_oof_manifest.json",
+        "sha256": "8cbd0d71ffc39c3a177381f498d6127cbac7f6257cb00b1fff4d6c6f9b7c6009"
+      },
+      "paired_delta_bootstrap_97_5pct_lcb": -0.017311124999999993,
+      "paired_delta_largest_positive_removed_total_unit_net_pnl": 14.599249999999998,
+      "paired_delta_total_unit_net_pnl": 16.209249999999997,
+      "protocol": {
+        "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v6/residual_v6_primary_slot_001_protocol.json",
+        "sha256": "a8c259fc259277567821894060aeac6e5ad67ebbd9d2ebcd37589d4529f24c76"
+      },
+      "prospective_power_required_market_count": 24673,
+      "report": {
+        "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v6/residual_v6_primary_slot_001_oof/residual_v6_oof_report.json",
+        "sha256": "38431909151fb94fcf6735492a960dce14936f911fb299efbb67adaa15e0da7e"
+      },
+      "slot_consumed": true,
+      "status": "terminal_failed_multiple_immutable_gates"
+    },
+    "slot_2": {
+      "all_gates_passed": false,
+      "candidate_accepted_market_count": 371,
+      "candidate_bootstrap_97_5pct_lcb": 0.003108572916666688,
+      "candidate_largest_winner_removed_total_unit_net_pnl": 17.687500000000007,
+      "candidate_total_unit_net_pnl": 18.35225000000001,
+      "failed_block": {
+        "candidate_total_unit_net_pnl": -0.851249999999999,
+        "chronological_block": 2
+      },
+      "failed_gates": [
+        "every_chronological_block_candidate_total_gte_zero",
+        "prospective_power_required_market_count_lte_2000"
+      ],
+      "manifest": {
+        "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v6/residual_v6_challenger_slot_002_oof/residual_v6_challenger_oof_manifest.json",
+        "sha256": "d21bc40023e5a6e0d6c64f92bdfb82f8d84251a8ac948f091e6ef25597e89348"
+      },
+      "paired_delta_bootstrap_97_5pct_lcb": 0.007312677083333339,
+      "paired_delta_largest_positive_removed_total_unit_net_pnl": 24.3965,
+      "paired_delta_total_unit_net_pnl": 25.7465,
+      "protocol": {
+        "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v6/residual_v6_challenger_slot_002_protocol.json",
+        "sha256": "23e2332c44331412996861c5366022f41cebd2510cfa6a8bfd65a903d5aec47b"
+      },
+      "prospective_power_required_market_count": 3778,
+      "report": {
+        "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v6/residual_v6_challenger_slot_002_oof/residual_v6_challenger_oof_report.json",
+        "sha256": "d3e4a95070e7eb08fdf687bba2f47de8673718712cc9b1dfafbed65e2e0ecc46"
+      },
+      "slot_consumed": true,
+      "status": "terminal_failed_block_stability_and_power_gates"
+    }
+  }
+}

@@ -467,3 +467,22 @@ def test_frozen_v6_final_slot_reconciles_and_exhausts_budget() -> None:
     assert result["actual_executing_module_binding_verified"] is True
     assert result["parent_v1_through_v5_and_primary_slot_immutable"] is True
     assert result["safety"] == SAFETY
+
+
+def test_v6_terminal_review_is_fail_closed_and_selects_no_candidate() -> None:
+    root = Path(DEFAULT_PROTOCOL).parent
+    terminal_path = root / "residual_v6_development_terminal_review.json"
+    terminal = _load_json(terminal_path)
+
+    assert terminal_path.with_suffix(".sha256").read_text(encoding="utf-8").strip() == (
+        "c8c076de871b750e56cdad0b264464a49391065b105b4960c2a3957a9b7582b2"
+    )
+    assert terminal["phase_1_terminal_failed"] is True
+    assert terminal["candidate_budget_exhausted"] is True
+    assert terminal["candidate_selected"] is None
+    assert terminal["candidate_freeze_allowed"] is False
+    assert terminal["slots"]["slot_1"]["all_gates_passed"] is False
+    assert terminal["slots"]["slot_2"]["all_gates_passed"] is False
+    assert terminal["next_stage"]["additional_v6_candidate_allowed"] is False
+    assert terminal["next_stage"]["new_lineage_requires_explicit_user_authorization"] is True
+    assert terminal["safety"] == SAFETY

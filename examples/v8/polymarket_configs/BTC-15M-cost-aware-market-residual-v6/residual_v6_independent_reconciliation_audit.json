@@ -1,0 +1,63 @@
+{
+  "artifacts_checked": {
+    "slot_1_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v6/residual_v6_primary_slot_001_oof/residual_v6_oof_manifest.json",
+      "sha256": "8cbd0d71ffc39c3a177381f498d6127cbac7f6257cb00b1fff4d6c6f9b7c6009"
+    },
+    "slot_1_report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v6/residual_v6_primary_slot_001_oof/residual_v6_oof_report.json",
+      "sha256": "38431909151fb94fcf6735492a960dce14936f911fb299efbb67adaa15e0da7e"
+    },
+    "slot_2_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v6/residual_v6_challenger_slot_002_oof/residual_v6_challenger_oof_manifest.json",
+      "sha256": "d21bc40023e5a6e0d6c64f92bdfb82f8d84251a8ac948f091e6ef25597e89348"
+    },
+    "slot_2_report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v6/residual_v6_challenger_slot_002_oof/residual_v6_challenger_oof_report.json",
+      "sha256": "d3e4a95070e7eb08fdf687bba2f47de8673718712cc9b1dfafbed65e2e0ecc46"
+    }
+  },
+  "created_at": "2026-08-10T12:51:00Z",
+  "development_only_forever": true,
+  "independent_checks": {
+    "all_file_sidecars_and_descriptors_match": true,
+    "baseline_and_candidate_market_counts_equal_600": true,
+    "candidate_and_baseline_share_bootstrap_indices": true,
+    "candidate_implementation_exact_bindings_verified": true,
+    "frozen_gate_set_recomputed_without_mutation": true,
+    "market_level_bootstrap_recomputed": true,
+    "no_current_or_future_target_label_used_for_fit": true,
+    "parent_v1_through_v5_and_slot_1_artifacts_unchanged": true,
+    "population_order_and_hashes_reconciled": true,
+    "report_json_and_markdown_reproduced": true,
+    "slot_1_fold_count": 6,
+    "slot_1_market_count": 600,
+    "slot_1_prediction_count": 2400,
+    "slot_2_fold_count": 6,
+    "slot_2_market_count": 600,
+    "slot_2_prediction_count": 2400
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v6",
+  "promotion_evidence_eligible": false,
+  "reconciliation_passed": true,
+  "result": {
+    "candidate_budget_exhausted": true,
+    "candidate_selected": null,
+    "slot_1_all_gates_passed": false,
+    "slot_2_all_gates_passed": false
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-cost-aware-residual-v6-independent-reconciliation-v1"
+}
