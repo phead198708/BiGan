@@ -64,5 +64,6 @@ jobs:
             tests/v8/test_residual_promotion_finalization.py \
             tests/v8/test_residual_promotion_evaluation.py \
             tests/v8/test_residual_promotion_rollback.py \
+            tests/v8/test_residual_promotion_release_readiness.py \
             tests/v8/test_polymarket_async_settlement.py \
             -q
