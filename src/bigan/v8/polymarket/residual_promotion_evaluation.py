@@ -32,21 +32,16 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
 )
 
 EVALUATION_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-evaluation-v1"
-MARKET_RESULT_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-market-result-v1"
-)
+MARKET_RESULT_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-market-result-v1"
 EXECUTION_CONTRACT_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-evaluation-execution-contract-v1"
 )
 AUTHORIZATION_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-outcome-evaluation-authorization-v1"
 )
-IMPLEMENTATION_REPOSITORY_PATH = (
-    "src/bigan/v8/polymarket/residual_promotion_evaluation.py"
-)
+IMPLEMENTATION_REPOSITORY_PATH = "src/bigan/v8/polymarket/residual_promotion_evaluation.py"
 CONFIG_REPOSITORY_PATH = (
-    "examples/v8/polymarket_configs/"
-    "BTC-15M-cost-aware-market-residual-promotion-v1"
+    "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1"
 )
 REQUIRED_GATE_NAMES = {
     "absolute_candidate_bootstrap_97_5pct_lcb_gt_zero",
@@ -71,6 +66,8 @@ def run_authorized_promotion_evaluation(
     service_root: Path | str,
     freeze_dir: Path | str,
     expected_population_manifest_sha256: str,
+    settlement_ingestion_manifest_path: Path | str,
+    expected_settlement_ingestion_manifest_sha256: str,
     settlements_path: Path | str,
     expected_settlements_sha256: str,
     execution_contract_path: Path | str,
@@ -101,14 +98,26 @@ def run_authorized_promotion_evaluation(
         execution_contract=_descriptor(contract_path, root),
         population_manifest_sha256=expected_population_manifest_sha256,
     )
+    _verify_descriptor(
+        dict(authorization.get("settlement_ingestion_contract") or {}),
+        repository_root=root,
+    )
+    settlement_manifest_file = _service_file(settlement_ingestion_manifest_path, collection_root)
+    if sha256_file(settlement_manifest_file) != expected_settlement_ingestion_manifest_sha256:
+        raise ValueError("settlement ingestion manifest SHA-256 mismatch")
+    settlement_manifest = _verified_json(settlement_manifest_file)
+    settlement_descriptor = _validate_settlement_ingestion_manifest(
+        settlement_manifest,
+        service_root=collection_root,
+        population_manifest_sha256=expected_population_manifest_sha256,
+        authorization=authorization,
+    )
     stamp = created_at or datetime.now(UTC).isoformat()
     destination.mkdir(parents=True, exist_ok=False)
     start_descriptor = _write_json(
         destination / "promotion_evaluation_started.json",
         {
-            "schema_version": (
-                "bigan-btc-15m-residual-promotion-evaluation-start-v1"
-            ),
+            "schema_version": ("bigan-btc-15m-residual-promotion-evaluation-start-v1"),
             "lineage_id": LINEAGE_ID,
             "candidate_id": CANDIDATE_ID,
             "started_at": stamp,
@@ -135,13 +144,12 @@ def run_authorized_promotion_evaluation(
         raise ValueError("exact population freeze escaped collection service root")
     candidate_rows = _load_jsonl(freeze / "candidate_decision_rows.jsonl")
     baseline_rows = _load_jsonl(freeze / "baseline_decision_rows.jsonl")
-    settlement_file = Path(settlements_path).resolve()
-    if (
-        not settlement_file.is_relative_to(collection_root)
-        or not settlement_file.is_file()
-        or sha256_file(settlement_file) != expected_settlements_sha256
-    ):
-        raise ValueError("official settlement artifact SHA-256 mismatch")
+    settlement_file = _service_file(settlements_path, collection_root)
+    if sha256_file(settlement_file) != expected_settlements_sha256 or settlement_descriptor != {
+        "path": settlement_file.relative_to(collection_root).as_posix(),
+        "sha256": expected_settlements_sha256,
+    }:
+        raise ValueError("official settlement artifact/manifest binding mismatch")
     settlements = _load_jsonl(settlement_file)
     market_results, reconciliation = build_market_results(
         candidate_rows=candidate_rows,
@@ -164,9 +172,7 @@ def run_authorized_promotion_evaluation(
     results_descriptor = _write_jsonl(
         destination / "promotion_market_results.jsonl", market_results
     )
-    report_descriptor = _write_json(
-        destination / "promotion_evaluation_report.json", report
-    )
+    report_descriptor = _write_json(destination / "promotion_evaluation_report.json", report)
     manifest = {
         "schema_version": EVALUATION_SCHEMA_VERSION,
         "lineage_id": LINEAGE_ID,
@@ -175,6 +181,10 @@ def run_authorized_promotion_evaluation(
         "execution_contract": _descriptor(contract_path, root),
         "evaluation_authorization": _descriptor(authorization_file, root),
         "population_manifest_sha256": expected_population_manifest_sha256,
+        "settlement_ingestion_manifest": {
+            "path": settlement_manifest_file.relative_to(collection_root).as_posix(),
+            "sha256": expected_settlement_ingestion_manifest_sha256,
+        },
         "official_settlements": {
             "path": settlement_file.relative_to(collection_root).as_posix(),
             "sha256": expected_settlements_sha256,
@@ -191,9 +201,7 @@ def run_authorized_promotion_evaluation(
         "micro_live_approval_granted": False,
         "safety": dict(SAFETY),
     }
-    manifest_descriptor = _write_json(
-        destination / "promotion_evaluation_manifest.json", manifest
-    )
+    manifest_descriptor = _write_json(destination / "promotion_evaluation_manifest.json", manifest)
     return {
         "manifest": manifest_descriptor,
         "report": report_descriptor,
@@ -250,12 +258,27 @@ def validate_evaluation_execution_contract(
                 "supersedes_execution_contract",
             }
         )
+    elif revision == "official_settlement_ingestion_v4":
+        bound.update(
+            {
+                "finalization_correction",
+                "finalization_feature_envelope_correction",
+                "settlement_ingestion_implementation",
+                "supersedes_execution_contract",
+            }
+        )
     elif revision is not None:
         raise ValueError("unknown promotion evaluation contract revision")
     for name in bound:
         _verify_descriptor(dict(contract.get(name) or {}), repository_root=root)
     if dict(contract["implementation"])["path"] != IMPLEMENTATION_REPOSITORY_PATH:
         raise ValueError("promotion evaluator implementation path mismatch")
+    if (
+        revision == "official_settlement_ingestion_v4"
+        and dict(contract["settlement_ingestion_implementation"])["path"]
+        != "src/bigan/v8/polymarket/residual_promotion_settlement.py"
+    ):
+        raise ValueError("settlement ingestion implementation path mismatch")
     protocol = _verified_json(root / dict(contract["statistical_protocol"])["path"])
     if (
         set(dict(protocol.get("gates") or {})) != REQUIRED_GATE_NAMES
@@ -298,12 +321,7 @@ def build_market_results(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Reconcile exact ordered populations and compute unit HOLD_TO_SETTLEMENT PnL."""
 
-    if not (
-        len(candidate_rows)
-        == len(baseline_rows)
-        == len(settlements)
-        == target_market_count
-    ):
+    if not (len(candidate_rows) == len(baseline_rows) == len(settlements) == target_market_count):
         raise ValueError("candidate/baseline/settlement population count mismatch")
     candidate_ids = [str(row.get("market_id") or "") for row in candidate_rows]
     baseline_ids = [str(row.get("market_id") or "") for row in baseline_rows]
@@ -320,9 +338,7 @@ def build_market_results(
     for index, (candidate, baseline, settlement) in enumerate(
         zip(candidate_rows, baseline_rows, settlements, strict=True), start=1
     ):
-        _validate_official_settlement(
-            settlement, synthetic_dry_run=synthetic_dry_run
-        )
+        _validate_official_settlement(settlement, synthetic_dry_run=synthetic_dry_run)
         candidate_result = _policy_result(candidate, settlement)
         baseline_result = _policy_result(baseline, settlement)
         result = {
@@ -332,27 +348,19 @@ def build_market_results(
             "market_id": candidate_ids[index - 1],
             "population_position": index,
             "chronological_block": (index - 1) // block_size + 1,
-            "chronological_half": (
-                "first" if index <= target_market_count // 2 else "second"
-            ),
+            "chronological_half": ("first" if index <= target_market_count // 2 else "second"),
             "candidate_accepted": candidate_result["accepted"],
             "candidate_selected_side": candidate_result["selected_side"],
             "candidate_decision_ts": candidate_result["decision_ts"],
             "candidate_prediction": candidate_result["selected_action_value"],
             "candidate_unit_net_pnl": candidate_result["unit_net_pnl"],
-            "candidate_total_cost_relative_to_mid": candidate_result[
-                "total_cost_relative_to_mid"
-            ],
-            "candidate_cost_decomposition": candidate_result[
-                "cost_decomposition"
-            ],
+            "candidate_total_cost_relative_to_mid": candidate_result["total_cost_relative_to_mid"],
+            "candidate_cost_decomposition": candidate_result["cost_decomposition"],
             "baseline_accepted": baseline_result["accepted"],
             "baseline_selected_side": baseline_result["selected_side"],
             "baseline_decision_ts": baseline_result["decision_ts"],
             "baseline_unit_net_pnl": baseline_result["unit_net_pnl"],
-            "baseline_total_cost_relative_to_mid": baseline_result[
-                "total_cost_relative_to_mid"
-            ],
+            "baseline_total_cost_relative_to_mid": baseline_result["total_cost_relative_to_mid"],
             "baseline_cost_decomposition": baseline_result["cost_decomposition"],
             "paired_delta_unit_net_pnl": (
                 candidate_result["unit_net_pnl"] - baseline_result["unit_net_pnl"]
@@ -396,12 +404,8 @@ def build_promotion_report(
         raise ValueError("production promotion evaluation requires exactly 2500 markets")
     if not market_results:
         raise ValueError("promotion evaluation population is empty")
-    candidate = np.asarray(
-        [float(row["candidate_unit_net_pnl"]) for row in market_results]
-    )
-    baseline = np.asarray(
-        [float(row["baseline_unit_net_pnl"]) for row in market_results]
-    )
+    candidate = np.asarray([float(row["candidate_unit_net_pnl"]) for row in market_results])
+    baseline = np.asarray([float(row["baseline_unit_net_pnl"]) for row in market_results])
     delta = candidate - baseline
     bootstrap = dict(protocol["bootstrap"])
     indices = _bootstrap_indices(
@@ -410,12 +414,8 @@ def build_promotion_report(
         seed=int(bootstrap["seed"]),
     )
     confidence = float(bootstrap["confidence"])
-    candidate_interval = _bootstrap_interval(
-        candidate, indices=indices, confidence=confidence
-    )
-    baseline_interval = _bootstrap_interval(
-        baseline, indices=indices, confidence=confidence
-    )
+    candidate_interval = _bootstrap_interval(candidate, indices=indices, confidence=confidence)
+    baseline_interval = _bootstrap_interval(baseline, indices=indices, confidence=confidence)
     delta_interval = _bootstrap_interval(delta, indices=indices, confidence=confidence)
     candidate_lwr = float(candidate.sum() - candidate[int(np.argmax(candidate))])
     delta_lwr = float(delta.sum() - delta[int(np.argmax(delta))])
@@ -427,31 +427,21 @@ def build_promotion_report(
         multipliers=list(protocol["cost_stress_multipliers"]),
     )
     gate_results = {
-        "absolute_candidate_bootstrap_97_5pct_lcb_gt_zero": (
-            candidate_interval["lower"] > 0.0
-        ),
+        "absolute_candidate_bootstrap_97_5pct_lcb_gt_zero": (candidate_interval["lower"] > 0.0),
         "paired_delta_bootstrap_97_5pct_lcb_gt_zero": delta_interval["lower"] > 0.0,
         "both_chronological_halves_candidate_total_gte_zero": all(
-            panel["candidate_total_unit_net_pnl"] >= 0.0
-            for panel in halves.values()
+            panel["candidate_total_unit_net_pnl"] >= 0.0 for panel in halves.values()
         ),
         "both_chronological_halves_delta_total_gte_zero": all(
-            panel["paired_delta_total_unit_net_pnl"] >= 0.0
-            for panel in halves.values()
+            panel["paired_delta_total_unit_net_pnl"] >= 0.0 for panel in halves.values()
         ),
         "every_one_of_five_chronological_500_market_blocks_candidate_total_gte_zero": (
             len(blocks) == 5
-            and all(
-                panel["candidate_total_unit_net_pnl"] >= 0.0
-                for panel in blocks.values()
-            )
+            and all(panel["candidate_total_unit_net_pnl"] >= 0.0 for panel in blocks.values())
         ),
         "every_one_of_five_chronological_500_market_blocks_delta_total_gte_zero": (
             len(blocks) == 5
-            and all(
-                panel["paired_delta_total_unit_net_pnl"] >= 0.0
-                for panel in blocks.values()
-            )
+            and all(panel["paired_delta_total_unit_net_pnl"] >= 0.0 for panel in blocks.values())
         ),
         "largest_positive_delta_removed_total_gte_zero": delta_lwr >= 0.0,
         "largest_winner_removed_candidate_total_gte_zero": candidate_lwr >= 0.0,
@@ -559,11 +549,17 @@ def dry_run_evaluation_pipeline(*, protocol: Mapping[str, Any]) -> dict[str, Any
                 "down_liquidity_depth": 10.0,
             },
         }
-        common["execution_features_sha256"] = canonical_json_sha256(
-            common["execution_features"]
-        )
+        common["execution_features_sha256"] = canonical_json_sha256(common["execution_features"])
         candidate_rows.append(dict(common))
-        baseline_rows.append({**common, "accepted": False, "selected_action": "NO_TRADE", "selected_side": None, "selected_action_value": 0.0})
+        baseline_rows.append(
+            {
+                **common,
+                "accepted": False,
+                "selected_action": "NO_TRADE",
+                "selected_side": None,
+                "selected_action_value": 0.0,
+            }
+        )
         settlements.append(
             {
                 "market_id": market_id,
@@ -598,9 +594,7 @@ def dry_run_evaluation_pipeline(*, protocol: Mapping[str, Any]) -> dict[str, Any
         "current_confirmatory_settlement_accessed": False,
         "current_confirmatory_pnl_accessed": False,
         "population_alignment_passed": reconciliation["passed"],
-        "shared_bootstrap_indices_sha256": internal["overall"][
-            "shared_bootstrap_indices_sha256"
-        ],
+        "shared_bootstrap_indices_sha256": internal["overall"]["shared_bootstrap_indices_sha256"],
         "largest_winner_removal_exercised": True,
         "chronological_halves_exercised": True,
         "five_blocks_exercised": len(internal["robustness"]["chronological_blocks"]) == 5,
@@ -612,9 +606,7 @@ def dry_run_evaluation_pipeline(*, protocol: Mapping[str, Any]) -> dict[str, Any
     }
 
 
-def _policy_result(
-    decision: Mapping[str, Any], settlement: Mapping[str, Any]
-) -> dict[str, Any]:
+def _policy_result(decision: Mapping[str, Any], settlement: Mapping[str, Any]) -> dict[str, Any]:
     features = dict(decision.get("execution_features") or {})
     if canonical_json_sha256(features) != decision.get("execution_features_sha256"):
         raise ValueError("decision execution feature SHA-256 mismatch")
@@ -685,9 +677,7 @@ def _policy_result(
     }
 
 
-def _validate_official_settlement(
-    row: Mapping[str, Any], *, synthetic_dry_run: bool
-) -> None:
+def _validate_official_settlement(row: Mapping[str, Any], *, synthetic_dry_run: bool) -> None:
     payout_up = row.get("payout_up")
     payout_down = row.get("payout_down")
     if not (
@@ -695,11 +685,7 @@ def _validate_official_settlement(
         and row.get("inferred") is False
         and row.get("unresolved") is False
         and row.get("settlement_source")
-        == (
-            "synthetic_dry_run_only"
-            if synthetic_dry_run
-            else "official_polymarket"
-        )
+        == ("synthetic_dry_run_only" if synthetic_dry_run else "official_polymarket")
         and (
             synthetic_dry_run
             or (
@@ -722,18 +708,26 @@ def _validate_evaluation_authorization(
     execution_contract: Mapping[str, Any],
     population_manifest_sha256: str,
 ) -> None:
+    settlement_contract = authorization.get("settlement_ingestion_contract")
+    if settlement_contract is not None and not (
+        set(dict(settlement_contract)) == {"path", "sha256"}
+        and all(dict(settlement_contract).values())
+        and authorization.get("outcome_access_claim_authorized") is True
+        and authorization.get("authorization_record_executable") is True
+        and authorization.get("template_is_executable") is False
+    ):
+        raise ValueError("outcome evaluation settlement binding is invalid")
     if not (
         authorization.get("schema_version") == AUTHORIZATION_SCHEMA_VERSION
         and authorization.get("lineage_id") == LINEAGE_ID
+        and authorization.get("candidate_id") == CANDIDATE_ID
         and authorization.get("fresh_outcome_access_authorized") is True
         and authorization.get("official_settlement_ingestion_authorized") is True
         and authorization.get("evaluation_exactly_once_authorized") is True
         and authorization.get("interim_evaluation_authorized") is False
         and authorization.get("rerun_authorized") is False
-        and authorization.get("population_manifest_sha256")
-        == population_manifest_sha256
-        and _pair(authorization.get("execution_contract"))
-        == _pair(execution_contract)
+        and authorization.get("population_manifest_sha256") == population_manifest_sha256
+        and _pair(authorization.get("execution_contract")) == _pair(execution_contract)
         and isinstance(authorization.get("service_root_id"), str)
         and bool(authorization.get("service_root_id"))
         and isinstance(authorization.get("collection_start_record_sha256"), str)
@@ -744,6 +738,38 @@ def _validate_evaluation_authorization(
         raise ValueError("outcome evaluation authorization is invalid")
 
 
+def _validate_settlement_ingestion_manifest(
+    manifest: Mapping[str, Any],
+    *,
+    service_root: Path,
+    population_manifest_sha256: str,
+    authorization: Mapping[str, Any],
+) -> dict[str, str]:
+    settlement_contract = dict(authorization.get("settlement_ingestion_contract") or {})
+    rows = dict(manifest.get("official_settlement_rows") or {})
+    report = dict(manifest.get("settlement_ingestion_report") or {})
+    claim = dict(manifest.get("outcome_access_claim") or {})
+    if not (
+        manifest.get("schema_version")
+        == "bigan-btc-15m-residual-promotion-settlement-ingestion-manifest-v1"
+        and manifest.get("lineage_id") == LINEAGE_ID
+        and manifest.get("candidate_id") == CANDIDATE_ID
+        and manifest.get("population_manifest_sha256") == population_manifest_sha256
+        and _pair(manifest.get("settlement_ingestion_contract")) == _pair(settlement_contract)
+        and manifest.get("settlement_population_complete") is True
+        and manifest.get("evaluation_allowed") is True
+        and manifest.get("rerun_allowed") is False
+        and manifest.get("automatic_evaluation_or_promotion") is False
+        and dict(manifest.get("safety") or {}) == SAFETY
+    ):
+        raise ValueError("settlement ingestion manifest is invalid")
+    for descriptor in (rows, report, claim):
+        path = _service_file(str(descriptor.get("path") or ""), service_root)
+        if sha256_file(path) != descriptor.get("sha256"):
+            raise ValueError("settlement ingestion child SHA-256 mismatch")
+    return {"path": str(rows["path"]), "sha256": str(rows["sha256"])}
+
+
 def _repo_file(path: Path | str, repository_root: Path) -> Path:
     value = Path(path)
     resolved = value.resolve() if value.is_absolute() else (repository_root / value).resolve()
@@ -752,9 +778,15 @@ def _repo_file(path: Path | str, repository_root: Path) -> Path:
     return resolved
 
 
-def _verify_descriptor(
-    descriptor: Mapping[str, Any], *, repository_root: Path
-) -> Path:
+def _service_file(path: Path | str, service_root: Path) -> Path:
+    value = Path(path)
+    resolved = value.resolve() if value.is_absolute() else (service_root / value).resolve()
+    if not resolved.is_relative_to(service_root) or not resolved.is_file():
+        raise ValueError("settlement artifact escaped collection service root")
+    return resolved
+
+
+def _verify_descriptor(descriptor: Mapping[str, Any], *, repository_root: Path) -> Path:
     if set(descriptor) != {"path", "sha256"}:
         raise ValueError("repository artifact descriptor is invalid")
     path = _repo_file(str(descriptor["path"]), repository_root)
@@ -788,10 +820,7 @@ def _verified_json(path: Path) -> dict[str, Any]:
         )
         if candidate.is_file()
     ]
-    if (
-        len(sidecars) != 1
-        or sidecars[0].read_text(encoding="utf-8").strip() != sha256_file(path)
-    ):
+    if len(sidecars) != 1 or sidecars[0].read_text(encoding="utf-8").strip() != sha256_file(path):
         raise ValueError("frozen JSON sidecar mismatch")
     return _load_json(path)
 
@@ -805,9 +834,7 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
 
 

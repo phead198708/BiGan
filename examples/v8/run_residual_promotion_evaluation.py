@@ -20,7 +20,7 @@ from bigan.v8.polymarket.residual_promotion_evaluation import (  # noqa: E402
 from bigan.v8.polymarket.residual_promotion_v1 import LINEAGE_ID  # noqa: E402
 
 CONFIG = ROOT / "examples/v8/polymarket_configs" / LINEAGE_ID
-EXECUTION_CONTRACT = CONFIG / "promotion_evaluation_execution_contract_v3.json"
+EXECUTION_CONTRACT = CONFIG / "promotion_evaluation_execution_contract_v4.json"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -31,6 +31,8 @@ def _parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--service-root", type=Path, required=True)
     evaluate.add_argument("--freeze-dir", type=Path, required=True)
     evaluate.add_argument("--population-manifest-sha256", required=True)
+    evaluate.add_argument("--settlement-ingestion-manifest", type=Path, required=True)
+    evaluate.add_argument("--settlement-ingestion-manifest-sha256", required=True)
     evaluate.add_argument("--settlements", type=Path, required=True)
     evaluate.add_argument("--settlements-sha256", required=True)
     evaluate.add_argument("--authorization", type=Path, required=True)
@@ -44,9 +46,7 @@ def main() -> int:
     args = _parser().parse_args()
     if args.command == "dry-run":
         protocol = json.loads(
-            (CONFIG / "prospective_statistical_protocol.json").read_text(
-                encoding="utf-8"
-            )
+            (CONFIG / "prospective_statistical_protocol.json").read_text(encoding="utf-8")
         )
         result = dry_run_evaluation_pipeline(protocol=protocol)
     else:
@@ -54,8 +54,10 @@ def main() -> int:
             repository_root=ROOT,
             service_root=args.service_root,
             freeze_dir=args.freeze_dir,
-            expected_population_manifest_sha256=(
-                args.population_manifest_sha256
+            expected_population_manifest_sha256=(args.population_manifest_sha256),
+            settlement_ingestion_manifest_path=(args.settlement_ingestion_manifest),
+            expected_settlement_ingestion_manifest_sha256=(
+                args.settlement_ingestion_manifest_sha256
             ),
             settlements_path=args.settlements,
             expected_settlements_sha256=args.settlements_sha256,

@@ -29,9 +29,7 @@ PROTOCOL = json.loads(
     ).read_text(encoding="utf-8")
 )
 CONFIG = (
-    REPO_ROOT
-    / "examples/v8/polymarket_configs"
-    / "BTC-15M-cost-aware-market-residual-promotion-v1"
+    REPO_ROOT / "examples/v8/polymarket_configs" / "BTC-15M-cost-aware-market-residual-promotion-v1"
 )
 
 
@@ -91,9 +89,7 @@ def test_market_pnl_uses_frozen_hold_to_settlement_cost_formula() -> None:
     expected = 1.0 - 0.55 - 0.0002 - 0.01 - 0.00005
     assert np.isclose(results[0]["candidate_unit_net_pnl"], expected)
     assert results[0]["baseline_unit_net_pnl"] == 0.0
-    assert results[0]["paired_delta_unit_net_pnl"] == results[0][
-        "candidate_unit_net_pnl"
-    ]
+    assert results[0]["paired_delta_unit_net_pnl"] == results[0]["candidate_unit_net_pnl"]
     assert reconciliation["passed"] is True
     assert reconciliation["paired_market_count"] == 10
 
@@ -187,11 +183,12 @@ def test_frozen_execution_contract_and_dry_run_artifacts_reconcile() -> None:
     for old_contract_path in (
         CONFIG / "promotion_evaluation_execution_contract.json",
         CONFIG / "promotion_evaluation_execution_contract_v2.json",
+        CONFIG / "promotion_evaluation_execution_contract_v3.json",
     ):
         assert old_contract_path.with_suffix(".json.sha256").read_text().strip() == (
             sha256_file(old_contract_path)
         )
-    contract_path = CONFIG / "promotion_evaluation_execution_contract_v3.json"
+    contract_path = CONFIG / "promotion_evaluation_execution_contract_v4.json"
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     validate_evaluation_execution_contract(contract, repository_root=REPO_ROOT)
     assert contract_path.with_suffix(".json.sha256").read_text().strip() == sha256_file(
@@ -200,21 +197,22 @@ def test_frozen_execution_contract_and_dry_run_artifacts_reconcile() -> None:
     report_path = CONFIG / "promotion_evaluation_dry_run_report.json"
     frozen_report = json.loads(report_path.read_text(encoding="utf-8"))
     assert frozen_report == dry_run_evaluation_pipeline(protocol=PROTOCOL)
-    assert report_path.with_suffix(".json.sha256").read_text().strip() == sha256_file(
-        report_path
-    )
+    assert report_path.with_suffix(".json.sha256").read_text().strip() == sha256_file(report_path)
 
 
-def test_evaluation_entrypoint_is_bound_to_corrective_v3_contract() -> None:
+def test_evaluation_entrypoint_is_bound_to_settlement_v4_contract() -> None:
     contract_path = evaluation_cli.EXECUTION_CONTRACT
-    assert contract_path == CONFIG / "promotion_evaluation_execution_contract_v3.json"
+    assert contract_path == CONFIG / "promotion_evaluation_execution_contract_v4.json"
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
-    assert contract["contract_revision"] == "feature_envelope_reconciliation_v3"
+    assert contract["contract_revision"] == "official_settlement_ingestion_v4"
     assert contract["finalization_correction"]["path"].endswith(
         "/finalization_native_missingness_correction.json"
     )
     assert contract["finalization_feature_envelope_correction"]["path"].endswith(
         "/finalization_feature_envelope_correction.json"
+    )
+    assert contract["settlement_ingestion_implementation"]["path"].endswith(
+        "/residual_promotion_settlement.py"
     )
     assert contract_path.with_suffix(".json.sha256").read_text().strip() == (
         sha256_file(contract_path)
@@ -222,7 +220,7 @@ def test_evaluation_entrypoint_is_bound_to_corrective_v3_contract() -> None:
     validate_evaluation_execution_contract(contract, repository_root=REPO_ROOT)
 
 
-def test_evaluation_cli_passes_corrective_v3_contract_to_one_shot_runner(
+def test_evaluation_cli_passes_settlement_v4_contract_to_one_shot_runner(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     captured: dict = {}
@@ -244,6 +242,10 @@ def test_evaluation_cli_passes_corrective_v3_contract_to_one_shot_runner(
             str(tmp_path / "freeze"),
             "--population-manifest-sha256",
             "1" * 64,
+            "--settlement-ingestion-manifest",
+            str(tmp_path / "settlement-manifest.json"),
+            "--settlement-ingestion-manifest-sha256",
+            "4" * 64,
             "--settlements",
             str(tmp_path / "settlements.jsonl"),
             "--settlements-sha256",
@@ -265,9 +267,7 @@ def test_evaluation_cli_passes_corrective_v3_contract_to_one_shot_runner(
 
 def test_execution_contract_implementation_drift_fails_closed() -> None:
     contract = json.loads(
-        (CONFIG / "promotion_evaluation_execution_contract_v3.json").read_text(
-            encoding="utf-8"
-        )
+        (CONFIG / "promotion_evaluation_execution_contract_v4.json").read_text(encoding="utf-8")
     )
     contract["implementation"]["sha256"] = "0" * 64
     with pytest.raises(ValueError, match="descriptor SHA-256 mismatch"):
@@ -276,9 +276,7 @@ def test_execution_contract_implementation_drift_fails_closed() -> None:
 
 def test_execution_contract_correction_child_drift_fails_closed() -> None:
     contract = json.loads(
-        (CONFIG / "promotion_evaluation_execution_contract_v3.json").read_text(
-            encoding="utf-8"
-        )
+        (CONFIG / "promotion_evaluation_execution_contract_v4.json").read_text(encoding="utf-8")
     )
     contract["finalization_feature_envelope_correction"]["sha256"] = "0" * 64
     with pytest.raises(ValueError, match="descriptor SHA-256 mismatch"):
@@ -289,16 +287,17 @@ def test_outcome_authorization_template_is_not_executable() -> None:
     for old_template in (
         CONFIG / "promotion_outcome_evaluation_authorization_template.json",
         CONFIG / "promotion_outcome_evaluation_authorization_template_v2.json",
+        CONFIG / "promotion_outcome_evaluation_authorization_template_v3.json",
     ):
         assert old_template.with_suffix(".json.sha256").read_text().strip() == (
             sha256_file(old_template)
         )
     template = json.loads(
-        (
-            CONFIG / "promotion_outcome_evaluation_authorization_template_v3.json"
-        ).read_text(encoding="utf-8")
+        (CONFIG / "promotion_outcome_evaluation_authorization_template_v4.json").read_text(
+            encoding="utf-8"
+        )
     )
-    with pytest.raises(ValueError, match="authorization is invalid"):
+    with pytest.raises(ValueError, match="invalid"):
         _validate_evaluation_authorization(
             template,
             execution_contract=template["execution_contract"],
@@ -337,9 +336,7 @@ def test_finalization_feature_envelope_correction_is_outcome_blind() -> None:
     assert path.with_suffix(".json.sha256").read_text().strip() == sha256_file(path)
     observation = correction["outcome_blind_observation"]
     assert observation["quality_valid"] is True
-    assert observation["feature_row_schema"]["execution_feature_envelope"] == (
-        "features"
-    )
+    assert observation["feature_row_schema"]["execution_feature_envelope"] == ("features")
     assert observation["outcomes_accessed"] is False
     assert observation["settlement_accessed"] is False
     assert observation["pnl_accessed"] is False
