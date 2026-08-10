@@ -1,0 +1,51 @@
+{
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "capital_at_risk": false,
+  "created_at": "2026-08-10T21:25:00Z",
+  "executable": false,
+  "explicit_human_approval_recorded": false,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "micro_live_authorized": false,
+  "micro_live_started": false,
+  "polymarket_write_allowed": false,
+  "preapproval_contract": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/micro_live_preapproval_contract_v6.json",
+    "sha256": "9ac492686bbcb421caf3823a99f56e74811397c07ba9e5d32b7dade44a384e2b"
+  },
+  "requested_initial_capital_fraction": 0.01,
+  "required_evidence_hashes": {
+    "fresh_evaluation_manifest_sha256": null,
+    "independent_security_review_report_sha256": null,
+    "operational_rollback_report_sha256": null,
+    "phase6_release_manifest_sha256": null,
+    "phase6_zero_capital_authorization_sha256": null,
+    "preapproval_assessment_sha256": null
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-micro-live-authorization-template-v6",
+  "security_review_protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/security_review_protocol_v1.json",
+    "sha256": "26304a08add9f068d57e1f195d10e43b8dcb6dac9994142daa9da8c161e71c59"
+  },
+  "security_review_template": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/security_review_template_v2.json",
+    "sha256": "46a6d814136615af55eff4f4a28872a8c5a62f93b4f9b25a4fda72c8fa133482"
+  },
+  "supersedes_authorization_template": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/micro_live_authorization_template_v5.json",
+    "sha256": "af27f8d2d6dc2f06ed0bcbb2e92adee30cd6bab1f7e3a18e11cc4c6c0de8e5cf"
+  },
+  "wallet_signing_allowed": false
+}

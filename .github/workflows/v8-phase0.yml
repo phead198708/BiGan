@@ -66,6 +66,7 @@ jobs:
             tests/v8/test_residual_promotion_settlement.py \
             tests/v8/test_residual_promotion_rollback.py \
             tests/v8/test_residual_promotion_release_readiness.py \
+            tests/v8/test_residual_promotion_security_review.py \
             tests/v8/test_residual_promotion_release_evidence.py \
             tests/v8/test_residual_promotion_execution_readiness.py \
             tests/v8/test_residual_promotion_signal_feed.py \
