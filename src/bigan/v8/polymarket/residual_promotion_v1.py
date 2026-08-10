@@ -1333,8 +1333,15 @@ def _repo_file(value: Path | str, root: Path, name: str) -> Path:
 def _verified_json(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise ResidualPromotionError(f"missing JSON artifact: {path}")
-    sidecar = path.with_suffix(path.suffix + ".sha256")
-    if not sidecar.is_file() or sidecar.read_text(encoding="utf-8").strip() != sha256_file(path):
+    sidecars = [
+        candidate
+        for candidate in (
+            path.with_suffix(".sha256"),
+            path.with_suffix(path.suffix + ".sha256"),
+        )
+        if candidate.is_file()
+    ]
+    if len(sidecars) != 1 or sidecars[0].read_text(encoding="utf-8").strip() != sha256_file(path):
         raise ResidualPromotionError(f"JSON artifact sidecar mismatch: {path}")
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):

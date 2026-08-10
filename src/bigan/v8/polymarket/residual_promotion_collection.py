@@ -392,8 +392,15 @@ def _repo_file(value: Path | str, root: Path) -> Path:
 
 
 def _verified_json(path: Path) -> dict[str, Any]:
-    sidecar = path.with_suffix(path.suffix + ".sha256")
-    if not sidecar.is_file() or sidecar.read_text(encoding="utf-8").strip() != sha256_file(path):
+    sidecars = [
+        candidate
+        for candidate in (
+            path.with_suffix(".sha256"),
+            path.with_suffix(path.suffix + ".sha256"),
+        )
+        if candidate.is_file()
+    ]
+    if len(sidecars) != 1 or sidecars[0].read_text(encoding="utf-8").strip() != sha256_file(path):
         raise ValueError(f"frozen JSON sidecar mismatch: {path}")
     return _load_json(path)
 
