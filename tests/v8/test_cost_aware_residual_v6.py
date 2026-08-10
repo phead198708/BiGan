@@ -16,6 +16,7 @@ from bigan.v8.polymarket.cost_aware_residual_v6 import (
     nested_dynamic_stopping_predict,
     validate_residual_v6_protocol,
     validate_v6_lineage_authorization,
+    verify_frozen_residual_v6_oof,
 )
 from bigan.v8.polymarket.moe_collection_observability import FEATURE_NAMES
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
@@ -198,3 +199,26 @@ def test_missing_market_action_fails_closed() -> None:
         nested_dynamic_stopping_predict(
             rows=rows, population_order=population, protocol=protocol
         )
+
+
+def test_frozen_v6_slot_1_reconciles_and_fails_closed() -> None:
+    result = verify_frozen_residual_v6_oof()
+
+    assert result["verification_passed"] is True
+    assert result["all_gates_passed"] is False
+    assert result["failed_gates"] == [
+        "absolute_market_bootstrap_97_5pct_lcb_gt_zero",
+        "paired_delta_market_bootstrap_97_5pct_lcb_gt_zero",
+        "every_chronological_block_candidate_total_gte_zero",
+        "every_chronological_block_paired_delta_total_gte_zero",
+        "stable_score_to_realized_pnl_ordering",
+        "prospective_power_required_market_count_lte_2000",
+    ]
+    assert result["remaining_candidate_slots"] == 1
+    assert result["oof_market_count"] == 600
+    assert result["manifest_sha256"] == (
+        "8cbd0d71ffc39c3a177381f498d6127cbac7f6257cb00b1fff4d6c6f9b7c6009"
+    )
+    assert result["actual_executing_module_binding_verified"] is True
+    assert result["parent_v1_through_v5_immutable"] is True
+    assert result["safety"] == SAFETY
