@@ -8,8 +8,11 @@ import pytest
 from bigan.v8.polymarket.challenge_development_lane import sha256_file
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 from bigan.v8.polymarket.residual_promotion_collection import canonical_attempt_hash
+from bigan.v8.polymarket.residual_promotion_evaluation import build_market_results
 from bigan.v8.polymarket.residual_promotion_finalization import (
     _execution_features,
+    _market_level_decisions,
+    _validate_decision_rows,
     _validate_quality_contract,
     freeze_exact_outcome_blind_population,
     select_exact_population,
@@ -102,6 +105,125 @@ def test_production_execution_features_missing_envelope_fails_closed() -> None:
             decision_ts=1_900_000_000_001,
             validation_fixture_only=False,
         )
+
+
+def test_finalizer_market_rows_feed_evaluator_cost_pipeline() -> None:
+    candidate_rows = []
+    baseline_rows = []
+    settlements = []
+    for index in range(10):
+        market_id = f"synthetic-integration-{index:02d}"
+        decision_ts = 1_900_000_000_000 + index
+        decisions = [
+            {
+                "market_id": market_id,
+                "decision_ts": decision_ts,
+                "candidate_action_values": {
+                    "NO_TRADE": 0.0,
+                    "BUY_UP_HOLD": 0.01,
+                    "BUY_DOWN_HOLD": -0.02,
+                },
+                "candidate_selected_action": "BUY_UP_HOLD",
+                "candidate_accepted_at_this_decision": True,
+                "baseline_action_values": {
+                    "NO_TRADE": 0.0,
+                    "BUY_UP_HOLD": -0.01,
+                    "BUY_DOWN_HOLD": -0.02,
+                },
+                "baseline_selected_action": "NO_TRADE",
+                "baseline_accepted_at_this_decision": False,
+                "baseline_fail_closed": False,
+                "baseline_fail_closed_reasons": [],
+                "candidate_bundle_sha256": BUNDLE_SHA,
+                "decision_influenced_collection": False,
+                "outcomes_accessed": False,
+                "settlement_accessed": False,
+                "pnl_accessed": False,
+                "safety": dict(SAFETY),
+            }
+        ]
+        feature_rows = [
+            {
+                "market_id": market_id,
+                "decision_ts": decision_ts,
+                "features": {
+                    "up_ask": 0.47,
+                    "up_bid": 0.46,
+                    "up_liquidity_depth": 15_022.94,
+                    "down_ask": 0.54,
+                    "down_bid": 0.53,
+                    "down_liquidity_depth": 15_022.94,
+                },
+            }
+        ]
+        _validate_decision_rows(
+            decisions,
+            market_id=market_id,
+            expected_candidate_bundle_sha256=BUNDLE_SHA,
+        )
+        candidate, baseline = _market_level_decisions(
+            decisions=decisions,
+            population_position=index + 1,
+            attempt_index=index + 1,
+            market_id=market_id,
+            candidate_bundle_sha256=BUNDLE_SHA,
+            baseline_artifact_sha256="b" * 64,
+            feature_rows=feature_rows,
+            validation_fixture_only=False,
+        )
+        candidate_rows.append(candidate)
+        baseline_rows.append(baseline)
+        settlements.append(
+            {
+                "market_id": market_id,
+                "settlement_source": "synthetic_dry_run_only",
+                "official_final": True,
+                "inferred": False,
+                "unresolved": False,
+                "payout_up": int(index % 2 == 0),
+                "payout_down": int(index % 2 != 0),
+            }
+        )
+
+    results, reconciliation = build_market_results(
+        candidate_rows=candidate_rows,
+        baseline_rows=baseline_rows,
+        settlements=settlements,
+        target_market_count=10,
+        synthetic_dry_run=True,
+    )
+    assert reconciliation["passed"] is True
+    assert reconciliation["paired_market_count"] == 10
+    assert {row["chronological_block"] for row in results} == {1, 2, 3, 4, 5}
+    assert {row["chronological_half"] for row in results} == {"first", "second"}
+    assert all(row["candidate_accepted"] is True for row in results)
+    assert all(row["baseline_accepted"] is False for row in results)
+    assert all(
+        {
+            "gross_price_edge",
+            "entry_spread_cost",
+            "fees",
+            "slippage",
+            "liquidity_impact",
+            "total_cost",
+            "unit_net_pnl",
+        }
+        <= set(row["candidate_cost_decomposition"])
+        for row in results
+    )
+    assert all(
+        row["baseline_cost_decomposition"]
+        == {
+            "gross_price_edge": 0.0,
+            "entry_spread_cost": 0.0,
+            "fees": 0.0,
+            "slippage": 0.0,
+            "liquidity_impact": 0.0,
+            "total_cost": 0.0,
+            "unit_net_pnl": 0.0,
+        }
+        for row in results
+    )
 
 
 @pytest.mark.parametrize(
