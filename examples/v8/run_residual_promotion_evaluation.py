@@ -20,6 +20,7 @@ from bigan.v8.polymarket.residual_promotion_evaluation import (  # noqa: E402
 from bigan.v8.polymarket.residual_promotion_v1 import LINEAGE_ID  # noqa: E402
 
 CONFIG = ROOT / "examples/v8/polymarket_configs" / LINEAGE_ID
+EXECUTION_CONTRACT = CONFIG / "promotion_evaluation_execution_contract_v2.json"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -41,7 +42,6 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _parser().parse_args()
-    contract = CONFIG / "promotion_evaluation_execution_contract.json"
     if args.command == "dry-run":
         protocol = json.loads(
             (CONFIG / "prospective_statistical_protocol.json").read_text(
@@ -59,8 +59,8 @@ def main() -> int:
             ),
             settlements_path=args.settlements,
             expected_settlements_sha256=args.settlements_sha256,
-            execution_contract_path=contract,
-            expected_execution_contract_sha256=sha256_file(contract),
+            execution_contract_path=EXECUTION_CONTRACT,
+            expected_execution_contract_sha256=sha256_file(EXECUTION_CONTRACT),
             authorization_path=args.authorization,
             expected_authorization_sha256=args.authorization_sha256,
             output_dir=args.output_dir,
