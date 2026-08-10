@@ -59,7 +59,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--clob-ws-url", default=DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL
     )
-    parser.add_argument("--maximum-new-attempts", type=int)
     return parser
 
 
@@ -88,13 +87,7 @@ def main() -> int:
         validation=validation,
         resumed_attempt_count=len(existing),
     )
-    new_attempts = 0
     while not progress["collection_complete"] and not progress["attempt_cap_exhausted"]:
-        if (
-            args.maximum_new_attempts is not None
-            and new_attempts >= args.maximum_new_attempts
-        ):
-            break
         scheduled_start = _wait_for_round_start(
             max_lag_seconds=args.max_round_start_lag_seconds
         )
@@ -148,7 +141,6 @@ def main() -> int:
             collector_protocol_sha256=validation["collector_protocol_sha256"],
             candidate_bundle_sha256=bundle_sha,
         )
-        new_attempts += 1
         print(json.dumps(_progress_line(progress), sort_keys=True), flush=True)
     return 0
 

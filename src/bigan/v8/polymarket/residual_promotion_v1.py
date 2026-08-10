@@ -703,6 +703,11 @@ def freeze_prospective_program(
     collector_path = _repo_file(
         collector_implementation_path, root, "collector implementation"
     )
+    source_v4_protocol = _verified_json(SOURCE_PROTOCOL)
+    source_gate_implementation = dict(
+        dict(source_v4_protocol["inputs"])["gate_implementation"]
+    )
+    _verify_descriptor(source_gate_implementation, root, "source v4 gate implementation")
     config = root / "examples/v8/polymarket_configs" / LINEAGE_ID
     stamp = created_at or datetime.now(UTC).isoformat()
     reporting = {
@@ -728,6 +733,9 @@ def freeze_prospective_program(
         "candidate_id": CANDIDATE_ID,
         "created_at": stamp,
         "candidate_bundle": {"path": bundle_path.relative_to(root).as_posix(), "sha256": bundle_sha},
+        "runtime_implementation": _descriptor(root / IMPLEMENTATION_PATH, root),
+        "source_v4_protocol": _descriptor(SOURCE_PROTOCOL, root),
+        "gate_implementation": source_gate_implementation,
         "baseline_contract": _descriptor(BASELINE_CONTRACT, root),
         "baseline_artifact": _baseline_model_descriptor(root),
         "feature_contract": _descriptor(FEATURE_CONTRACT, root),
@@ -764,6 +772,27 @@ def freeze_prospective_program(
             "market_identity_and_population_reconciliation": True,
             "missingness_and_causality_reconciliation": True,
             "offline_live_prediction_and_decision_parity": True,
+            "stable_score_to_realized_pnl_ordering": True,
+        },
+        "gate_inheritance": {
+            "source_v4_gates": source_v4_protocol["gates"],
+            "source_v4_prospective_power": source_v4_protocol[
+                "prospective_power"
+            ],
+            "only_authorized_exception": (
+                "replace_source_prospective_power_required_market_count_lte_2000_"
+                "sample_plan_with_exact_2500_quality_valid_markets_and_3000_attempt_cap"
+            ),
+            "all_non_sample_plan_economic_and_integrity_gates_unchanged": True,
+            "fixed_acceptance_threshold": 0.0,
+        },
+        "exclusion_rules": {
+            "quality_invalid_attempts_excluded_before_outcome_access": True,
+            "duplicate_market_id_policy": "keep_chronological_first_quality_valid_capture",
+            "post_outcome_exclusion_allowed": False,
+            "unresolved_market_exclusion_allowed": False,
+            "inferred_settlement_allowed": False,
+            "route_side_missingness_or_outlier_filtering_allowed": False,
         },
         "cost_stress_multipliers": [1.2, 1.5, 2.0],
         "failure_semantics": {

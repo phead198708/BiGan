@@ -39,6 +39,16 @@ FORBIDDEN_FIELD_TOKENS = (
     "target",
     "label",
 )
+OUTCOME_BLIND_FALSE_FIELDS = {
+    "outcomes_accessed",
+    "settlement_accessed",
+    "pnl_accessed",
+    "fresh_outcomes_opened",
+    "interim_pnl_evaluated",
+}
+OUTCOME_BLIND_GOVERNANCE_FIELDS = {
+    "target_quality_valid_market_count",
+}
 
 
 def validate_collection_authorization(
@@ -317,21 +327,13 @@ def assert_outcome_blind(value: Any, *, path: str = "root") -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
             lowered = str(key).lower()
-            if any(token in lowered for token in FORBIDDEN_FIELD_TOKENS) and key not in {
-                "outcomes_accessed",
-                "settlement_accessed",
-                "pnl_accessed",
-                "fresh_outcomes_opened",
-                "interim_pnl_evaluated",
-            }:
+            if (
+                any(token in lowered for token in FORBIDDEN_FIELD_TOKENS)
+                and key not in OUTCOME_BLIND_FALSE_FIELDS
+                and key not in OUTCOME_BLIND_GOVERNANCE_FIELDS
+            ):
                 raise ValueError(f"forbidden outcome-bearing field: {path}.{key}")
-            if key in {
-                "outcomes_accessed",
-                "settlement_accessed",
-                "pnl_accessed",
-                "fresh_outcomes_opened",
-                "interim_pnl_evaluated",
-            } and child is not False:
+            if key in OUTCOME_BLIND_FALSE_FIELDS and child is not False:
                 raise ValueError(f"outcome-blind safety field must be false: {path}.{key}")
             assert_outcome_blind(child, path=f"{path}.{key}")
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
@@ -354,7 +356,19 @@ def _score_decisions(
             feature_row,
             observed_at_ts=observed_at,
         )
-        baseline_result = score_matched_baseline(baseline, feature_row)
+        try:
+            baseline_result = score_matched_baseline(baseline, feature_row)
+        except (KeyError, TypeError, ValueError) as exc:
+            baseline_result = {
+                "action_values": {
+                    "NO_TRADE": 0.0,
+                    "BUY_UP_HOLD": None,
+                    "BUY_DOWN_HOLD": None,
+                },
+                "selected_action": "NO_TRADE",
+                "fail_closed": True,
+                "fail_closed_reasons": [str(exc) or exc.__class__.__name__],
+            }
         candidate_action = str(candidate["selected_action"])
         baseline_action = str(baseline_result["selected_action"])
         candidate_accept_now = not candidate_accepted and candidate_action != "NO_TRADE"
@@ -371,6 +385,12 @@ def _score_decisions(
                 "baseline_action_values": baseline_result["action_values"],
                 "baseline_selected_action": baseline_action,
                 "baseline_accepted_at_this_decision": baseline_accept_now,
+                "baseline_fail_closed": bool(
+                    baseline_result.get("fail_closed", False)
+                ),
+                "baseline_fail_closed_reasons": list(
+                    baseline_result.get("fail_closed_reasons", [])
+                ),
                 "candidate_bundle_sha256": runtime.manifest_sha256,
                 "decision_recorded_after_quality_classification": True,
                 "decision_influenced_collection": False,
