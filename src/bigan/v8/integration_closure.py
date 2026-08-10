@@ -90,9 +90,11 @@ def _working_mode(root: Path, path: str) -> str:
     return output.split(maxsplit=1)[0]
 
 
-def _changed_paths(root: Path, base_commit: str) -> tuple[str, ...]:
+def _changed_paths(
+    root: Path, base_commit: str, head_commit: str = "HEAD"
+) -> tuple[str, ...]:
     deleted = str(
-        _git(root, "diff", "--name-only", "--diff-filter=D", base_commit, "HEAD")
+        _git(root, "diff", "--name-only", "--diff-filter=D", base_commit, head_commit)
     ).splitlines()
     if deleted:
         raise IntegrationClosureError(
@@ -105,7 +107,7 @@ def _changed_paths(root: Path, base_commit: str) -> tuple[str, ...]:
             "--name-only",
             "--diff-filter=ACMRT",
             base_commit,
-            "HEAD",
+            head_commit,
         )
     ).splitlines()
     return tuple(sorted(path for path in changed if path))
@@ -390,6 +392,16 @@ def _validate_structure(payload: Mapping[str, Any]) -> None:
     ]
     if len(source_keys) != len(set(source_keys)):
         raise IntegrationClosureError("duplicate source/destination entry in closure")
+    self_paths_raw = payload.get("self_paths")
+    if not isinstance(self_paths_raw, list) or len(self_paths_raw) != 2:
+        raise IntegrationClosureError(
+            "self_paths must contain exactly the manifest and its sidecar"
+        )
+    self_paths = [
+        _safe_repo_path(path, field="self path") for path in self_paths_raw
+    ]
+    if self_paths != sorted(set(self_paths)):
+        raise IntegrationClosureError("self_paths must be sorted and unique")
 
 
 def verify_integration_closure_payload(
@@ -460,16 +472,13 @@ def verify_integration_closure_payload(
 
     if verify_diff_inventory:
         base_commit = str(payload["base"]["commit"])
+        generation_head = str(payload.get("generation_head", ""))
+        if not HEX_40_OR_64.fullmatch(generation_head):
+            raise IntegrationClosureError("invalid generation_head")
         expected_paths = set(entry_by_path)
-        self_paths_raw = payload.get("self_paths")
-        if not isinstance(self_paths_raw, list):
-            raise IntegrationClosureError("self_paths must be a list")
-        self_paths = {
-            _safe_repo_path(path, field="self path") for path in self_paths_raw
-        }
-        actual_paths = set(_changed_paths(root, base_commit))
-        missing = sorted((expected_paths | self_paths) - actual_paths)
-        extra = sorted(actual_paths - (expected_paths | self_paths))
+        actual_paths = set(_changed_paths(root, base_commit, generation_head))
+        missing = sorted(expected_paths - actual_paths)
+        extra = sorted(actual_paths - expected_paths)
         if missing or extra:
             raise IntegrationClosureError(
                 f"closure inventory mismatch; missing={missing}, extra={extra}"
@@ -504,6 +513,102 @@ def verify_integration_closure(manifest_path: Path, *, root: Path) -> dict[str, 
     return verify_integration_closure_payload(payload, root=root)
 
 
+def verify_integration_closure_set(
+    manifest_paths: Sequence[Path], *, root: Path
+) -> dict[str, Any]:
+    """Verify a contiguous sequence of independently closed integration layers."""
+
+    root = root.resolve()
+    if not manifest_paths:
+        raise IntegrationClosureError("at least one integration closure is required")
+    layers: list[dict[str, Any]] = []
+    for raw_path in manifest_paths:
+        path = raw_path.resolve()
+        report = verify_integration_closure(path, root=root)
+        payload = json.loads(path.read_text())
+        relative_path = path.relative_to(root).as_posix()
+        manifest_commit = str(
+            _git(root, "log", "-1", "--format=%H", "HEAD", "--", relative_path)
+        ).strip()
+        if not HEX_40_OR_64.fullmatch(manifest_commit):
+            raise IntegrationClosureError(f"manifest is not committed: {relative_path}")
+        layers.append(
+            {
+                "path": relative_path,
+                "payload": payload,
+                "manifest_commit": manifest_commit,
+                "report": report,
+            }
+        )
+
+    commit_to_layer = {layer["manifest_commit"]: layer for layer in layers}
+    if len(commit_to_layer) != len(layers):
+        raise IntegrationClosureError("multiple closure manifests share one commit")
+    starts = [
+        layer
+        for layer in layers
+        if layer["payload"]["base"]["commit"] not in commit_to_layer
+    ]
+    if len(starts) != 1:
+        raise IntegrationClosureError("closure layers do not have one deterministic root")
+    ordered = [starts[0]]
+    while len(ordered) < len(layers):
+        next_layers = [
+            layer
+            for layer in layers
+            if layer not in ordered
+            and layer["payload"]["base"]["commit"]
+            == ordered[-1]["manifest_commit"]
+        ]
+        if len(next_layers) != 1:
+            raise IntegrationClosureError("closure layer chain is missing or ambiguous")
+        ordered.append(next_layers[0])
+
+    all_paths: set[str] = set()
+    for layer in ordered:
+        payload = layer["payload"]
+        generation_head = payload["generation_head"]
+        self_paths = set(payload["self_paths"])
+        manifest_only_paths = set(
+            _changed_paths(root, generation_head, layer["manifest_commit"])
+        )
+        if manifest_only_paths != self_paths:
+            raise IntegrationClosureError(
+                f"manifest commit scope mismatch for {layer['path']}: "
+                f"expected={sorted(self_paths)}, actual={sorted(manifest_only_paths)}"
+            )
+        layer_paths = {
+            entry["destination_path"] for entry in payload["entries"]
+        } | self_paths
+        overlap = all_paths & layer_paths
+        if overlap:
+            raise IntegrationClosureError(
+                "duplicate paths across closure layers: " + ", ".join(sorted(overlap))
+            )
+        all_paths.update(layer_paths)
+
+    root_base = ordered[0]["payload"]["base"]["commit"]
+    actual_paths = set(_changed_paths(root, root_base, "HEAD"))
+    missing = sorted(all_paths - actual_paths)
+    extra = sorted(actual_paths - all_paths)
+    if missing or extra:
+        raise IntegrationClosureError(
+            f"global closure inventory mismatch; missing={missing}, extra={extra}"
+        )
+    final_tree_drift = _changed_paths(root, ordered[-1]["manifest_commit"], "HEAD")
+    if final_tree_drift:
+        raise IntegrationClosureError(
+            "unclosed changes after final closure manifest: "
+            + ", ".join(final_tree_drift)
+        )
+    return {
+        "closure_ids": [layer["payload"]["closure_id"] for layer in ordered],
+        "entry_count": sum(layer["report"]["entry_count"] for layer in ordered),
+        "layer_count": len(ordered),
+        "verification_passed": True,
+    }
+
+
 def _parse_source(value: str) -> dict[str, Any]:
     parts = value.split(",", 2)
     if len(parts) != 3:
@@ -525,6 +630,9 @@ def _parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser("verify")
     verify.add_argument("manifest", type=Path)
     verify.add_argument("--root", type=Path, default=Path.cwd())
+    verify_all = subparsers.add_parser("verify-all")
+    verify_all.add_argument("manifest_dir", type=Path)
+    verify_all.add_argument("--root", type=Path, default=Path.cwd())
     build = subparsers.add_parser("build")
     build.add_argument("--root", type=Path, default=Path.cwd())
     build.add_argument("--output", type=Path, required=True)
@@ -542,6 +650,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "verify":
         report = verify_integration_closure(args.manifest, root=args.root)
+        print(json.dumps(report, sort_keys=True))
+        return 0
+    if args.command == "verify-all":
+        manifests = sorted(
+            args.manifest_dir.glob("issue264_*_integration_closure_manifest.json")
+        )
+        report = verify_integration_closure_set(manifests, root=args.root)
         print(json.dumps(report, sort_keys=True))
         return 0
     payload = build_integration_closure_manifest(

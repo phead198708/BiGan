@@ -8,8 +8,8 @@ import pytest
 
 from bigan.v8.integration_closure import (
     IntegrationClosureError,
-    verify_integration_closure,
     verify_integration_closure_payload,
+    verify_integration_closure_set,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,9 +29,10 @@ def _payload() -> dict:
 def test_committed_issue264_integration_closures_verify_exactly() -> None:
     manifests = _manifest_paths()
     assert manifests
-    reports = [verify_integration_closure(path, root=ROOT) for path in manifests]
-    assert all(report["verification_passed"] is True for report in reports)
-    assert all(report["entry_count"] > 0 for report in reports)
+    report = verify_integration_closure_set(manifests, root=ROOT)
+    assert report["verification_passed"] is True
+    assert report["entry_count"] > 0
+    assert report["layer_count"] == len(manifests)
 
 
 def test_duplicate_destination_fails_closed() -> None:
@@ -56,7 +57,7 @@ def test_extra_changed_path_fails_closed() -> None:
         if entry["destination_path"] == ".github/workflows/v8-phase0.yml"
     )
     payload["entries"].remove(removable)
-    with pytest.raises(IntegrationClosureError, match="closure inventory mismatch"):
+    with pytest.raises(IntegrationClosureError, match="self_paths must contain exactly"):
         verify_integration_closure_payload(payload, root=ROOT)
 
 

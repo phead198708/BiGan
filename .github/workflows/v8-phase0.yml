@@ -55,6 +55,5 @@ jobs:
           shopt -s nullglob
           manifests=(examples/v8/integration_closure/issue264_*_integration_closure_manifest.json)
           [[ ${#manifests[@]} -gt 0 ]]
-          for manifest in "${manifests[@]}"; do
-            python -m bigan.v8.integration_closure verify "${manifest}" --root .
-          done
+          python -m bigan.v8.integration_closure verify-all \
+            examples/v8/integration_closure --root .
