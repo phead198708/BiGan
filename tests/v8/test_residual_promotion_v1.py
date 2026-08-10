@@ -9,6 +9,9 @@ import pytest
 
 from bigan.v8.polymarket.challenge_development_lane import sha256_file
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
+from bigan.v8.polymarket.recorder.public_provider import (
+    PolymarketPublicHTTPRealCorpusProvider,
+)
 from bigan.v8.polymarket.residual_promotion_collection import (
     assert_outcome_blind,
     build_progress,
@@ -195,8 +198,8 @@ def test_progress_is_hash_chained_and_model_decisions_do_not_select_population()
 
 def test_frozen_collection_authorization_and_runtime_validate() -> None:
     result = validate_collection_authorization(
-        authorization_path=CONFIG / "manual_collection_authorization_v2.json",
-        collector_protocol_path=CONFIG / "prospective_collector_protocol_v2.json",
+        authorization_path=CONFIG / "manual_collection_authorization_v3.json",
+        collector_protocol_path=CONFIG / "prospective_collector_protocol_v3.json",
         repository_root=REPO_ROOT,
     )
     assert result["validation_passed"] is True
@@ -215,7 +218,7 @@ def test_zero_attempt_collector_correction_supersedes_original_fail_closed() -> 
     assert correction["threshold_gate_cost_baseline_or_population_changed"] is False
     assert correction["fresh_outcomes_accessed"] is False
     assert correction["safety"] == SAFETY
-    with pytest.raises(ValueError, match="superseded fail-closed"):
+    with pytest.raises(ValueError, match="superseded"):
         validate_collection_authorization(
             authorization_path=CONFIG / "manual_collection_authorization.json",
             collector_protocol_path=CONFIG / "prospective_collector_protocol.json",
@@ -224,11 +227,14 @@ def test_zero_attempt_collector_correction_supersedes_original_fail_closed() -> 
 
 
 def test_corrected_collector_graph_requires_chainlink_and_reconciles_hashes() -> None:
-    protocol = _json(CONFIG / "prospective_collector_protocol_v2.json")
+    protocol = _json(CONFIG / "prospective_collector_protocol_v3.json")
     assert protocol["chainlink_rtds_background_collector_required"] is True
     assert protocol["chainlink_rtds_injected_into_capture"] is True
     assert protocol["chainlink_missing_or_stale_behavior"] == "quality_invalid_fail_closed"
-    assert protocol["prior_attempts_consumed"] == 0
+    assert protocol["prior_attempts_consumed"] == 1
+    assert protocol["prior_failed_attempt_preserved"] is True
+    assert protocol["full_window_coverage_measurement_required"] is True
+    assert protocol["rest_fallback_collection_seconds"] == 5.0
     bindings = protocol["implementation_bindings"]
     assert set(bindings) == {
         "collector_cli",
@@ -244,11 +250,38 @@ def test_corrected_collector_graph_requires_chainlink_and_reconciles_hashes() ->
     ).read_text(encoding="utf-8")
     assert "PolymarketChainlinkRTDSCollector" in collector_source
     assert "chainlink_rtds_collector=chainlink" in collector_source
+    assert "rest_fallback_collection_seconds" in collector_source
     provenance = _json(
         CONFIG / "collector_pre_attempt_engineering_correction.json"
     )["source_provenance"]
     assert provenance["source_commit"] == "0595b168512c43f45966957dde8b36a23723cbce"
     assert provenance["source_content_sha256"] == bindings["live_round_finalizer"]["sha256"]
+
+
+def test_coverage_correction_preserves_failed_attempt_and_supersedes_v2() -> None:
+    correction = _json(CONFIG / "collector_coverage_instrumentation_correction.json")
+    assert correction["detected_after_attempt"] == 1
+    assert correction["prior_attempts_consumed"] == 1
+    assert correction["prior_quality_valid_market_count"] == 0
+    assert correction["failed_attempt_preserved"] is True
+    assert correction["first_attempt_audit"]["quality_valid"] is False
+    assert correction["first_attempt_audit"]["resolution_rows"] == 0
+    assert correction["gate_threshold_or_model_changed"] is False
+    assert correction["model_prediction_bytes_changed"] is False
+    assert correction["fresh_outcomes_accessed"] is False
+    with pytest.raises(ValueError, match="superseded by coverage correction"):
+        validate_collection_authorization(
+            authorization_path=CONFIG / "manual_collection_authorization_v2.json",
+            collector_protocol_path=CONFIG / "prospective_collector_protocol_v2.json",
+            repository_root=REPO_ROOT,
+        )
+
+
+def test_v3_provider_enables_existing_full_window_coverage_measurement() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        rest_fallback_collection_seconds=5.0
+    )
+    assert provider._full_window_coverage_required() is True
 
 
 def test_prospective_protocol_preserves_economic_gates_and_no_optional_stopping() -> None:

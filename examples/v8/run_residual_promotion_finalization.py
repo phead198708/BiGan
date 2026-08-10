@@ -28,12 +28,12 @@ def main() -> int:
     parser.add_argument(
         "--authorization",
         type=Path,
-        default=CONFIG / "manual_collection_authorization_v2.json",
+        default=CONFIG / "manual_collection_authorization_v3.json",
     )
     parser.add_argument(
         "--collector-protocol",
         type=Path,
-        default=CONFIG / "prospective_collector_protocol_v2.json",
+        default=CONFIG / "prospective_collector_protocol_v3.json",
     )
     args = parser.parse_args()
     report = freeze_exact_outcome_blind_population(
