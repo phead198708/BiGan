@@ -21,7 +21,7 @@
       "destination_path": ".github/workflows/v8-phase0.yml",
       "destination_sha256": "3f97b303328979472ac39ba2edc759285742c968ee18ff866e1b3f1772c26b03",
       "import_reason": "integration_ci_hard_gate",
-      "source_commit": "b3974412c06b808d2af140b7666df74d82f49d3b",
+      "source_commit": "bbaea4cef64521627dd703561e1566c6181cfd01",
       "source_content_sha256": "3f97b303328979472ac39ba2edc759285742c968ee18ff866e1b3f1772c26b03",
       "source_git_blob_oid": "7038f7f44fd64aa4f2b44790b1d7167432721201",
       "source_git_mode": "100644",
@@ -2379,14 +2379,14 @@
       "source_ref": "codex/issue-264-phase0-evidence"
     },
     {
-      "destination_git_blob_oid": "965c0fabe40dfcdbeacf22e73344c5eab27dcbc3",
+      "destination_git_blob_oid": "696ca501156740311723384693fa16b2b3f29e35",
       "destination_git_mode": "100644",
       "destination_path": "src/bigan/v8/integration_closure.py",
-      "destination_sha256": "7bf14ed41b637fadd97b681a413487c40546aa952119dde34c0bdf8c0c80ccad",
+      "destination_sha256": "6fc2f8c711cee4d219851d259bce744576e79c7a62d6fa1976b22afbc92d12f5",
       "import_reason": "deterministic_integration_closure_verifier",
-      "source_commit": "b3974412c06b808d2af140b7666df74d82f49d3b",
-      "source_content_sha256": "7bf14ed41b637fadd97b681a413487c40546aa952119dde34c0bdf8c0c80ccad",
-      "source_git_blob_oid": "965c0fabe40dfcdbeacf22e73344c5eab27dcbc3",
+      "source_commit": "bbaea4cef64521627dd703561e1566c6181cfd01",
+      "source_content_sha256": "6fc2f8c711cee4d219851d259bce744576e79c7a62d6fa1976b22afbc92d12f5",
+      "source_git_blob_oid": "696ca501156740311723384693fa16b2b3f29e35",
       "source_git_mode": "100644",
       "source_path": "src/bigan/v8/integration_closure.py",
       "source_pr": 273,
@@ -2827,14 +2827,14 @@
       "source_ref": "codex/issue-264-phase0-evidence"
     },
     {
-      "destination_git_blob_oid": "ad943e57695b754efb786462c2b51de2b0451496",
+      "destination_git_blob_oid": "84911c347272228ef4285d57705295135c86147c",
       "destination_git_mode": "100644",
       "destination_path": "tests/v8/test_issue264_integration_closure.py",
-      "destination_sha256": "43e93834c70ea3a728b4a5e5d93400b5ae5e1cd361af79522565fae8988d107f",
+      "destination_sha256": "27ef279937ef27c5a26459a7adfd12f23383ef9b405bbcdf8f8744662b7a43ac",
       "import_reason": "integration_closure_fail_closed_regression_test",
-      "source_commit": "b3974412c06b808d2af140b7666df74d82f49d3b",
-      "source_content_sha256": "43e93834c70ea3a728b4a5e5d93400b5ae5e1cd361af79522565fae8988d107f",
-      "source_git_blob_oid": "ad943e57695b754efb786462c2b51de2b0451496",
+      "source_commit": "bbaea4cef64521627dd703561e1566c6181cfd01",
+      "source_content_sha256": "27ef279937ef27c5a26459a7adfd12f23383ef9b405bbcdf8f8744662b7a43ac",
+      "source_git_blob_oid": "84911c347272228ef4285d57705295135c86147c",
       "source_git_mode": "100644",
       "source_path": "tests/v8/test_issue264_integration_closure.py",
       "source_pr": 273,
@@ -2846,7 +2846,7 @@
       "destination_path": "tests/v8/test_polymarket_real_public_provider.py",
       "destination_sha256": "5396ffbb485c2eb85fce5bc06e94451f32b8f778025356971a4d2c5852e9fe83",
       "import_reason": "behavior_and_governance_regression_coverage",
-      "source_commit": "b3974412c06b808d2af140b7666df74d82f49d3b",
+      "source_commit": "bbaea4cef64521627dd703561e1566c6181cfd01",
       "source_content_sha256": "5396ffbb485c2eb85fce5bc06e94451f32b8f778025356971a4d2c5852e9fe83",
       "source_git_blob_oid": "b6a72c1f78217754469772caf4d2a4d4f5f04c74",
       "source_git_mode": "100644",
@@ -2864,7 +2864,7 @@
       "sidecar_sha256": "dbbd056b26c5fa3139cb54f534dc884a305f7d2a0e59b079428c6517b15c4f04"
     }
   ],
-  "generation_head": "b3974412c06b808d2af140b7666df74d82f49d3b",
+  "generation_head": "bbaea4cef64521627dd703561e1566c6181cfd01",
   "repository": "phead198708/BiGan",
   "safety": {
     "capital_at_risk": false,
@@ -2924,7 +2924,7 @@
       "source_ref": "codex/issue-264-residual-v6"
     },
     {
-      "source_commit": "b3974412c06b808d2af140b7666df74d82f49d3b",
+      "source_commit": "bbaea4cef64521627dd703561e1566c6181cfd01",
       "source_pr": 273,
       "source_ref": "codex/issue-264-integration-foundation"
     }
