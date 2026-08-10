@@ -1,0 +1,61 @@
+{
+  "authorization_source": {
+    "issue": "https://github.com/phead198708/BiGan/issues/264",
+    "scope": "explicit_user_authorization_in_codex_task"
+  },
+  "candidate_slot": {
+    "architecture_feature_threshold_or_hyperparameter_search_allowed": false,
+    "byte_equivalent_engineering_fix_consumes_slot": false,
+    "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+    "maximum_slots": 1,
+    "prediction_changing_modification_requires_reauthorization": true
+  },
+  "carry_forward": {
+    "architecture_features_threshold_and_training_configuration_fixed": true,
+    "historical_v4_failed_gate": "prospective_power_required_market_count_lte_2000",
+    "historical_v4_n_max_2000_gate_changed": false,
+    "historical_v4_terminal_result_rewritten": false,
+    "new_sample_plan_is_separate_explicit_authorization": true,
+    "source_lineage": "BTC-15M-cost-aware-market-residual-v4",
+    "source_slot": "residual-v4-challenger-slot-002"
+  },
+  "created_at": "2026-08-10T14:00:00+00:00",
+  "final_fit": {
+    "fit_count": 1,
+    "fresh_outcomes_allowed": false,
+    "opened_development_only_forever_data_allowed": true,
+    "outcome_aware_development_fit": true
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "micro_live": {
+    "automatic_launch_allowed": false,
+    "fresh_confirmation_runtime_parity_phase6_and_rollback_required": true,
+    "maximum_capital_fraction_after_separate_approval": 0.01
+  },
+  "prospective_program": {
+    "candidate_switch_allowed": false,
+    "fresh_population_reuse_after_failed_gate_allowed": false,
+    "interim_pnl_evaluation_allowed": false,
+    "maximum_attempts": 3000,
+    "optional_stopping_allowed": false,
+    "outcome_blind_until_population_freeze": true,
+    "read_only": true,
+    "strictly_later_than_all_existing_data": true,
+    "target_quality_valid_market_count": 2500,
+    "zero_capital": true
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-v1-authorization"
+}
