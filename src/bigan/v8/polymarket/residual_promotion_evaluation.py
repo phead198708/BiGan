@@ -712,11 +712,15 @@ def _validate_evaluation_authorization(
     if settlement_contract is not None and not (
         set(dict(settlement_contract)) == {"path", "sha256"}
         and all(dict(settlement_contract).values())
+        and authorization.get("outcome_access_claim_authorized") is True
+        and authorization.get("authorization_record_executable") is True
+        and authorization.get("template_is_executable") is False
     ):
         raise ValueError("outcome evaluation settlement binding is invalid")
     if not (
         authorization.get("schema_version") == AUTHORIZATION_SCHEMA_VERSION
         and authorization.get("lineage_id") == LINEAGE_ID
+        and authorization.get("candidate_id") == CANDIDATE_ID
         and authorization.get("fresh_outcome_access_authorized") is True
         and authorization.get("official_settlement_ingestion_authorized") is True
         and authorization.get("evaluation_exactly_once_authorized") is True

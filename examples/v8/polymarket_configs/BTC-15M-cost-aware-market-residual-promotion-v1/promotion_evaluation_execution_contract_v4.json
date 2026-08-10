@@ -39,7 +39,7 @@
   },
   "implementation": {
     "path": "src/bigan/v8/polymarket/residual_promotion_evaluation.py",
-    "sha256": "f449184ca3a0ed792fc51b925adff36c5d08ba8ef07cbb803abe2879ca817d18"
+    "sha256": "20005750f042747a3ad1917d3376a111d922fd0b37db0765305a4657f1c60ed9"
   },
   "interim_evaluation_allowed": false,
   "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
@@ -95,7 +95,7 @@
   "schema_version": "bigan-btc-15m-residual-promotion-evaluation-execution-contract-v1",
   "settlement_ingestion_implementation": {
     "path": "src/bigan/v8/polymarket/residual_promotion_settlement.py",
-    "sha256": "f143b2f8e8953c4de22225408d4ea8ab065439efacf2ec9b3e424b0419c25c50"
+    "sha256": "930f494fb22ff3c3de245fd2645e04ed8ccb194e0337831a7d85f146313dbc89"
   },
   "statistical_protocol": {
     "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/prospective_statistical_protocol.json",

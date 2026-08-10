@@ -95,6 +95,8 @@ def test_frozen_settlement_contract_and_authorization_template_reconcile() -> No
         "path": CONTRACT.relative_to(REPO_ROOT).as_posix(),
         "sha256": sha256_file(CONTRACT),
     }
+    assert template["candidate_id"] == CANDIDATE_ID
+    assert template["authorized_record_schema_version"] == AUTHORIZATION_SCHEMA_VERSION
     assert template["fresh_outcome_access_authorized"] is False
     assert template["official_settlement_ingestion_authorized"] is False
     assert template["outcome_access_claim_authorized"] is False
@@ -102,7 +104,7 @@ def test_frozen_settlement_contract_and_authorization_template_reconcile() -> No
     assert template["authorization_record_executable"] is False
     assert template["template_is_executable"] is False
     assert template["safety"] == SAFETY
-    with pytest.raises(ValueError, match="authorization is invalid"):
+    with pytest.raises(ValueError, match="invalid"):
         _validate_evaluation_authorization(
             template,
             execution_contract=template["execution_contract"],

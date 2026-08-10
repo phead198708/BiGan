@@ -281,6 +281,9 @@ def validate_settlement_ingestion_contract(
         and contract.get("partial_failure_terminalizes_lineage") is True
         and contract.get("rerun_allowed") is False
         and contract.get("automatic_evaluation_or_promotion") is False
+        and contract.get("fresh_outcomes_accessed_when_frozen") is False
+        and contract.get("settlement_accessed_when_frozen") is False
+        and contract.get("pnl_accessed_when_frozen") is False
         and dict(contract.get("safety") or {}) == SAFETY
     ):
         raise ValueError("settlement ingestion contract is invalid")

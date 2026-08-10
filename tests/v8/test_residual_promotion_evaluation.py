@@ -297,7 +297,7 @@ def test_outcome_authorization_template_is_not_executable() -> None:
             encoding="utf-8"
         )
     )
-    with pytest.raises(ValueError, match="authorization is invalid"):
+    with pytest.raises(ValueError, match="invalid"):
         _validate_evaluation_authorization(
             template,
             execution_contract=template["execution_contract"],

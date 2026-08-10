@@ -10,7 +10,7 @@
   "polymarket_write_allowed": false,
   "preapproval_contract": {
     "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/micro_live_preapproval_contract_v4.json",
-    "sha256": "376f2e39abfc42df32d4dfe96c4286618f65fb9657753d279ca82b93bde2c9bb"
+    "sha256": "176e4bf8e0cbd2764925fa6edceb6013de294aaf5833d8de04874b922f1299f4"
   },
   "requested_initial_capital_fraction": 0.01,
   "required_evidence_hashes": {

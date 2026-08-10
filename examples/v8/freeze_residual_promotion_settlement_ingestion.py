@@ -16,6 +16,7 @@ if str(SRC) not in sys.path:
 from bigan.v8.polymarket.challenge_development_lane import sha256_file  # noqa: E402
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY  # noqa: E402
 from bigan.v8.polymarket.residual_promotion_evaluation import (  # noqa: E402
+    AUTHORIZATION_SCHEMA_VERSION,
     validate_evaluation_execution_contract,
 )
 from bigan.v8.polymarket.residual_promotion_release_readiness import (  # noqa: E402
@@ -111,6 +112,8 @@ def main() -> int:
     authorization = {
         **old_authorization,
         "authorization_template_revision": "official_settlement_ingestion_v4",
+        "candidate_id": CANDIDATE_ID,
+        "authorized_record_schema_version": AUTHORIZATION_SCHEMA_VERSION,
         "execution_contract": _descriptor(NEW_EXECUTION),
         "settlement_ingestion_contract": _descriptor(SETTLEMENT_CONTRACT),
         "supersedes_authorization_template": _descriptor(OLD_AUTHORIZATION),

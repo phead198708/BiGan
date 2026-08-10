@@ -65,15 +65,15 @@
   },
   "promotion_evaluation_contract": {
     "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/promotion_evaluation_execution_contract_v4.json",
-    "sha256": "84052372e60f7aea8b1302240b85cc7b1026debca7797825afd6e56d37f2b159"
+    "sha256": "054d84c204c5d02a7e27fc0d9f45116ed511f35a79e75d5fd0363a5596136c29"
   },
   "promotion_outcome_authorization_template": {
     "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/promotion_outcome_evaluation_authorization_template_v4.json",
-    "sha256": "cc9037c0e6e4fd8a1d07183904aaf0677a839dff8519837193a29139851d01c4"
+    "sha256": "a13ffbd80338424d260204bbcff5e0f1702e8872a7df5c551a540653408eb041"
   },
   "promotion_settlement_ingestion_contract": {
     "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/promotion_settlement_ingestion_contract.json",
-    "sha256": "22724e2d9615d16f27c765dcb5b0d9d60c5d7041c1029d8676dc5651624d3eb7"
+    "sha256": "39b09122249784b6c79d26930a9f87e3dcc27f4ec350de13a1ef58c7119a6b76"
   },
   "readiness_implementation": {
     "path": "src/bigan/v8/polymarket/residual_promotion_release_readiness.py",
