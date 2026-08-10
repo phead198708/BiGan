@@ -1,0 +1,39 @@
+{
+  "evaluation_allowed": true,
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "no_rerun": true,
+  "official_settlement_only": true,
+  "outcome_access_claim": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/outcome_access_claim_001.json",
+    "sha256": "d555bd316367dcae5163048c8da4ad1702753e30cb67bbb78b89f7fbf606d240"
+  },
+  "outcome_distribution": {
+    "DOWN": 423,
+    "UP": 377
+  },
+  "outcomes_accessed": true,
+  "pnl_accessed": false,
+  "population_changed": false,
+  "promotion_evidence_eligible": false,
+  "requested_market_count": 800,
+  "role": "official_read_only_exact_population_settlement",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-settlement-ingestion-v1",
+  "settled_market_count": 800,
+  "settlement_accessed": true,
+  "source_capture_mutated": false,
+  "unresolved_market_count": 0,
+  "unresolved_markets": []
+}

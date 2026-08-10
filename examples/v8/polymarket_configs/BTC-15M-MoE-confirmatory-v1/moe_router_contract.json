@@ -1,0 +1,105 @@
+{
+  "schema_version": "bigan-btc-15m-moe-router-contract-v1",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v1",
+  "candidate_id": "mixture_of_experts",
+  "architecture_type": "deterministic_regime_router_with_conditional_experts_and_global_fallback",
+  "router_type": "deterministic_non_learned_decision_time_router",
+  "created_at": "2026-07-30T00:45:00+00:00",
+  "source_parent_contract": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/candidate_family_protocol.json",
+    "sha256": "b1008633ddd5fad3228bbf29031bd0cb5f994663cabae10931c1913f639a8c26",
+    "candidate_id": "mixture_of_experts",
+    "ordinal": 3,
+    "used_for_hypothesis_definition_only": true
+  },
+  "router_inputs": {
+    "btc_return_15m": {
+      "direction": "unsigned_market_direction_before_side_transform",
+      "available_at_or_before_decision_required": true
+    },
+    "btc_return_regime": {
+      "bearish_if_lt": -0.00025,
+      "bullish_if_gt": 0.00025,
+      "otherwise": "sideways",
+      "missing_bucket": "missing"
+    },
+    "btc_volatility_15m": {
+      "available_at_or_before_decision_required": true
+    },
+    "volatility_bucket": {
+      "low_if_lte": 0.0002893233649502971,
+      "medium_if_lte": 0.00042012025376223845,
+      "otherwise": "high",
+      "missing_bucket": "missing"
+    }
+  },
+  "router_precedence": [
+    {
+      "ordinal": 1,
+      "condition": "volatility_bucket == high",
+      "route": "high_vol"
+    },
+    {
+      "ordinal": 2,
+      "condition": "volatility_bucket != high and btc_return_regime == bullish",
+      "route": "bullish"
+    },
+    {
+      "ordinal": 3,
+      "condition": "volatility_bucket != high and btc_return_regime == bearish",
+      "route": "bearish"
+    },
+    {
+      "ordinal": 4,
+      "condition": "otherwise",
+      "route": "low_vol"
+    }
+  ],
+  "expert_ids": [
+    "high_vol",
+    "bullish",
+    "bearish",
+    "low_vol"
+  ],
+  "support_and_fallback": {
+    "support_unit": "distinct_strictly_prior_training_markets_with_at_least_one_row_assigned_to_route",
+    "minimum_expert_training_markets": 20,
+    "expert_used_if_support_gte": 20,
+    "fallback_used_if_support_lt": 20,
+    "fallback_model": "matched_global_baseline",
+    "fallback_training_population": "same_frozen_development_population_as_global_baseline"
+  },
+  "causality": {
+    "decision_ts_required": true,
+    "available_at_ts_must_be_lte_decision_ts": true,
+    "max_input_ts_must_be_lte_decision_ts": true,
+    "settlement_outcome_allowed": false,
+    "future_price_or_return_allowed": false,
+    "target_or_pnl_allowed": false
+  },
+  "forbidden_changes": [
+    "router_precedence",
+    "router_cutoffs",
+    "expert_set",
+    "minimum_expert_support",
+    "fallback_logic",
+    "side_filter",
+    "regime_rejection",
+    "missingness_filter",
+    "uncertainty_overlay",
+    "post_hoc_abstention"
+  ],
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}

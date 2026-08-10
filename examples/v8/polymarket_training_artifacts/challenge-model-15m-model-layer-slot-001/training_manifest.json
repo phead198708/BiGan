@@ -1,0 +1,36 @@
+{
+  "artifacts": {
+    "dataset_manifest": {
+      "path": "dataset_manifest.json",
+      "sha256": "8351220f3fc0d405c89c55f80bb67e0f56669813691ea969bf035a16237a6230"
+    },
+    "model": {
+      "path": "model.ubj",
+      "sha256": "63c981c4ccf2dff422597ac69e9debc28123d697a75311eb79745a36be15812c"
+    },
+    "predictions": {
+      "path": "predictions.jsonl",
+      "sha256": "83e3e16ac3c7bffefcfe7563a1aecfe8f508cf933e8cb5a633ea12f9c050def5"
+    },
+    "training_report": {
+      "path": "training_report.json",
+      "sha256": "72607c8eb41c40512de9643645a0aaea58a124cb2441646568eccb0b5d3dd49e"
+    }
+  },
+  "created_at": "2026-07-29T10:42:40.729462+00:00",
+  "development_only_forever": true,
+  "promotion_evidence_eligible": false,
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-challenge-model-15m-training-manifest-v1",
+  "source_commit": "1b0d430ae412220dc3e46e097c318706f93dbc9f",
+  "training_completed": true,
+  "training_implementation_commit": "179f255769fe4ca93e0c304970765e6bdb27969c",
+  "training_slot_id": "challenge-model-15m-model-layer-slot-001"
+}

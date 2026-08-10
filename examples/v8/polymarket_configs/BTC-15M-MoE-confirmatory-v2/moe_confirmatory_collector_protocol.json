@@ -1,0 +1,45 @@
+{
+  "attempt_cap_derivation": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_quality_rate_analysis.json",
+    "sha256": "6abe9f28c68f91944601a53d34b972e0de618a96c4292f66f0ee66d94da13097"
+  },
+  "capture_control_may_read_outcomes_labels_or_pnl": false,
+  "collection_design": {
+    "attempt_cap": 905,
+    "chronological_earliest_quality_valid_unique_markets_required": true,
+    "maximum_quality_valid_markets_per_attempt": 1,
+    "one_fixed_window": true,
+    "target_is_mathematically_reachable_under_cap": true,
+    "target_quality_valid_market_count": 800
+  },
+  "created_at": "2026-07-30T09:00:00+00:00",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "no_failed_window_replacement": true,
+  "no_interim_outcome_looks": true,
+  "no_optional_stopping": true,
+  "outcome_blind_capture_required": true,
+  "power_analysis": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_power_analysis.json",
+    "sha256": "ffb31eb6d6b91e3d5dd52971088103d3b905a73fd66c26eda239cbec3b1fddde"
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-confirmatory-collector-v2",
+  "state": {
+    "collector_protocol_frozen": true,
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  }
+}

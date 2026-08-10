@@ -1,0 +1,210 @@
+{
+  "schema_version": "bigan-challenge-model-15m-training-slot-v1",
+  "training_slot_id": "challenge-model-15m-model-layer-slot-003",
+  "created_at": "2026-07-29T11:30:00+00:00",
+  "role": "outcome-aware-development-training-only",
+  "development_only_forever": true,
+  "promotion_evidence_eligible": false,
+  "training_implementation_commit": "5620a9d317d6518f8fabc84a6f4dbfdcd13f8b12",
+  "supersedes_failed_training_slot": {
+    "training_slot_id": "challenge-model-15m-model-layer-slot-002",
+    "result_path": "examples/v8/polymarket_configs/challenge_model_15m_model_layer_training_slot_002_result.json",
+    "result_sha256": "413df6a73201631d1eff87186caf9b203e92c0e159119834522ac37328c24437",
+    "reason": "positive test point estimate did not place the accepted-market bootstrap LCB above zero"
+  },
+  "hypothesis": {
+    "change": "normalize the two shared-model side probabilities to sum exactly to one at each market decision before subtracting frozen executable costs",
+    "reason": "slot 002 raw paired probability sums ranged from 0.935995 to 1.047239 on test decisions, leaving avoidable incoherence in a binary exhaustive market",
+    "expected_mechanism": "pair normalization removes probability-mass drift while preserving side ranking, allowing the fixed zero after-cost rule to reject incoherent marginal entries without any searched threshold"
+  },
+  "dataset": {
+    "lane_id": "challenge-model-development-btc-updown-15m-v1",
+    "quality_valid_outcome_finalized_market_count": 113,
+    "expected_decisions_per_market": 2,
+    "expected_side_rows_per_decision": 2,
+    "expected_side_row_count": 452,
+    "outcome_aware_development_use_allowed": true,
+    "promotion_evidence_use_allowed": false
+  },
+  "input_pins": {
+    "training_protocol": {
+      "path": "examples/v8/polymarket_configs/challenge_model_15m_training_protocol_preregistration.json",
+      "sha256": "b81aebe5bc6705ef454dbe29dd0f5ca1c141ecccf9bf4e47d66ae928b21e7d2d"
+    },
+    "training_readiness": {
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/training_readiness_latest.json",
+      "sha256": "0fa975715639625e4e2eb819b6c1aa9601c9d9fb59947620f65271b745051a37"
+    },
+    "transfer_freeze": {
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/transfer_diagnostic/transfer_diagnostic_freeze.json",
+      "sha256": "9cf6382af8dfb8b7e54a5ef31f87438c095326d16871e8fcbfe39556049b89a9"
+    },
+    "finalized_development_corpus_index": {
+      "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/finalized_development_corpus_index.jsonl",
+      "sha256": "0c3623e0d6d540a0fae4b71e96e8df3e342e171213212df43473c2b4de2292e6"
+    }
+  },
+  "target": {
+    "policy": "HOLD_TO_SETTLEMENT",
+    "action_mapping": {
+      "UP": "BUY_UP_HOLD_TO_SETTLEMENT",
+      "DOWN": "BUY_DOWN_HOLD_TO_SETTLEMENT"
+    },
+    "field": "total_net_pnl_per_notional",
+    "training_decomposition": "pair_normalized_selected_side_settlement_probability_minus_frozen_executable_cost",
+    "score_formula": "raw_side_probability_divided_by_paired_probability_sum_minus_entry_ask_fees_slippage_and_liquidity_impact",
+    "unit_sizing": true,
+    "official_post_close_finalized_outcome_required": true,
+    "target_available_to_feature_builder": false,
+    "target_available_to_capture_control": false
+  },
+  "feature_contract": {
+    "base_feature_names": [
+      "selected_ask",
+      "selected_bid",
+      "selected_mid",
+      "selected_ask_size",
+      "selected_bid_size",
+      "selected_spread_bps",
+      "selected_executable_ask_notional",
+      "selected_executable_bid_notional",
+      "selected_liquidity_depth",
+      "selected_book_staleness_ms",
+      "selected_book_update_lag_ms",
+      "selected_queue_fill_probability_proxy",
+      "selected_recent_bid_depth_volatility_1m",
+      "selected_recent_book_update_count_1m",
+      "selected_recent_spread_stability_1m",
+      "selected_recent_trade_volume",
+      "opposite_ask",
+      "opposite_bid",
+      "opposite_mid",
+      "opposite_ask_size",
+      "opposite_bid_size",
+      "opposite_spread_bps",
+      "opposite_executable_ask_notional",
+      "opposite_executable_bid_notional",
+      "opposite_liquidity_depth",
+      "opposite_book_staleness_ms",
+      "opposite_book_update_lag_ms",
+      "opposite_queue_fill_probability_proxy",
+      "opposite_recent_bid_depth_volatility_1m",
+      "opposite_recent_book_update_count_1m",
+      "opposite_recent_spread_stability_1m",
+      "opposite_recent_trade_volume",
+      "selected_minus_opposite_mid",
+      "selected_minus_opposite_spread_bps",
+      "selected_minus_opposite_liquidity_depth",
+      "selected_minus_opposite_recent_trade_volume",
+      "paired_ask_sum",
+      "paired_bid_sum",
+      "paired_mid_sum",
+      "combined_spread_bps",
+      "signed_chainlink_reference_distance",
+      "signed_btc_mid_to_chainlink_relative_distance",
+      "signed_btc_return_10s",
+      "signed_btc_return_30s",
+      "signed_btc_return_1m",
+      "signed_btc_return_5m",
+      "signed_btc_return_15m",
+      "btc_volatility_1m",
+      "btc_volatility_5m",
+      "btc_volatility_15m",
+      "market_progress_fraction",
+      "time_remaining_fraction",
+      "provider_health_score",
+      "book_snapshot_pair_ts_delta_ms"
+    ],
+    "shared_side_symmetric_model": true,
+    "side_identity_feature_allowed": false,
+    "directional_feature_rule": "multiply causal directional BTC and Chainlink features by plus_one_for_UP_and_minus_one_for_DOWN",
+    "market_horizon_seconds": 900,
+    "native_missing_value": "xgboost_nan",
+    "explicit_missing_indicator_for_every_feature": true,
+    "missing_encoded_as_numeric_zero_allowed": false,
+    "future_exit_or_settlement_feature_allowed": false,
+    "feature_causality_rule": "available_at_ts_and_max_input_ts_must_be_lte_decision_ts"
+  },
+  "split": {
+    "method": "chronological_unique_market_groups",
+    "market_order": "market_start_ts_then_market_id",
+    "train_fraction": 0.6,
+    "validation_fraction": 0.2,
+    "test_fraction": 0.2,
+    "all_rows_for_one_market_must_remain_in_one_split": true,
+    "random_row_split_allowed": false,
+    "validation_usage": "early_stopping_only",
+    "test_usage": "single_post_fit_development_report_only",
+    "test_visible_before_fit": false
+  },
+  "model": {
+    "family": "xgboost_shared_side_symmetric_pair_normalized_win_probability_with_cost_subtraction",
+    "parameters": {
+      "objective": "binary:logistic",
+      "eval_metric": "logloss",
+      "tree_method": "hist",
+      "nthread": 1,
+      "max_depth": 2,
+      "eta": 0.05,
+      "min_child_weight": 8.0,
+      "subsample": 1.0,
+      "colsample_bytree": 1.0,
+      "reg_lambda": 10.0,
+      "reg_alpha": 0.0,
+      "gamma": 0.0,
+      "max_bin": 64,
+      "seed": 26015
+    },
+    "num_boost_round": 400,
+    "early_stopping_rounds": 30,
+    "model_selection_metric": "validation_logloss",
+    "single_candidate_only": true,
+    "numeric_hyperparameters_changed_from_slot_002": false
+  },
+  "development_evaluation_policy": {
+    "decision_rule": "chronological_first_decision_with_positive_prediction_then_highest_side_prediction",
+    "fixed_acceptance_threshold": 0.0,
+    "side_tie_break_order": [
+      "UP",
+      "DOWN"
+    ],
+    "one_trade_maximum_per_market": true,
+    "unit_sizing": true,
+    "bootstrap_population": "accepted_markets",
+    "bootstrap_resamples": 10000,
+    "bootstrap_seed": 26015,
+    "bootstrap_confidence": 0.95,
+    "development_signal_rule": {
+      "minimum_accepted_test_markets": 5,
+      "test_mean_unit_net_pnl_bootstrap_lcb_must_be_gt": 0.0,
+      "report_only": true,
+      "promotion_claim_allowed": false
+    },
+    "comparison_to_legacy_hold_policy_allowed": false,
+    "comparison_to_v8_1_sell_before_close_bridge_allowed": false
+  },
+  "development_discipline": {
+    "candidate_count": 1,
+    "hyperparameter_search_allowed": false,
+    "threshold_search_allowed": false,
+    "five_minute_exact_195_threshold_mining_allowed": false,
+    "old_15m_plus_12_39_used_as_gate": false,
+    "post_result_same_slot_mutation_allowed": false,
+    "additional_candidate_requires_new_preregistration": true
+  },
+  "execution_boundary": {
+    "collection_restart_allowed": false,
+    "new_outcome_collection_allowed": false,
+    "paper_action_allowed": false,
+    "promotion_action_allowed": false,
+    "candidate_lineage_change_allowed": false
+  },
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  }
+}

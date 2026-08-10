@@ -1,0 +1,77 @@
+{
+  "attribution_completeness_required": true,
+  "created_at": "2026-07-30T09:00:00+00:00",
+  "forbidden_reporting_behavior": {
+    "missingness_filtering": true,
+    "outlier_deletion": true,
+    "pooled_panels_rescuing_failed_gates": true,
+    "post_hoc_exclusions": true,
+    "route_filtering": true,
+    "winner_language_before_all_gates_pass": true
+  },
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "missingness_semantics": {
+    "explicit_missing_indicator_required": true,
+    "missing_value_encoded_as_numeric_zero_allowed": false,
+    "native_missing_value": "nan"
+  },
+  "population": {
+    "NO_TRADE_rows_required": true,
+    "all_frozen_markets_must_reconcile_to_target": true,
+    "dropped_market_count_must_equal": 0,
+    "one_row_per_frozen_market_required": true
+  },
+  "required_market_fields": [
+    "market_id",
+    "decision_ts",
+    "requested_route",
+    "expert_id",
+    "expert_training_market_count",
+    "expert_available",
+    "fallback_used",
+    "actual_model_used",
+    "candidate_selected_side",
+    "baseline_selected_side",
+    "candidate_accepted",
+    "baseline_accepted",
+    "candidate_unit_net_pnl",
+    "baseline_unit_net_pnl",
+    "paired_delta_unit_net_pnl",
+    "provider_health",
+    "feature_missingness",
+    "cost_decomposition",
+    "chronological_half"
+  ],
+  "required_panels": [
+    "overall",
+    "requested_route",
+    "actual_model",
+    "expert_vs_fallback",
+    "UP_vs_DOWN",
+    "regime",
+    "provider_health",
+    "complete_feature_vs_missing_feature",
+    "chronological_half",
+    "largest_winner_attribution"
+  ],
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-future-reporting-contract-v2",
+  "state": {
+    "contract_frozen": true,
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  }
+}

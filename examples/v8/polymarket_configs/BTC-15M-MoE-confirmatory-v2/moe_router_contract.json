@@ -1,0 +1,109 @@
+{
+  "architecture_type": "deterministic_regime_router_with_conditional_experts_and_global_fallback",
+  "candidate_id": "mixture_of_experts",
+  "causality": {
+    "available_at_ts_must_be_lte_decision_ts": true,
+    "decision_ts_required": true,
+    "future_price_or_return_allowed": false,
+    "max_input_ts_must_be_lte_decision_ts": true,
+    "settlement_outcome_allowed": false,
+    "target_or_pnl_allowed": false
+  },
+  "created_at": "2026-07-30T09:00:00+00:00",
+  "expert_ids": [
+    "high_vol",
+    "bullish",
+    "bearish",
+    "low_vol"
+  ],
+  "forbidden_changes": [
+    "router_precedence",
+    "router_cutoffs",
+    "expert_set",
+    "minimum_expert_support",
+    "fallback_logic",
+    "side_filter",
+    "regime_rejection",
+    "missingness_filter",
+    "uncertainty_overlay",
+    "post_hoc_abstention"
+  ],
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "router_inputs": {
+    "btc_return_15m": {
+      "available_at_or_before_decision_required": true,
+      "direction": "unsigned_market_direction_before_side_transform"
+    },
+    "btc_return_regime": {
+      "bearish_if_lt": -0.00025,
+      "bullish_if_gt": 0.00025,
+      "missing_bucket": "missing",
+      "otherwise": "sideways"
+    },
+    "btc_volatility_15m": {
+      "available_at_or_before_decision_required": true
+    },
+    "volatility_bucket": {
+      "low_if_lte": 0.0002893233649502971,
+      "medium_if_lte": 0.00042012025376223845,
+      "missing_bucket": "missing",
+      "otherwise": "high"
+    }
+  },
+  "router_precedence": [
+    {
+      "condition": "volatility_bucket == high",
+      "ordinal": 1,
+      "route": "high_vol"
+    },
+    {
+      "condition": "volatility_bucket != high and btc_return_regime == bullish",
+      "ordinal": 2,
+      "route": "bullish"
+    },
+    {
+      "condition": "volatility_bucket != high and btc_return_regime == bearish",
+      "ordinal": 3,
+      "route": "bearish"
+    },
+    {
+      "condition": "otherwise",
+      "ordinal": 4,
+      "route": "low_vol"
+    }
+  ],
+  "router_type": "deterministic_non_learned_decision_time_router",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-router-contract-v2",
+  "source_parent_contract": {
+    "candidate_id": "mixture_of_experts",
+    "ordinal": 3,
+    "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/candidate_family_protocol.json",
+    "sha256": "b1008633ddd5fad3228bbf29031bd0cb5f994663cabae10931c1913f639a8c26",
+    "used_for_hypothesis_definition_only": true
+  },
+  "source_v1_contract": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_router_contract.json",
+    "sha256": "243b90aedb54198470ac04aeff713d5a6c6cd8b05c2c87eb49b48752d69bdb46"
+  },
+  "support_and_fallback": {
+    "expert_used_if_support_gte": 20,
+    "fallback_model": "matched_global_baseline",
+    "fallback_training_population": "all_113_development_markets_equal_to_matched_global_baseline",
+    "fallback_used_if_support_lt": 20,
+    "minimum_expert_training_markets": 20,
+    "support_unit": "distinct_strictly_prior_training_markets_with_at_least_one_row_assigned_to_route"
+  }
+}

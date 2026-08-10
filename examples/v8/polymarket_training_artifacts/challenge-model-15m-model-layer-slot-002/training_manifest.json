@@ -1,0 +1,39 @@
+{
+  "after_cost_score_formula": "win_probability-entry_ask-fees-slippage-liquidity_impact",
+  "artifacts": {
+    "dataset_manifest": {
+      "path": "dataset_manifest.json",
+      "sha256": "f7523eb02fccb5488744723cc3b52bd77b3667f955f8e3ebf6ea8bb6358b5121"
+    },
+    "model": {
+      "path": "model.ubj",
+      "sha256": "1ce1ceaa993f2f8d20ff7a60d14eaee447a597adecdfcf89a0c912b206686a8c"
+    },
+    "predictions": {
+      "path": "predictions.jsonl",
+      "sha256": "ff79e17fa2ea15f16d8865bc4d7fc778dd58bb5dd5f8eba61ea7b1ce95ceede5"
+    },
+    "training_report": {
+      "path": "training_report.json",
+      "sha256": "a281bec92be655fa27c5718f4539db3f771d3174e79a7d7d842eca583c12586b"
+    }
+  },
+  "created_at": "2026-07-29T10:46:25.060354+00:00",
+  "development_only_forever": true,
+  "model_family": "xgboost_shared_side_symmetric_win_probability_with_cost_subtraction",
+  "prediction_semantics": "selected_side_win_probability_minus_frozen_executable_entry_cost",
+  "promotion_evidence_eligible": false,
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-challenge-model-15m-training-manifest-v1",
+  "source_commit": "b80216d760a797a2c23dd36fc0adadb06381988d",
+  "training_completed": true,
+  "training_implementation_commit": "a0d90365a784582e1a69d96220154a0ef3539f69",
+  "training_slot_id": "challenge-model-15m-model-layer-slot-002"
+}

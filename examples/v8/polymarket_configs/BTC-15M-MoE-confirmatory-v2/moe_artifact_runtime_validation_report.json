@@ -1,0 +1,330 @@
+{
+  "checks": {
+    "DOWN_selection_executed": true,
+    "NO_TRADE_executed": true,
+    "UP_selection_executed": true,
+    "UP_tie_break_executed": true,
+    "all_available_experts_executed": true,
+    "artifact_hash_mismatch_rejection_passed": true,
+    "bundle_hash_verified": true,
+    "causality_failure_tests_passed": true,
+    "child_sha_verification_passed": true,
+    "fallback_executed": true,
+    "fresh_collection_authorized": false,
+    "fresh_environment_resolution": true,
+    "fresh_outcomes_opened": false,
+    "mandatory_gate_passed": true,
+    "prediction_results": [
+      {
+        "accepted": true,
+        "actual_model_used": "moe_expert_high_vol",
+        "fixture_id": "high_vol_native_expert",
+        "normalized_probabilities": [
+          0.5,
+          0.5
+        ],
+        "raw_probabilities": [
+          0.5102415084838867,
+          0.5102415084838867
+        ],
+        "required_path": "high_vol_native_expert",
+        "route": "high_vol",
+        "scores": [
+          0.04999999999999999,
+          0.04999999999999999
+        ],
+        "selected_side": "UP",
+        "tie_break_candidate_side": "UP"
+      },
+      {
+        "accepted": true,
+        "actual_model_used": "moe_expert_bullish",
+        "fixture_id": "bullish_native_expert",
+        "normalized_probabilities": [
+          0.5216397213579396,
+          0.47836032715487115
+        ],
+        "raw_probabilities": [
+          0.3204529881477356,
+          0.2938656508922577
+        ],
+        "required_path": "bullish_native_expert",
+        "route": "bullish",
+        "scores": [
+          0.07163972135793956,
+          0.028360327154871134
+        ],
+        "selected_side": "UP",
+        "tie_break_candidate_side": "UP"
+      },
+      {
+        "accepted": true,
+        "actual_model_used": "moe_expert_bearish",
+        "fixture_id": "bearish_native_expert",
+        "normalized_probabilities": [
+          0.3307625070582604,
+          0.6692374929417396
+        ],
+        "raw_probabilities": [
+          0.1761099100112915,
+          0.35632622241973877
+        ],
+        "required_path": "bearish_native_expert",
+        "route": "bearish",
+        "scores": [
+          -0.11923749294173963,
+          0.2192374929417396
+        ],
+        "selected_side": "DOWN",
+        "tie_break_candidate_side": "DOWN"
+      },
+      {
+        "accepted": true,
+        "actual_model_used": "global_baseline_fallback",
+        "fixture_id": "low_vol_global_fallback",
+        "normalized_probabilities": [
+          0.5,
+          0.5
+        ],
+        "raw_probabilities": [
+          0.37598252296447754,
+          0.37598252296447754
+        ],
+        "required_path": "low_vol_global_fallback",
+        "route": "low_vol",
+        "scores": [
+          0.04999999999999999,
+          0.04999999999999999
+        ],
+        "selected_side": "UP",
+        "tie_break_candidate_side": "UP"
+      },
+      {
+        "accepted": true,
+        "actual_model_used": "moe_expert_high_vol",
+        "fixture_id": "selected_side_up",
+        "normalized_probabilities": [
+          0.5,
+          0.5
+        ],
+        "raw_probabilities": [
+          0.4846046268939972,
+          0.4846046268939972
+        ],
+        "required_path": "UP_selection",
+        "route": "high_vol",
+        "scores": [
+          0.5,
+          -0.5
+        ],
+        "selected_side": "UP",
+        "tie_break_candidate_side": "UP"
+      },
+      {
+        "accepted": true,
+        "actual_model_used": "moe_expert_high_vol",
+        "fixture_id": "selected_side_down",
+        "normalized_probabilities": [
+          0.5,
+          0.5
+        ],
+        "raw_probabilities": [
+          0.4846046268939972,
+          0.4846046268939972
+        ],
+        "required_path": "DOWN_selection",
+        "route": "high_vol",
+        "scores": [
+          -0.5,
+          0.5
+        ],
+        "selected_side": "DOWN",
+        "tie_break_candidate_side": "DOWN"
+      },
+      {
+        "accepted": false,
+        "actual_model_used": "moe_expert_bullish",
+        "fixture_id": "no_trade_both_scores_nonpositive",
+        "normalized_probabilities": [
+          0.5,
+          0.5
+        ],
+        "raw_probabilities": [
+          0.3204529881477356,
+          0.3204529881477356
+        ],
+        "required_path": "NO_TRADE",
+        "route": "bullish",
+        "scores": [
+          -0.5,
+          -0.5
+        ],
+        "selected_side": null,
+        "tie_break_candidate_side": "UP"
+      },
+      {
+        "accepted": true,
+        "actual_model_used": "moe_expert_bearish",
+        "fixture_id": "asymmetric_paired_feature_rows",
+        "normalized_probabilities": [
+          0.6692374929417396,
+          0.3307625070582604
+        ],
+        "raw_probabilities": [
+          0.35632622241973877,
+          0.1761099100112915
+        ],
+        "required_path": "asymmetric_pair",
+        "route": "bearish",
+        "scores": [
+          0.2192374929417396,
+          -0.11923749294173963
+        ],
+        "selected_side": "UP",
+        "tie_break_candidate_side": "UP"
+      },
+      {
+        "accepted": false,
+        "actual_model_used": "moe_expert_high_vol",
+        "fixture_id": "exact_threshold_boundary_score_zero",
+        "normalized_probabilities": [
+          0.5,
+          0.5
+        ],
+        "raw_probabilities": [
+          0.4846046268939972,
+          0.4846046268939972
+        ],
+        "required_path": "threshold_boundary",
+        "route": "high_vol",
+        "scores": [
+          0.0,
+          0.0
+        ],
+        "selected_side": null,
+        "tie_break_candidate_side": "UP"
+      },
+      {
+        "accepted": true,
+        "actual_model_used": "moe_expert_high_vol",
+        "fixture_id": "up_down_tie_frozen_up_tiebreak",
+        "normalized_probabilities": [
+          0.5,
+          0.5
+        ],
+        "raw_probabilities": [
+          0.4846046268939972,
+          0.4846046268939972
+        ],
+        "required_path": "UP_tie_break",
+        "route": "high_vol",
+        "scores": [
+          0.09999999999999998,
+          0.09999999999999998
+        ],
+        "selected_side": "UP",
+        "tie_break_candidate_side": "UP"
+      }
+    ],
+    "rejection_results": [
+      {
+        "error": "MoE router inputs missing: max_input_ts",
+        "fixture_id": "missing_required_router_field",
+        "rejected": true
+      },
+      {
+        "error": "outcome or future fields are forbidden from MoE routing: future_return, target",
+        "fixture_id": "forbidden_future_outcome_router_field",
+        "rejected": true
+      },
+      {
+        "error": "MoE router input causality violation",
+        "fixture_id": "available_after_decision",
+        "rejected": true
+      },
+      {
+        "error": "MoE router input causality violation",
+        "fixture_id": "max_input_after_decision",
+        "rejected": true
+      },
+      {
+        "error": "unknown frozen MoE route: unknown",
+        "fixture_id": "unknown_route",
+        "rejected": true
+      }
+    ],
+    "router_boundary_tests_passed": true,
+    "router_results": [
+      {
+        "fixture_id": "high_vol_precedence_over_bullish",
+        "observed_route": "high_vol",
+        "passed": true
+      },
+      {
+        "fixture_id": "bullish_router_path",
+        "observed_route": "bullish",
+        "passed": true
+      },
+      {
+        "fixture_id": "bearish_router_path",
+        "observed_route": "bearish",
+        "passed": true
+      },
+      {
+        "fixture_id": "sideways_low_vol_router_path",
+        "observed_route": "low_vol",
+        "passed": true
+      }
+    ],
+    "safety": {
+      "#134_resume_allowed": false,
+      "#146_start_allowed": false,
+      "capital_at_risk": false,
+      "freeze_ready": false,
+      "live_trading_allowed": false,
+      "paper_candidate_allowed": false,
+      "polymarket_write_allowed": false,
+      "promotion_evidence_eligible": false,
+      "source_model_candidate_eligible": false,
+      "v8_execution_handoff_allowed": false,
+      "wallet_signing_allowed": false
+    },
+    "threshold_boundary_executed": true,
+    "verified_child_sha256_count": 13
+  },
+  "created_at": "2026-07-30T09:00:00+00:00",
+  "failure_semantics": "any_mismatch_blocks_collection_authorization",
+  "inputs": {
+    "artifact_graph": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_artifact_graph.json",
+      "sha256": "265ecd1b62bd5489099b37b09df9e65a6bbf62a4fe1b293a2b8a73d1951cf205"
+    },
+    "bundle_hash": "fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807",
+    "model_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_model_manifest.json",
+      "sha256": "e23c365d200181df0d4dfa3b3c458ff0eeccbacf52372b7a7448c34450ac77b0"
+    }
+  },
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "mandatory_gate_passed": true,
+  "role": "mandatory_precollection_runtime_gate",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-runtime-validation-report-v2",
+  "state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  }
+}

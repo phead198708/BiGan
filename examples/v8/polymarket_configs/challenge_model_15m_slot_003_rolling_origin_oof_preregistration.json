@@ -1,0 +1,84 @@
+{
+  "schema_version": "bigan-challenge-model-15m-rolling-origin-oof-preregistration-v1",
+  "diagnostic_id": "challenge-model-15m-slot-003-rolling-origin-oof-v1",
+  "created_at": "2026-07-29T11:45:00+00:00",
+  "role": "outcome-aware-development-diagnostic-only",
+  "development_only_forever": true,
+  "promotion_evidence_eligible": false,
+  "implementation_commit": "75cff204ae371969c7a97d74562b8fe2de7c5e81",
+  "candidate_preregistration": {
+    "path": "examples/v8/polymarket_configs/challenge_model_15m_model_layer_training_slot_003_preregistration.json",
+    "sha256": "b672f529cffd9e9ceed7d819b24f82a805dc4b51f8dd2e19f8ed6ef0503ff183"
+  },
+  "prior_result": {
+    "path": "examples/v8/polymarket_configs/challenge_model_15m_model_layer_training_slot_003_result.json",
+    "sha256": "487e40b8a8a525140d02069c069ab09adf088ce525c2105d7d2ce02a041eaae4"
+  },
+  "purpose": {
+    "question": "does the frozen slot-003 model family retain positive after-cost value under strictly prior-market refits with more out-of-fold support",
+    "not_a_gate_rewrite": true,
+    "slot_003_original_test_rule_remains_failed": true,
+    "candidate_behavior_change_allowed": false
+  },
+  "rolling_origin": {
+    "market_order": "market_start_ts_then_market_id",
+    "initial_training_market_count": 40,
+    "target_block_size": 1,
+    "inner_train_fraction": 0.8,
+    "inner_validation_fraction": 0.2,
+    "inner_split_method": "chronological_unique_market_groups",
+    "model_parameters": "exactly_candidate_preregistration",
+    "strictly_prior_market_labels_only": true,
+    "future_market_labels_or_features_allowed": false,
+    "target_market_label_used_for_fit": false,
+    "target_market_count_expected": 73,
+    "one_refit_per_target_market": true
+  },
+  "development_evaluation_policy": {
+    "decision_rule": "chronological_first_decision_with_positive_prediction_then_highest_side_prediction",
+    "fixed_acceptance_threshold": 0.0,
+    "one_trade_maximum_per_market": true,
+    "unit_sizing": true,
+    "minimum_accepted_oof_markets": 30,
+    "bootstrap_population": "accepted_oof_markets",
+    "bootstrap_resamples": 10000,
+    "bootstrap_seed": 26015,
+    "bootstrap_confidence": 0.95,
+    "mean_unit_net_pnl_bootstrap_lcb_must_be_gt": 0.0,
+    "report_only": true,
+    "promotion_claim_allowed": false
+  },
+  "robustness_rule": {
+    "largest_winner_removed_total_unit_net_pnl_must_be_gt": 0.0,
+    "each_chronological_half_total_unit_net_pnl_must_be_gt": 0.0
+  },
+  "development_discipline": {
+    "candidate_behavior_changed": false,
+    "threshold_search_allowed": false,
+    "hyperparameter_search_allowed": false,
+    "sizing_change_allowed": false,
+    "old_15m_plus_12_39_used_as_gate": false,
+    "five_minute_exact_195_threshold_mining_allowed": false,
+    "single_diagnostic_run_only": true
+  },
+  "evidence_boundary": {
+    "development_signal_rule_can_rehabilitate_slot_003_original_test_failure": false,
+    "promotion_evidence_claim_allowed": false,
+    "confirmatory_evidence_claim_allowed": false,
+    "new_candidate_requires_separate_preregistration": true
+  },
+  "execution_boundary": {
+    "collection_restart_allowed": false,
+    "new_outcome_collection_allowed": false,
+    "paper_action_allowed": false,
+    "promotion_action_allowed": false
+  },
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  }
+}
