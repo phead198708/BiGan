@@ -113,6 +113,29 @@ def _changed_paths(
     return tuple(sorted(path for path in changed if path))
 
 
+def _is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    result = subprocess.run(
+        ("git", "merge-base", "--is-ancestor", ancestor, descendant),
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise IntegrationClosureError(
+        "git merge-base --is-ancestor failed closed: " + result.stderr.strip()
+    )
+
+
+def _tree_is_identical(root: Path, left_commit: str, right_commit: str) -> bool:
+    left_tree = str(_git(root, "rev-parse", f"{left_commit}^{{tree}}")).strip()
+    right_tree = str(_git(root, "rev-parse", f"{right_commit}^{{tree}}")).strip()
+    return left_tree == right_tree
+
+
 def _import_reason(path: str) -> str:
     if path == "pyproject.toml":
         return "runtime_dependency_declaration"
@@ -615,13 +638,23 @@ def verify_integration_closure_set(
             }
         )
 
-    commit_to_layer = {layer["manifest_commit"]: layer for layer in layers}
-    if len(commit_to_layer) != len(layers):
+    manifest_commits = {layer["manifest_commit"] for layer in layers}
+    if len(manifest_commits) != len(layers):
         raise IntegrationClosureError("multiple closure manifests share one commit")
+
+    def is_predecessor(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+        left_commit = str(left["manifest_commit"])
+        right_base = str(right["payload"]["base"]["commit"])
+        return _is_ancestor(root, left_commit, right_base) and _tree_is_identical(
+            root, left_commit, right_base
+        )
+
     starts = [
         layer
         for layer in layers
-        if layer["payload"]["base"]["commit"] not in commit_to_layer
+        if not any(
+            other is not layer and is_predecessor(other, layer) for other in layers
+        )
     ]
     if len(starts) != 1:
         raise IntegrationClosureError("closure layers do not have one deterministic root")
@@ -630,9 +663,7 @@ def verify_integration_closure_set(
         next_layers = [
             layer
             for layer in layers
-            if layer not in ordered
-            and layer["payload"]["base"]["commit"]
-            == ordered[-1]["manifest_commit"]
+            if layer not in ordered and is_predecessor(ordered[-1], layer)
         ]
         if len(next_layers) != 1:
             raise IntegrationClosureError("closure layer chain is missing or ambiguous")

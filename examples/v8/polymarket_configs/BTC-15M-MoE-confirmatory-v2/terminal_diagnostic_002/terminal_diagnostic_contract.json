@@ -1,0 +1,127 @@
+{
+  "candidate_bundle_hash": "fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807",
+  "created_at": "2026-08-09T06:00:00Z",
+  "diagnostic_semantics": {
+    "auc": "pairwise_probability_of_positive_score_exceeding_negative_score_with_half_credit_for_ties",
+    "correlation": "pearson_product_moment_on_accepted_action_predicted_net_score_and_realized_unit_net_pnl",
+    "decision_count_per_market": 2,
+    "decision_time_only_features": true,
+    "market_population_count": 800,
+    "probability_clipping_epsilon_for_log_loss": 1e-15,
+    "probability_metrics_row_unit": "market_decision_side",
+    "probability_metrics_side_row_count": 3200,
+    "side_order": [
+      "UP",
+      "DOWN"
+    ],
+    "target": "official_settlement_side_indicator",
+    "unit_action_value": "settlement_payout_minus_executable_ask_minus_fees_minus_slippage_minus_liquidity_impact"
+  },
+  "future_evidence_boundary": {
+    "current_800_market_population_role": "development_only_forever",
+    "prior_113_market_distribution_population_role": "development_only_forever",
+    "prior_73_market_effect_population_role": "development_only_forever",
+    "promotion_evidence_eligible": false,
+    "strictly_later_unopened_population_required": true
+  },
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "population_denominators": {
+    "confirmatory_population_count": 800,
+    "distribution_population_count": 113,
+    "effect_population_count": 73
+  },
+  "power_diagnostic_semantics": {
+    "confidence": 0.975,
+    "normal_approximation_only": true,
+    "plugin_market_count_target_crossing_probability_0_5": {
+      "absolute_candidate": 36816,
+      "paired_delta": 52867
+    },
+    "plugin_market_count_target_crossing_probability_0_8": {
+      "absolute_candidate": 75222,
+      "paired_delta": 108017
+    },
+    "usable_as_collection_plan": false
+  },
+  "role": "deterministic_post_terminal_diagnostic_contract",
+  "raw_provenance_status": "recovered_content_addressed_archive_deep_hash_verified",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-terminal-diagnostic-contract-v2",
+  "source_artifacts": {
+    "artifact_graph": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_artifact_graph.json",
+      "sha256": "265ecd1b62bd5489099b37b09df9e65a6bbf62a4fe1b293a2b8a73d1951cf205"
+    },
+    "baseline_decision_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/baseline_decision_rows.jsonl",
+      "sha256": "49ee6bdd7a3caccb824af8dd3645d3f42a9342b81a766412dfe7ed42f21f8006"
+    },
+    "candidate_decision_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/candidate_decision_rows.jsonl",
+      "sha256": "7784f2423b7d16f3ac665729432e16c6980ad94b656e049d03ecf776fdaed338"
+    },
+    "confirmatory_capture_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/confirmatory_capture_manifest.json",
+      "sha256": "a7d82694b9b4a798f382b6d086f74dda2fa7a296f0870f193fcc00e9192be4ff"
+    },
+    "confirmatory_evaluation_report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/moe_confirmatory_evaluation_report.json",
+      "sha256": "72b7c4a8abaa438e0656f7b510acd6fd01894b5d6e55869dc8fd4708e35cc26f"
+    },
+    "confirmatory_market_evaluation_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/confirmatory_market_evaluation_rows.jsonl",
+      "sha256": "1bd6e2fe4ae3d8f867976fe490fb79e32a784f7266950a269d83495264c580c7"
+    },
+    "cost_action_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_cost_and_action_contract.json",
+      "sha256": "7a2d2f170cd6b042188f8282014dfbfb7d379e49085bd00807aace1881d7bf43"
+    },
+    "development_distribution_reference": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_development_distribution_shift_reference.json",
+      "sha256": "cc2134ef5518c2b8fc8d48b1969ade0d55affef8fd690a6abffb438e9063037b"
+    },
+    "development_metric_reconciliation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_metric_reconciliation_report.json",
+      "sha256": "153cbcf3573b8ce0b8022c1faab4348193f245ac3de1a8b284c21d0a3d4c8028"
+    },
+    "development_paired_planning_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/development_paired_planning_rows.jsonl",
+      "sha256": "d7f670e2c367a01dab4055603077f6b31c751b41a1a2a42cdcb1c3733ea2fb83"
+    },
+    "development_route_attribution": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_route_attribution_report.json",
+      "sha256": "f540ed6bcbd7bc93e74d283a61cb385c802e8e0c24c102e35ef4d14b3dc99adf"
+    },
+    "power_interpretation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_power_interpretation_r1.json",
+      "sha256": "8cfc1700782115274e248b859a98d8f1dd7352a609947ab177e8e242598f0910"
+    },
+    "raw_evidence_manifest_index": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/raw_evidence_manifest_index.jsonl",
+      "sha256": "4b8a51c20299986440676c27f1a488ed099a898e337b17aa3838bdf0d5bc2495"
+    },
+    "raw_capture_recovery_bundle_manifest": {
+      "path": "examples/v8/polymarket_artifacts/raw_archives/sha256/5deddaabd9d4ec9d979dfe47f77dd01ee6671c708154588b7325ae8325638639/bundle_manifest.json",
+      "sha256": "aab5c7187cdce4f7b6e2f9c5ed08b3a1f79b3c0d72c75fdf017384254c388d72"
+    }
+  },
+  "terminal_invariants": {
+    "additional_v2_collection_allowed": false,
+    "confirmatory_gate_passed": false,
+    "rerun_allowed": false,
+    "terminal_failed": true,
+    "v2_permission_change_allowed": false
+  }
+}

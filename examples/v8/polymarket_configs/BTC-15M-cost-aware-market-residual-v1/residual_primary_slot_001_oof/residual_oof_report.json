@@ -1,0 +1,209 @@
+{
+  "all_gates_passed": false,
+  "candidate_freeze_allowed": false,
+  "candidate_role": "primary",
+  "created_at": "2026-08-09T06:39:12Z",
+  "development_only_forever": true,
+  "failed_gates": [
+    "every_chronological_block_paired_delta_total_gte_zero",
+    "prospective_power_required_market_count_lte_2000"
+  ],
+  "fresh_confirmatory_collection_authorized": false,
+  "gate_results": {
+    "absolute_market_bootstrap_97_5pct_lcb_gt_zero": true,
+    "all_cost_stress_candidate_totals_gte_zero": true,
+    "all_cost_stress_paired_delta_totals_gte_zero": true,
+    "every_chronological_block_candidate_total_gte_zero": true,
+    "every_chronological_block_paired_delta_total_gte_zero": false,
+    "largest_positive_delta_removed_total_gte_zero": true,
+    "largest_winner_removed_candidate_total_gte_zero": true,
+    "paired_delta_market_bootstrap_97_5pct_lcb_gt_zero": true,
+    "population_and_leakage_reconciliation": true,
+    "prospective_power_required_market_count_lte_2000": false,
+    "stable_score_to_realized_pnl_ordering": true
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v1",
+  "live_shadow_start_allowed": false,
+  "overall": {
+    "baseline_accepted_market_count": 597,
+    "baseline_bootstrap_interval": {
+      "confidence": 0.975,
+      "lower": -0.046763458333333306,
+      "method": "market_level_paired_percentile_bootstrap",
+      "resamples": 10000,
+      "upper": 0.022512239583333336
+    },
+    "baseline_mean_unit_net_pnl": -0.01232374999999999,
+    "baseline_total_unit_net_pnl": -7.394249999999993,
+    "candidate_accepted_market_count": 570,
+    "candidate_bootstrap_interval": {
+      "confidence": 0.975,
+      "lower": 0.0010904270833333623,
+      "method": "market_level_paired_percentile_bootstrap",
+      "resamples": 10000,
+      "upper": 0.06778203125
+    },
+    "candidate_mean_unit_net_pnl": 0.03499583333333335,
+    "candidate_total_unit_net_pnl": 20.99750000000001,
+    "paired_delta_bootstrap_interval": {
+      "confidence": 0.975,
+      "lower": 0.006173614583333335,
+      "method": "market_level_paired_percentile_bootstrap",
+      "resamples": 10000,
+      "upper": 0.08832655208333333
+    },
+    "paired_delta_mean_unit_net_pnl": 0.04731958333333334,
+    "paired_delta_total_unit_net_pnl": 28.391750000000002,
+    "shared_bootstrap_indices_sha256": "5d98dd80406013c2a1b2af443e98af48ec7d571afc57e384ba0dd84f3a59dd8c"
+  },
+  "population": {
+    "NO_TRADE_included_as_zero": true,
+    "baseline_market_count": 600,
+    "candidate_market_count": 600,
+    "initial_training_market_count": 200,
+    "oof_market_count": 600,
+    "paired_market_count": 600,
+    "source_market_count": 800
+  },
+  "promotion_claim_made": false,
+  "promotion_evidence_eligible": false,
+  "prospective_power": {
+    "confidence": 0.975,
+    "diagnostic_only_not_promotion_evidence": true,
+    "fast_track_feasible": false,
+    "maximum_market_count": 2000,
+    "method": "plugin_normal_approximation_with_preregistered_effect_haircut",
+    "panels": {
+      "absolute_candidate": {
+        "conservative_effect": 0.017497916666666676,
+        "effect_haircut": 0.5,
+        "observed_mean": 0.03499583333333335,
+        "observed_standard_deviation": 0.4205800919133342,
+        "required_market_count": 4535
+      },
+      "paired_delta": {
+        "conservative_effect": 0.02365979166666667,
+        "effect_haircut": 0.5,
+        "observed_mean": 0.04731958333333334,
+        "observed_standard_deviation": 0.5157303784936095,
+        "required_market_count": 3730
+      }
+    },
+    "required_market_count": 4535,
+    "target_power": 0.8
+  },
+  "protocol_sha256": "ba5fc86e7965c3a3553f16099fe16f0fa64b3530dba4e7e393957dd7b9e0d7fb",
+  "robustness": {
+    "candidate_largest_winner_removed_total_unit_net_pnl": 20.03275000000001,
+    "chronological_blocks": {
+      "1": {
+        "baseline_total_unit_net_pnl": 1.4852500000000008,
+        "candidate_accepted_market_count": 95,
+        "candidate_total_unit_net_pnl": 0.8147500000000013,
+        "market_count": 100,
+        "paired_delta_total_unit_net_pnl": -0.6704999999999994
+      },
+      "2": {
+        "baseline_total_unit_net_pnl": -1.2997499999999982,
+        "candidate_accepted_market_count": 96,
+        "candidate_total_unit_net_pnl": 2.2110000000000025,
+        "market_count": 100,
+        "paired_delta_total_unit_net_pnl": 3.5107500000000003
+      },
+      "3": {
+        "baseline_total_unit_net_pnl": -4.204999999999999,
+        "candidate_accepted_market_count": 98,
+        "candidate_total_unit_net_pnl": 3.927500000000001,
+        "market_count": 100,
+        "paired_delta_total_unit_net_pnl": 8.1325
+      },
+      "4": {
+        "baseline_total_unit_net_pnl": -5.990499999999998,
+        "candidate_accepted_market_count": 93,
+        "candidate_total_unit_net_pnl": 0.3332500000000017,
+        "market_count": 100,
+        "paired_delta_total_unit_net_pnl": 6.32375
+      },
+      "5": {
+        "baseline_total_unit_net_pnl": 2.795500000000002,
+        "candidate_accepted_market_count": 94,
+        "candidate_total_unit_net_pnl": 7.712500000000002,
+        "market_count": 100,
+        "paired_delta_total_unit_net_pnl": 4.917000000000001
+      },
+      "6": {
+        "baseline_total_unit_net_pnl": -0.17974999999999827,
+        "candidate_accepted_market_count": 94,
+        "candidate_total_unit_net_pnl": 5.998500000000002,
+        "market_count": 100,
+        "paired_delta_total_unit_net_pnl": 6.17825
+      }
+    },
+    "chronological_halves": {
+      "first": {
+        "baseline_total_unit_net_pnl": -4.019499999999996,
+        "candidate_accepted_market_count": 289,
+        "candidate_total_unit_net_pnl": 6.953250000000005,
+        "market_count": 300,
+        "paired_delta_total_unit_net_pnl": 10.97275
+      },
+      "second": {
+        "baseline_total_unit_net_pnl": -3.374749999999995,
+        "candidate_accepted_market_count": 281,
+        "candidate_total_unit_net_pnl": 14.044250000000005,
+        "market_count": 300,
+        "paired_delta_total_unit_net_pnl": 17.419
+      }
+    },
+    "cost_stress": {
+      "1.2x": {
+        "actions_reselected": false,
+        "baseline_total_unit_net_pnl": -8.884499999999992,
+        "candidate_total_unit_net_pnl": 19.588600000000014,
+        "multiplier": 1.2,
+        "paired_delta_total_unit_net_pnl": 28.473100000000002
+      },
+      "1.5x": {
+        "actions_reselected": false,
+        "baseline_total_unit_net_pnl": -11.119874999999993,
+        "candidate_total_unit_net_pnl": 17.47525000000001,
+        "multiplier": 1.5,
+        "paired_delta_total_unit_net_pnl": 28.595125
+      },
+      "2.0x": {
+        "actions_reselected": false,
+        "baseline_total_unit_net_pnl": -14.84549999999998,
+        "candidate_total_unit_net_pnl": 13.953000000000019,
+        "multiplier": 2.0,
+        "paired_delta_total_unit_net_pnl": 28.798500000000004
+      }
+    },
+    "paired_delta_largest_positive_removed_total_unit_net_pnl": 26.641750000000002,
+    "score_to_realized_pnl_ordering": {
+      "accepted_market_count": 570,
+      "high_minus_low_mean_pnl": 0.05229473684210527,
+      "high_score_half_mean_pnl": 0.06298508771929827,
+      "low_score_half_mean_pnl": 0.010690350877193004,
+      "passed": true,
+      "spearman_rank_correlation": 0.15485136625876295
+    }
+  },
+  "route_side_missingness_or_outlier_filtering_performed": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-cost-aware-residual-oof-report-v1",
+  "slot_id": "residual-primary-slot-001",
+  "source_commit": "c1a44c6dc7085a163298daf5923035621821e617",
+  "threshold_or_hyperparameter_search_performed": false
+}

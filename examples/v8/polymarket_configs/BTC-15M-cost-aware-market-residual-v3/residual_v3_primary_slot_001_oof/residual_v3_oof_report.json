@@ -1,0 +1,216 @@
+{
+  "all_gates_passed": false,
+  "architecture_type": "pooled_side_symmetric_market_anchored_probability_residual_with_fixed_causal_interactions_and_exponential_recency_weighting",
+  "candidate_freeze_allowed": false,
+  "candidate_role": "primary",
+  "created_at": "2026-08-09T09:58:36Z",
+  "development_only_forever": true,
+  "existing_gate_threshold_cost_baseline_population_changed": false,
+  "failed_gates": [
+    "every_chronological_block_candidate_total_gte_zero",
+    "every_chronological_block_paired_delta_total_gte_zero",
+    "prospective_power_required_market_count_lte_2000"
+  ],
+  "fresh_confirmatory_collection_authorized": false,
+  "gate_results": {
+    "absolute_market_bootstrap_97_5pct_lcb_gt_zero": true,
+    "all_cost_stress_candidate_totals_gte_zero": true,
+    "all_cost_stress_paired_delta_totals_gte_zero": true,
+    "every_chronological_block_candidate_total_gte_zero": false,
+    "every_chronological_block_paired_delta_total_gte_zero": false,
+    "largest_positive_delta_removed_total_gte_zero": true,
+    "largest_winner_removed_candidate_total_gte_zero": true,
+    "paired_delta_market_bootstrap_97_5pct_lcb_gt_zero": true,
+    "population_and_leakage_reconciliation": true,
+    "prospective_power_required_market_count_lte_2000": false,
+    "stable_score_to_realized_pnl_ordering": true
+  },
+  "immutable_gate_implementation_sha256": "491a329f708a16d5aecdd952552cbff3fa13d8f7446bfe3e0c78fade3b36f78c",
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v3",
+  "live_shadow_start_allowed": false,
+  "next_stage_authorization_required_even_if_all_gates_pass": true,
+  "overall": {
+    "baseline_accepted_market_count": 597,
+    "baseline_bootstrap_interval": {
+      "confidence": 0.975,
+      "lower": -0.046763458333333306,
+      "method": "market_level_paired_percentile_bootstrap",
+      "resamples": 10000,
+      "upper": 0.022512239583333336
+    },
+    "baseline_mean_unit_net_pnl": -0.01232374999999999,
+    "baseline_total_unit_net_pnl": -7.394249999999993,
+    "candidate_accepted_market_count": 573,
+    "candidate_bootstrap_interval": {
+      "confidence": 0.975,
+      "lower": 0.004872281250000037,
+      "method": "market_level_paired_percentile_bootstrap",
+      "resamples": 10000,
+      "upper": 0.07186871875
+    },
+    "candidate_mean_unit_net_pnl": 0.038877083333333354,
+    "candidate_total_unit_net_pnl": 23.326250000000012,
+    "paired_delta_bootstrap_interval": {
+      "confidence": 0.975,
+      "lower": 0.01001276041666668,
+      "method": "market_level_paired_percentile_bootstrap",
+      "resamples": 10000,
+      "upper": 0.09225017708333333
+    },
+    "paired_delta_mean_unit_net_pnl": 0.051200833333333334,
+    "paired_delta_total_unit_net_pnl": 30.7205,
+    "shared_bootstrap_indices_sha256": "5d98dd80406013c2a1b2af443e98af48ec7d571afc57e384ba0dd84f3a59dd8c"
+  },
+  "parent_v1_or_v2_failed_artifacts_changed": false,
+  "population": {
+    "NO_TRADE_included_as_zero": true,
+    "baseline_market_count": 600,
+    "candidate_market_count": 600,
+    "initial_training_market_count": 200,
+    "oof_market_count": 600,
+    "paired_market_count": 600,
+    "source_market_count": 800
+  },
+  "promotion_claim_made": false,
+  "promotion_evidence_eligible": false,
+  "prospective_power": {
+    "confidence": 0.975,
+    "diagnostic_only_not_promotion_evidence": true,
+    "fast_track_feasible": false,
+    "maximum_market_count": 2000,
+    "method": "plugin_normal_approximation_with_preregistered_effect_haircut",
+    "panels": {
+      "absolute_candidate": {
+        "conservative_effect": 0.019438541666666677,
+        "effect_haircut": 0.5,
+        "observed_mean": 0.038877083333333354,
+        "observed_standard_deviation": 0.4148924559396718,
+        "required_market_count": 3576
+      },
+      "paired_delta": {
+        "conservative_effect": 0.025600416666666667,
+        "effect_haircut": 0.5,
+        "observed_mean": 0.051200833333333334,
+        "observed_standard_deviation": 0.5120416577842891,
+        "required_market_count": 3140
+      }
+    },
+    "required_market_count": 3576,
+    "target_power": 0.8
+  },
+  "protocol_sha256": "49550a4f924c82060aa3e56fd1dbe6f691c96ad83c39b431fe0be86f7df9b3db",
+  "remaining_candidate_slots": 1,
+  "robustness": {
+    "candidate_largest_winner_removed_total_unit_net_pnl": 22.46150000000001,
+    "chronological_blocks": {
+      "1": {
+        "baseline_total_unit_net_pnl": 1.4852500000000008,
+        "candidate_accepted_market_count": 98,
+        "candidate_total_unit_net_pnl": 0.5840000000000013,
+        "market_count": 100,
+        "paired_delta_total_unit_net_pnl": -0.9012499999999994
+      },
+      "2": {
+        "baseline_total_unit_net_pnl": -1.2997499999999982,
+        "candidate_accepted_market_count": 98,
+        "candidate_total_unit_net_pnl": 4.053500000000002,
+        "market_count": 100,
+        "paired_delta_total_unit_net_pnl": 5.35325
+      },
+      "3": {
+        "baseline_total_unit_net_pnl": -4.204999999999999,
+        "candidate_accepted_market_count": 96,
+        "candidate_total_unit_net_pnl": 4.6110000000000015,
+        "market_count": 100,
+        "paired_delta_total_unit_net_pnl": 8.816
+      },
+      "4": {
+        "baseline_total_unit_net_pnl": -5.990499999999998,
+        "candidate_accepted_market_count": 95,
+        "candidate_total_unit_net_pnl": -0.9087499999999986,
+        "market_count": 100,
+        "paired_delta_total_unit_net_pnl": 5.0817499999999995
+      },
+      "5": {
+        "baseline_total_unit_net_pnl": 2.795500000000002,
+        "candidate_accepted_market_count": 98,
+        "candidate_total_unit_net_pnl": 10.320500000000003,
+        "market_count": 100,
+        "paired_delta_total_unit_net_pnl": 7.525
+      },
+      "6": {
+        "baseline_total_unit_net_pnl": -0.17974999999999827,
+        "candidate_accepted_market_count": 88,
+        "candidate_total_unit_net_pnl": 4.666000000000002,
+        "market_count": 100,
+        "paired_delta_total_unit_net_pnl": 4.84575
+      }
+    },
+    "chronological_halves": {
+      "first": {
+        "baseline_total_unit_net_pnl": -4.019499999999996,
+        "candidate_accepted_market_count": 292,
+        "candidate_total_unit_net_pnl": 9.248500000000005,
+        "market_count": 300,
+        "paired_delta_total_unit_net_pnl": 13.268
+      },
+      "second": {
+        "baseline_total_unit_net_pnl": -3.374749999999995,
+        "candidate_accepted_market_count": 281,
+        "candidate_total_unit_net_pnl": 14.077750000000005,
+        "market_count": 300,
+        "paired_delta_total_unit_net_pnl": 17.4525
+      }
+    },
+    "cost_stress": {
+      "1.2x": {
+        "actions_reselected": false,
+        "baseline_total_unit_net_pnl": -8.884499999999992,
+        "candidate_total_unit_net_pnl": 21.97060000000001,
+        "multiplier": 1.2,
+        "paired_delta_total_unit_net_pnl": 30.855100000000004
+      },
+      "1.5x": {
+        "actions_reselected": false,
+        "baseline_total_unit_net_pnl": -11.119874999999993,
+        "candidate_total_unit_net_pnl": 19.93712500000001,
+        "multiplier": 1.5,
+        "paired_delta_total_unit_net_pnl": 31.05700000000001
+      },
+      "2.0x": {
+        "actions_reselected": false,
+        "baseline_total_unit_net_pnl": -14.84549999999998,
+        "candidate_total_unit_net_pnl": 16.54800000000002,
+        "multiplier": 2.0,
+        "paired_delta_total_unit_net_pnl": 31.393500000000003
+      }
+    },
+    "paired_delta_largest_positive_removed_total_unit_net_pnl": 28.9705,
+    "score_to_realized_pnl_ordering": {
+      "accepted_market_count": 573,
+      "high_minus_low_mean_pnl": 0.0799288333617602,
+      "high_score_half_mean_pnl": 0.08060365853658538,
+      "low_score_half_mean_pnl": 0.0006748251748251921,
+      "passed": true,
+      "spearman_rank_correlation": 0.13698016825832943
+    }
+  },
+  "route_side_missingness_or_outlier_filtering_performed": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-causal-time-adaptive-residual-oof-report-v3",
+  "slot_id": "residual-v3-primary-slot-001",
+  "source_commit": "f7f6fe6d1449dce80c578c426348b548f3057de3",
+  "threshold_or_hyperparameter_search_performed": false
+}
