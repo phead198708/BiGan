@@ -32,10 +32,10 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
 )
 
 AUTHORIZATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v1"
+    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v2"
 )
 HUMAN_ATTESTATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-human-micro-live-attestation-v1"
+    "bigan-btc-15m-residual-promotion-human-micro-live-attestation-v2"
 )
 IMPLEMENTATION_REPOSITORY_PATH = (
     "src/bigan/v8/polymarket/residual_promotion_micro_live_authorization.py"
@@ -85,6 +85,7 @@ class VerifiedMicroLiveAuthorization:
     candidate_bundle_sha256: str
     capital_base_usd: Decimal
     maximum_notional_usd: Decimal
+    maximum_realized_loss_usd: Decimal
     maximum_open_orders: int
     authorized_at_ts_ms: int
     expires_at_ts_ms: int
@@ -124,6 +125,7 @@ def verify_micro_live_authorization(
         "capital_base_usd",
         "requested_initial_capital_fraction",
         "maximum_notional_usd",
+        "maximum_realized_loss_usd",
         "maximum_open_orders",
         "market_allowlist",
         "allowed_actions",
@@ -208,12 +210,16 @@ def verify_micro_live_authorization(
     maximum_notional = _positive_decimal(
         authorization.get("maximum_notional_usd"), "maximum notional"
     )
+    maximum_realized_loss = _positive_decimal(
+        authorization.get("maximum_realized_loss_usd"), "maximum realized loss"
+    )
     maximum_open_orders = authorization.get("maximum_open_orders")
     authorized_at = authorization.get("authorized_at_ts_ms")
     expires_at = authorization.get("expires_at_ts_ms")
     if not (
         fraction == MAXIMUM_INITIAL_CAPITAL_FRACTION
         and maximum_notional == capital_base * fraction
+        and maximum_realized_loss <= maximum_notional
         and isinstance(maximum_open_orders, int)
         and not isinstance(maximum_open_orders, bool)
         and 1 <= maximum_open_orders <= 10
@@ -255,6 +261,7 @@ def verify_micro_live_authorization(
         "capital_base_usd": str(capital_base),
         "requested_initial_capital_fraction": str(fraction),
         "maximum_notional_usd": str(maximum_notional),
+        "maximum_realized_loss_usd": str(maximum_realized_loss),
         "maximum_open_orders": maximum_open_orders,
         "market_allowlist": list(MARKET_ALLOWLIST),
         "allowed_actions": list(ALLOWED_ACTIONS),
@@ -275,6 +282,7 @@ def verify_micro_live_authorization(
         expires_at_ts_ms=int(expires_at),
         capital_base_usd=capital_base,
         maximum_notional_usd=maximum_notional,
+        maximum_realized_loss_usd=maximum_realized_loss,
         maximum_open_orders=int(maximum_open_orders),
     )
     if not (
@@ -297,6 +305,7 @@ def verify_micro_live_authorization(
         candidate_bundle_sha256=str(candidate_sha),
         capital_base_usd=capital_base,
         maximum_notional_usd=maximum_notional,
+        maximum_realized_loss_usd=maximum_realized_loss,
         maximum_open_orders=int(maximum_open_orders),
         authorized_at_ts_ms=int(authorized_at),
         expires_at_ts_ms=int(expires_at),
@@ -393,6 +402,7 @@ def _validate_human_approval(
     expires_at_ts_ms: int,
     capital_base_usd: Decimal,
     maximum_notional_usd: Decimal,
+    maximum_realized_loss_usd: Decimal,
     maximum_open_orders: int,
 ) -> None:
     if set(approval) != {
@@ -433,6 +443,7 @@ def _validate_human_approval(
         f"APPROVE {LINEAGE_ID} MICRO-LIVE authorization_id={authorization_id} "
         f"capital_base_usd={capital_base_usd} "
         f"maximum_notional_usd={maximum_notional_usd} "
+        f"maximum_realized_loss_usd={maximum_realized_loss_usd} "
         f"maximum_open_orders={maximum_open_orders} capital_fraction=0.01 "
         f"expires_at_ts_ms={expires_at_ts_ms}"
     )

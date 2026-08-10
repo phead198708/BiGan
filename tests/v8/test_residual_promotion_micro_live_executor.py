@@ -118,6 +118,24 @@ def _base_feature_and_signal() -> tuple[dict[str, Any], dict[str, Any]]:
         },
         "up_token_id": "67890",
         "down_token_id": "12345",
+        "market_identity": {
+            "source_type": "gamma_primary_plus_live_clob_revalidation",
+            "condition_id": feature_row["market_id"],
+            "slug": "btc-updown-15m-1789948800",
+            "market_family": "btc_updown_15m",
+            "market_start_ts_ms": AUTHORIZED_AT_TS_MS,
+            "market_end_ts_ms": AUTHORIZED_AT_TS_MS + 900_000,
+            "up_token_id": "67890",
+            "down_token_id": "12345",
+            "gamma_fetched_at_ts_ms": AUTHORIZED_AT_TS_MS + 1_000,
+            "clob_revalidated_at_ts_ms": decision_ts_ms,
+            "raw_gamma_payload_sha256": "a" * 64,
+            "clob_revalidation_payload_sha256": "b" * 64,
+            "clob_revalidation_passed": True,
+            "outcomes_accessed": False,
+            "settlement_accessed": False,
+            "pnl_accessed": False,
+        },
         "selected_action": parity["selected_action"],
         "model_scored": parity["model_scored"],
         "fail_closed": parity["fail_closed"],
@@ -579,6 +597,7 @@ def _authorization(
         "capital_base_usd": "1000",
         "requested_initial_capital_fraction": "0.01",
         "maximum_notional_usd": "10.00",
+        "maximum_realized_loss_usd": "1.00",
         "maximum_open_orders": 2,
         "market_allowlist": ["BTC-15M"],
         "allowed_actions": ["BUY_UP_HOLD", "BUY_DOWN_HOLD"],
@@ -592,7 +611,8 @@ def _authorization(
     command = (
         "APPROVE BTC-15M-cost-aware-market-residual-promotion-v1 MICRO-LIVE "
         f"authorization_id={authorization_id} capital_base_usd=1000 "
-        "maximum_notional_usd=10.00 maximum_open_orders=2 "
+        "maximum_notional_usd=10.00 maximum_realized_loss_usd=1.00 "
+        "maximum_open_orders=2 "
         f"capital_fraction=0.01 expires_at_ts_ms={identity['expires_at_ts_ms']}"
     )
     comment_url = "https://github.com/phead198708/BiGan/issues/264#issuecomment-99001"
@@ -646,6 +666,7 @@ def _authorization(
             "requested_initial_capital_fraction"
         ],
         "maximum_notional_usd": identity["maximum_notional_usd"],
+        "maximum_realized_loss_usd": identity["maximum_realized_loss_usd"],
         "maximum_open_orders": identity["maximum_open_orders"],
         "market_allowlist": identity["market_allowlist"],
         "allowed_actions": identity["allowed_actions"],
@@ -692,6 +713,20 @@ def _signal(**overrides: Any) -> dict[str, Any]:
             signal_payload[key] = value
             if key == "market_id":
                 feature_row["market_id"] = value
+                signal_payload["market_identity"]["condition_id"] = value
+            elif key == "slug":
+                start = int(str(value).rsplit("-", maxsplit=1)[1]) * 1_000
+                signal_payload["market_identity"].update(
+                    {
+                        "slug": value,
+                        "market_start_ts_ms": start,
+                        "market_end_ts_ms": start + 900_000,
+                    }
+                )
+            elif key in {"up_token_id", "down_token_id"}:
+                signal_payload["market_identity"][key] = value
+            elif key == "observed_at_ts_ms":
+                signal_payload["market_identity"]["clob_revalidated_at_ts_ms"] = value
         else:
             payload[key] = value
     return payload
@@ -802,6 +837,14 @@ def test_submit_is_idempotent_and_one_market_has_one_intent(
     assert replay["status"] == "IDEMPOTENT_REPLAY"
     assert replay["client_order_id"] == first["client_order_id"]
     assert len(transport.submit_calls) == 1
+    audit_events = [
+        event for event in executor.events if event["event_type"] == "SIGNAL_EVALUATED"
+    ]
+    assert [event["payload"]["disposition"] for event in audit_events] == [
+        "EXECUTION_INTENT",
+        "IDEMPOTENT_REPLAY",
+    ]
+    assert sum(event["event_type"] == "ORDER_PREPARED" for event in executor.events) == 1
 
 
 def test_conflicting_duplicate_engages_kill_switch_and_cancels_open_order(
@@ -831,6 +874,12 @@ def test_allowlist_no_trade_candidate_and_token_contract_block_without_transport
     verified = _verified(authorized_fixture)
     transport = FakeTransport()
     executor = MicroLiveExecutor(verified, transport=transport)
+    failed_closed = _signal(
+        candidate_bundle_sha256=verified.candidate_bundle_sha256
+    )
+    failed_closed["feature_row"]["max_input_ts"] -= 10_000
+    failed_closed = _bind_signal_to_runtime(failed_closed, verified.runtime)
+    assert executor.submit_signal(**failed_closed)["reason"] == "signal_failed_closed"
     with pytest.raises(MicroLiveExecutionError, match="identity or safety"):
         executor.submit_signal(
             **_signal(
@@ -838,12 +887,6 @@ def test_allowlist_no_trade_candidate_and_token_contract_block_without_transport
                 market_family="ETH-15M",
             )
         )
-    failed_closed = _signal(
-        candidate_bundle_sha256=verified.candidate_bundle_sha256
-    )
-    failed_closed["feature_row"]["max_input_ts"] -= 10_000
-    failed_closed = _bind_signal_to_runtime(failed_closed, verified.runtime)
-    assert executor.submit_signal(**failed_closed)["reason"] == "signal_failed_closed"
     with pytest.raises(MicroLiveExecutionError, match="identity or safety"):
         executor.submit_signal(
             **_signal(candidate_bundle_sha256="0" * 64)
@@ -856,6 +899,7 @@ def test_allowlist_no_trade_candidate_and_token_contract_block_without_transport
     with pytest.raises(MicroLiveExecutionError, match="identity or safety"):
         executor.submit_signal(**duplicate_tokens)
     assert transport.submit_calls == []
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
 
 
 def test_signal_envelope_tampering_and_outcome_fields_fail_closed(
@@ -912,6 +956,78 @@ def test_signal_envelope_tampering_and_outcome_fields_fail_closed(
 
     assert transport.submit_calls == []
     assert transport.cancel_calls == []
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+
+def test_second_frozen_decision_is_audited_and_blocked_without_kill(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    first = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    assert executor.submit_signal(**first)["status"] == "ORDER_ACKNOWLEDGED"
+
+    second = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    second_ts = AUTHORIZED_AT_TS_MS + 600_000
+    second["signal_payload"]["decision_ts_ms"] = second_ts
+    second["signal_payload"]["observed_at_ts_ms"] = second_ts
+    second["signal_payload"]["market_identity"][
+        "clob_revalidated_at_ts_ms"
+    ] = second_ts
+    second["feature_row"].update(
+        {
+            "decision_ts": second_ts,
+            "available_at_ts": second_ts,
+            "feature_cutoff_ts": second_ts,
+            "max_input_ts": second_ts,
+        }
+    )
+    for provenance in dict(second["feature_row"]["feature_provenance"]).values():
+        provenance["available_at_ts"] = second_ts
+        provenance["max_input_ts"] = second_ts
+    second["now_ts_ms"] = second_ts + 1_000
+    second["operator_heartbeat_ts_ms"] = second_ts + 950
+    second = _bind_signal_to_runtime(second, verified.runtime)
+    blocked = executor.submit_signal(**second)
+    assert blocked["reason"] == "one_trade_maximum_per_market"
+    assert len(transport.submit_calls) == 1
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is False
+    audited = [
+        event["payload"]
+        for event in executor.events
+        if event["event_type"] == "SIGNAL_EVALUATED"
+    ]
+    assert audited[-1]["disposition"] == "BLOCKED_NO_TRADE"
+    assert audited[-1]["reason"] == "one_trade_maximum_per_market"
+
+
+def test_market_identity_token_binding_and_live_revalidation_fail_closed(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+
+    mismatched_transport = FakeTransport()
+    mismatched_executor = MicroLiveExecutor(verified, transport=mismatched_transport)
+    mismatched = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    mismatched["signal_payload"]["market_identity"]["down_token_id"] = "99999"
+    with pytest.raises(MicroLiveExecutionError, match="identity binding"):
+        mismatched_executor.submit_signal(**mismatched)
+    assert mismatched_transport.submit_calls == []
+    assert mismatched_executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+    stale_transport = FakeTransport()
+    stale_executor = MicroLiveExecutor(verified, transport=stale_transport)
+    stale = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    stale["signal_payload"]["market_identity"]["clob_revalidated_at_ts_ms"] = (
+        NOW_TS_MS - 5_001
+    )
+    with pytest.raises(MicroLiveExecutionError, match="market identity is stale"):
+        stale_executor.submit_signal(**stale)
+    assert stale_transport.submit_calls == []
+    assert stale_executor.reconciliation_snapshot()["kill_switch_reason"] == (
+        "market_identity_stale"
+    )
 
 
 def test_open_order_and_authorization_lifetime_notional_caps(
@@ -997,6 +1113,32 @@ def test_stale_heartbeat_kills_and_cancels_existing_order(
     assert len(transport.cancel_calls) == 1
 
 
+def test_signal_event_clock_regression_persists_kill_and_rejection_audit(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    with pytest.raises(MicroLiveExecutionError, match="event clock regressed"):
+        executor.submit_signal(
+            **_signal(
+                candidate_bundle_sha256=verified.candidate_bundle_sha256,
+                market_id=f"0x{333:064x}",
+                up_token_id="53330",
+                down_token_id="53331",
+                now_ts_ms=NOW_TS_MS - 1,
+            )
+        )
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["kill_switch_reason"] == "event_clock_regression"
+    assert len(transport.cancel_calls) == 1
+    assert any(event["event_type"] == "SIGNAL_REJECTED" for event in executor.events)
+
+
 def test_fill_cash_position_settlement_and_restart_reconcile(
     authorized_fixture: dict[str, Any],
 ) -> None:
@@ -1034,6 +1176,7 @@ def test_fill_cash_position_settlement_and_restart_reconcile(
         official_settlement_sha256="1" * 64,
     )
     assert settled["snapshot"]["cash_usd"] == "10.60"
+    assert settled["snapshot"]["realized_pnl_usd"] == "0.60"
     assert settled["snapshot"]["positions"]["DOWN"] == "0"
     state = executor.export_state()
     restored = MicroLiveExecutor.restore(
@@ -1043,6 +1186,54 @@ def test_fill_cash_position_settlement_and_restart_reconcile(
     )
     assert restored.export_state() == state
     assert restored.reconciliation_snapshot() == executor.reconciliation_snapshot()
+
+
+def test_realized_loss_limit_is_human_bound_and_persistently_kills(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    assert verified.maximum_realized_loss_usd == Decimal("1.00")
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    for index in range(1, 4):
+        order = executor.submit_signal(
+            **_signal(
+                candidate_bundle_sha256=verified.candidate_bundle_sha256,
+                market_id=f"0x{index + 100:064x}",
+                up_token_id=str(30_000 + index * 2),
+                down_token_id=str(30_001 + index * 2),
+            )
+        )
+        executor.record_fill(
+            client_order_id=order["client_order_id"],
+            fill_id=f"loss-fill-{index}",
+            now_ts_ms=NOW_TS_MS,
+            quantity="1",
+            price="0.39",
+            fee_usd="0.01",
+            transport_event_sha256=f"{index + 10:064x}",
+        )
+        executor.record_settlement(
+            client_order_id=order["client_order_id"],
+            settlement_id=f"loss-settlement-{index}",
+            now_ts_ms=NOW_TS_MS,
+            payout_per_token="0",
+            official_settlement_sha256=f"{index + 20:064x}",
+        )
+    snapshot = executor.reconciliation_snapshot()
+    assert Decimal(snapshot["realized_pnl_usd"]) == Decimal("-1.20")
+    assert snapshot["maximum_realized_loss_usd"] == "1.00"
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["kill_switch_reason"] == "maximum_realized_loss_reached"
+    blocked = executor.submit_signal(
+        **_signal(
+            candidate_bundle_sha256=verified.candidate_bundle_sha256,
+            market_id=f"0x{999:064x}",
+            up_token_id="41000",
+            down_token_id="41001",
+        )
+    )
+    assert blocked["reason"] == "kill_switch_active"
 
 
 def test_conflicting_fill_and_partial_open_settlement_engage_kill_switch(
@@ -1117,6 +1308,88 @@ def test_unknown_submission_engages_kill_switch_without_retry(
     assert executor.reconciliation_snapshot()["kill_switch_active"] is True
 
 
+def test_all_lifecycle_reconciliation_ambiguities_persistently_kill(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+
+    unknown_fill = MicroLiveExecutor(verified, transport=FakeTransport())
+    with pytest.raises(MicroLiveExecutionError, match="acknowledged order"):
+        unknown_fill.record_fill(
+            client_order_id="missing-order",
+            fill_id="missing-fill",
+            now_ts_ms=NOW_TS_MS,
+            quantity="1",
+            price="0.39",
+            fee_usd="0.01",
+            transport_event_sha256="a" * 64,
+        )
+    assert unknown_fill.reconciliation_snapshot()["kill_switch_reason"] == (
+        "fill_reconciliation_failed"
+    )
+
+    close_transport = FakeTransport()
+    bad_close = MicroLiveExecutor(verified, transport=close_transport)
+    close_order = bad_close.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    with pytest.raises(MicroLiveExecutionError, match="status is invalid"):
+        bad_close.record_order_closed(
+            client_order_id=close_order["client_order_id"],
+            status="FILLED",
+            now_ts_ms=NOW_TS_MS,
+            transport_event_sha256="b" * 64,
+        )
+    assert bad_close.reconciliation_snapshot()["kill_switch_reason"] == (
+        "order_close_reconciliation_failed"
+    )
+    assert len(close_transport.cancel_calls) == 1
+
+    settlement_transport = FakeTransport()
+    bad_settlement = MicroLiveExecutor(verified, transport=settlement_transport)
+    settlement_order = bad_settlement.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    with pytest.raises(MicroLiveExecutionError, match="unfilled order"):
+        bad_settlement.record_settlement(
+            client_order_id=settlement_order["client_order_id"],
+            settlement_id="unfilled-settlement",
+            now_ts_ms=NOW_TS_MS,
+            payout_per_token="1",
+            official_settlement_sha256="c" * 64,
+        )
+    assert bad_settlement.reconciliation_snapshot()["kill_switch_reason"] == (
+        "settlement_reconciliation_failed"
+    )
+    assert len(settlement_transport.cancel_calls) == 1
+
+
+def test_lifecycle_timestamp_regression_still_persists_kill(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    with pytest.raises(MicroLiveExecutionError, match="timestamp regressed"):
+        executor.record_fill(
+            client_order_id=order["client_order_id"],
+            fill_id="regressed-fill",
+            now_ts_ms=NOW_TS_MS - 1,
+            quantity="1",
+            price="0.39",
+            fee_usd="0.01",
+            transport_event_sha256="d" * 64,
+        )
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["kill_switch_reason"] == "fill_reconciliation_failed"
+    assert snapshot["fill_count"] == 0
+    assert len(transport.cancel_calls) == 1
+
+
 def test_rehashed_tampered_state_still_fails_closed(
     authorized_fixture: dict[str, Any],
 ) -> None:
@@ -1126,9 +1399,43 @@ def test_rehashed_tampered_state_still_fails_closed(
         **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
     )
     state = executor.export_state()
-    state["events"][0]["payload"]["selected_action"] = "BUY_UP_HOLD"
+    prepared = next(
+        event for event in state["events"] if event["event_type"] == "ORDER_PREPARED"
+    )
+    prepared["payload"]["selected_action"] = "BUY_UP_HOLD"
     previous = "GENESIS"
     for event in state["events"]:
+        event["previous_event_sha256"] = previous
+        core = {key: value for key, value in event.items() if key != "event_sha256"}
+        event["event_sha256"] = canonical_json_sha256(core)
+        previous = event["event_sha256"]
+    payload = {key: value for key, value in state.items() if key != "state_sha256"}
+    state["state_sha256"] = canonical_json_sha256(payload)
+    with pytest.raises(MicroLiveExecutionError, match="prepared order identity"):
+        MicroLiveExecutor.restore(
+            authorization=verified,
+            transport=FakeTransport(),
+            state=state,
+        )
+
+
+def test_rehashed_order_without_execution_intent_audit_fails_closed(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    executor = MicroLiveExecutor(verified, transport=FakeTransport())
+    executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    state = executor.export_state()
+    state["events"] = [
+        event
+        for event in state["events"]
+        if event["event_type"] != "SIGNAL_EVALUATED"
+    ]
+    previous = "GENESIS"
+    for sequence, event in enumerate(state["events"], start=1):
+        event["sequence"] = sequence
         event["previous_event_sha256"] = previous
         core = {key: value for key, value in event.items() if key != "event_sha256"}
         event["event_sha256"] = canonical_json_sha256(core)
@@ -1176,6 +1483,7 @@ def test_rehashed_event_timestamp_regression_still_fails_closed(
         ("micro_live_authorized", False, "state is not explicit"),
         ("automatic_launch_allowed", True, "state is not explicit"),
         ("requested_initial_capital_fraction", "0.02", "limits or validity"),
+        ("maximum_realized_loss_usd", "10.01", "limits or validity"),
     ),
 )
 def test_authorization_tampering_fails_closed(
@@ -1236,6 +1544,7 @@ def test_human_approval_owner_and_timestamp_are_exact(
     github = _json(authorized_fixture["evidence_root"] / approval_descriptor["path"])
     assert "capital_base_usd=1000" in github["body"]
     assert "maximum_notional_usd=10.00" in github["body"]
+    assert "maximum_realized_loss_usd=1.00" in github["body"]
     assert "maximum_open_orders=2" in github["body"]
 
     changed = copy.deepcopy(authorized_fixture["authorization"])
