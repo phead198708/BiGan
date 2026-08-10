@@ -1,0 +1,77 @@
+{
+  "authorization_scope": {
+    "candidate_slot_budget": {
+      "maximum_total_slots": 2,
+      "slot_budget_may_be_increased": false
+    },
+    "actual_executing_module_path_and_sha_binding_required": true,
+    "fresh_collection_authorized": false,
+    "fresh_outcome_opening_authorized": false,
+    "live_shadow_authorized": false,
+    "outcome_aware_development_authorized": true,
+    "paper_or_live_execution_authorized": false,
+    "promotion_authorized": false,
+    "training_may_start_only_after_slot_protocol_is_sha_frozen": true,
+    "wallet_or_write_authorized": false
+  },
+  "authorization_source": {
+    "instruction": "授权建立 BTC-15M-cost-aware-market-residual-v5，最多 2 个预注册候选 slot，并保持既有 gates、零阈值、N_max=2000、成本、基线、人口、失败 artifacts 和全部安全状态不变。",
+    "instruction_sha256": "ea656aa81e9a1c0f29ff397a047427517168159c3800461fe82feb74f16d5869",
+    "source_id": "codex-thread-019fb261-29fd-76b2-a2b5-99e29668d4e3",
+    "type": "explicit_user_instruction"
+  },
+  "created_at": "2026-08-10T10:42:18Z",
+  "forbidden": [
+    "mutation_of_existing_gate_or_threshold",
+    "mutation_of_zero_acceptance_threshold",
+    "mutation_of_N_max_2000",
+    "mutation_of_cost_model_baseline_or_population",
+    "mutation_of_v1_v2_v3_or_v4_failed_artifacts",
+    "candidate_slot_budget_increase",
+    "parameter_weight_or_threshold_grid_search",
+    "evaluation_before_candidate_protocol_and_executing_module_sha_freeze",
+    "fresh_collection_or_outcome_opening",
+    "live_shadow_or_paper_live_execution",
+    "wallet_write_promotion_or_capital_risk"
+  ],
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v5",
+  "parent_lineage": {
+    "candidate_budget_consumed": 2,
+    "candidate_budget_maximum": 2,
+    "failed_artifacts_mutable": false,
+    "gate_or_threshold_change_allowed": false,
+    "lineage_id": "BTC-15M-cost-aware-market-residual-v4",
+    "status": "phase_1_terminal_failed",
+    "terminal_review": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v4/residual_v4_development_terminal_review.json",
+      "sha256": "85102e916f7304090ab203fb4d0128f88aa5157fd71f2ec4dec80e4ad8abbd74"
+    }
+  },
+  "registered_development_data": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/development_data_registry.json",
+    "sha256": "770f2808e1373ca1a699d213abc7dc76851cf58aff142cc1967165a8401129cf"
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-cost-aware-residual-lineage-authorization-v5",
+  "state": {
+    "candidate_frozen": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false,
+    "lineage_authorized_for_governed_development": true,
+    "live_shadow_started": false,
+    "promotion_started": false,
+    "training_started": false
+  }
+}
