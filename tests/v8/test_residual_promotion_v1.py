@@ -195,14 +195,60 @@ def test_progress_is_hash_chained_and_model_decisions_do_not_select_population()
 
 def test_frozen_collection_authorization_and_runtime_validate() -> None:
     result = validate_collection_authorization(
-        authorization_path=CONFIG / "manual_collection_authorization.json",
-        collector_protocol_path=CONFIG / "prospective_collector_protocol.json",
+        authorization_path=CONFIG / "manual_collection_authorization_v2.json",
+        collector_protocol_path=CONFIG / "prospective_collector_protocol_v2.json",
         repository_root=REPO_ROOT,
     )
     assert result["validation_passed"] is True
     assert result["fresh_outcomes_opened"] is False
     assert result["runtime"].candidate_id == CANDIDATE_ID
     assert result["safety"] == SAFETY
+
+
+def test_zero_attempt_collector_correction_supersedes_original_fail_closed() -> None:
+    correction = _json(CONFIG / "collector_pre_attempt_engineering_correction.json")
+    assert correction["detected_before_first_attempt"] is True
+    assert correction["prior_attempts_consumed"] == 0
+    assert correction["prior_quality_valid_market_count"] == 0
+    assert correction["original_authorization_invalidated_for_execution"] is True
+    assert correction["model_prediction_bytes_changed"] is False
+    assert correction["threshold_gate_cost_baseline_or_population_changed"] is False
+    assert correction["fresh_outcomes_accessed"] is False
+    assert correction["safety"] == SAFETY
+    with pytest.raises(ValueError, match="superseded fail-closed"):
+        validate_collection_authorization(
+            authorization_path=CONFIG / "manual_collection_authorization.json",
+            collector_protocol_path=CONFIG / "prospective_collector_protocol.json",
+            repository_root=REPO_ROOT,
+        )
+
+
+def test_corrected_collector_graph_requires_chainlink_and_reconciles_hashes() -> None:
+    protocol = _json(CONFIG / "prospective_collector_protocol_v2.json")
+    assert protocol["chainlink_rtds_background_collector_required"] is True
+    assert protocol["chainlink_rtds_injected_into_capture"] is True
+    assert protocol["chainlink_missing_or_stale_behavior"] == "quality_invalid_fail_closed"
+    assert protocol["prior_attempts_consumed"] == 0
+    bindings = protocol["implementation_bindings"]
+    assert set(bindings) == {
+        "collector_cli",
+        "collection_ledger",
+        "pending_capture",
+        "chainlink_rtds",
+        "live_round_finalizer",
+    }
+    for descriptor in bindings.values():
+        assert sha256_file(REPO_ROOT / descriptor["path"]) == descriptor["sha256"]
+    collector_source = (
+        REPO_ROOT / bindings["collector_cli"]["path"]
+    ).read_text(encoding="utf-8")
+    assert "PolymarketChainlinkRTDSCollector" in collector_source
+    assert "chainlink_rtds_collector=chainlink" in collector_source
+    provenance = _json(
+        CONFIG / "collector_pre_attempt_engineering_correction.json"
+    )["source_provenance"]
+    assert provenance["source_commit"] == "0595b168512c43f45966957dde8b36a23723cbce"
+    assert provenance["source_content_sha256"] == bindings["live_round_finalizer"]["sha256"]
 
 
 def test_prospective_protocol_preserves_economic_gates_and_no_optional_stopping() -> None:

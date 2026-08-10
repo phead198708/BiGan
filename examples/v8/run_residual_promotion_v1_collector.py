@@ -18,6 +18,7 @@ if str(SRC) not in sys.path:
 
 from bigan.v8.polymarket import (  # noqa: E402
     DEFAULT_POLYMARKET_CLOB_WS_MARKET_URL,
+    PolymarketChainlinkRTDSCollector,
     PolymarketPublicHTTPRealCorpusProvider,
     PolymarketRealCorpusRecorderConfig,
     capture_polymarket_pending_round,
@@ -45,12 +46,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--authorization",
         type=Path,
-        default=CONFIG / "manual_collection_authorization.json",
+        default=CONFIG / "manual_collection_authorization_v2.json",
     )
     parser.add_argument(
         "--collector-protocol",
         type=Path,
-        default=CONFIG / "prospective_collector_protocol.json",
+        default=CONFIG / "prospective_collector_protocol_v2.json",
     )
     parser.add_argument("--http-timeout-seconds", type=float, default=20.0)
     parser.add_argument("--capture-timeout-seconds", type=float, default=930.0)
@@ -73,6 +74,30 @@ def main() -> int:
     )
     runtime = validation["runtime"]
     baseline = load_matched_baseline(repository_root=ROOT)
+    chainlink = PolymarketChainlinkRTDSCollector()
+    chainlink.start()
+    try:
+        return _collect(
+            args=args,
+            root=root,
+            validation=validation,
+            runtime=runtime,
+            baseline=baseline,
+            chainlink=chainlink,
+        )
+    finally:
+        chainlink.stop()
+
+
+def _collect(
+    *,
+    args: argparse.Namespace,
+    root: Path,
+    validation: dict[str, Any],
+    runtime: Any,
+    baseline: Any,
+    chainlink: PolymarketChainlinkRTDSCollector,
+) -> int:
     bundle_sha = str(validation["bundle"]["sha256"])
     attempts_path = root / "outcome_blind_attempts.jsonl"
     existing = _load_jsonl(attempts_path) if attempts_path.exists() else []
@@ -114,6 +139,7 @@ def main() -> int:
             capture = capture_polymarket_pending_round(
                 config,
                 public_provider=provider,
+                chainlink_rtds_collector=chainlink,
             )
             capture_summary = {
                 **dict(capture.report),

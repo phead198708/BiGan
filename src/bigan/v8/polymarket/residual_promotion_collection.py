@@ -64,6 +64,17 @@ def validate_collection_authorization(
     collector_file = _repo_file(collector_protocol_path, root)
     authorization = _verified_json(authorization_file)
     collector = _verified_json(collector_file)
+    correction_file = (
+        root
+        / "examples/v8/polymarket_configs"
+        / LINEAGE_ID
+        / "collector_pre_attempt_engineering_correction.json"
+    )
+    is_corrected = authorization.get("schema_version") == (
+        "bigan-btc-15m-residual-promotion-v1-manual-collection-authorization-v2"
+    )
+    if correction_file.exists() and not is_corrected:
+        raise ValueError("manual collection authorization is superseded fail-closed")
     if not (
         authorization.get("lineage_id") == LINEAGE_ID
         and authorization.get("fresh_collection_authorized") is True
@@ -97,6 +108,46 @@ def validate_collection_authorization(
         and dict(collector.get("safety") or {}) == SAFETY
     ):
         raise ValueError("collector protocol is invalid")
+    if is_corrected:
+        correction = _verified_json(correction_file)
+        correction_descriptor = dict(
+            authorization.get("collector_engineering_correction") or {}
+        )
+        if not (
+            correction_descriptor.get("path")
+            == correction_file.relative_to(root).as_posix()
+            and correction_descriptor.get("sha256") == sha256_file(correction_file)
+            and correction.get("prior_attempts_consumed") == 0
+            and correction.get("fresh_outcomes_accessed") is False
+            and correction.get("model_prediction_bytes_changed") is False
+            and correction.get("threshold_gate_cost_baseline_or_population_changed")
+            is False
+            and correction.get("original_authorization_invalidated_for_execution")
+            is True
+            and dict(correction.get("safety") or {}) == SAFETY
+            and collector.get("schema_version")
+            == "bigan-btc-15m-residual-promotion-v1-collector-protocol-v2"
+            and collector.get("collector_engineering_correction")
+            == correction_descriptor
+            and collector.get("chainlink_rtds_background_collector_required") is True
+            and collector.get("chainlink_rtds_injected_into_capture") is True
+            and authorization.get("prior_attempts_consumed") == 0
+            and authorization.get("prior_fresh_outcomes_opened") is False
+        ):
+            raise ValueError("corrected collection authorization is invalid")
+        bindings = dict(collector.get("implementation_bindings") or {})
+        if set(bindings) != {
+            "collector_cli",
+            "collection_ledger",
+            "pending_capture",
+            "chainlink_rtds",
+            "live_round_finalizer",
+        }:
+            raise ValueError("corrected collector implementation graph is incomplete")
+        for name, binding in bindings.items():
+            bound = _repo_file(str(dict(binding).get("path") or ""), root)
+            if sha256_file(bound) != dict(binding).get("sha256"):
+                raise ValueError(f"corrected collector implementation drift: {name}")
     bundle = dict(authorization["candidate_bundle"])
     runtime = load_residual_promotion_runtime(
         manifest_path=bundle["path"],
