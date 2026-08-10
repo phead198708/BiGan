@@ -26,6 +26,7 @@ from bigan.v8.polymarket.cost_aware_residual_v6_challenger import (
     _quality_features,
     prequential_lower_quantile_proposal_predict,
     validate_challenger_protocol,
+    verify_frozen_challenger_oof,
 )
 from bigan.v8.polymarket.moe_collection_observability import FEATURE_NAMES
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
@@ -447,3 +448,22 @@ def test_v6_final_slot_protocol_binds_exact_lower_quantile_executor() -> None:
     assert protocol["action_policy"]["fixed_acceptance_threshold"] == 0.0
     assert protocol["prospective_power"]["maximum_market_count"] == 2000
     assert protocol["candidate_budget"]["slots_remaining_after_run"] == 0
+
+
+def test_frozen_v6_final_slot_reconciles_and_exhausts_budget() -> None:
+    result = verify_frozen_challenger_oof()
+
+    assert result["verification_passed"] is True
+    assert result["all_gates_passed"] is False
+    assert result["failed_gates"] == [
+        "every_chronological_block_candidate_total_gte_zero",
+        "prospective_power_required_market_count_lte_2000",
+    ]
+    assert result["candidate_budget_exhausted"] is True
+    assert result["oof_market_count"] == 600
+    assert result["manifest_sha256"] == (
+        "d21bc40023e5a6e0d6c64f92bdfb82f8d84251a8ac948f091e6ef25597e89348"
+    )
+    assert result["actual_executing_module_binding_verified"] is True
+    assert result["parent_v1_through_v5_and_primary_slot_immutable"] is True
+    assert result["safety"] == SAFETY
