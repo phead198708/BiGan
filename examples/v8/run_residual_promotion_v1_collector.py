@@ -75,6 +75,10 @@ def main() -> int:
         collector_protocol_path=args.collector_protocol,
         repository_root=ROOT,
     )
+    if args.rest_fallback_collection_seconds != validation.get(
+        "rest_fallback_collection_seconds"
+    ):
+        raise ValueError("collector full-window coverage parameter drift")
     runtime = validation["runtime"]
     baseline = load_matched_baseline(repository_root=ROOT)
     chainlink = PolymarketChainlinkRTDSCollector()

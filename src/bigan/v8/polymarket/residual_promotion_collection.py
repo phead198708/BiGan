@@ -201,6 +201,9 @@ def validate_collection_authorization(
         "authorization_sha256": sha256_file(authorization_file),
         "authorization_schema_version": authorization_schema,
         "collector_protocol_sha256": sha256_file(collector_file),
+        "rest_fallback_collection_seconds": collector.get(
+            "rest_fallback_collection_seconds"
+        ),
         "runtime": runtime,
         "bundle": bundle,
         "validation_passed": True,
