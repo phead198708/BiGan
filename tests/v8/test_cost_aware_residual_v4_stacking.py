@@ -115,9 +115,13 @@ def test_stacking_contract_is_structural_and_search_free() -> None:
 
 
 def test_frozen_stacking_protocol_exactly_binds_final_slot() -> None:
-    assert sha256_file(DEFAULT_PROTOCOL) == (
+    expected_sha256 = (
         "4ffcbca46a876ed1e3611ada214625a43f61d81deacdb5284db986933c844f24"
     )
+    assert sha256_file(DEFAULT_PROTOCOL) == expected_sha256
+    assert DEFAULT_PROTOCOL.with_suffix(".sha256").read_text(
+        encoding="utf-8"
+    ).strip() == expected_sha256
     payload = json.loads(DEFAULT_PROTOCOL.read_text(encoding="utf-8"))
     validate_stacking_challenger_protocol(payload)
     assert payload["inputs"]["candidate_implementation"]["sha256"] == (
