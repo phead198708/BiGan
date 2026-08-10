@@ -444,7 +444,10 @@ def verify_integration_closure_payload(
         if not target_file.is_file():
             raise IntegrationClosureError(f"sidecar target missing: {target}")
         expected = _sha256(target_file.read_bytes())
-        actual = (root / path).read_text().strip()
+        sidecar_tokens = (root / path).read_text().split()
+        if not sidecar_tokens:
+            raise IntegrationClosureError(f"empty sidecar: {path}")
+        actual = sidecar_tokens[0]
         if actual != expected:
             raise IntegrationClosureError(f"sidecar content mismatch: {path}")
 
