@@ -17,7 +17,11 @@ from bigan.v8.polymarket.cost_aware_residual_v5 import (
     validate_v5_lineage_authorization,
 )
 from bigan.v8.polymarket.cost_aware_residual_v5_challenger import (
+    DEFAULT_PROTOCOL as CHALLENGER_PROTOCOL,
+)
+from bigan.v8.polymarket.cost_aware_residual_v5_challenger import (
     _canonicalize_feature_order,
+    validate_challenger_protocol,
 )
 from bigan.v8.polymarket.moe_collection_observability import FEATURE_NAMES
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
@@ -187,3 +191,20 @@ def test_v5_challenger_adapter_resolves_semantic_order_without_changing_values()
     assert tuple(adapted["features"]) == tuple(FEATURE_NAMES)
     assert adapted["features"] == rows[0]["features"]
     assert tuple(row["features"]) != tuple(adapted["features"])
+
+
+def test_v5_final_slot_protocol_preserves_candidate_and_gate_bytes() -> None:
+    protocol_path = Path(CHALLENGER_PROTOCOL)
+    protocol = _load_json(protocol_path)
+
+    validate_challenger_protocol(protocol)
+
+    assert protocol_path.with_suffix(".sha256").read_text(encoding="utf-8").strip() == (
+        "5483aeb573517eb66443368302d2aa8d4fbcc6d3ead97e1199b7edb1c2e56730"
+    )
+    assert protocol["inputs"]["candidate_implementation"]["sha256"] == (
+        "df936704c7d429ab11a106527c6a6355a1335ef58907d9c6a0e4f38c8de23af6"
+    )
+    assert protocol["structural_change"]["candidate_algorithm_changed"] is False
+    assert protocol["model"] == _load_json(Path(DEFAULT_PROTOCOL))["model"]
+    assert protocol["gates"] == _load_json(Path(DEFAULT_PROTOCOL))["gates"]
