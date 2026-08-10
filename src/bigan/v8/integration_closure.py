@@ -157,10 +157,26 @@ def _walk_candidate_implementation_descriptors(
             )
 
 
-def _sidecar_target(path: str) -> str | None:
+def _sidecar_target(root: Path, path: str) -> str | None:
     if not path.endswith(".sha256"):
         return None
-    return path[: -len(".sha256")]
+    stem = path[: -len(".sha256")]
+    direct = root / stem
+    if direct.is_file():
+        return stem
+    json_target = root / f"{stem}.json"
+    if json_target.is_file():
+        return f"{stem}.json"
+    raise IntegrationClosureError(f"cannot resolve sidecar target: {path}")
+
+
+def _sidecar_path_for_target(
+    entry_by_path: Mapping[str, Mapping[str, Any]], target: str
+) -> str | None:
+    candidates = [f"{target}.sha256"]
+    if PurePosixPath(target).suffix:
+        candidates.append(str(PurePosixPath(target).with_suffix(".sha256")))
+    return next((path for path in candidates if path in entry_by_path), None)
 
 
 def _artifact_bindings(entries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -178,8 +194,8 @@ def _artifact_bindings(entries: Sequence[Mapping[str, Any]]) -> list[dict[str, A
             kind = "candidate_implementation_binding_audit"
         else:
             continue
-        sidecar_path = f"{path}.sha256"
-        sidecar = entry_by_path.get(sidecar_path)
+        sidecar_path = _sidecar_path_for_target(entry_by_path, path)
+        sidecar = entry_by_path.get(sidecar_path) if sidecar_path is not None else None
         if sidecar is None:
             raise IntegrationClosureError(f"missing frozen sidecar entry for {path}")
         bindings.append(
@@ -299,7 +315,7 @@ def build_integration_closure_manifest(
             "destination_sha256": _sha256(destination_bytes),
             "import_reason": _import_reason(path),
         }
-        target = _sidecar_target(path)
+        target = _sidecar_target(root, path)
         if target is not None:
             entry["sidecar_for"] = target
         entries.append(entry)
@@ -421,7 +437,7 @@ def verify_integration_closure_payload(
             )
 
     for path, entry in entry_by_path.items():
-        target = _sidecar_target(path)
+        target = _sidecar_target(root, path)
         if target is None:
             continue
         if entry.get("sidecar_for") != target:
