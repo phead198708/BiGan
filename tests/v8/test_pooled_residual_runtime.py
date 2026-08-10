@@ -29,6 +29,7 @@ from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 from bigan.v8.polymarket.pooled_residual_runtime import (
     ACTIONS,
     BUNDLE_SCHEMA_VERSION,
+    CALIBRATION_ELIGIBILITY_SCHEMA_VERSION,
     PooledResidualRuntimeError,
     build_pooled_residual_feature_row_as_of,
     load_pooled_residual_runtime,
@@ -162,6 +163,28 @@ def test_runtime_artifact_or_candidate_mismatch_fails_closed(
         )
 
 
+def test_calibration_eligibility_sha_or_semantics_drift_fails_closed(
+    tmp_path: Path,
+) -> None:
+    fixture = _bundle_fixture(tmp_path)
+    eligibility = json.loads(
+        fixture["eligibility_path"].read_text(encoding="utf-8")
+    )
+    eligibility["fixed_acceptance_threshold"] = 0.01
+    _write_json(fixture["eligibility_path"], eligibility)
+    manifest = json.loads(fixture["manifest_path"].read_text(encoding="utf-8"))
+    manifest["calibration_eligibility"] = _descriptor(
+        fixture["eligibility_path"], tmp_path
+    )
+    _write_json(fixture["manifest_path"], manifest)
+    with pytest.raises(PooledResidualRuntimeError, match="calibration eligibility"):
+        load_pooled_residual_runtime(
+            manifest_path=fixture["manifest_path"],
+            expected_manifest_sha256=sha256_file(fixture["manifest_path"]),
+            repository_root=tmp_path,
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     [
@@ -232,6 +255,15 @@ def test_runtime_rejects_real_v4_terminal_failed_candidate(tmp_path: Path) -> No
     manifest = json.loads(fixture["manifest_path"].read_text(encoding="utf-8"))
     manifest["candidate_id"] = "residual-v4-challenger-slot-002"
     manifest["lineage_id"] = failed["lineage_id"]
+    eligibility = json.loads(
+        fixture["eligibility_path"].read_text(encoding="utf-8")
+    )
+    eligibility["candidate_id"] = manifest["candidate_id"]
+    eligibility["lineage_id"] = manifest["lineage_id"]
+    _write_json(fixture["eligibility_path"], eligibility)
+    manifest["calibration_eligibility"] = _descriptor(
+        fixture["eligibility_path"], tmp_path
+    )
     manifest["candidate_freeze"] = _descriptor(fixture["freeze_path"], tmp_path)
     _write_json(fixture["manifest_path"], manifest)
     with pytest.raises(PooledResidualRuntimeError, match="not OOF-gated and frozen"):
@@ -275,6 +307,30 @@ def _bundle_fixture(tmp_path: Path, *, reversed_features: bool = False) -> dict:
     booster.save_model(model_path)
     feature_path = bundle / "feature_contract.json"
     _write_json(feature_path, _feature_contract())
+    cost_path = bundle / "cost_contract.json"
+    _write_json(cost_path, _cost_contract())
+    eligibility_path = bundle / "calibration_eligibility.json"
+    _write_json(
+        eligibility_path,
+        {
+            "schema_version": CALIBRATION_ELIGIBILITY_SCHEMA_VERSION,
+            "candidate_id": "synthetic-passing-candidate",
+            "lineage_id": "BTC-15M-cost-aware-market-residual-v99",
+            "score_semantics": "direct_after_cost_action_value",
+            "calibration_method": "identity_no_post_hoc_calibration",
+            "calibration_fit_population": (
+                "strictly_prior_market_grouped_rolling_origin_oof"
+            ),
+            "fixed_acceptance_threshold": 0.0,
+            "threshold_or_parameter_search_performed": False,
+            "route_side_missingness_or_outlier_filtering_performed": False,
+            "all_frozen_oof_gates_passed": True,
+            "offline_runtime_eligible": True,
+            "live_shadow_authorized": False,
+            "paper_or_live_execution_authorized": False,
+            "safety": SAFETY,
+        },
+    )
     freeze_path = bundle / "candidate_freeze.json"
     _write_json(
         freeze_path,
@@ -311,6 +367,8 @@ def _bundle_fixture(tmp_path: Path, *, reversed_features: bool = False) -> dict:
                 ),
             },
             "feature_contract": _descriptor(feature_path, tmp_path),
+            "cost_contract": _descriptor(cost_path, tmp_path),
+            "calibration_eligibility": _descriptor(eligibility_path, tmp_path),
             "candidate_freeze": _descriptor(freeze_path, tmp_path),
             "decision_contract": {
                 "actions": list(ACTIONS),
@@ -341,6 +399,8 @@ def _bundle_fixture(tmp_path: Path, *, reversed_features: bool = False) -> dict:
         "manifest_sha": sha256_file(manifest_path),
         "model_path": model_path,
         "feature_path": feature_path,
+        "cost_path": cost_path,
+        "eligibility_path": eligibility_path,
         "freeze_path": freeze_path,
         "booster": booster,
     }
@@ -368,6 +428,29 @@ def _feature_contract() -> dict:
             "missing_encoded_as_numeric_zero_allowed": False,
             "native_model_missing_value": "nan",
         },
+    }
+
+
+def _cost_contract() -> dict:
+    return {
+        "execution_policy": "HOLD_TO_SETTLEMENT",
+        "action_policy": {
+            "fixed_acceptance_threshold": 0.0,
+            "threshold_search_allowed": False,
+            "one_trade_maximum_per_market": True,
+            "side_filter_allowed": False,
+        },
+        "cost_semantics": {
+            "complement_quote_proxy_allowed": False,
+            "true_paired_executable_asks_required": True,
+            "unit_net_pnl": "gross_price_edge_minus_total_cost",
+        },
+        "sizing": {
+            "unit_sizing": True,
+            "sizing_multiplier": 1.0,
+            "dynamic_sizing_allowed": False,
+        },
+        "safety": SAFETY,
     }
 
 

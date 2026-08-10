@@ -33,6 +33,9 @@ from bigan.v8.polymarket.regime_adaptive_candidate_evaluation import FEATURE_NAM
 
 BUNDLE_SCHEMA_VERSION = "bigan-btc-15m-pooled-residual-runtime-bundle-v1"
 RUNTIME_RESULT_SCHEMA_VERSION = "bigan-btc-15m-pooled-residual-runtime-result-v1"
+CALIBRATION_ELIGIBILITY_SCHEMA_VERSION = (
+    "bigan-btc-15m-pooled-residual-calibration-eligibility-v1"
+)
 MARKET_FAMILY = "btc_updown_15m"
 MARKET_HORIZON_MS = 900_000
 ACTIONS = ("NO_TRADE", "BUY_UP_HOLD", "BUY_DOWN_HOLD")
@@ -51,6 +54,8 @@ class PooledResidualRuntime:
     manifest_sha256: str
     model_sha256: str
     feature_contract_sha256: str
+    cost_contract_sha256: str
+    calibration_eligibility_sha256: str
     candidate_freeze_sha256: str
     maximum_decision_lag_ms: int
     maximum_source_age_ms: int
@@ -245,17 +250,31 @@ def load_pooled_residual_runtime(
         feature_path = _verify_descriptor(
             manifest.get("feature_contract"), root, "feature_contract"
         )
+        cost_path = _verify_descriptor(
+            manifest.get("cost_contract"), root, "cost_contract"
+        )
+        eligibility_path = _verify_descriptor(
+            manifest.get("calibration_eligibility"),
+            root,
+            "calibration_eligibility",
+        )
         freeze_path = _verify_descriptor(
             manifest.get("candidate_freeze"), root, "candidate_freeze"
         )
     except PooledResidualRuntimeError as exc:
         blockers.append(str(exc))
-        model_path = feature_path = freeze_path = None
+        model_path = feature_path = cost_path = eligibility_path = freeze_path = None
     if blockers:
         raise PooledResidualRuntimeError(
             "invalid pooled residual runtime manifest: " + ", ".join(blockers)
         )
-    assert model_path is not None and feature_path is not None and freeze_path is not None
+    assert (
+        model_path is not None
+        and feature_path is not None
+        and cost_path is not None
+        and eligibility_path is not None
+        and freeze_path is not None
+    )
     model_descriptor = dict(manifest["model"])
     if model_descriptor.get("format") != "xgboost_ubj":
         raise PooledResidualRuntimeError("runtime model format must be xgboost_ubj")
@@ -266,6 +285,14 @@ def load_pooled_residual_runtime(
 
     feature_contract = _load_json(feature_path, "feature contract")
     _validate_feature_contract(feature_contract)
+    cost_contract = _load_json(cost_path, "cost contract")
+    _validate_cost_contract(cost_contract)
+    eligibility = _load_json(eligibility_path, "calibration eligibility")
+    _validate_calibration_eligibility(
+        eligibility,
+        candidate_id=candidate_id,
+        lineage_id=lineage_id,
+    )
     freeze = _load_json(freeze_path, "candidate freeze")
     _validate_candidate_freeze(freeze, candidate_id=candidate_id, lineage_id=lineage_id)
 
@@ -291,6 +318,8 @@ def load_pooled_residual_runtime(
         manifest_sha256=expected_sha,
         model_sha256=sha256_file(model_path),
         feature_contract_sha256=sha256_file(feature_path),
+        cost_contract_sha256=sha256_file(cost_path),
+        calibration_eligibility_sha256=sha256_file(eligibility_path),
         candidate_freeze_sha256=sha256_file(freeze_path),
         maximum_decision_lag_ms=maximum_decision_lag_ms,
         maximum_source_age_ms=maximum_source_age_ms,
@@ -447,6 +476,55 @@ def _validate_candidate_freeze(
         raise PooledResidualRuntimeError("candidate is not OOF-gated and frozen")
 
 
+def _validate_cost_contract(contract: Mapping[str, Any]) -> None:
+    action = dict(contract.get("action_policy") or {})
+    cost = dict(contract.get("cost_semantics") or {})
+    sizing = dict(contract.get("sizing") or {})
+    valid = (
+        contract.get("execution_policy") == "HOLD_TO_SETTLEMENT"
+        and action.get("fixed_acceptance_threshold") == 0.0
+        and action.get("threshold_search_allowed") is False
+        and action.get("one_trade_maximum_per_market") is True
+        and action.get("side_filter_allowed") is False
+        and cost.get("complement_quote_proxy_allowed") is False
+        and cost.get("true_paired_executable_asks_required") is True
+        and cost.get("unit_net_pnl") == "gross_price_edge_minus_total_cost"
+        and sizing.get("unit_sizing") is True
+        and sizing.get("sizing_multiplier") == 1.0
+        and sizing.get("dynamic_sizing_allowed") is False
+        and dict(contract.get("safety") or {}) == SAFETY
+    )
+    if not valid:
+        raise PooledResidualRuntimeError("invalid frozen residual cost contract")
+
+
+def _validate_calibration_eligibility(
+    artifact: Mapping[str, Any], *, candidate_id: str, lineage_id: str
+) -> None:
+    valid = (
+        artifact.get("schema_version") == CALIBRATION_ELIGIBILITY_SCHEMA_VERSION
+        and artifact.get("candidate_id") == candidate_id
+        and artifact.get("lineage_id") == lineage_id
+        and artifact.get("score_semantics") == "direct_after_cost_action_value"
+        and artifact.get("calibration_method") == "identity_no_post_hoc_calibration"
+        and artifact.get("calibration_fit_population")
+        == "strictly_prior_market_grouped_rolling_origin_oof"
+        and artifact.get("fixed_acceptance_threshold") == 0.0
+        and artifact.get("threshold_or_parameter_search_performed") is False
+        and artifact.get("route_side_missingness_or_outlier_filtering_performed")
+        is False
+        and artifact.get("all_frozen_oof_gates_passed") is True
+        and artifact.get("offline_runtime_eligible") is True
+        and artifact.get("live_shadow_authorized") is False
+        and artifact.get("paper_or_live_execution_authorized") is False
+        and dict(artifact.get("safety") or {}) == SAFETY
+    )
+    if not valid:
+        raise PooledResidualRuntimeError(
+            "invalid pooled residual calibration eligibility artifact"
+        )
+
+
 def _verify_descriptor(value: Any, root: Path, name: str) -> Path:
     descriptor = dict(value or {})
     relative = descriptor.get("path")
@@ -495,6 +573,7 @@ def _safe_int(value: Any) -> int | None:
 __all__ = [
     "ACTIONS",
     "BUNDLE_SCHEMA_VERSION",
+    "CALIBRATION_ELIGIBILITY_SCHEMA_VERSION",
     "PooledResidualRuntime",
     "PooledResidualRuntimeError",
     "RUNTIME_RESULT_SCHEMA_VERSION",
