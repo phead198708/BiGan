@@ -476,7 +476,9 @@ def verify_integration_closure_payload(
         if not HEX_40_OR_64.fullmatch(generation_head):
             raise IntegrationClosureError("invalid generation_head")
         expected_paths = set(entry_by_path)
-        actual_paths = set(_changed_paths(root, base_commit, generation_head))
+        actual_paths = set(_changed_paths(root, base_commit, generation_head)) - set(
+            payload["self_paths"]
+        )
         missing = sorted(expected_paths - actual_paths)
         extra = sorted(actual_paths - expected_paths)
         if missing or extra:

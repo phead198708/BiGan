@@ -57,14 +57,14 @@ def test_extra_changed_path_fails_closed() -> None:
         if entry["destination_path"] == ".github/workflows/v8-phase0.yml"
     )
     payload["entries"].remove(removable)
-    with pytest.raises(IntegrationClosureError, match="self_paths must contain exactly"):
+    with pytest.raises(IntegrationClosureError, match="closure inventory mismatch"):
         verify_integration_closure_payload(payload, root=ROOT)
 
 
 def test_missing_declared_path_fails_closed() -> None:
     payload = _payload()
     payload["self_paths"].append("examples/v8/integration_closure/not-present.json")
-    with pytest.raises(IntegrationClosureError, match="closure inventory mismatch"):
+    with pytest.raises(IntegrationClosureError, match="self_paths must contain exactly"):
         verify_integration_closure_payload(payload, root=ROOT)
 
 
