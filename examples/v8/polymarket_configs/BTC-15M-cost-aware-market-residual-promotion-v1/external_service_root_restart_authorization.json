@@ -1,0 +1,73 @@
+{
+  "authorization_scope": "one_byte_verified_external_service_root_restart_only",
+  "authorization_source": "user_message_2026-08-11_scheme_2_byte_verified_external_service_root_migration_and_controlled_restart",
+  "candidate_bundle_manifest": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/bundle_manifest.json",
+    "sha256": "7a5b872b5a2a010a0868bf7d22fb4bdc39a941dd04464bb53890d34aa1846b3e"
+  },
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "capital_at_risk": false,
+  "collector_decisions_changed": false,
+  "collector_restart_authorized": true,
+  "collector_restart_completed": false,
+  "created_at": "2026-08-10T19:46:00Z",
+  "destination_root": "/Volumes/BIGAN_PROMOTION_V1/BiGan-Promotion-v1-Collection-v2",
+  "fresh_outcomes_opened": false,
+  "implementation": {
+    "path": "src/bigan/v8/polymarket/residual_promotion_migrated_restart.py",
+    "sha256": "e18cf77a1712162e5025afe5c432e57ea64471570d66c73f93a163aeefd5757c"
+  },
+  "ledger_closed_attempt_count": 9,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "live_trading_allowed": false,
+  "maximum_attempts": 3000,
+  "migration_report": {
+    "path": "/Volumes/PHILIPS/BiGan-Archives/BiGan-Promotion-v1-Collection-v2-migration-audit-002/service_root_migration_report.json",
+    "sha256": "d26fb4f19897592f004e17944ebd21f3a47434eda9598e60cc96ce96e25fa597"
+  },
+  "model_bytes_changed": false,
+  "original_collector_cli": {
+    "path": "examples/v8/run_residual_promotion_v1_collector.py",
+    "sha256": "af2fcd7dcec87ebbc2960e3853e947ea0b628a4f1add50da50090342f8ad43ff"
+  },
+  "original_collector_protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/prospective_collector_protocol_v3.json",
+    "sha256": "b9fb1291297d597b6e3bb35f409f4de198c4d87c2a9c2d79947a19649415be7a"
+  },
+  "original_manual_collection_authorization": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/manual_collection_authorization_v3.json",
+    "sha256": "ce1e218b641484eda713b84704b727ed0d720d01eaaff8056bca01a42dd109b7"
+  },
+  "outcomes_accessed": false,
+  "paper_candidate_allowed": false,
+  "pnl_accessed": false,
+  "polymarket_write_allowed": false,
+  "quality_valid_market_count": 8,
+  "restart_cli": {
+    "path": "examples/v8/run_residual_promotion_v1_migrated_collector.py",
+    "sha256": "ab6e540cfe2d4e4c81736149c5a14125004033f99251dc4251437adc4c8ae940"
+  },
+  "router_features_cost_action_baseline_or_population_changed": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-external-service-root-restart-authorization-v1",
+  "service_root_tree_sha256": "1a4c1d05b894859c7aaad5443548207726d27bfe4c7b08c08fe9dca8395dcddb",
+  "settlement_accessed": false,
+  "source_capture_deletion_authorized": false,
+  "source_service_root_mutation_authorized": false,
+  "source_root": "/Users/tcscoder/Workspaces/BiGan-Promotion-v1-Collection-v2",
+  "target_quality_valid_market_count": 2500,
+  "v8_execution_handoff_allowed": false,
+  "wallet_signing_allowed": false
+}
