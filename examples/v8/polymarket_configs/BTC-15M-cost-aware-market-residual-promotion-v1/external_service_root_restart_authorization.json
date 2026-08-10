@@ -11,7 +11,7 @@
   "collector_restart_authorized": true,
   "collector_restart_completed": false,
   "created_at": "2026-08-10T19:46:00Z",
-  "destination_root": "/Volumes/PHILIPS/BiGan-Services/BiGan-Promotion-v1-Collection-v2",
+  "destination_root": "/Volumes/BIGAN_PROMOTION_V1/BiGan-Promotion-v1-Collection-v2",
   "fresh_outcomes_opened": false,
   "implementation": {
     "path": "src/bigan/v8/polymarket/residual_promotion_migrated_restart.py",
@@ -22,8 +22,8 @@
   "live_trading_allowed": false,
   "maximum_attempts": 3000,
   "migration_report": {
-    "path": "/Volumes/PHILIPS/BiGan-Archives/BiGan-Promotion-v1-Collection-v2-migration-audit-001/service_root_migration_report.json",
-    "sha256": "38dcc70115d8ae3dba50db2b21a24c526f23573a6e9535f6eebe2c29a221751b"
+    "path": "/Volumes/PHILIPS/BiGan-Archives/BiGan-Promotion-v1-Collection-v2-migration-audit-002/service_root_migration_report.json",
+    "sha256": "d26fb4f19897592f004e17944ebd21f3a47434eda9598e60cc96ce96e25fa597"
   },
   "model_bytes_changed": false,
   "original_collector_cli": {

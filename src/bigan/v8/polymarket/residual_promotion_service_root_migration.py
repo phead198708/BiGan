@@ -68,6 +68,7 @@ def migrate_service_root(
     destination_snapshot = snapshot_service_root(destination)
     if destination_snapshot != source_snapshot:
         raise ValueError("migrated service-root snapshot does not match source bytes")
+    _verify_runtime_write_metadata_safety(destination)
     progress = _load_json(destination / "collection_progress.json")
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -92,6 +93,7 @@ def migrate_service_root(
         "migration_complete": True,
         "source_bytes_verified": True,
         "destination_bytes_verified": True,
+        "runtime_write_metadata_safe": True,
         "source_capture_mutated": False,
         "source_capture_deleted": False,
         "collection_population_changed": False,
@@ -164,6 +166,7 @@ def verify_service_root_migration(
         or report.get("migration_complete") is not True
         or report.get("source_bytes_verified") is not True
         or report.get("destination_bytes_verified") is not True
+        or report.get("runtime_write_metadata_safe") is not True
         or any(report.get(field) is not False for field in false_fields)
         or dict(report.get("safety") or {}) != SAFETY
     ):
@@ -329,6 +332,24 @@ def _remove_generated_appledouble(root: Path) -> None:
         path.unlink()
     if any(root.rglob("._*")):
         raise ValueError("migration AppleDouble cleanup failed")
+
+
+def _verify_runtime_write_metadata_safety(root: Path) -> None:
+    probe = root / ".bigan-runtime-write-probe"
+    sidecar = root / "._.bigan-runtime-write-probe"
+    if probe.exists() or sidecar.exists():
+        raise ValueError("migration runtime write probe path already exists")
+    probe.mkdir()
+    (probe / "probe.json").write_text("{}\n", encoding="utf-8")
+    appledouble = sorted(path for path in root.rglob("._*") if path.name.startswith("._"))
+    shutil.rmtree(probe)
+    for path in sorted(appledouble, reverse=True):
+        if path.exists() or path.is_symlink():
+            path.unlink()
+    if appledouble:
+        raise ValueError(
+            "destination filesystem generates AppleDouble during runtime writes"
+        )
 
 
 def _validate_disjoint_roots(*, source: Path, destination: Path) -> None:

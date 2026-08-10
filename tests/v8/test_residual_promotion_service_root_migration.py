@@ -106,6 +106,7 @@ def test_migration_copies_and_verifies_exact_service_bytes(tmp_path: Path) -> No
 
     assert result["verification_passed"] is True
     assert result["source_snapshot"] == result["destination_snapshot"]
+    assert result["runtime_write_metadata_safe"] is True
     assert result["attempt_count"] == 1
     assert result["quality_valid_market_count"] == 1
     assert not (destination / ".DS_Store").exists()
