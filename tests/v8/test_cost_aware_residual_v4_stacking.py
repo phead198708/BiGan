@@ -19,6 +19,7 @@ from bigan.v8.polymarket.cost_aware_residual_v4_stacking import (
     require_stacking_candidate_implementation_binding,
     soft_stacking_action_values,
     validate_stacking_challenger_protocol,
+    verify_frozen_stacking_challenger_oof,
 )
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 from bigan.v8.polymarket.regime_adaptive_lineage import REPO_ROOT
@@ -153,6 +154,23 @@ def test_frozen_stacking_protocol_rejects_candidate_module_swap() -> None:
     )
     with pytest.raises(ValueError, match="candidate_implementation_exact_binding"):
         validate_stacking_challenger_protocol(swapped, verify_artifacts=False)
+
+
+def test_frozen_stacking_challenger_oof_reconstructs_fail_closed() -> None:
+    result = verify_frozen_stacking_challenger_oof()
+    assert result == {
+        "actual_executing_module_binding_verified": True,
+        "all_gates_passed": False,
+        "candidate_budget_exhausted": True,
+        "failed_gates": ["prospective_power_required_market_count_lte_2000"],
+        "manifest_sha256": (
+            "7a5d3f0170c0233425ee446442eaf3073626bca7d6fc1a7ea64e30f9361db643"
+        ),
+        "oof_market_count": 600,
+        "parent_v1_v2_v3_and_primary_immutable": True,
+        "safety": SAFETY,
+        "verification_passed": True,
+    }
 
 
 def _synthetic_row(side: str, entry_ask: float) -> dict:
