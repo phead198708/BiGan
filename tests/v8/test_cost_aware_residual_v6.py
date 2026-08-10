@@ -19,8 +19,13 @@ from bigan.v8.polymarket.cost_aware_residual_v6 import (
     verify_frozen_residual_v6_oof,
 )
 from bigan.v8.polymarket.cost_aware_residual_v6_challenger import (
+    DEFAULT_PROTOCOL as CHALLENGER_PROTOCOL,
+)
+from bigan.v8.polymarket.cost_aware_residual_v6_challenger import (
+    FIXED_QUANTILE_ALPHA,
     _quality_features,
     prequential_lower_quantile_proposal_predict,
+    validate_challenger_protocol,
 )
 from bigan.v8.polymarket.moe_collection_observability import FEATURE_NAMES
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
@@ -424,3 +429,21 @@ def test_challenger_missing_frozen_action_fails_closed() -> None:
             population_order=population,
             protocol=protocol,
         )
+
+
+def test_v6_final_slot_protocol_binds_exact_lower_quantile_executor() -> None:
+    protocol_path = Path(CHALLENGER_PROTOCOL)
+    protocol = _load_json(protocol_path)
+
+    validate_challenger_protocol(protocol)
+
+    assert protocol_path.with_suffix(".sha256").read_text(encoding="utf-8").strip() == (
+        "23e2332c44331412996861c5366022f41cebd2510cfa6a8bfd65a903d5aec47b"
+    )
+    assert protocol["inputs"]["candidate_implementation"]["sha256"] == (
+        "18cdef6627e456f47f7e59969798c206118569b3f62557d5d7685997fbbd1f53"
+    )
+    assert protocol["model"]["fixed_quantile_alpha"] == FIXED_QUANTILE_ALPHA == 0.4
+    assert protocol["action_policy"]["fixed_acceptance_threshold"] == 0.0
+    assert protocol["prospective_power"]["maximum_market_count"] == 2000
+    assert protocol["candidate_budget"]["slots_remaining_after_run"] == 0
