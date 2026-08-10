@@ -38,13 +38,11 @@ from bigan.v8.polymarket.residual_promotion_release_readiness import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG = (
-    REPO_ROOT
-    / "examples/v8/polymarket_configs/"
-    "BTC-15M-cost-aware-market-residual-promotion-v1"
+    REPO_ROOT / "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1"
 )
-CONTRACT = CONFIG / "micro_live_preapproval_contract_v3.json"
-PREFLIGHT = CONFIG / "micro_live_preapproval_preflight_report_v3.json"
-AUTHORIZATION_TEMPLATE = CONFIG / "micro_live_authorization_template_v3.json"
+CONTRACT = CONFIG / "micro_live_preapproval_contract_v4.json"
+PREFLIGHT = CONFIG / "micro_live_preapproval_preflight_report_v4.json"
+AUTHORIZATION_TEMPLATE = CONFIG / "micro_live_authorization_template_v4.json"
 HISTORICAL_ARTIFACTS = (
     CONFIG / "micro_live_preapproval_contract.json",
     CONFIG / "micro_live_preapproval_preflight_report.json",
@@ -52,6 +50,9 @@ HISTORICAL_ARTIFACTS = (
     CONFIG / "micro_live_preapproval_contract_v2.json",
     CONFIG / "micro_live_preapproval_preflight_report_v2.json",
     CONFIG / "micro_live_authorization_template_v2.json",
+    CONFIG / "micro_live_preapproval_contract_v3.json",
+    CONFIG / "micro_live_preapproval_preflight_report_v3.json",
+    CONFIG / "micro_live_authorization_template_v3.json",
 )
 
 
@@ -88,6 +89,10 @@ def _complete_evidence(contract: dict[str, object]) -> dict[str, dict[str, objec
                 "automatic_promotion_or_live_unlock": False,
                 "micro_live_approval_granted": False,
                 "population_manifest_sha256": population_sha,
+                "settlement_ingestion_manifest": {
+                    "path": "settlement_ingestion_manifest.json",
+                    "sha256": "c" * 64,
+                },
                 "evaluation_report": {
                     "path": "promotion_evaluation_report.json",
                     "sha256": "b" * 64,
@@ -106,9 +111,7 @@ def _complete_evidence(contract: dict[str, object]) -> dict[str, dict[str, objec
                 "failed_population_reuse_allowed": False,
                 "phase6_required": True,
                 "rollback_drill_required": True,
-                "micro_live_go_no_go": (
-                    "NO_GO_PENDING_PHASE6_AND_ROLLBACK_DRILL"
-                ),
+                "micro_live_go_no_go": ("NO_GO_PENDING_PHASE6_AND_ROLLBACK_DRILL"),
                 "automatic_promotion_or_live_unlock": False,
             }
         ),
@@ -255,9 +258,7 @@ def _phase6_report(contract: dict[str, object]) -> dict[str, object]:
         stable_model_sha256=bundle_sha,
         safe_parameter_sha256=compute_safe_parameters_sha256(safe_parameters),
         safe_parameters=safe_parameters,
-        rollback_artifact_sha256=dict(contract["functional_rollback_drill"])[
-            "sha256"
-        ],
+        rollback_artifact_sha256=dict(contract["functional_rollback_drill"])["sha256"],
         latency_measurements_ms=(75, 92, 88),
     )
     result = run_phase6_cicd_pipeline(
@@ -273,17 +274,21 @@ def test_frozen_contract_and_sidecars_reconcile() -> None:
     contract = _json(CONTRACT)
     assert contract["schema_version"] == CONTRACT_SCHEMA_VERSION
     assert dict(contract["supersedes_preapproval_contract"])["path"].endswith(
-        "/micro_live_preapproval_contract_v2.json"
+        "/micro_live_preapproval_contract_v3.json"
     )
-    assert dict(contract["finalization_feature_envelope_correction"])[
-        "path"
-    ].endswith("/finalization_feature_envelope_correction.json")
+    assert dict(contract["finalization_feature_envelope_correction"])["path"].endswith(
+        "/finalization_feature_envelope_correction.json"
+    )
+    assert dict(contract["promotion_settlement_ingestion_contract"])["path"].endswith(
+        "/promotion_settlement_ingestion_contract.json"
+    )
+    assert dict(contract["promotion_outcome_authorization_template"])["path"].endswith(
+        "/promotion_outcome_evaluation_authorization_template_v4.json"
+    )
     validate_release_readiness_contract(
         contract,
         repository_root=REPO_ROOT,
-        expected_implementation_sha256=sha256_file(
-            REPO_ROOT / IMPLEMENTATION_REPOSITORY_PATH
-        ),
+        expected_implementation_sha256=sha256_file(REPO_ROOT / IMPLEMENTATION_REPOSITORY_PATH),
     )
     for path in (CONTRACT, PREFLIGHT, AUTHORIZATION_TEMPLATE):
         sidecar = path.with_suffix(path.suffix + ".sha256")
@@ -326,9 +331,7 @@ def test_complete_technical_evidence_can_only_request_human_go_no_go() -> None:
     assert report["schema_version"] == ASSESSMENT_SCHEMA_VERSION
     assert all(report["technical_checks"].values())
     assert report["phase6_zero_capital_pipeline_passed"] is True
-    assert report["status"] == (
-        "READY_TO_REQUEST_HUMAN_1_PERCENT_MICRO_LIVE_GO_NO_GO"
-    )
+    assert report["status"] == ("READY_TO_REQUEST_HUMAN_1_PERCENT_MICRO_LIVE_GO_NO_GO")
     assert report["ready_to_request_micro_live_approval"] is True
     assert report["requested_initial_capital_fraction"] == 0.01
     assert report["explicit_human_approval_recorded"] is False
@@ -426,9 +429,7 @@ def test_static_byte_drift_fails_closed() -> None:
         validate_release_readiness_contract(
             changed,
             repository_root=REPO_ROOT,
-            expected_implementation_sha256=sha256_file(
-                REPO_ROOT / IMPLEMENTATION_REPOSITORY_PATH
-            ),
+            expected_implementation_sha256=sha256_file(REPO_ROOT / IMPLEMENTATION_REPOSITORY_PATH),
         )
 
 
@@ -436,7 +437,7 @@ def test_authorization_template_is_non_executable_and_empty() -> None:
     template = _json(AUTHORIZATION_TEMPLATE)
     assert template["schema_version"] == AUTHORIZATION_TEMPLATE_SCHEMA_VERSION
     assert dict(template["supersedes_authorization_template"])["path"].endswith(
-        "/micro_live_authorization_template_v2.json"
+        "/micro_live_authorization_template_v3.json"
     )
     assert template["requested_initial_capital_fraction"] == 0.01
     assert template["explicit_human_approval_recorded"] is False
