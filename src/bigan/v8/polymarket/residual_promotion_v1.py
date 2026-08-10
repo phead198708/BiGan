@@ -405,11 +405,31 @@ def run_final_fit(
         raise ResidualPromotionError("final-fit protocol SHA-256 mismatch")
     protocol = _verified_json(protocol_file)
     validate_final_fit_protocol(protocol, repository_root=root)
-    if source_commit != protocol["source_commit"]:
-        raise ResidualPromotionError("final-fit source commit mismatch")
     bundle_dir = protocol_file.parent / "candidate_bundle"
     if bundle_dir.exists() and any(bundle_dir.iterdir()):
         raise FileExistsError("the single final-fit slot is already consumed")
+    correction_path = protocol_file.parent / "pre_fit_engineering_correction.json"
+    correction_descriptor: dict[str, str] | None = None
+    if source_commit != protocol["source_commit"]:
+        correction = _verified_json(correction_path)
+        if not (
+            correction.get("original_protocol_source_commit")
+            == protocol["source_commit"]
+            and correction.get("corrected_source_commit") == source_commit
+            and correction.get("prediction_semantics_changed") is False
+            and correction.get("model_fit_attempted_before_correction") is False
+            and correction.get("model_artifact_created_before_correction") is False
+            and correction.get("candidate_slot_consumed_by_failed_loader") is False
+            and correction.get("fresh_outcomes_accessed") is False
+            and dict(correction.get("safety") or {}) == SAFETY
+        ):
+            raise ResidualPromotionError("pre-fit engineering correction is invalid")
+        _verify_descriptor(
+            correction["corrected_implementation"], root, "corrected implementation"
+        )
+        correction_descriptor = _descriptor(correction_path, root)
+    elif correction_path.exists():
+        raise ResidualPromotionError("unexpected pre-fit correction for original source")
     bundle_dir.mkdir(parents=True, exist_ok=True)
     public_rows = _load_jsonl(_repo_file(SOURCE_DATASET, root, "development dataset"))
     rows, population_order = _internal_training_rows(public_rows)
@@ -563,6 +583,7 @@ def run_final_fit(
         "source_commit": source_commit,
         "final_fit_protocol": _descriptor(protocol_file, root),
         "candidate_source_freeze": dict(protocol["candidate_source_freeze"]),
+        "pre_fit_engineering_correction": correction_descriptor,
         "single_candidate_slot_consumed": True,
         "fit_executed_exactly_once": True,
         "development_market_count": len(population_order),
@@ -584,6 +605,7 @@ def run_final_fit(
         "source_commit": source_commit,
         "final_fit_protocol": _descriptor(protocol_file, root),
         "candidate_source_freeze": dict(protocol["candidate_source_freeze"]),
+        "pre_fit_engineering_correction": correction_descriptor,
         "candidate_freeze": _descriptor(freeze_path, root),
         "model_graph": _descriptor(graph_path, root),
         "artifacts": model_descriptors,
@@ -843,6 +865,46 @@ def validate_final_fit_protocol(
         )
 
 
+def prepare_pre_fit_engineering_correction(
+    *,
+    repository_root: Path | str = REPO_ROOT,
+    corrected_source_commit: str,
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    """Bind a non-semantic loader fix after a fail-before-fit attempt."""
+
+    root = Path(repository_root).resolve()
+    if not HEX_GIT_SHA.fullmatch(corrected_source_commit):
+        raise ResidualPromotionError("corrected source commit must be a full Git SHA")
+    protocol_path = root / "examples/v8/polymarket_configs" / LINEAGE_ID / "final_fit_protocol.json"
+    protocol = _verified_json(protocol_path)
+    bundle_dir = protocol_path.parent / "candidate_bundle"
+    if bundle_dir.exists() and any(bundle_dir.iterdir()):
+        raise ResidualPromotionError("a model artifact exists; correction is not pre-fit")
+    correction_path = protocol_path.parent / "pre_fit_engineering_correction.json"
+    payload = {
+        "schema_version": f"{SCHEMA_VERSION}-pre-fit-engineering-correction",
+        "lineage_id": LINEAGE_ID,
+        "candidate_id": CANDIDATE_ID,
+        "created_at": created_at or datetime.now(UTC).isoformat(),
+        "original_final_fit_protocol": _descriptor(protocol_path, root),
+        "original_protocol_source_commit": protocol["source_commit"],
+        "corrected_source_commit": corrected_source_commit,
+        "corrected_implementation": _descriptor(root / IMPLEMENTATION_PATH, root),
+        "failure_stage": "development_json_feature_mapping_key_order_validation",
+        "correction": "validate_exact_feature_key_set_then_reconstruct_frozen_FEATURE_NAMES_order",
+        "prediction_semantics_changed": False,
+        "architecture_feature_threshold_training_or_gate_changed": False,
+        "model_fit_attempted_before_correction": False,
+        "model_artifact_created_before_correction": False,
+        "candidate_slot_consumed_by_failed_loader": False,
+        "fresh_outcomes_accessed": False,
+        "safety": dict(SAFETY),
+    }
+    _write_frozen_json(correction_path, payload)
+    return _descriptor(correction_path, root)
+
+
 def load_residual_promotion_runtime(
     *,
     manifest_path: Path | str,
@@ -1053,7 +1115,7 @@ def _internal_training_rows(
         if source.get("development_only_forever") is not True or source.get("promotion_evidence_eligible") is not False:
             raise ResidualPromotionError("final-fit source is not development-only")
         mapping = dict(source.get("features") or {})
-        if tuple(mapping) != FEATURE_NAMES:
+        if set(mapping) != set(FEATURE_NAMES) or len(mapping) != len(FEATURE_NAMES):
             raise ResidualPromotionError("final-fit feature order drifted")
         values = [math.nan if mapping[name] is None else float(mapping[name]) for name in FEATURE_NAMES]
         row = dict(source)
@@ -1390,6 +1452,7 @@ __all__ = [
     "freeze_prospective_program",
     "load_matched_baseline",
     "load_residual_promotion_runtime",
+    "prepare_pre_fit_engineering_correction",
     "prepare_pretraining_freeze",
     "run_final_fit",
     "score_matched_baseline",

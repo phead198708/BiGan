@@ -17,6 +17,7 @@ from bigan.v8.polymarket.residual_promotion_v1 import (  # noqa: E402
     CONFIG_DIR,
     freeze_prospective_program,
     load_residual_promotion_runtime,
+    prepare_pre_fit_engineering_correction,
     prepare_pretraining_freeze,
     run_final_fit,
     validate_final_fit_protocol,
@@ -29,6 +30,9 @@ def _parser() -> argparse.ArgumentParser:
     prepare = commands.add_parser("prepare")
     prepare.add_argument("--source-commit", required=True)
     prepare.add_argument("--created-at")
+    correction = commands.add_parser("pre-fit-correction")
+    correction.add_argument("--corrected-source-commit", required=True)
+    correction.add_argument("--created-at")
     final_fit = commands.add_parser("final-fit")
     final_fit.add_argument("--source-commit", required=True)
     final_fit.add_argument(
@@ -66,6 +70,12 @@ def main() -> int:
         report = prepare_pretraining_freeze(
             repository_root=ROOT,
             source_commit=args.source_commit,
+            created_at=args.created_at,
+        )
+    elif args.command == "pre-fit-correction":
+        report = prepare_pre_fit_engineering_correction(
+            repository_root=ROOT,
+            corrected_source_commit=args.corrected_source_commit,
             created_at=args.created_at,
         )
     elif args.command == "final-fit":
