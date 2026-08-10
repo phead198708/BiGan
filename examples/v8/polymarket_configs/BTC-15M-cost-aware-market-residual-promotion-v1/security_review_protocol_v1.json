@@ -1,0 +1,138 @@
+{
+  "automatic_authorization_or_launch": false,
+  "candidate_bundle": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/bundle_manifest.json",
+    "sha256": "7a5b872b5a2a010a0868bf7d22fb4bdc39a941dd04464bb53890d34aa1846b3e"
+  },
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "ci_contract": {
+    "exact_head_ci_required": true,
+    "github_actions_run_url_required": true,
+    "required_conclusion": "SUCCESS"
+  },
+  "created_at": "2026-08-10T21:25:00Z",
+  "execution_safety_contract": {
+    "maximum_future_initial_capital_fraction": 0.01,
+    "review_authorizes_capital": false,
+    "review_authorizes_micro_live": false,
+    "review_authorizes_phase6": false,
+    "review_authorizes_polymarket_writes": false,
+    "review_authorizes_wallet_signing": false
+  },
+  "findings_contract": {
+    "open_p0_allowed": 0,
+    "open_p1_allowed": 0,
+    "p2_p3_must_be_reported": true,
+    "resolved_p0_p1_requires_resolution_commit": true
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "report_schema_version": "bigan-btc-15m-residual-promotion-independent-security-review-report-v2",
+  "required_control_evidence_paths": {
+    "artifact_hash_and_candidate_identity": [
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/bundle_manifest.json",
+      "tests/v8/test_residual_promotion_runtime.py"
+    ],
+    "audit_log_integrity_and_restart_recovery": [
+      "src/bigan/v8/polymarket/residual_promotion_execution_readiness.py",
+      "tests/v8/test_residual_promotion_execution_readiness.py"
+    ],
+    "authorization_separation_and_exact_payload_binding": [
+      "src/bigan/v8/polymarket/residual_promotion_release_readiness_v6.py",
+      "tests/v8/test_residual_promotion_security_review.py"
+    ],
+    "btc_15m_market_allowlist": [
+      "src/bigan/v8/polymarket/residual_promotion_execution_readiness.py",
+      "tests/v8/test_residual_promotion_execution_readiness.py"
+    ],
+    "conflicting_duplicate_fail_closed": [
+      "src/bigan/v8/polymarket/residual_promotion_execution_readiness.py",
+      "tests/v8/test_residual_promotion_execution_readiness.py"
+    ],
+    "credential_and_wallet_isolation": [
+      "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py",
+      "tests/v8/test_residual_promotion_micro_live_executor.py"
+    ],
+    "idempotent_order_and_business_identity": [
+      "src/bigan/v8/polymarket/residual_promotion_execution_readiness.py",
+      "tests/v8/test_residual_promotion_execution_readiness.py"
+    ],
+    "kill_switch_and_operator_heartbeat": [
+      "src/bigan/v8/polymarket/residual_promotion_execution_readiness.py",
+      "tests/v8/test_residual_promotion_execution_readiness.py"
+    ],
+    "one_percent_cap_and_no_automatic_launch": [
+      "src/bigan/v8/polymarket/residual_promotion_release_readiness_v6.py",
+      "tests/v8/test_residual_promotion_security_review.py"
+    ],
+    "order_fill_position_cash_settlement_reconciliation": [
+      "src/bigan/v8/polymarket/residual_promotion_execution_readiness.py",
+      "tests/v8/test_residual_promotion_execution_readiness.py"
+    ],
+    "rollback_to_no_trade": [
+      "src/bigan/v8/polymarket/residual_promotion_rollback.py",
+      "tests/v8/test_residual_promotion_rollback.py"
+    ],
+    "write_surface_deny_by_default": [
+      "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py",
+      "tests/v8/test_residual_promotion_micro_live_executor.py"
+    ]
+  },
+  "required_control_ids": [
+    "artifact_hash_and_candidate_identity",
+    "btc_15m_market_allowlist",
+    "authorization_separation_and_exact_payload_binding",
+    "credential_and_wallet_isolation",
+    "write_surface_deny_by_default",
+    "idempotent_order_and_business_identity",
+    "conflicting_duplicate_fail_closed",
+    "order_fill_position_cash_settlement_reconciliation",
+    "kill_switch_and_operator_heartbeat",
+    "audit_log_integrity_and_restart_recovery",
+    "rollback_to_no_trade",
+    "one_percent_cap_and_no_automatic_launch"
+  ],
+  "required_scope_component_paths": {
+    "candidate_bundle": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/bundle_manifest.json",
+    "execution_readiness": "src/bigan/v8/polymarket/residual_promotion_execution_readiness.py",
+    "micro_live_authorization_verifier": "src/bigan/v8/polymarket/residual_promotion_micro_live_authorization.py",
+    "phase6_contracts": "src/bigan/v8/phase6/contracts.py",
+    "phase6_pipeline": "src/bigan/v8/phase6/pipeline.py",
+    "release_readiness_v6": "src/bigan/v8/polymarket/residual_promotion_release_readiness_v6.py",
+    "residual_runtime": "src/bigan/v8/polymarket/pooled_residual_runtime.py",
+    "rollback": "src/bigan/v8/polymarket/residual_promotion_rollback.py",
+    "security_review_protocol": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/security_review_protocol_v1.json",
+    "security_review_validator": "src/bigan/v8/polymarket/residual_promotion_security_review.py",
+    "separate_micro_live_executor": "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py"
+  },
+  "review_independence_contract": {
+    "exact_reviewed_commit_required": true,
+    "github_pull_request_review_required": true,
+    "github_review_payload_artifact_required": true,
+    "review_state_required": "APPROVED",
+    "reviewer_attestation_artifact_required": true,
+    "reviewer_attestation_schema_version": "bigan-btc-15m-residual-promotion-independent-reviewer-attestation-v1",
+    "reviewer_github_login_required": true,
+    "reviewer_must_not_be_an_implementation_author": true,
+    "self_review_forbidden": true
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-independent-security-review-protocol-v1",
+  "scope_schema_version": "bigan-btc-15m-residual-promotion-independent-security-review-scope-v1",
+  "security_review_is_independent_evidence_only": true,
+  "validator_implementation": {
+    "path": "src/bigan/v8/polymarket/residual_promotion_security_review.py",
+    "sha256": "16d72ddfd6c94e5dfa2a0bcc01456eb2064678317114c711b9ec88f8fbcf90da"
+  }
+}
