@@ -12,12 +12,14 @@ from bigan.v8.polymarket.cost_aware_residual_v4 import (
     AUTHORIZATION_INSTRUCTION,
     AUTHORIZATION_INSTRUCTION_SHA256,
     DEFAULT_AUTHORIZATION,
+    DEFAULT_PROTOCOL,
     DEFAULT_REGISTRY,
     IMMUTABLE_GATE_IMPLEMENTATION,
     LINEAGE_ID,
     blend_probability_action_values,
     prequential_expert_weights,
     require_v4_candidate_implementation_binding,
+    validate_residual_v4_protocol,
     validate_v4_lineage_authorization,
 )
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
@@ -104,6 +106,31 @@ def test_v4_valid_but_unrelated_repository_file_swap_is_rejected() -> None:
         match="does not identify the executing module",
     ):
         require_v4_candidate_implementation_binding(payload)
+
+
+def test_frozen_primary_protocol_validates_and_exactly_binds_current_module() -> None:
+    payload = json.loads(DEFAULT_PROTOCOL.read_text(encoding="utf-8"))
+    validate_residual_v4_protocol(payload)
+    assert sha256_file(DEFAULT_PROTOCOL) == (
+        "05298c079f9e48aa412427ecc2c4cbc704885cd6d9e19ef584d6c80082362b96"
+    )
+    assert payload["inputs"]["candidate_implementation"] == {
+        "path": "src/bigan/v8/polymarket/cost_aware_residual_v4.py",
+        "sha256": "c54bffa58bda1b5a3480ba463cb06dea69b245137079b7ce728fda2bff5860da",
+    }
+    assert payload["candidate_budget"]["maximum_total_slots"] == 2
+    assert payload["candidate_budget"]["slots_consumed_before_run"] == 0
+    assert payload["state"]["training_started"] is False
+    assert payload["safety"] == SAFETY
+
+
+def test_frozen_primary_protocol_rejects_valid_gate_file_as_candidate() -> None:
+    payload = json.loads(DEFAULT_PROTOCOL.read_text(encoding="utf-8"))
+    payload["inputs"]["candidate_implementation"] = dict(
+        IMMUTABLE_GATE_IMPLEMENTATION
+    )
+    with pytest.raises(ValueError, match="candidate_implementation_exact_binding"):
+        validate_residual_v4_protocol(payload, verify_artifacts=False)
 
 
 def test_prequential_weights_start_equal_and_use_only_supplied_history() -> None:
