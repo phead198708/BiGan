@@ -413,6 +413,7 @@ def verify_integration_closure_payload(
     *,
     root: Path,
     verify_diff_inventory: bool = True,
+    destination_commit: str | None = None,
 ) -> dict[str, Any]:
     """Verify source, destination, sidecar, evidence, and implementation bindings."""
 
@@ -428,16 +429,27 @@ def verify_integration_closure_payload(
         )
         source_commit = str(entry["source_commit"])
         source_bytes = _git_object_bytes(root, source_commit, source_path)
-        destination = root / destination_path
-        if not destination.is_file():
-            raise IntegrationClosureError(f"missing destination: {destination_path}")
-        destination_bytes = destination.read_bytes()
+        if destination_commit is None:
+            destination = root / destination_path
+            if not destination.is_file():
+                raise IntegrationClosureError(f"missing destination: {destination_path}")
+            destination_bytes = destination.read_bytes()
+            destination_blob_oid = _working_blob_oid(root, destination_path)
+            destination_mode = _working_mode(root, destination_path)
+        else:
+            destination_bytes = _git_object_bytes(
+                root, destination_commit, destination_path
+            )
+            destination_blob_oid = _git_blob_oid(
+                root, destination_commit, destination_path
+            )
+            destination_mode = _git_mode(root, destination_commit, destination_path)
         checks = {
             "source_git_blob_oid": _git_blob_oid(root, source_commit, source_path),
             "source_git_mode": _git_mode(root, source_commit, source_path),
             "source_content_sha256": _sha256(source_bytes),
-            "destination_git_blob_oid": _working_blob_oid(root, destination_path),
-            "destination_git_mode": _working_mode(root, destination_path),
+            "destination_git_blob_oid": destination_blob_oid,
+            "destination_git_mode": destination_mode,
             "destination_sha256": _sha256(destination_bytes),
         }
         for field, actual in checks.items():
@@ -457,10 +469,20 @@ def verify_integration_closure_payload(
         if entry.get("sidecar_for") != target:
             raise IntegrationClosureError(f"sidecar target mismatch: {path}")
         target_file = root / target
-        if not target_file.is_file():
+        if destination_commit is None and not target_file.is_file():
             raise IntegrationClosureError(f"sidecar target missing: {target}")
-        expected = _sha256(target_file.read_bytes())
-        sidecar_tokens = (root / path).read_text().split()
+        target_bytes = (
+            target_file.read_bytes()
+            if destination_commit is None
+            else _git_object_bytes(root, destination_commit, target)
+        )
+        sidecar_bytes = (
+            (root / path).read_bytes()
+            if destination_commit is None
+            else _git_object_bytes(root, destination_commit, path)
+        )
+        expected = _sha256(target_bytes)
+        sidecar_tokens = sidecar_bytes.decode().split()
         if not sidecar_tokens:
             raise IntegrationClosureError(f"empty sidecar: {path}")
         actual = sidecar_tokens[0]
@@ -499,7 +521,12 @@ def verify_integration_closure_payload(
     }
 
 
-def verify_integration_closure(manifest_path: Path, *, root: Path) -> dict[str, Any]:
+def verify_integration_closure(
+    manifest_path: Path,
+    *,
+    root: Path,
+    destination_commit: str | None = None,
+) -> dict[str, Any]:
     """Load and verify a closure manifest plus its own SHA-256 sidecar."""
 
     manifest_path = manifest_path.resolve()
@@ -516,7 +543,9 @@ def verify_integration_closure(manifest_path: Path, *, root: Path) -> dict[str, 
     payload = json.loads(raw)
     if not isinstance(payload, Mapping):
         raise IntegrationClosureError("manifest root must be an object")
-    return verify_integration_closure_payload(payload, root=root)
+    return verify_integration_closure_payload(
+        payload, root=root, destination_commit=destination_commit
+    )
 
 
 def verify_integration_closure_set(
@@ -530,14 +559,16 @@ def verify_integration_closure_set(
     layers: list[dict[str, Any]] = []
     for raw_path in manifest_paths:
         path = raw_path.resolve()
-        report = verify_integration_closure(path, root=root)
-        payload = json.loads(path.read_text())
         relative_path = path.relative_to(root).as_posix()
         manifest_commit = str(
             _git(root, "log", "-1", "--format=%H", "HEAD", "--", relative_path)
         ).strip()
         if not HEX_40_OR_64.fullmatch(manifest_commit):
             raise IntegrationClosureError(f"manifest is not committed: {relative_path}")
+        report = verify_integration_closure(
+            path, root=root, destination_commit=manifest_commit
+        )
+        payload = json.loads(path.read_text())
         layers.append(
             {
                 "path": relative_path,
