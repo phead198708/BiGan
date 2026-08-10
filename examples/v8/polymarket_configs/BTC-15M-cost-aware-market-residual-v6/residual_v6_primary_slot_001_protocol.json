@@ -1,0 +1,296 @@
+{
+  "action_policy": {
+    "NO_TRADE_if_no_positive_prediction": true,
+    "NO_TRADE_unit_pnl": 0.0,
+    "accept_if": "highest_side_prediction>0",
+    "decision_order": "chronological",
+    "fixed_acceptance_threshold": 0.0,
+    "one_trade_maximum_per_market": true,
+    "side_tie_break_order": [
+      "UP",
+      "DOWN"
+    ],
+    "threshold_search_allowed": false
+  },
+  "baseline": {
+    "candidate_and_baseline_population_must_match": true,
+    "candidate_and_baseline_share_bootstrap_indices": true,
+    "matched_global_baseline_behavior_is_frozen": true,
+    "policy": "HOLD_TO_SETTLEMENT"
+  },
+  "bootstrap": {
+    "NO_TRADE_participates_as_zero": true,
+    "candidate_and_baseline_share_indices": true,
+    "confidence": 0.975,
+    "lower_quantile": 0.025,
+    "method": "market_level_paired_percentile_bootstrap",
+    "resamples": 10000,
+    "seed": 26401,
+    "unit": "unique_market"
+  },
+  "candidate_budget": {
+    "maximum_total_slots": 2,
+    "slot_budget_may_be_increased": false,
+    "slots_consumed_before_run": 0,
+    "slots_remaining_after_run": 1,
+    "this_slot_ordinal": 1
+  },
+  "candidate_role": "primary",
+  "cost_stress": {
+    "action_selection_reused_from_base_cost": true,
+    "formula": "gross_price_edge-multiplier*total_cost_relative_to_mid",
+    "multipliers": [
+      1.2,
+      1.5,
+      2.0
+    ]
+  },
+  "created_at": "2026-08-10T12:08:00Z",
+  "dataset": {
+    "decision_rows_per_market": 2,
+    "development_only_forever": true,
+    "market_count": 800,
+    "population_order": "frozen_confirmatory_capture_manifest_order",
+    "side_decision_row_count": 3200,
+    "sides_per_decision": 2
+  },
+  "development_discipline": {
+    "challenger_requires_separate_preregistration": true,
+    "feature_search_allowed": false,
+    "hyperparameter_search_allowed": false,
+    "one_candidate_this_slot": true,
+    "post_result_mutation_allowed": false,
+    "route_side_missingness_or_outlier_filtering_allowed": false,
+    "threshold_search_allowed": false,
+    "weight_search_allowed": false
+  },
+  "development_only_forever": true,
+  "feature_contract": {
+    "base_feature_count": 54,
+    "decision_time_causal_inputs_only": true,
+    "early_model_uses_early_decision_features_only": true,
+    "feature_search_allowed": false,
+    "late_model_uses_late_decision_features_only": true,
+    "market_horizon_seconds": 900,
+    "missing_values_encoded_as_zero": false,
+    "native_missing_value": "nan",
+    "new_raw_feature_added": false,
+    "ordered_feature_count": 108,
+    "ordered_feature_names_sha256": "a61ef8953a2801d3e404d376261f306846cae5a4bf3ef3c97918572c48720e89",
+    "same_108_feature_contract_at_both_stages": true,
+    "shared_side_symmetric_model": true,
+    "side_identity_feature_allowed": false,
+    "source_contract_reused_without_feature_addition_or_removal": true
+  },
+  "forbidden": [
+    "mutation_of_existing_gate_or_threshold",
+    "mutation_of_zero_acceptance_threshold",
+    "mutation_of_N_max_2000",
+    "mutation_of_cost_model_baseline_or_population",
+    "mutation_of_v1_v2_v3_v4_or_v5_failed_artifacts",
+    "candidate_slot_budget_increase",
+    "parameter_feature_weight_or_threshold_grid_search",
+    "route_side_missingness_or_outlier_filtering",
+    "post_result_candidate_mutation",
+    "evaluation_before_candidate_protocol_and_executing_module_sha_freeze",
+    "opened_development_data_as_promotion_evidence",
+    "fresh_collection_or_outcome_opening",
+    "shadow_paper_live_wallet_write_promotion_or_capital_risk"
+  ],
+  "gates": {
+    "absolute_market_bootstrap_97_5pct_lcb_gt_zero": true,
+    "all_cost_stress_candidate_totals_gte_zero": true,
+    "all_cost_stress_paired_delta_totals_gte_zero": true,
+    "every_chronological_block_candidate_total_gte_zero": true,
+    "every_chronological_block_paired_delta_total_gte_zero": true,
+    "largest_positive_delta_removed_total_gte_zero": true,
+    "largest_winner_removed_candidate_total_gte_zero": true,
+    "paired_delta_market_bootstrap_97_5pct_lcb_gt_zero": true,
+    "population_and_leakage_reconciliation": true,
+    "prospective_power_required_market_count_lte_2000": true,
+    "stable_score_to_realized_pnl_ordering": true
+  },
+  "hypothesis": {
+    "change": "replace independent early and late action scoring with nested fitted-Q dynamic stopping",
+    "expected_mechanism": "price the option value of waiting so the unchanged zero threshold acts early only when early direct value exceeds a strictly prior cross-fitted late continuation policy",
+    "reason": "v1 through v5 did not explicitly model the sequential early-versus-wait decision"
+  },
+  "inputs": {
+    "candidate_implementation": {
+      "path": "src/bigan/v8/polymarket/cost_aware_residual_v6.py",
+      "sha256": "299befa843d8b6feee9fce7d0b51a5a4d83de722f45b9875fa1de0bb9910374b"
+    },
+    "development_data_registry": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v6/development_data_registry.json",
+      "sha256": "4871563daef8afaa8649025767e5b35c8232474e2d18381b5e5cc2dc831c46f9"
+    },
+    "gate_implementation": {
+      "path": "src/bigan/v8/polymarket/cost_aware_residual.py",
+      "sha256": "491a329f708a16d5aecdd952552cbff3fa13d8f7446bfe3e0c78fade3b36f78c"
+    },
+    "lineage_authorization": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v6/lineage_authorization.json",
+      "sha256": "b8fba0aff704d492fc898b535f9cb1cb3112ea628789eba57e557f7fe3436c85"
+    },
+    "matched_global_baseline_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_matched_global_baseline_contract.json",
+      "sha256": "1f26fc5cc39c9f52241bd40d09efe6530e88dcabad696f3a1df494944302bff5"
+    },
+    "parent_cost_and_action_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_cost_and_action_contract.json",
+      "sha256": "7a2d2f170cd6b042188f8282014dfbfb7d379e49085bd00807aace1881d7bf43"
+    },
+    "parent_feature_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_feature_contract.json",
+      "sha256": "dbc6e5e000a79548c5e5c74a38366ede4fe112fd3157850b8e3571599ef642bc"
+    },
+    "parent_v4_development_dataset_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v4/residual_v4_challenger_slot_002_oof/residual_v4_stacking_development_dataset_rows.jsonl",
+      "sha256": "d7f9d0dac1a6f9c4cb2101fc771360b2c05377168c280523721aee4294df4fab"
+    },
+    "parent_v4_market_results": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v4/residual_v4_challenger_slot_002_oof/residual_v4_stacking_oof_market_results.jsonl",
+      "sha256": "0b769b124602e973463133979e4a1cc7da84d3d4d5d482a743a591226201c782"
+    },
+    "parent_v5_terminal_review": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-v5/residual_v5_development_terminal_review.json",
+      "sha256": "22b4cd829c3f042088ab9e37a855653869bc8d7069da8d2bfd60f3b90719e472"
+    }
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-v6",
+  "model": {
+    "early_incremental_model": {
+      "family": "pooled_side_symmetric_xgboost_regressor",
+      "fixed_num_boost_round": 128,
+      "parameters": {
+        "colsample_bytree": 1.0,
+        "eta": 0.03,
+        "eval_metric": "rmse",
+        "gamma": 0.0,
+        "max_bin": 64,
+        "max_depth": 2,
+        "min_child_weight": 16.0,
+        "nthread": 1,
+        "objective": "reg:squarederror",
+        "reg_alpha": 0.0,
+        "reg_lambda": 20.0,
+        "seed": 26461,
+        "subsample": 1.0,
+        "tree_method": "hist"
+      }
+    },
+    "family": "nested_fitted_Q_dynamic_optimal_stopping",
+    "fixed_num_boost_round": 128,
+    "late_direct_model": {
+      "family": "pooled_side_symmetric_xgboost_regressor",
+      "fixed_num_boost_round": 128,
+      "parameters": {
+        "colsample_bytree": 1.0,
+        "eta": 0.03,
+        "eval_metric": "rmse",
+        "gamma": 0.0,
+        "max_bin": 64,
+        "max_depth": 2,
+        "min_child_weight": 16.0,
+        "nthread": 1,
+        "objective": "reg:squarederror",
+        "reg_alpha": 0.0,
+        "reg_lambda": 20.0,
+        "seed": 26461,
+        "subsample": 1.0,
+        "tree_method": "hist"
+      }
+    },
+    "model_selection_or_early_stopping_performed": false,
+    "parameters": {
+      "colsample_bytree": 1.0,
+      "eta": 0.03,
+      "eval_metric": "rmse",
+      "gamma": 0.0,
+      "max_bin": 64,
+      "max_depth": 2,
+      "min_child_weight": 16.0,
+      "nthread": 1,
+      "objective": "reg:squarederror",
+      "reg_alpha": 0.0,
+      "reg_lambda": 20.0,
+      "seed": 26461,
+      "subsample": 1.0,
+      "tree_method": "hist"
+    },
+    "route_or_expert_filtering_allowed": false
+  },
+  "promotion_evidence_eligible": false,
+  "prospective_power": {
+    "confidence": 0.975,
+    "effect_haircut": 0.5,
+    "maximum_market_count": 2000,
+    "required_n_rule": "max_absolute_and_paired_plugin_normal_approximation",
+    "target_power": 0.8
+  },
+  "rolling_origin": {
+    "future_market_used_for_fit": false,
+    "initial_training_market_count": 200,
+    "market_grouped": true,
+    "market_order": "frozen_capture_order",
+    "oof_market_count": 600,
+    "strictly_prior_market_labels_only": true,
+    "target_block_count": 6,
+    "target_block_size": 100
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-dynamic-stopping-oof-protocol-v6",
+  "sequential_training": {
+    "current_or_future_outer_label_used_for_fit": false,
+    "inner_OOF_continuation_only_for_early_training": true,
+    "inner_initial_training_market_count": 100,
+    "inner_method": "expanding_market_grouped_rolling_origin_for_late_continuation",
+    "inner_target_block_market_count": 100,
+    "late_continuation_action_policy": "unchanged_zero_threshold_UP_first_tie_break",
+    "outer_method": "frozen_six_block_market_grouped_rolling_origin",
+    "outer_target_late_features_used_for_early_score": false,
+    "parameter_feature_weight_or_threshold_search_allowed": false
+  },
+  "slot_id": "residual-v6-primary-slot-001",
+  "state": {
+    "candidate_frozen": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false,
+    "live_shadow_started": false,
+    "promotion_started": false,
+    "training_started": false
+  },
+  "structural_change": {
+    "changed_component": "sequential_decision_target_and_training_graph",
+    "cost_baseline_population_or_gate_changed": false,
+    "expected_mechanism": "the unchanged zero threshold now means act early only when predicted early value exceeds a cross-fitted late continuation policy; otherwise preserve the option to wait and use a direct after-cost late action value",
+    "from": "score_each_decision_as_an_independent_immediate_action",
+    "parameter_feature_weight_or_threshold_search_performed": false,
+    "reason": "v1_through_v5_treated_early_and_late_actions_independently;_a_positive_early_score_could_trade_without_pricing_the_option_to_wait_for_the_late_decision",
+    "route_side_missingness_or_outlier_filter_added": false,
+    "threshold_changed": false,
+    "to": "nested_fitted_Q_optimal_stopping_with_late_direct_value_and_early_incremental_value_over_strictly_prior_inner_OOF_continuation_policy"
+  },
+  "target": {
+    "NO_TRADE_value": 0.0,
+    "continuation_target": "realized_PnL_of_strictly_inner_OOF_late_policy_or_zero",
+    "early_score_semantics": "incremental_value_of_acting_now_instead_of_waiting",
+    "early_target": "early_direct_after_cost_action_value-continuation_target",
+    "execution_policy": "HOLD_TO_SETTLEMENT",
+    "late_formula": "settlement_payout-executable_ask-frozen_fees-slippage-liquidity_impact",
+    "late_target": "direct_after_cost_action_value",
+    "post_close_training_labels_only": true
+  }
+}

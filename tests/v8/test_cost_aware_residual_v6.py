@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import math
 from copy import deepcopy
+from pathlib import Path
 
 import numpy as np
 import pytest
 
+from bigan.v8.polymarket.cost_aware_residual import _load_json
 from bigan.v8.polymarket.cost_aware_residual_v6 import (
+    DEFAULT_PROTOCOL,
+    FIXED_NUM_BOOST_ROUND,
+    FIXED_PARAMETERS,
     _dmatrix,
     nested_dynamic_stopping_predict,
+    validate_residual_v6_protocol,
     validate_v6_lineage_authorization,
 )
 from bigan.v8.polymarket.moe_collection_observability import FEATURE_NAMES
@@ -90,6 +96,24 @@ def test_v6_authorization_is_exact_and_parent_v5_remains_immutable() -> None:
     assert result["narrow_main_integration_preparation_authorized"] is True
     assert result["fresh_collection_or_execution_authorized"] is False
     assert result["safety"] == SAFETY
+
+
+def test_v6_slot_1_protocol_binds_exact_executor_before_oof() -> None:
+    protocol_path = Path(DEFAULT_PROTOCOL)
+    protocol = _load_json(protocol_path)
+
+    validate_residual_v6_protocol(protocol)
+
+    assert protocol_path.with_suffix(".sha256").read_text(encoding="utf-8").strip() == (
+        "a8c259fc259277567821894060aeac6e5ad67ebbd9d2ebcd37589d4529f24c76"
+    )
+    assert protocol["inputs"]["candidate_implementation"]["sha256"] == (
+        "299befa843d8b6feee9fce7d0b51a5a4d83de722f45b9875fa1de0bb9910374b"
+    )
+    assert protocol["model"]["fixed_num_boost_round"] == FIXED_NUM_BOOST_ROUND
+    assert protocol["model"]["parameters"] == FIXED_PARAMETERS
+    assert protocol["action_policy"]["fixed_acceptance_threshold"] == 0.0
+    assert protocol["prospective_power"]["maximum_market_count"] == 2000
 
 
 def test_nested_dynamic_stopping_is_deterministic_and_strictly_prior() -> None:
