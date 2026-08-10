@@ -1,0 +1,2573 @@
+{
+  "candidate_fixed_window_sizes": [
+    160,
+    240,
+    320,
+    480,
+    640,
+    800,
+    960,
+    1200
+  ],
+  "confirmatory_design_ready": true,
+  "core_effect_and_variance_sensitivity": [
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.45227681489791977,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.28964909301266717,
+      "sample_size": 160,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.6154802253723244,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.4057392416036079,
+      "sample_size": 240,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.7396490637517228,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.5110849082731982,
+      "sample_size": 320,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.8901077267679823,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.682437812118316,
+      "sample_size": 480,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9572966774033395,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8026552332189633,
+      "sample_size": 640,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.984400273274067,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8815855083413114,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9945708591030286,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.9309529282043277,
+      "sample_size": 960,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9989623130824938,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.970574429609963,
+      "sample_size": 1200,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.3766957408006506,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.24109069404183026,
+      "sample_size": 160,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.5222147943689098,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.33714889777110757,
+      "sample_size": 240,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.6433916313122893,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.427766493744456,
+      "sample_size": 320,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.8134371701746282,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.5860948012234763,
+      "sample_size": 480,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9085079176774233,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.7103362032738884,
+      "sample_size": 640,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9572966774033395,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8026552332189634,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9808388206803933,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8685259363236396,
+      "sample_size": 960,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9945708591030286,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.9309529282043278,
+      "sample_size": 1200,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.32363176555480905,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.20829998053284327,
+      "sample_size": 160,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.45227681489791965,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.28964909301266717,
+      "sample_size": 240,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.5654281073599673,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.3680696796720868,
+      "sample_size": 320,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.7396490637517228,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.5110849082731983,
+      "sample_size": 480,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.8519492066325915,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.6312990294562116,
+      "sample_size": 640,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9191681096503955,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.7278138366717736,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9572966774033395,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8026552332189633,
+      "sample_size": 960,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.984400273274067,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8815855083413116,
+      "sample_size": 1200,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.2809828454978737,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.18252123018935562,
+      "sample_size": 160,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.39366959570213106,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.2517859060142858,
+      "sample_size": 240,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.4966915705966007,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.3194815663189307,
+      "sample_size": 320,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.6665239873009935,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.44666333730787344,
+      "sample_size": 480,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.7881780455880221,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.558973341308793,
+      "sample_size": 640,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.869895787055033,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.6543979234329446,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.922258609438979,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.7330959030373948,
+      "sample_size": 960,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9655771066316857,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.823033308268361,
+      "sample_size": 1200,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.2340362048316651,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.15455535515483698,
+      "sample_size": 160,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.32700218845717555,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.21035684999461057,
+      "sample_size": 240,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.41514233778245013,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.26548088622977406,
+      "sample_size": 320,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.5706323685733081,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.37188764504403626,
+      "sample_size": 480,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.6945278921713209,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.4704194073355534,
+      "sample_size": 640,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.7881780455880221,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.558973341308793,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.8562340501481797,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.6366792872373112,
+      "sample_size": 960,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9222586094389791,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.7330959030373949,
+      "sample_size": 1200,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.2023754806239132,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.135831358745379,
+      "sample_size": 160,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.2809828454978736,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.18252123018935562,
+      "sample_size": 240,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.35702160446800635,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.2288260176004081,
+      "sample_size": 320,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.4966915705966008,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.31948156631893077,
+      "sample_size": 480,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.6154802253723244,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.405739241603608,
+      "sample_size": 640,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.7121348643648129,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.4859082519919313,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.7881780455880221,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.558973341308793,
+      "sample_size": 960,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.8698957870550331,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.6543979234329449,
+      "sample_size": 1200,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.14918446810898084,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.10434295323206344,
+      "sample_size": 160,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.2023754806239132,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.135831358745379,
+      "sample_size": 240,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.254996028762748,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.16700024148103265,
+      "sample_size": 320,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.35702160446800646,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.228826017600408,
+      "sample_size": 480,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.45227681489791977,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.28964909301266717,
+      "sample_size": 640,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.5387470929600784,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.3488204312515286,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.6154802253723244,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.4057392416036079,
+      "sample_size": 960,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.7121348643648131,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.4859082519919313,
+      "sample_size": 1200,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.1277550793916178,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.09153180652019854,
+      "sample_size": 160,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.17051667604067167,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.11700149377437663,
+      "sample_size": 240,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.212954321328356,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.1420816388921612,
+      "sample_size": 320,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.2964407321521677,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.19181520283553194,
+      "sample_size": 480,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.3766957408006506,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.24109069404183026,
+      "sample_size": 640,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.45227681489791965,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.28964909301266717,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.5222147943689098,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.33714889777110757,
+      "sample_size": 960,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.6154802253723246,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.405739241603608,
+      "sample_size": 1200,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.11337647281552893,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.08285070053250937,
+      "sample_size": 160,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.14918446810898084,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.10434295323206344,
+      "sample_size": 240,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.1846970425886717,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.1253878945000501,
+      "sample_size": 320,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.254996028762748,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.16700024148103265,
+      "sample_size": 480,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.32363176555480905,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.20829998053284327,
+      "sample_size": 640,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.3896493249219581,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.2492427150755665,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.45227681489791965,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.28964909301266717,
+      "sample_size": 960,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.5387470929600784,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.3488204312515286,
+      "sample_size": 1200,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 160,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 240,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 320,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 480,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 640,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 960,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 1200,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 160,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 240,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 320,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 480,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 640,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 960,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 1200,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 160,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 240,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 320,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 480,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 640,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 960,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.0,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.0,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.025000000000000022,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.025000000000000022,
+      "sample_size": 1200,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "zero_effect",
+      "variance_multiplier": 1.5
+    }
+  ],
+  "created_at": "2026-07-30T09:00:00+00:00",
+  "design_selection_rows": [
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.3766957408006506,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.24109069404183026,
+      "sample_size": 160,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.5222147943689098,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.33714889777110757,
+      "sample_size": 240,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.6433916313122893,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.427766493744456,
+      "sample_size": 320,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.8134371701746282,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.5860948012234763,
+      "sample_size": 480,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9085079176774233,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.7103362032738884,
+      "sample_size": 640,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9572966774033395,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8026552332189634,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9808388206803933,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8685259363236396,
+      "sample_size": 960,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9945708591030286,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.9309529282043278,
+      "sample_size": 1200,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    }
+  ],
+  "design_selection_rule": {
+    "effect_size_scenario": "observed_development_effect",
+    "minimum_absolute_moe_LCB_crossing_probability": 0.8,
+    "minimum_primary_delta_LCB_crossing_probability": 0.8,
+    "selection": "smallest_tested_fixed_window_satisfying_both",
+    "variance_multiplier": 1.25
+  },
+  "development_result_is_validation_or_promotion_evidence": false,
+  "failed_round_replacement_allowed": false,
+  "interim_outcome_looks_allowed": false,
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "observed_development_distribution": {
+    "absolute_moe": {
+      "mean": 0.05989041095890412,
+      "sample_standard_deviation": 0.41170577788714857,
+      "sample_variance": 0.1695016475456621
+    },
+    "effective_sample_size": 73.0,
+    "primary_delta": {
+      "mean": 0.052602739726027394,
+      "sample_standard_deviation": 0.47339195066110173,
+      "sample_variance": 0.22409993895072297
+    },
+    "weight_sum": 73.0
+  },
+  "optional_stopping_allowed": false,
+  "paired_planning_rows": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/development_paired_planning_rows.jsonl",
+    "sha256": "d7f670e2c367a01dab4055603077f6b31c751b41a1a2a42cdcb1c3733ea2fb83"
+  },
+  "planning_market_count": 73,
+  "power_protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_power_protocol.json",
+    "sha256": "a85e918bc83caf708e73fe208ec4af84fb879c6cf7bc2bc5695e12984e446a3d"
+  },
+  "provider_and_regime_sensitivity": [
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.45227681489791977,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.28964909301266717,
+      "sample_size": 160,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "development_missingness_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.6154802253723244,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.4057392416036079,
+      "sample_size": 240,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "development_missingness_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.7396490637517228,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.5110849082731982,
+      "sample_size": 320,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "development_missingness_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.8901077267679823,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.682437812118316,
+      "sample_size": 480,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "development_missingness_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9572966774033395,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8026552332189633,
+      "sample_size": 640,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "development_missingness_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.984400273274067,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8815855083413114,
+      "sample_size": 800,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "development_missingness_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9945708591030286,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.9309529282043277,
+      "sample_size": 960,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "development_missingness_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9989623130824938,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.970574429609963,
+      "sample_size": 1200,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "development_missingness_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.014793750000000012,
+      "assumed_absolute_moe_variance": 0.17930648199971283,
+      "assumed_primary_delta_mean": 0.06212820512820512,
+      "assumed_primary_delta_variance": 0.24694453953657655,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.06450122124710034,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.35251577486283225,
+      "sample_size": 160,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "reduced_missingness",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.014793750000000012,
+          "sample_standard_deviation": 0.42344596113283783,
+          "sample_variance": 0.17930648199971283
+        },
+        "effective_sample_size": 42.73972602739725,
+        "primary_delta": {
+          "mean": 0.06212820512820512,
+          "sample_standard_deviation": 0.49693514620780904,
+          "sample_variance": 0.24694453953657655
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.014793750000000012,
+      "assumed_absolute_moe_variance": 0.17930648199971283,
+      "assumed_primary_delta_mean": 0.06212820512820512,
+      "assumed_primary_delta_variance": 0.24694453953657655,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.07798902687312281,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.4907774097806153,
+      "sample_size": 240,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "reduced_missingness",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.014793750000000012,
+          "sample_standard_deviation": 0.42344596113283783,
+          "sample_variance": 0.17930648199971283
+        },
+        "effective_sample_size": 42.73972602739725,
+        "primary_delta": {
+          "mean": 0.06212820512820512,
+          "sample_standard_deviation": 0.49693514620780904,
+          "sample_variance": 0.24694453953657655
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.014793750000000012,
+      "assumed_absolute_moe_variance": 0.17930648199971283,
+      "assumed_primary_delta_mean": 0.06212820512820512,
+      "assumed_primary_delta_variance": 0.24694453953657655,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.09093823893546038,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.6089222684859492,
+      "sample_size": 320,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "reduced_missingness",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.014793750000000012,
+          "sample_standard_deviation": 0.42344596113283783,
+          "sample_variance": 0.17930648199971283
+        },
+        "effective_sample_size": 42.73972602739725,
+        "primary_delta": {
+          "mean": 0.06212820512820512,
+          "sample_standard_deviation": 0.49693514620780904,
+          "sample_variance": 0.24694453953657655
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.014793750000000012,
+      "assumed_absolute_moe_variance": 0.17930648199971283,
+      "assumed_primary_delta_mean": 0.06212820512820512,
+      "assumed_primary_delta_variance": 0.24694453953657655,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.11613299955117995,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.7820535900118719,
+      "sample_size": 480,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "reduced_missingness",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.014793750000000012,
+          "sample_standard_deviation": 0.42344596113283783,
+          "sample_variance": 0.17930648199971283
+        },
+        "effective_sample_size": 42.73972602739725,
+        "primary_delta": {
+          "mean": 0.06212820512820512,
+          "sample_standard_deviation": 0.49693514620780904,
+          "sample_variance": 0.24694453953657655
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.014793750000000012,
+      "assumed_absolute_moe_variance": 0.17930648199971283,
+      "assumed_primary_delta_mean": 0.06212820512820512,
+      "assumed_primary_delta_variance": 0.24694453953657655,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.14093436484266375,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8854904666607798,
+      "sample_size": 640,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "reduced_missingness",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.014793750000000012,
+          "sample_standard_deviation": 0.42344596113283783,
+          "sample_variance": 0.17930648199971283
+        },
+        "effective_sample_size": 42.73972602739725,
+        "primary_delta": {
+          "mean": 0.06212820512820512,
+          "sample_standard_deviation": 0.49693514620780904,
+          "sample_variance": 0.24694453953657655
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.014793750000000012,
+      "assumed_absolute_moe_variance": 0.17930648199971283,
+      "assumed_primary_delta_mean": 0.06212820512820512,
+      "assumed_primary_delta_variance": 0.24694453953657655,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.1655729066713411,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.9425117261152105,
+      "sample_size": 800,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "reduced_missingness",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.014793750000000012,
+          "sample_standard_deviation": 0.42344596113283783,
+          "sample_variance": 0.17930648199971283
+        },
+        "effective_sample_size": 42.73972602739725,
+        "primary_delta": {
+          "mean": 0.06212820512820512,
+          "sample_standard_deviation": 0.49693514620780904,
+          "sample_variance": 0.24694453953657655
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.014793750000000012,
+      "assumed_absolute_moe_variance": 0.17930648199971283,
+      "assumed_primary_delta_mean": 0.06212820512820512,
+      "assumed_primary_delta_variance": 0.24694453953657655,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.1901092112777577,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.9721723264565708,
+      "sample_size": 960,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "reduced_missingness",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.014793750000000012,
+          "sample_standard_deviation": 0.42344596113283783,
+          "sample_variance": 0.17930648199971283
+        },
+        "effective_sample_size": 42.73972602739725,
+        "primary_delta": {
+          "mean": 0.06212820512820512,
+          "sample_standard_deviation": 0.49693514620780904,
+          "sample_variance": 0.24694453953657655
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.014793750000000012,
+      "assumed_absolute_moe_variance": 0.17930648199971283,
+      "assumed_primary_delta_mean": 0.06212820512820512,
+      "assumed_primary_delta_variance": 0.24694453953657655,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.22670997645138757,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.9911288222812937,
+      "sample_size": 1200,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "reduced_missingness",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.014793750000000012,
+          "sample_standard_deviation": 0.42344596113283783,
+          "sample_variance": 0.17930648199971283
+        },
+        "effective_sample_size": 42.73972602739725,
+        "primary_delta": {
+          "mean": 0.06212820512820512,
+          "sample_standard_deviation": 0.49693514620780904,
+          "sample_variance": 0.24694453953657655
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": -0.027232499999999982,
+      "assumed_absolute_moe_variance": 0.1882335402704499,
+      "assumed_primary_delta_mean": 0.07100512820512819,
+      "assumed_primary_delta_variance": 0.27341143507379395,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.00294426599062525,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.4042786993444908,
+      "sample_size": 160,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "complete_feature_heavy_future_population",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": -0.027232499999999982,
+          "sample_standard_deviation": 0.43385889442357856,
+          "sample_variance": 0.1882335402704499
+        },
+        "effective_sample_size": 20.041109969167522,
+        "primary_delta": {
+          "mean": 0.07100512820512819,
+          "sample_standard_deviation": 0.5228875931534367,
+          "sample_variance": 0.27341143507379395
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": -0.027232499999999982,
+      "assumed_absolute_moe_variance": 0.1882335402704499,
+      "assumed_primary_delta_mean": 0.07100512820512819,
+      "assumed_primary_delta_variance": 0.27341143507379395,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.0016819650924188023,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.5571516410704213,
+      "sample_size": 240,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "complete_feature_heavy_future_population",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": -0.027232499999999982,
+          "sample_standard_deviation": 0.43385889442357856,
+          "sample_variance": 0.1882335402704499
+        },
+        "effective_sample_size": 20.041109969167522,
+        "primary_delta": {
+          "mean": 0.07100512820512819,
+          "sample_standard_deviation": 0.5228875931534367,
+          "sample_variance": 0.27341143507379395
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": -0.027232499999999982,
+      "assumed_absolute_moe_variance": 0.1882335402704499,
+      "assumed_primary_delta_mean": 0.07100512820512819,
+      "assumed_primary_delta_variance": 0.27341143507379395,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.001025335433939012,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.6805357264777365,
+      "sample_size": 320,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "complete_feature_heavy_future_population",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": -0.027232499999999982,
+          "sample_standard_deviation": 0.43385889442357856,
+          "sample_variance": 0.1882335402704499
+        },
+        "effective_sample_size": 20.041109969167522,
+        "primary_delta": {
+          "mean": 0.07100512820512819,
+          "sample_standard_deviation": 0.5228875931534367,
+          "sample_variance": 0.27341143507379395
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": -0.027232499999999982,
+      "assumed_absolute_moe_variance": 0.1882335402704499,
+      "assumed_primary_delta_mean": 0.07100512820512819,
+      "assumed_primary_delta_variance": 0.27341143507379395,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.0004262758359345198,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8449802032021232,
+      "sample_size": 480,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "complete_feature_heavy_future_population",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": -0.027232499999999982,
+          "sample_standard_deviation": 0.43385889442357856,
+          "sample_variance": 0.1882335402704499
+        },
+        "effective_sample_size": 20.041109969167522,
+        "primary_delta": {
+          "mean": 0.07100512820512819,
+          "sample_standard_deviation": 0.5228875931534367,
+          "sample_variance": 0.27341143507379395
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": -0.027232499999999982,
+      "assumed_absolute_moe_variance": 0.1882335402704499,
+      "assumed_primary_delta_mean": 0.07100512820512819,
+      "assumed_primary_delta_variance": 0.27341143507379395,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.00019416860567883498,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.9299460023737021,
+      "sample_size": 640,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "complete_feature_heavy_future_population",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": -0.027232499999999982,
+          "sample_standard_deviation": 0.43385889442357856,
+          "sample_variance": 0.1882335402704499
+        },
+        "effective_sample_size": 20.041109969167522,
+        "primary_delta": {
+          "mean": 0.07100512820512819,
+          "sample_standard_deviation": 0.5228875931534367,
+          "sample_variance": 0.27341143507379395
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": -0.027232499999999982,
+      "assumed_absolute_moe_variance": 0.1882335402704499,
+      "assumed_primary_delta_mean": 0.07100512820512819,
+      "assumed_primary_delta_variance": 0.27341143507379395,
+      "estimated_probability_absolute_moe_LCB_gt_0": 9.374053543959038e-05,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.9700057007644352,
+      "sample_size": 800,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "complete_feature_heavy_future_population",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": -0.027232499999999982,
+          "sample_standard_deviation": 0.43385889442357856,
+          "sample_variance": 0.1882335402704499
+        },
+        "effective_sample_size": 20.041109969167522,
+        "primary_delta": {
+          "mean": 0.07100512820512819,
+          "sample_standard_deviation": 0.5228875931534367,
+          "sample_variance": 0.27341143507379395
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": -0.027232499999999982,
+      "assumed_absolute_moe_variance": 0.1882335402704499,
+      "assumed_primary_delta_mean": 0.07100512820512819,
+      "assumed_primary_delta_variance": 0.27341143507379395,
+      "estimated_probability_absolute_moe_LCB_gt_0": 4.715897490242815e-05,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.9876948996117008,
+      "sample_size": 960,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "complete_feature_heavy_future_population",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": -0.027232499999999982,
+          "sample_standard_deviation": 0.43385889442357856,
+          "sample_variance": 0.1882335402704499
+        },
+        "effective_sample_size": 20.041109969167522,
+        "primary_delta": {
+          "mean": 0.07100512820512819,
+          "sample_standard_deviation": 0.5228875931534367,
+          "sample_variance": 0.27341143507379395
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": -0.027232499999999982,
+      "assumed_absolute_moe_variance": 0.1882335402704499,
+      "assumed_primary_delta_mean": 0.07100512820512819,
+      "assumed_primary_delta_variance": 0.27341143507379395,
+      "estimated_probability_absolute_moe_LCB_gt_0": 1.7800754779973005e-05,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.9969660254504,
+      "sample_size": 1200,
+      "scenario_family": "provider_missingness",
+      "scenario_name": "complete_feature_heavy_future_population",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": -0.027232499999999982,
+          "sample_standard_deviation": 0.43385889442357856,
+          "sample_variance": 0.1882335402704499
+        },
+        "effective_sample_size": 20.041109969167522,
+        "primary_delta": {
+          "mean": 0.07100512820512819,
+          "sample_standard_deviation": 0.5228875931534367,
+          "sample_variance": 0.27341143507379395
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.45227681489791977,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.28964909301266717,
+      "sample_size": 160,
+      "scenario_family": "regime",
+      "scenario_name": "development_regime_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.6154802253723244,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.4057392416036079,
+      "sample_size": 240,
+      "scenario_family": "regime",
+      "scenario_name": "development_regime_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.7396490637517228,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.5110849082731982,
+      "sample_size": 320,
+      "scenario_family": "regime",
+      "scenario_name": "development_regime_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.8901077267679823,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.682437812118316,
+      "sample_size": 480,
+      "scenario_family": "regime",
+      "scenario_name": "development_regime_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9572966774033395,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8026552332189633,
+      "sample_size": 640,
+      "scenario_family": "regime",
+      "scenario_name": "development_regime_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.984400273274067,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8815855083413114,
+      "sample_size": 800,
+      "scenario_family": "regime",
+      "scenario_name": "development_regime_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9945708591030286,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.9309529282043277,
+      "sample_size": 960,
+      "scenario_family": "regime",
+      "scenario_name": "development_regime_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9989623130824938,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.970574429609963,
+      "sample_size": 1200,
+      "scenario_family": "regime",
+      "scenario_name": "development_regime_mix",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.05989041095890412,
+          "sample_standard_deviation": 0.41170577788714857,
+          "sample_variance": 0.1695016475456621
+        },
+        "effective_sample_size": 73.0,
+        "primary_delta": {
+          "mean": 0.052602739726027394,
+          "sample_standard_deviation": 0.47339195066110173,
+          "sample_variance": 0.22409993895072297
+        },
+        "weight_sum": 73.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04358851766513058,
+      "assumed_absolute_moe_variance": 0.17006253932684642,
+      "assumed_primary_delta_mean": 0.04531298003072196,
+      "assumed_primary_delta_variance": 0.22195824933642647,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.26665040691875674,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.22862995812679898,
+      "sample_size": 160,
+      "scenario_family": "regime",
+      "scenario_name": "increased_bearish_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.04358851766513058,
+          "sample_standard_deviation": 0.4123863956616979,
+          "sample_variance": 0.17006253932684642
+        },
+        "effective_sample_size": 71.34246575342468,
+        "primary_delta": {
+          "mean": 0.04531298003072196,
+          "sample_standard_deviation": 0.4711244520680565,
+          "sample_variance": 0.22195824933642647
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04358851766513058,
+      "assumed_absolute_moe_variance": 0.17006253932684642,
+      "assumed_primary_delta_mean": 0.04531298003072196,
+      "assumed_primary_delta_variance": 0.22195824933642647,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.3735393028444721,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.319198134919542,
+      "sample_size": 240,
+      "scenario_family": "regime",
+      "scenario_name": "increased_bearish_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.04358851766513058,
+          "sample_standard_deviation": 0.4123863956616979,
+          "sample_variance": 0.17006253932684642
+        },
+        "effective_sample_size": 71.34246575342468,
+        "primary_delta": {
+          "mean": 0.04531298003072196,
+          "sample_standard_deviation": 0.4711244520680565,
+          "sample_variance": 0.22195824933642647
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04358851766513058,
+      "assumed_absolute_moe_variance": 0.17006253932684642,
+      "assumed_primary_delta_mean": 0.04531298003072196,
+      "assumed_primary_delta_variance": 0.22195824933642647,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.47242463434104026,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.40538410849928097,
+      "sample_size": 320,
+      "scenario_family": "regime",
+      "scenario_name": "increased_bearish_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.04358851766513058,
+          "sample_standard_deviation": 0.4123863956616979,
+          "sample_variance": 0.17006253932684642
+        },
+        "effective_sample_size": 71.34246575342468,
+        "primary_delta": {
+          "mean": 0.04531298003072196,
+          "sample_standard_deviation": 0.4711244520680565,
+          "sample_variance": 0.22195824933642647
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04358851766513058,
+      "assumed_absolute_moe_variance": 0.17006253932684642,
+      "assumed_primary_delta_mean": 0.04531298003072196,
+      "assumed_primary_delta_variance": 0.22195824933642647,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.6389930315966627,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.5585306569798243,
+      "sample_size": 480,
+      "scenario_family": "regime",
+      "scenario_name": "increased_bearish_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.04358851766513058,
+          "sample_standard_deviation": 0.4123863956616979,
+          "sample_variance": 0.17006253932684642
+        },
+        "effective_sample_size": 71.34246575342468,
+        "primary_delta": {
+          "mean": 0.04531298003072196,
+          "sample_standard_deviation": 0.4711244520680565,
+          "sample_variance": 0.22195824933642647
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04358851766513058,
+      "assumed_absolute_moe_variance": 0.17006253932684642,
+      "assumed_primary_delta_mean": 0.04531298003072196,
+      "assumed_primary_delta_variance": 0.22195824933642647,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.7623906053706249,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.6819759157242183,
+      "sample_size": 640,
+      "scenario_family": "regime",
+      "scenario_name": "increased_bearish_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.04358851766513058,
+          "sample_standard_deviation": 0.4123863956616979,
+          "sample_variance": 0.17006253932684642
+        },
+        "effective_sample_size": 71.34246575342468,
+        "primary_delta": {
+          "mean": 0.04531298003072196,
+          "sample_standard_deviation": 0.4711244520680565,
+          "sample_variance": 0.22195824933642647
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04358851766513058,
+      "assumed_absolute_moe_variance": 0.17006253932684642,
+      "assumed_primary_delta_mean": 0.04531298003072196,
+      "assumed_primary_delta_variance": 0.22195824933642647,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.8484090300002067,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.776501514244463,
+      "sample_size": 800,
+      "scenario_family": "regime",
+      "scenario_name": "increased_bearish_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.04358851766513058,
+          "sample_standard_deviation": 0.4123863956616979,
+          "sample_variance": 0.17006253932684642
+        },
+        "effective_sample_size": 71.34246575342468,
+        "primary_delta": {
+          "mean": 0.04531298003072196,
+          "sample_standard_deviation": 0.4711244520680565,
+          "sample_variance": 0.22195824933642647
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04358851766513058,
+      "assumed_absolute_moe_variance": 0.17006253932684642,
+      "assumed_primary_delta_mean": 0.04531298003072196,
+      "assumed_primary_delta_variance": 0.22195824933642647,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9057410678034614,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8461546120028293,
+      "sample_size": 960,
+      "scenario_family": "regime",
+      "scenario_name": "increased_bearish_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.04358851766513058,
+          "sample_standard_deviation": 0.4123863956616979,
+          "sample_variance": 0.17006253932684642
+        },
+        "effective_sample_size": 71.34246575342468,
+        "primary_delta": {
+          "mean": 0.04531298003072196,
+          "sample_standard_deviation": 0.4711244520680565,
+          "sample_variance": 0.22195824933642647
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04358851766513058,
+      "assumed_absolute_moe_variance": 0.17006253932684642,
+      "assumed_primary_delta_mean": 0.04531298003072196,
+      "assumed_primary_delta_variance": 0.22195824933642647,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9555782993082782,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.9149411752704609,
+      "sample_size": 1200,
+      "scenario_family": "regime",
+      "scenario_name": "increased_bearish_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.04358851766513058,
+          "sample_standard_deviation": 0.4123863956616979,
+          "sample_variance": 0.17006253932684642
+        },
+        "effective_sample_size": 71.34246575342468,
+        "primary_delta": {
+          "mean": 0.04531298003072196,
+          "sample_standard_deviation": 0.4711244520680565,
+          "sample_variance": 0.22195824933642647
+        },
+        "weight_sum": 1.0
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.03856732815057284,
+      "assumed_absolute_moe_variance": 0.16302563216910132,
+      "assumed_primary_delta_mean": 0.02030646481178396,
+      "assumed_primary_delta_variance": 0.23583312668383968,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.22610718351631287,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.07620913995537637,
+      "sample_size": 160,
+      "scenario_family": "regime",
+      "scenario_name": "reduced_high_vol_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.03856732815057284,
+          "sample_standard_deviation": 0.4037643275093793,
+          "sample_variance": 0.16302563216910132
+        },
+        "effective_sample_size": 61.584981731132665,
+        "primary_delta": {
+          "mean": 0.02030646481178396,
+          "sample_standard_deviation": 0.48562653004530104,
+          "sample_variance": 0.23583312668383968
+        },
+        "weight_sum": 0.9999999999999999
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.03856732815057284,
+      "assumed_absolute_moe_variance": 0.16302563216910132,
+      "assumed_primary_delta_mean": 0.02030646481178396,
+      "assumed_primary_delta_variance": 0.23583312668383968,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.3155483767041528,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.09473154893761515,
+      "sample_size": 240,
+      "scenario_family": "regime",
+      "scenario_name": "reduced_high_vol_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.03856732815057284,
+          "sample_standard_deviation": 0.4037643275093793,
+          "sample_variance": 0.16302563216910132
+        },
+        "effective_sample_size": 61.584981731132665,
+        "primary_delta": {
+          "mean": 0.02030646481178396,
+          "sample_standard_deviation": 0.48562653004530104,
+          "sample_variance": 0.23583312668383968
+        },
+        "weight_sum": 0.9999999999999999
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.03856732815057284,
+      "assumed_absolute_moe_variance": 0.16302563216910132,
+      "assumed_primary_delta_mean": 0.02030646481178396,
+      "assumed_primary_delta_variance": 0.23583312668383968,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.40080618977318905,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.11276483412057225,
+      "sample_size": 320,
+      "scenario_family": "regime",
+      "scenario_name": "reduced_high_vol_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.03856732815057284,
+          "sample_standard_deviation": 0.4037643275093793,
+          "sample_variance": 0.16302563216910132
+        },
+        "effective_sample_size": 61.584981731132665,
+        "primary_delta": {
+          "mean": 0.02030646481178396,
+          "sample_standard_deviation": 0.48562653004530104,
+          "sample_variance": 0.23583312668383968
+        },
+        "weight_sum": 0.9999999999999999
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.03856732815057284,
+      "assumed_absolute_moe_variance": 0.16302563216910132,
+      "assumed_primary_delta_mean": 0.02030646481178396,
+      "assumed_primary_delta_variance": 0.23583312668383968,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.5528089263636609,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.14827887322729416,
+      "sample_size": 480,
+      "scenario_family": "regime",
+      "scenario_name": "reduced_high_vol_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.03856732815057284,
+          "sample_standard_deviation": 0.4037643275093793,
+          "sample_variance": 0.16302563216910132
+        },
+        "effective_sample_size": 61.584981731132665,
+        "primary_delta": {
+          "mean": 0.02030646481178396,
+          "sample_standard_deviation": 0.48562653004530104,
+          "sample_variance": 0.23583312668383968
+        },
+        "weight_sum": 0.9999999999999999
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.03856732815057284,
+      "assumed_absolute_moe_variance": 0.16302563216910132,
+      "assumed_primary_delta_mean": 0.02030646481178396,
+      "assumed_primary_delta_variance": 0.23583312668383968,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.675987298439255,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.18349674698696317,
+      "sample_size": 640,
+      "scenario_family": "regime",
+      "scenario_name": "reduced_high_vol_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.03856732815057284,
+          "sample_standard_deviation": 0.4037643275093793,
+          "sample_variance": 0.16302563216910132
+        },
+        "effective_sample_size": 61.584981731132665,
+        "primary_delta": {
+          "mean": 0.02030646481178396,
+          "sample_standard_deviation": 0.48562653004530104,
+          "sample_variance": 0.23583312668383968
+        },
+        "weight_sum": 0.9999999999999999
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.03856732815057284,
+      "assumed_absolute_moe_variance": 0.16302563216910132,
+      "assumed_primary_delta_mean": 0.02030646481178396,
+      "assumed_primary_delta_variance": 0.23583312668383968,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.7708753676248354,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.21850337897879202,
+      "sample_size": 800,
+      "scenario_family": "regime",
+      "scenario_name": "reduced_high_vol_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.03856732815057284,
+          "sample_standard_deviation": 0.4037643275093793,
+          "sample_variance": 0.16302563216910132
+        },
+        "effective_sample_size": 61.584981731132665,
+        "primary_delta": {
+          "mean": 0.02030646481178396,
+          "sample_standard_deviation": 0.48562653004530104,
+          "sample_variance": 0.23583312668383968
+        },
+        "weight_sum": 0.9999999999999999
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.03856732815057284,
+      "assumed_absolute_moe_variance": 0.16302563216910132,
+      "assumed_primary_delta_mean": 0.02030646481178396,
+      "assumed_primary_delta_variance": 0.23583312668383968,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.841247096168643,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.2532254397187991,
+      "sample_size": 960,
+      "scenario_family": "regime",
+      "scenario_name": "reduced_high_vol_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.03856732815057284,
+          "sample_standard_deviation": 0.4037643275093793,
+          "sample_variance": 0.16302563216910132
+        },
+        "effective_sample_size": 61.584981731132665,
+        "primary_delta": {
+          "mean": 0.02030646481178396,
+          "sample_standard_deviation": 0.48562653004530104,
+          "sample_variance": 0.23583312668383968
+        },
+        "weight_sum": 0.9999999999999999
+      }
+    },
+    {
+      "assumed_absolute_moe_mean": 0.03856732815057284,
+      "assumed_absolute_moe_variance": 0.16302563216910132,
+      "assumed_primary_delta_mean": 0.02030646481178396,
+      "assumed_primary_delta_variance": 0.23583312668383968,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9113195118211335,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.3045178193691721,
+      "sample_size": 1200,
+      "scenario_family": "regime",
+      "scenario_name": "reduced_high_vol_share",
+      "variance_multiplier": 1.0,
+      "weighted_distribution": {
+        "absolute_moe": {
+          "mean": 0.03856732815057284,
+          "sample_standard_deviation": 0.4037643275093793,
+          "sample_variance": 0.16302563216910132
+        },
+        "effective_sample_size": 61.584981731132665,
+        "primary_delta": {
+          "mean": 0.02030646481178396,
+          "sample_standard_deviation": 0.48562653004530104,
+          "sample_variance": 0.23583312668383968
+        },
+        "weight_sum": 0.9999999999999999
+      }
+    }
+  ],
+  "role": "planning_only_precollection_sample_size_selection",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-confirmatory-power-analysis-v2",
+  "selected_confirmatory_market_count": 800,
+  "selected_design_is_one_fixed_window": true,
+  "state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  }
+}

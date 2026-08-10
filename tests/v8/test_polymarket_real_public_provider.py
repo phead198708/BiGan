@@ -470,11 +470,14 @@ def test_public_http_provider_prefers_stream_orderbook_snapshots_when_available(
     }
 
 
-def test_public_http_provider_seeds_rest_book_before_websocket_snapshots() -> None:
+def test_public_http_provider_uses_websocket_without_rest_seed() -> None:
     orderbook_source = FakeWebSocketStreamOrderBookSource()
     provider = PolymarketPublicHTTPRealCorpusProvider(
         current_time_ms=1_700_001_000_000,
-        fetch_json=FakePublicFetch(include_reference_prices=True),
+        fetch_json=FakePublicFetch(
+            include_reference_prices=True,
+            fail_clob_books=True,
+        ),
         orderbook_source=orderbook_source,
     )
     config = PolymarketRealCorpusRecorderConfig(
@@ -488,12 +491,13 @@ def test_public_http_provider_seeds_rest_book_before_websocket_snapshots() -> No
     books = provider.orderbook_rows(markets, config)
 
     assert orderbook_source.requested_token_ids == ("up-token", "down-token")
-    assert len(books) == 4
-    assert {row["available_at_ts"] for row in books} == {
-        1_700_000_000_000,
-        1_700_000_059_100,
-    }
+    assert len(books) == 2
+    assert {row["available_at_ts"] for row in books} == {1_700_000_059_100}
     assert {row["collection_end_ts"] for row in books} == {1_700_000_059_100}
+    assert {row["orderbook_source_type"] for row in books} == {
+        "polymarket_clob_websocket"
+    }
+    assert all(row["orderbook_rest_fallback_used"] is False for row in books)
 
 
 class FakePublicFetch:
@@ -734,6 +738,7 @@ class FakeWebSocketStreamOrderBookSource(PolymarketCLOBWebSocketOrderBookSource)
             ws_url="wss://example.invalid/ws/market",
             timeout_seconds=1.0,
         )
+        self.continuous_window_coverage_required = False
         self.requested_token_ids: tuple[str, ...] = ()
 
     def book_payload_snapshots(self, token_ids: tuple[str, ...]) -> list[dict[str, dict]]:

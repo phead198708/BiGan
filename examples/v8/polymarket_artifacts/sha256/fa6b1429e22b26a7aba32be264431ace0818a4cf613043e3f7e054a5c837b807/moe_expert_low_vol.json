@@ -1,0 +1,9 @@
+{
+  "available": false,
+  "expert_id": "low_vol",
+  "frozen_behavior": "full_113_matched_global_baseline",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "minimum_training_market_count": 20,
+  "schema_version": "bigan-btc-15m-moe-unavailable-expert-v2",
+  "training_market_count": 18
+}

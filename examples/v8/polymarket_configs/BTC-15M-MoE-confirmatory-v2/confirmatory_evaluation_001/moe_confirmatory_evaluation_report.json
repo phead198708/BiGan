@@ -1,0 +1,407 @@
+{
+  "all_gate_booleans_true": false,
+  "automatic_promotion_performed": false,
+  "bootstrap": {
+    "NO_TRADE": 0.0,
+    "candidate_and_baseline_use_identical_resample_indices": true,
+    "confidence": 0.975,
+    "method": "market_level_paired_percentile_bootstrap",
+    "quantile": 0.025,
+    "resamples": 10000,
+    "route_level_resampling_forbidden": true,
+    "seed": 26015,
+    "shared_index_matrix_sha256": "5a09d46dc8323f82513ee9f047d069edabfae83a82ef0ec4cb6793f311a5c709",
+    "trade_level_resampling_forbidden": true,
+    "unit": "unique_market"
+  },
+  "candidate_bundle_hash": "fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807",
+  "candidate_id": "mixture_of_experts",
+  "confirmatory_gate_passed": false,
+  "created_at": "2026-08-08T15:30:58.957415+00:00",
+  "failed_round_terminal": true,
+  "gate_observed_values": {
+    "expert_fallback_attribution_complete": true,
+    "first_chronological_half_moe_pnl": 4.521250000000008,
+    "first_chronological_half_paired_delta": -4.160499999999999,
+    "moe_largest_winner_removed_total_pnl": 2.5985000000000134,
+    "moe_mean_pnl_bootstrap_lcb": -0.026126281249999987,
+    "moe_total_after_cost_pnl": 3.5432500000000156,
+    "paired_delta_largest_positive_removed_total": 0.6162500000000009,
+    "paired_delta_mean_pnl_bootstrap_lcb": -0.021840812499999997,
+    "paired_executable_ask_coverage": 1.0,
+    "quality_valid_market_count": 800,
+    "reporting_contract_complete": true,
+    "runtime_artifact_validation_passed": true,
+    "second_chronological_half_moe_pnl": -0.9779999999999927,
+    "second_chronological_half_paired_delta": 6.601750000000001,
+    "target_or_future_leakage_count": 0
+  },
+  "gate_results": {
+    "expert_fallback_attribution_complete": true,
+    "first_chronological_half_moe_pnl": true,
+    "first_chronological_half_paired_delta": false,
+    "moe_largest_winner_removed_total_pnl": true,
+    "moe_mean_pnl_bootstrap_lcb": false,
+    "moe_total_after_cost_pnl": true,
+    "paired_delta_largest_positive_removed_total": true,
+    "paired_delta_mean_pnl_bootstrap_lcb": false,
+    "paired_executable_ask_coverage": true,
+    "quality_valid_market_count": true,
+    "reporting_contract_complete": true,
+    "runtime_artifact_validation_passed": true,
+    "second_chronological_half_moe_pnl": false,
+    "second_chronological_half_paired_delta": true,
+    "target_or_future_leakage_count": true
+  },
+  "implementation_commit": "b3bcdf468a4c24d03e400eff0a56be4b1111345e",
+  "inputs": {
+    "market_evaluation_rows": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/confirmatory_market_evaluation_rows.jsonl",
+      "sha256": "1bd6e2fe4ae3d8f867976fe490fb79e32a784f7266950a269d83495264c580c7"
+    },
+    "outcome_access_claim": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/outcome_access_claim_001.json",
+      "sha256": "d555bd316367dcae5163048c8da4ad1702753e30cb67bbb78b89f7fbf606d240"
+    },
+    "reporting_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_future_evaluation_reporting_contract.json",
+      "sha256": "40a3b6fec6e181fdffe7564adc47c24dcf73e0e5773239bfa79853d465fda1e1"
+    },
+    "settlement_ingestion_report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/settlement_ingestion_report.json",
+      "sha256": "50d842fb8341d38c55555153f7f68c94a11a160d369b872d00f5e4f94b0cb091"
+    },
+    "statistical_protocol": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_protocol_r1.json",
+      "sha256": "7bab5c428a69f9556d56f78897d2f28e7391188a2d632a72ffc0dca246e8c273"
+    }
+  },
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "panels": {
+    "UP_vs_DOWN": {
+      "DOWN": {
+        "baseline_accepted_count": 462,
+        "baseline_total_unit_net_pnl": 4.552000000000007,
+        "candidate_accepted_count": 467,
+        "candidate_total_unit_net_pnl": 7.6157500000000065,
+        "market_count": 467,
+        "paired_delta_total_unit_net_pnl": 3.0637499999999998
+      },
+      "NO_TRADE": {
+        "baseline_accepted_count": 3,
+        "baseline_total_unit_net_pnl": -0.17074999999999999,
+        "candidate_accepted_count": 0,
+        "candidate_total_unit_net_pnl": 0.0,
+        "market_count": 5,
+        "paired_delta_total_unit_net_pnl": 0.17074999999999999
+      },
+      "UP": {
+        "baseline_accepted_count": 327,
+        "baseline_total_unit_net_pnl": -3.2792499999999936,
+        "candidate_accepted_count": 328,
+        "candidate_total_unit_net_pnl": -4.072499999999994,
+        "market_count": 328,
+        "paired_delta_total_unit_net_pnl": -0.7932500000000003
+      }
+    },
+    "actual_model": {
+      "global_baseline_fallback": {
+        "baseline_accepted_count": 170,
+        "baseline_total_unit_net_pnl": 2.4675000000000034,
+        "candidate_accepted_count": 170,
+        "candidate_total_unit_net_pnl": 3.9675000000000034,
+        "market_count": 172,
+        "paired_delta_total_unit_net_pnl": 1.5
+      },
+      "moe_expert_bearish": {
+        "baseline_accepted_count": 267,
+        "baseline_total_unit_net_pnl": -4.078749999999997,
+        "candidate_accepted_count": 270,
+        "candidate_total_unit_net_pnl": -0.3079999999999969,
+        "market_count": 271,
+        "paired_delta_total_unit_net_pnl": 3.77075
+      },
+      "moe_expert_bullish": {
+        "baseline_accepted_count": 205,
+        "baseline_total_unit_net_pnl": 2.901250000000003,
+        "candidate_accepted_count": 204,
+        "candidate_total_unit_net_pnl": 2.1385000000000027,
+        "market_count": 206,
+        "paired_delta_total_unit_net_pnl": -0.7627500000000008
+      },
+      "moe_expert_high_vol": {
+        "baseline_accepted_count": 150,
+        "baseline_total_unit_net_pnl": -0.18799999999999698,
+        "candidate_accepted_count": 151,
+        "candidate_total_unit_net_pnl": -2.254749999999997,
+        "market_count": 151,
+        "paired_delta_total_unit_net_pnl": -2.06675
+      }
+    },
+    "chronological_half": {
+      "first": {
+        "baseline_accepted_count": 393,
+        "baseline_total_unit_net_pnl": 8.681750000000006,
+        "candidate_accepted_count": 397,
+        "candidate_total_unit_net_pnl": 4.521250000000006,
+        "market_count": 400,
+        "paired_delta_total_unit_net_pnl": -4.160500000000001
+      },
+      "second": {
+        "baseline_accepted_count": 399,
+        "baseline_total_unit_net_pnl": -7.5797499999999935,
+        "candidate_accepted_count": 398,
+        "candidate_total_unit_net_pnl": -0.9779999999999938,
+        "market_count": 400,
+        "paired_delta_total_unit_net_pnl": 6.60175
+      }
+    },
+    "complete_feature_vs_missing_feature": {
+      "complete": {
+        "baseline_accepted_count": 109,
+        "baseline_total_unit_net_pnl": 3.3022500000000017,
+        "candidate_accepted_count": 109,
+        "candidate_total_unit_net_pnl": 0.8722500000000016,
+        "market_count": 109,
+        "paired_delta_total_unit_net_pnl": -2.43
+      },
+      "missing": {
+        "baseline_accepted_count": 683,
+        "baseline_total_unit_net_pnl": -2.200249999999989,
+        "candidate_accepted_count": 686,
+        "candidate_total_unit_net_pnl": 2.671000000000011,
+        "market_count": 691,
+        "paired_delta_total_unit_net_pnl": 4.871249999999999
+      }
+    },
+    "expert_vs_fallback": {
+      "expert": {
+        "baseline_accepted_count": 622,
+        "baseline_total_unit_net_pnl": -1.3654999999999906,
+        "candidate_accepted_count": 625,
+        "candidate_total_unit_net_pnl": -0.4242499999999908,
+        "market_count": 628,
+        "paired_delta_total_unit_net_pnl": 0.9412499999999993
+      },
+      "fallback": {
+        "baseline_accepted_count": 170,
+        "baseline_total_unit_net_pnl": 2.4675000000000034,
+        "candidate_accepted_count": 170,
+        "candidate_total_unit_net_pnl": 3.9675000000000034,
+        "market_count": 172,
+        "paired_delta_total_unit_net_pnl": 1.5
+      }
+    },
+    "largest_winner_attribution": {
+      "candidate": {
+        "actual_model_used": "moe_expert_bullish",
+        "fallback_used": false,
+        "market_id": "0x6125d04bfc7af6f84d7543bd7dff4face4d5078022637b1a668b6698be11ef9a",
+        "requested_route": "bullish",
+        "selected_side": "DOWN",
+        "unit_net_pnl": 0.94475
+      },
+      "paired_delta": {
+        "actual_model_used": "moe_expert_bearish",
+        "fallback_used": false,
+        "market_id": "0x0f920658567069fff88d539c723a5fb454e33bffe7e91a1d144785b31bc1a568",
+        "requested_route": "bearish",
+        "selected_side": "UP",
+        "unit_net_pnl": 1.8250000000000002
+      }
+    },
+    "overall": {
+      "baseline_accepted_count": 792,
+      "baseline_bootstrap_interval": {
+        "confidence": 0.975,
+        "lower": -0.028337906249999975,
+        "method": "market_level_paired_percentile_bootstrap",
+        "resample_count": 10000,
+        "upper": 0.030614296875000006
+      },
+      "baseline_mean_unit_net_pnl": 0.001377500000000017,
+      "baseline_total_unit_net_pnl": 1.1020000000000136,
+      "candidate_accepted_count": 795,
+      "candidate_bootstrap_interval": {
+        "confidence": 0.975,
+        "lower": -0.026126281249999987,
+        "method": "market_level_paired_percentile_bootstrap",
+        "resample_count": 10000,
+        "upper": 0.034883031250000016
+      },
+      "candidate_mean_unit_net_pnl": 0.00442906250000002,
+      "candidate_total_unit_net_pnl": 3.5432500000000156,
+      "market_count": 800,
+      "paired_delta_bootstrap_interval": {
+        "confidence": 0.975,
+        "lower": -0.021840812499999997,
+        "method": "market_level_paired_percentile_bootstrap",
+        "resample_count": 10000,
+        "upper": 0.028274921874999998
+      },
+      "paired_delta_mean_unit_net_pnl": 0.003051562500000002,
+      "paired_delta_total_unit_net_pnl": 2.441250000000002,
+      "paired_executable_ask_coverage": 1.0
+    },
+    "provider_health": {
+      "present": {
+        "baseline_accepted_count": 792,
+        "baseline_total_unit_net_pnl": 1.1020000000000127,
+        "candidate_accepted_count": 795,
+        "candidate_total_unit_net_pnl": 3.5432500000000124,
+        "market_count": 800,
+        "paired_delta_total_unit_net_pnl": 2.4412499999999993
+      }
+    },
+    "regime": {
+      "bearish|high": {
+        "baseline_accepted_count": 60,
+        "baseline_total_unit_net_pnl": 1.0695000000000012,
+        "candidate_accepted_count": 60,
+        "candidate_total_unit_net_pnl": -0.8649999999999987,
+        "market_count": 60,
+        "paired_delta_total_unit_net_pnl": -1.9345
+      },
+      "bearish|low": {
+        "baseline_accepted_count": 176,
+        "baseline_total_unit_net_pnl": -8.525999999999998,
+        "candidate_accepted_count": 179,
+        "candidate_total_unit_net_pnl": -2.975249999999998,
+        "market_count": 180,
+        "paired_delta_total_unit_net_pnl": 5.55075
+      },
+      "bearish|medium": {
+        "baseline_accepted_count": 91,
+        "baseline_total_unit_net_pnl": 4.447250000000001,
+        "candidate_accepted_count": 91,
+        "candidate_total_unit_net_pnl": 2.667250000000001,
+        "market_count": 91,
+        "paired_delta_total_unit_net_pnl": -1.7799999999999998
+      },
+      "bullish|high": {
+        "baseline_accepted_count": 77,
+        "baseline_total_unit_net_pnl": -1.3242499999999986,
+        "candidate_accepted_count": 78,
+        "candidate_total_unit_net_pnl": -1.4264999999999983,
+        "market_count": 78,
+        "paired_delta_total_unit_net_pnl": -0.10225000000000004
+      },
+      "bullish|low": {
+        "baseline_accepted_count": 131,
+        "baseline_total_unit_net_pnl": -1.3102499999999973,
+        "candidate_accepted_count": 131,
+        "candidate_total_unit_net_pnl": -1.5877499999999978,
+        "market_count": 132,
+        "paired_delta_total_unit_net_pnl": -0.27750000000000075
+      },
+      "bullish|medium": {
+        "baseline_accepted_count": 74,
+        "baseline_total_unit_net_pnl": 4.211500000000001,
+        "candidate_accepted_count": 73,
+        "candidate_total_unit_net_pnl": 3.7262500000000007,
+        "market_count": 74,
+        "paired_delta_total_unit_net_pnl": -0.48525000000000007
+      },
+      "sideways|high": {
+        "baseline_accepted_count": 13,
+        "baseline_total_unit_net_pnl": 0.06675000000000023,
+        "candidate_accepted_count": 13,
+        "candidate_total_unit_net_pnl": 0.03675000000000028,
+        "market_count": 13,
+        "paired_delta_total_unit_net_pnl": -0.029999999999999916
+      },
+      "sideways|low": {
+        "baseline_accepted_count": 146,
+        "baseline_total_unit_net_pnl": 4.733500000000003,
+        "candidate_accepted_count": 146,
+        "candidate_total_unit_net_pnl": 6.233500000000003,
+        "market_count": 148,
+        "paired_delta_total_unit_net_pnl": 1.5
+      },
+      "sideways|medium": {
+        "baseline_accepted_count": 24,
+        "baseline_total_unit_net_pnl": -2.2659999999999996,
+        "candidate_accepted_count": 24,
+        "candidate_total_unit_net_pnl": -2.2659999999999996,
+        "market_count": 24,
+        "paired_delta_total_unit_net_pnl": 0.0
+      }
+    },
+    "requested_route": {
+      "bearish": {
+        "baseline_accepted_count": 267,
+        "baseline_total_unit_net_pnl": -4.078749999999997,
+        "candidate_accepted_count": 270,
+        "candidate_total_unit_net_pnl": -0.3079999999999969,
+        "market_count": 271,
+        "paired_delta_total_unit_net_pnl": 3.77075
+      },
+      "bullish": {
+        "baseline_accepted_count": 205,
+        "baseline_total_unit_net_pnl": 2.901250000000003,
+        "candidate_accepted_count": 204,
+        "candidate_total_unit_net_pnl": 2.1385000000000027,
+        "market_count": 206,
+        "paired_delta_total_unit_net_pnl": -0.7627500000000008
+      },
+      "high_vol": {
+        "baseline_accepted_count": 150,
+        "baseline_total_unit_net_pnl": -0.18799999999999698,
+        "candidate_accepted_count": 151,
+        "candidate_total_unit_net_pnl": -2.254749999999997,
+        "market_count": 151,
+        "paired_delta_total_unit_net_pnl": -2.06675
+      },
+      "low_vol": {
+        "baseline_accepted_count": 170,
+        "baseline_total_unit_net_pnl": 2.4675000000000034,
+        "candidate_accepted_count": 170,
+        "candidate_total_unit_net_pnl": 3.9675000000000034,
+        "market_count": 172,
+        "paired_delta_total_unit_net_pnl": 1.5
+      }
+    }
+  },
+  "paper_candidate_allowed": false,
+  "population": {
+    "baseline_row_count": 800,
+    "candidate_row_count": 800,
+    "dropped_market_count": 0,
+    "duplicate_market_count": 0,
+    "market_count": 800,
+    "out_of_window_market_count": 0,
+    "paired_row_count": 800,
+    "population_changed": false
+  },
+  "promotion_evidence_eligible": false,
+  "promotion_evidence_ready_for_manual_governance": false,
+  "rerun_allowed": false,
+  "robustness": {
+    "candidate_chronological_halves": {
+      "first": 4.521250000000008,
+      "second": -0.9779999999999927
+    },
+    "candidate_largest_winner_removed_total": 2.5985000000000134,
+    "paired_delta_chronological_halves": {
+      "first": -4.160499999999999,
+      "second": 6.601750000000001
+    },
+    "paired_delta_largest_positive_removed_total": 0.6162500000000009
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-confirmatory-evaluation-report-v1",
+  "source_capture_mutated": false,
+  "v8_execution_handoff_allowed": false
+}

@@ -1,0 +1,39 @@
+{
+  "schema_version": "bigan-challenge-model-development-lane-authorization-extension-v1",
+  "authorization_id": "challenge-model-development-lane-attempt-120-explicit-user-authorization-20260728",
+  "lane_id": "challenge-model-development-btc-updown-15m-v1",
+  "authorization_source": {
+    "type": "explicit_user_instruction_in_codex_task",
+    "instruction": "OK，开始Attempt 120",
+    "received_date": "2026-07-28"
+  },
+  "supersedes_protocol": {
+    "commit": "6fbc74a7af242b437447ee0459d0c3557ddcebd6",
+    "sha256": "19badf0185b16df00b58b029ff39896ffadbc167a7f760a0ee931142411a0fc2",
+    "maximum_capture_attempts": 119
+  },
+  "authorization": {
+    "exact_newly_authorized_attempts": [
+      120
+    ],
+    "maximum_capture_attempts": 120,
+    "attempt_120_authorized": true,
+    "attempt_121_authorized": false,
+    "stop_before_attempt_121": true,
+    "outcome_blind_capture_only": true,
+    "post_close_development_finalization_allowed": true,
+    "development_only_forever": true,
+    "promotion_evidence_eligible": false
+  },
+  "training_started": false,
+  "candidate_lineage_changed": false,
+  "thresholds_changed": false,
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  }
+}

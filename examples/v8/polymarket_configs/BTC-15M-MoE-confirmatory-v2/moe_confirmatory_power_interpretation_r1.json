@@ -1,0 +1,161 @@
+{
+  "created_at": "2026-07-30T12:00:00+00:00",
+  "design_criterion": {
+    "effect_size_scenario": "observed_development_effect",
+    "normal_approximation": {
+      "assumed_absolute_moe_mean": 0.05989041095890412,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.052602739726027394,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.9572966774033395,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.8026552332189634,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "observed_development_effect",
+      "variance_multiplier": 1.25
+    },
+    "selected_sample_size": 800,
+    "variance_multiplier": 1.25
+  },
+  "development_effect_may_be_optimistic": true,
+  "development_evidence_role": "planning_only_not_promotion_evidence",
+  "empirical_paired_market_bootstrap_validation_at_n800": {
+    "NO_TRADE_unit_net_pnl": 0.0,
+    "absolute_moe_lcb_crossing_count": 981,
+    "absolute_moe_lcb_crossing_probability": 0.981,
+    "bootstrap_quantile": 0.025,
+    "candidate_and_baseline_use_identical_market_draws": true,
+    "inner_bootstrap_resamples": 1000,
+    "market_level_paired_resampling": true,
+    "outer_simulations": 1000,
+    "paired_delta_lcb_crossing_count": 903,
+    "paired_delta_lcb_crossing_probability": 0.903,
+    "sample_size": 800,
+    "seed": 26015,
+    "source_market_count": 73
+  },
+  "empirical_validation_may_change_frozen_target": false,
+  "empirical_validation_role": "validation_of_normal_approximation_only",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "normal_approximation_observed_effect_at_n800": {
+    "assumed_absolute_moe_mean": 0.05989041095890412,
+    "assumed_absolute_moe_variance": 0.1695016475456621,
+    "assumed_primary_delta_mean": 0.052602739726027394,
+    "assumed_primary_delta_variance": 0.22409993895072297,
+    "estimated_probability_absolute_moe_LCB_gt_0": 0.984400273274067,
+    "estimated_probability_primary_delta_LCB_gt_0": 0.8815855083413114,
+    "sample_size": 800,
+    "scenario_family": "effect_and_variance",
+    "scenario_name": "observed_development_effect",
+    "variance_multiplier": 1.0
+  },
+  "overall_all_gate_success_probability_estimated": false,
+  "overall_all_gate_success_probability_not_guaranteed": true,
+  "primary_and_absolute_lcb_design_ready": true,
+  "report_only_75pct_and_50pct_effect_power_at_n800": [
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.869895787055033,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.6543979234329446,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.7881780455880221,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.558973341308793,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.04491780821917809,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.03945205479452055,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.7121348643648129,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.4859082519919313,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "75pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.1695016475456621,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.22409993895072297,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.5387470929600784,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.3488204312515286,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.0
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.21187705943207763,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.2801249236884037,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.45227681489791965,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.28964909301266717,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.25
+    },
+    {
+      "assumed_absolute_moe_mean": 0.02994520547945206,
+      "assumed_absolute_moe_variance": 0.25425247131849316,
+      "assumed_primary_delta_mean": 0.026301369863013697,
+      "assumed_primary_delta_variance": 0.33614990842608444,
+      "estimated_probability_absolute_moe_LCB_gt_0": 0.3896493249219581,
+      "estimated_probability_primary_delta_LCB_gt_0": 0.2492427150755665,
+      "sample_size": 800,
+      "scenario_family": "effect_and_variance",
+      "scenario_name": "50pct_of_observed_effect",
+      "variance_multiplier": 1.5
+    }
+  ],
+  "report_only_sensitivities_are_not_hard_design_selection_scenarios": true,
+  "revision_id": "BTC-15M-MoE-confirmatory-v2-precollection-r1",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-power-interpretation-r1",
+  "selected_confirmatory_market_count": 800,
+  "selected_target_unchanged": true,
+  "source_planning_rows": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/development_paired_planning_rows.jsonl",
+    "sha256": "d7f670e2c367a01dab4055603077f6b31c751b41a1a2a42cdcb1c3733ea2fb83"
+  },
+  "source_power_analysis": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_power_analysis.json",
+    "sha256": "ffb31eb6d6b91e3d5dd52971088103d3b905a73fd66c26eda239cbec3b1fddde"
+  },
+  "state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "winner_selection_bias_possible": true
+}

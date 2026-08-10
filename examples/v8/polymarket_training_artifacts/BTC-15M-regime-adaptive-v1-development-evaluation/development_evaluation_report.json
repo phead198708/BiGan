@@ -1,0 +1,840 @@
+{
+  "artifacts": {
+    "fold_audits": {
+      "path": "development_fold_audits.jsonl",
+      "sha256": "7f2fe6f9e1e8efb37efbb11328f4b9c96e139b99ceb649c085ac603847d59499"
+    },
+    "predictions": {
+      "path": "development_oof_predictions.jsonl",
+      "sha256": "d76640aa1550e3ab7bee32e3dd41be26d2ca156020c628bb85a8ae54a47b60f1"
+    }
+  },
+  "candidate_budget_executions_consumed": 5,
+  "candidate_budget_executions_maximum": 5,
+  "candidate_count": 5,
+  "candidate_ids": [
+    "global_baseline",
+    "regime_conditioned_calibration",
+    "mixture_of_experts",
+    "drift_aware_rolling_calibration",
+    "uncertainty_aware_abstention"
+  ],
+  "candidate_results": [
+    {
+      "candidate_id": "global_baseline",
+      "candidate_ordinal": 1,
+      "development_only_forever": true,
+      "development_selection_eligible": false,
+      "development_selection_gate_results": {
+        "bootstrap_lcb": false,
+        "first_chronological_half": false,
+        "largest_winner_removed": false,
+        "minimum_acceptance_rate": true,
+        "minimum_accepted_market_count": true,
+        "second_chronological_half": true,
+        "target_or_future_label_leakage": true
+      },
+      "probability_metrics": {
+        "brier_score": 0.17997267694191882,
+        "calibration_intercept": -4.981678339434316e-17,
+        "calibration_slope": 1.0413839301521053,
+        "log_loss": 0.5483692566856829,
+        "side_row_count": 292
+      },
+      "promotion_evidence_eligible": false,
+      "stratified_diagnostics": {
+        "btc_return_regime": {
+          "bearish": {
+            "accepted_market_count": 31,
+            "mean_unit_net_pnl": -0.0781532258064516,
+            "total_unit_net_pnl": -2.4227499999999993
+          },
+          "bullish": {
+            "accepted_market_count": 36,
+            "mean_unit_net_pnl": 0.025861111111111112,
+            "total_unit_net_pnl": 0.9310000000000004
+          },
+          "sideways": {
+            "accepted_market_count": 5,
+            "mean_unit_net_pnl": 0.40474999999999994,
+            "total_unit_net_pnl": 2.02375
+          }
+        },
+        "depth_bucket": {
+          "high": {
+            "accepted_market_count": 24,
+            "mean_unit_net_pnl": -0.12004166666666662,
+            "total_unit_net_pnl": -2.8809999999999993
+          },
+          "low": {
+            "accepted_market_count": 23,
+            "mean_unit_net_pnl": 0.0938804347826087,
+            "total_unit_net_pnl": 2.15925
+          },
+          "medium": {
+            "accepted_market_count": 25,
+            "mean_unit_net_pnl": 0.050150000000000014,
+            "total_unit_net_pnl": 1.2537500000000001
+          }
+        },
+        "side": {
+          "DOWN": {
+            "accepted_market_count": 44,
+            "mean_unit_net_pnl": -0.03059090909090906,
+            "total_unit_net_pnl": -1.3459999999999992
+          },
+          "UP": {
+            "accepted_market_count": 28,
+            "mean_unit_net_pnl": 0.06707142857142857,
+            "total_unit_net_pnl": 1.8780000000000001
+          }
+        },
+        "spread_bucket": {
+          "high": {
+            "accepted_market_count": 23,
+            "mean_unit_net_pnl": 0.016923913043478265,
+            "total_unit_net_pnl": 0.3892500000000001
+          },
+          "low": {
+            "accepted_market_count": 27,
+            "mean_unit_net_pnl": 0.020305555555555608,
+            "total_unit_net_pnl": 0.5482500000000003
+          },
+          "medium": {
+            "accepted_market_count": 22,
+            "mean_unit_net_pnl": -0.018431818181818164,
+            "total_unit_net_pnl": -0.4054999999999995
+          }
+        },
+        "volatility_bucket": {
+          "high": {
+            "accepted_market_count": 25,
+            "mean_unit_net_pnl": -0.04304999999999999,
+            "total_unit_net_pnl": -1.0762499999999995
+          },
+          "low": {
+            "accepted_market_count": 26,
+            "mean_unit_net_pnl": 0.02167307692307693,
+            "total_unit_net_pnl": 0.5635000000000001
+          },
+          "medium": {
+            "accepted_market_count": 21,
+            "mean_unit_net_pnl": 0.049750000000000016,
+            "total_unit_net_pnl": 1.0447500000000003
+          }
+        },
+        "volume_bucket": {
+          "high": {
+            "accepted_market_count": 4,
+            "mean_unit_net_pnl": -0.279,
+            "total_unit_net_pnl": -1.116
+          },
+          "low": {
+            "accepted_market_count": 6,
+            "mean_unit_net_pnl": -0.09441666666666663,
+            "total_unit_net_pnl": -0.5664999999999998
+          },
+          "medium": {
+            "accepted_market_count": 3,
+            "mean_unit_net_pnl": -0.011916666666666612,
+            "total_unit_net_pnl": -0.03574999999999984
+          },
+          "missing": {
+            "accepted_market_count": 59,
+            "mean_unit_net_pnl": 0.038139830508474595,
+            "total_unit_net_pnl": 2.2502500000000007
+          }
+        }
+      },
+      "target_or_future_label_leakage_count": 0,
+      "trading_metrics": {
+        "acceptance_rate": 0.9863013698630136,
+        "accepted_down_count": 44,
+        "accepted_market_count": 72,
+        "accepted_up_count": 28,
+        "cost_signal_ratio": 0.6172661870503598,
+        "entry_spread_cost": 0.42000000000000004,
+        "fees": 0.014400000000000001,
+        "first_chronological_half_total_unit_net_pnl": -1.3239999999999994,
+        "gross_price_edge": 1.39,
+        "largest_winner_removed_total_unit_net_pnl": -0.3027499999999991,
+        "liquidity_impact": 0.0036000000000000003,
+        "market_count": 73,
+        "mean_unit_net_pnl": 0.007287671232876719,
+        "mean_unit_net_pnl_bootstrap_interval": {
+          "confidence": 0.95,
+          "lower": -0.09114220890410958,
+          "method": "market_bootstrap_percentile_with_NO_TRADE_as_zero",
+          "resamples": 10000,
+          "seed": 26015,
+          "upper": 0.10632876712328763
+        },
+        "second_chronological_half_total_unit_net_pnl": 1.8560000000000003,
+        "slippage": 0.42000000000000004,
+        "total_cost": 0.8580000000000001,
+        "total_unit_net_pnl": 0.5320000000000009
+      }
+    },
+    {
+      "candidate_id": "regime_conditioned_calibration",
+      "candidate_ordinal": 2,
+      "development_only_forever": true,
+      "development_selection_eligible": false,
+      "development_selection_gate_results": {
+        "bootstrap_lcb": false,
+        "first_chronological_half": false,
+        "largest_winner_removed": false,
+        "minimum_acceptance_rate": true,
+        "minimum_accepted_market_count": true,
+        "second_chronological_half": true,
+        "target_or_future_label_leakage": true
+      },
+      "probability_metrics": {
+        "brier_score": 0.18781762218488418,
+        "calibration_intercept": -4.1904725854162836e-17,
+        "calibration_slope": 0.8284992856416571,
+        "log_loss": 0.5769084989692393,
+        "side_row_count": 292
+      },
+      "promotion_evidence_eligible": false,
+      "stratified_diagnostics": {
+        "btc_return_regime": {
+          "bearish": {
+            "accepted_market_count": 31,
+            "mean_unit_net_pnl": -0.04750806451612901,
+            "total_unit_net_pnl": -1.4727499999999993
+          },
+          "bullish": {
+            "accepted_market_count": 36,
+            "mean_unit_net_pnl": 0.003361111111111111,
+            "total_unit_net_pnl": 0.12100000000000043
+          },
+          "sideways": {
+            "accepted_market_count": 5,
+            "mean_unit_net_pnl": 0.40474999999999994,
+            "total_unit_net_pnl": 2.02375
+          }
+        },
+        "depth_bucket": {
+          "high": {
+            "accepted_market_count": 23,
+            "mean_unit_net_pnl": -0.1315543478260869,
+            "total_unit_net_pnl": -3.0257499999999995
+          },
+          "low": {
+            "accepted_market_count": 23,
+            "mean_unit_net_pnl": 0.15431521739130433,
+            "total_unit_net_pnl": 3.5492500000000002
+          },
+          "medium": {
+            "accepted_market_count": 26,
+            "mean_unit_net_pnl": 0.005711538461538468,
+            "total_unit_net_pnl": 0.14850000000000016
+          }
+        },
+        "side": {
+          "DOWN": {
+            "accepted_market_count": 46,
+            "mean_unit_net_pnl": -0.02253260869565215,
+            "total_unit_net_pnl": -1.036499999999999
+          },
+          "UP": {
+            "accepted_market_count": 26,
+            "mean_unit_net_pnl": 0.06571153846153846,
+            "total_unit_net_pnl": 1.7085000000000001
+          }
+        },
+        "spread_bucket": {
+          "high": {
+            "accepted_market_count": 23,
+            "mean_unit_net_pnl": 0.028663043478260878,
+            "total_unit_net_pnl": 0.6592500000000002
+          },
+          "low": {
+            "accepted_market_count": 26,
+            "mean_unit_net_pnl": 0.04128846153846158,
+            "total_unit_net_pnl": 1.0735000000000003
+          },
+          "medium": {
+            "accepted_market_count": 23,
+            "mean_unit_net_pnl": -0.046119565217391266,
+            "total_unit_net_pnl": -1.0607499999999996
+          }
+        },
+        "volatility_bucket": {
+          "high": {
+            "accepted_market_count": 24,
+            "mean_unit_net_pnl": -0.07670833333333332,
+            "total_unit_net_pnl": -1.8409999999999995
+          },
+          "low": {
+            "accepted_market_count": 25,
+            "mean_unit_net_pnl": 0.04115000000000002,
+            "total_unit_net_pnl": 1.02875
+          },
+          "medium": {
+            "accepted_market_count": 23,
+            "mean_unit_net_pnl": 0.0645326086956522,
+            "total_unit_net_pnl": 1.4842500000000003
+          }
+        },
+        "volume_bucket": {
+          "high": {
+            "accepted_market_count": 4,
+            "mean_unit_net_pnl": -0.279,
+            "total_unit_net_pnl": -1.116
+          },
+          "low": {
+            "accepted_market_count": 6,
+            "mean_unit_net_pnl": -0.09441666666666663,
+            "total_unit_net_pnl": -0.5664999999999998
+          },
+          "medium": {
+            "accepted_market_count": 3,
+            "mean_unit_net_pnl": -0.011916666666666612,
+            "total_unit_net_pnl": -0.03574999999999984
+          },
+          "missing": {
+            "accepted_market_count": 59,
+            "mean_unit_net_pnl": 0.040512711864406796,
+            "total_unit_net_pnl": 2.390250000000001
+          }
+        }
+      },
+      "target_or_future_label_leakage_count": 0,
+      "trading_metrics": {
+        "acceptance_rate": 0.9863013698630136,
+        "accepted_down_count": 46,
+        "accepted_market_count": 72,
+        "accepted_up_count": 26,
+        "cost_signal_ratio": 0.5549668874172186,
+        "entry_spread_cost": 0.41000000000000003,
+        "fees": 0.014400000000000001,
+        "first_chronological_half_total_unit_net_pnl": -2.9139999999999993,
+        "gross_price_edge": 1.51,
+        "largest_winner_removed_total_unit_net_pnl": -0.16274999999999895,
+        "liquidity_impact": 0.0036000000000000003,
+        "market_count": 73,
+        "mean_unit_net_pnl": 0.009205479452054806,
+        "mean_unit_net_pnl_bootstrap_interval": {
+          "confidence": 0.95,
+          "lower": -0.0897105308219178,
+          "method": "market_bootstrap_percentile_with_NO_TRADE_as_zero",
+          "resamples": 10000,
+          "seed": 26015,
+          "upper": 0.10790573630136985
+        },
+        "second_chronological_half_total_unit_net_pnl": 3.5860000000000003,
+        "slippage": 0.41000000000000003,
+        "total_cost": 0.8380000000000001,
+        "total_unit_net_pnl": 0.672000000000001
+      }
+    },
+    {
+      "candidate_id": "mixture_of_experts",
+      "candidate_ordinal": 3,
+      "development_only_forever": true,
+      "development_selection_eligible": false,
+      "development_selection_gate_results": {
+        "bootstrap_lcb": false,
+        "first_chronological_half": true,
+        "largest_winner_removed": true,
+        "minimum_acceptance_rate": true,
+        "minimum_accepted_market_count": true,
+        "second_chronological_half": true,
+        "target_or_future_label_leakage": true
+      },
+      "probability_metrics": {
+        "brier_score": 0.19016778812743315,
+        "calibration_intercept": -9.629263757330817e-18,
+        "calibration_slope": 1.0917134450793597,
+        "log_loss": 0.5735468841797627,
+        "side_row_count": 292
+      },
+      "promotion_evidence_eligible": false,
+      "stratified_diagnostics": {
+        "btc_return_regime": {
+          "bearish": {
+            "accepted_market_count": 30,
+            "mean_unit_net_pnl": -0.06674999999999999,
+            "total_unit_net_pnl": -2.0024999999999995
+          },
+          "bullish": {
+            "accepted_market_count": 35,
+            "mean_unit_net_pnl": 0.10775000000000001,
+            "total_unit_net_pnl": 3.77125
+          },
+          "sideways": {
+            "accepted_market_count": 7,
+            "mean_unit_net_pnl": 0.3718928571428571,
+            "total_unit_net_pnl": 2.60325
+          }
+        },
+        "depth_bucket": {
+          "high": {
+            "accepted_market_count": 24,
+            "mean_unit_net_pnl": 0.015375000000000033,
+            "total_unit_net_pnl": 0.3690000000000005
+          },
+          "low": {
+            "accepted_market_count": 25,
+            "mean_unit_net_pnl": 0.10275000000000002,
+            "total_unit_net_pnl": 2.56875
+          },
+          "medium": {
+            "accepted_market_count": 23,
+            "mean_unit_net_pnl": 0.06235869565217393,
+            "total_unit_net_pnl": 1.43425
+          }
+        },
+        "side": {
+          "DOWN": {
+            "accepted_market_count": 38,
+            "mean_unit_net_pnl": 0.03922368421052633,
+            "total_unit_net_pnl": 1.4905000000000006
+          },
+          "UP": {
+            "accepted_market_count": 34,
+            "mean_unit_net_pnl": 0.08474999999999999,
+            "total_unit_net_pnl": 2.8815
+          }
+        },
+        "spread_bucket": {
+          "high": {
+            "accepted_market_count": 23,
+            "mean_unit_net_pnl": 0.02257608695652175,
+            "total_unit_net_pnl": 0.51925
+          },
+          "low": {
+            "accepted_market_count": 26,
+            "mean_unit_net_pnl": 0.14321153846153847,
+            "total_unit_net_pnl": 3.7235000000000005
+          },
+          "medium": {
+            "accepted_market_count": 23,
+            "mean_unit_net_pnl": 0.005619565217391327,
+            "total_unit_net_pnl": 0.12925000000000045
+          }
+        },
+        "volatility_bucket": {
+          "high": {
+            "accepted_market_count": 26,
+            "mean_unit_net_pnl": 0.12648076923076923,
+            "total_unit_net_pnl": 3.2885000000000004
+          },
+          "low": {
+            "accepted_market_count": 27,
+            "mean_unit_net_pnl": -0.004879629629629602,
+            "total_unit_net_pnl": -0.13174999999999992
+          },
+          "medium": {
+            "accepted_market_count": 19,
+            "mean_unit_net_pnl": 0.06396052631578948,
+            "total_unit_net_pnl": 1.2152500000000002
+          }
+        },
+        "volume_bucket": {
+          "high": {
+            "accepted_market_count": 5,
+            "mean_unit_net_pnl": -0.22825,
+            "total_unit_net_pnl": -1.14125
+          },
+          "low": {
+            "accepted_market_count": 6,
+            "mean_unit_net_pnl": -0.042749999999999976,
+            "total_unit_net_pnl": -0.25649999999999984
+          },
+          "medium": {
+            "accepted_market_count": 2,
+            "mean_unit_net_pnl": 0.33975000000000005,
+            "total_unit_net_pnl": 0.6795000000000001
+          },
+          "missing": {
+            "accepted_market_count": 59,
+            "mean_unit_net_pnl": 0.08627542372881358,
+            "total_unit_net_pnl": 5.09025
+          }
+        }
+      },
+      "target_or_future_label_leakage_count": 0,
+      "trading_metrics": {
+        "acceptance_rate": 0.9863013698630136,
+        "accepted_down_count": 38,
+        "accepted_market_count": 72,
+        "accepted_up_count": 34,
+        "cost_signal_ratio": 0.16084452975047991,
+        "entry_spread_cost": 0.41000000000000014,
+        "fees": 0.014400000000000001,
+        "first_chronological_half_total_unit_net_pnl": 0.14600000000000066,
+        "gross_price_edge": 5.21,
+        "largest_winner_removed_total_unit_net_pnl": 3.5372500000000007,
+        "liquidity_impact": 0.0036000000000000003,
+        "market_count": 73,
+        "mean_unit_net_pnl": 0.05989041095890412,
+        "mean_unit_net_pnl_bootstrap_interval": {
+          "confidence": 0.95,
+          "lower": -0.03593672945205478,
+          "method": "market_bootstrap_percentile_with_NO_TRADE_as_zero",
+          "resamples": 10000,
+          "seed": 26015,
+          "upper": 0.15222936643835616
+        },
+        "second_chronological_half_total_unit_net_pnl": 4.226,
+        "slippage": 0.41000000000000003,
+        "total_cost": 0.8380000000000003,
+        "total_unit_net_pnl": 4.372000000000001
+      }
+    },
+    {
+      "candidate_id": "drift_aware_rolling_calibration",
+      "candidate_ordinal": 4,
+      "development_only_forever": true,
+      "development_selection_eligible": false,
+      "development_selection_gate_results": {
+        "bootstrap_lcb": false,
+        "first_chronological_half": false,
+        "largest_winner_removed": false,
+        "minimum_acceptance_rate": true,
+        "minimum_accepted_market_count": true,
+        "second_chronological_half": true,
+        "target_or_future_label_leakage": true
+      },
+      "probability_metrics": {
+        "brier_score": 0.17941745084848557,
+        "calibration_intercept": -8.862873630655246e-17,
+        "calibration_slope": 0.9354756010268038,
+        "log_loss": 0.5445021805634068,
+        "side_row_count": 292
+      },
+      "promotion_evidence_eligible": false,
+      "stratified_diagnostics": {
+        "btc_return_regime": {
+          "bearish": {
+            "accepted_market_count": 30,
+            "mean_unit_net_pnl": -0.06309999999999998,
+            "total_unit_net_pnl": -1.8929999999999993
+          },
+          "bullish": {
+            "accepted_market_count": 38,
+            "mean_unit_net_pnl": 0.00659210526315791,
+            "total_unit_net_pnl": 0.25050000000000017
+          },
+          "sideways": {
+            "accepted_market_count": 5,
+            "mean_unit_net_pnl": 0.40474999999999994,
+            "total_unit_net_pnl": 2.02375
+          }
+        },
+        "depth_bucket": {
+          "high": {
+            "accepted_market_count": 23,
+            "mean_unit_net_pnl": -0.08961956521739127,
+            "total_unit_net_pnl": -2.06125
+          },
+          "low": {
+            "accepted_market_count": 23,
+            "mean_unit_net_pnl": 0.0512717391304348,
+            "total_unit_net_pnl": 1.1792500000000001
+          },
+          "medium": {
+            "accepted_market_count": 27,
+            "mean_unit_net_pnl": 0.046787037037037044,
+            "total_unit_net_pnl": 1.2632500000000002
+          }
+        },
+        "side": {
+          "DOWN": {
+            "accepted_market_count": 41,
+            "mean_unit_net_pnl": -0.020859756097560956,
+            "total_unit_net_pnl": -0.8552499999999994
+          },
+          "UP": {
+            "accepted_market_count": 32,
+            "mean_unit_net_pnl": 0.03864062500000001,
+            "total_unit_net_pnl": 1.2365000000000002
+          }
+        },
+        "spread_bucket": {
+          "high": {
+            "accepted_market_count": 24,
+            "mean_unit_net_pnl": 0.05577083333333333,
+            "total_unit_net_pnl": 1.3385
+          },
+          "low": {
+            "accepted_market_count": 26,
+            "mean_unit_net_pnl": 0.019365384615384652,
+            "total_unit_net_pnl": 0.5035000000000005
+          },
+          "medium": {
+            "accepted_market_count": 23,
+            "mean_unit_net_pnl": -0.06351086956521737,
+            "total_unit_net_pnl": -1.4607499999999995
+          }
+        },
+        "volatility_bucket": {
+          "high": {
+            "accepted_market_count": 27,
+            "mean_unit_net_pnl": -0.006009259259259247,
+            "total_unit_net_pnl": -0.16224999999999956
+          },
+          "low": {
+            "accepted_market_count": 24,
+            "mean_unit_net_pnl": 0.05412500000000001,
+            "total_unit_net_pnl": 1.2990000000000002
+          },
+          "medium": {
+            "accepted_market_count": 22,
+            "mean_unit_net_pnl": -0.0343409090909091,
+            "total_unit_net_pnl": -0.7554999999999998
+          }
+        },
+        "volume_bucket": {
+          "high": {
+            "accepted_market_count": 5,
+            "mean_unit_net_pnl": 0.06375000000000001,
+            "total_unit_net_pnl": 0.31875000000000003
+          },
+          "low": {
+            "accepted_market_count": 5,
+            "mean_unit_net_pnl": -0.19224999999999998,
+            "total_unit_net_pnl": -0.9612499999999998
+          },
+          "medium": {
+            "accepted_market_count": 3,
+            "mean_unit_net_pnl": -0.011916666666666612,
+            "total_unit_net_pnl": -0.03574999999999984
+          },
+          "missing": {
+            "accepted_market_count": 60,
+            "mean_unit_net_pnl": 0.017658333333333335,
+            "total_unit_net_pnl": 1.0595000000000003
+          }
+        }
+      },
+      "target_or_future_label_leakage_count": 0,
+      "trading_metrics": {
+        "acceptance_rate": 1.0,
+        "accepted_down_count": 41,
+        "accepted_market_count": 73,
+        "accepted_up_count": 32,
+        "cost_signal_ratio": 0.6824239900041652,
+        "entry_spread_cost": 0.4005000000000001,
+        "fees": 0.0146,
+        "first_chronological_half_total_unit_net_pnl": -0.7794999999999995,
+        "gross_price_edge": 1.2004999999999997,
+        "largest_winner_removed_total_unit_net_pnl": -0.4534999999999992,
+        "liquidity_impact": 0.00365,
+        "market_count": 73,
+        "mean_unit_net_pnl": 0.005222602739726041,
+        "mean_unit_net_pnl_bootstrap_interval": {
+          "confidence": 0.95,
+          "lower": -0.09943835616438354,
+          "method": "market_bootstrap_percentile_with_NO_TRADE_as_zero",
+          "resamples": 10000,
+          "seed": 26015,
+          "upper": 0.1060445205479452
+        },
+        "second_chronological_half_total_unit_net_pnl": 1.1607500000000004,
+        "slippage": 0.4005000000000001,
+        "total_cost": 0.8192500000000001,
+        "total_unit_net_pnl": 0.3812500000000008
+      }
+    },
+    {
+      "candidate_id": "uncertainty_aware_abstention",
+      "candidate_ordinal": 5,
+      "development_only_forever": true,
+      "development_selection_eligible": false,
+      "development_selection_gate_results": {
+        "bootstrap_lcb": false,
+        "first_chronological_half": false,
+        "largest_winner_removed": false,
+        "minimum_acceptance_rate": true,
+        "minimum_accepted_market_count": true,
+        "second_chronological_half": false,
+        "target_or_future_label_leakage": true
+      },
+      "probability_metrics": {
+        "brier_score": 0.17320388512398863,
+        "calibration_intercept": -7.334740299323101e-17,
+        "calibration_slope": 1.1044823224694644,
+        "log_loss": 0.5246566947540587,
+        "side_row_count": 292
+      },
+      "promotion_evidence_eligible": false,
+      "stratified_diagnostics": {
+        "btc_return_regime": {
+          "bearish": {
+            "accepted_market_count": 26,
+            "mean_unit_net_pnl": -0.0850576923076923,
+            "total_unit_net_pnl": -2.2114999999999996
+          },
+          "bullish": {
+            "accepted_market_count": 25,
+            "mean_unit_net_pnl": -0.036430000000000004,
+            "total_unit_net_pnl": -0.91075
+          },
+          "sideways": {
+            "accepted_market_count": 2,
+            "mean_unit_net_pnl": 0.29475,
+            "total_unit_net_pnl": 0.5895
+          }
+        },
+        "depth_bucket": {
+          "high": {
+            "accepted_market_count": 20,
+            "mean_unit_net_pnl": -0.10122500000000001,
+            "total_unit_net_pnl": -2.0244999999999997
+          },
+          "low": {
+            "accepted_market_count": 20,
+            "mean_unit_net_pnl": -0.033,
+            "total_unit_net_pnl": -0.6599999999999999
+          },
+          "medium": {
+            "accepted_market_count": 13,
+            "mean_unit_net_pnl": 0.011673076923076934,
+            "total_unit_net_pnl": 0.15175000000000008
+          }
+        },
+        "side": {
+          "DOWN": {
+            "accepted_market_count": 32,
+            "mean_unit_net_pnl": -0.015703124999999984,
+            "total_unit_net_pnl": -0.5024999999999996
+          },
+          "UP": {
+            "accepted_market_count": 21,
+            "mean_unit_net_pnl": -0.09667857142857146,
+            "total_unit_net_pnl": -2.03025
+          }
+        },
+        "spread_bucket": {
+          "high": {
+            "accepted_market_count": 29,
+            "mean_unit_net_pnl": -0.03471551724137931,
+            "total_unit_net_pnl": -1.00675
+          },
+          "low": {
+            "accepted_market_count": 10,
+            "mean_unit_net_pnl": -0.05625,
+            "total_unit_net_pnl": -0.5624999999999998
+          },
+          "medium": {
+            "accepted_market_count": 14,
+            "mean_unit_net_pnl": -0.06882142857142856,
+            "total_unit_net_pnl": -0.9634999999999998
+          }
+        },
+        "volatility_bucket": {
+          "high": {
+            "accepted_market_count": 21,
+            "mean_unit_net_pnl": -0.055940476190476186,
+            "total_unit_net_pnl": -1.1747499999999997
+          },
+          "low": {
+            "accepted_market_count": 10,
+            "mean_unit_net_pnl": -0.07324999999999998,
+            "total_unit_net_pnl": -0.7324999999999999
+          },
+          "medium": {
+            "accepted_market_count": 22,
+            "mean_unit_net_pnl": -0.028431818181818173,
+            "total_unit_net_pnl": -0.6255
+          }
+        },
+        "volume_bucket": {
+          "high": {
+            "accepted_market_count": 2,
+            "mean_unit_net_pnl": -0.39525,
+            "total_unit_net_pnl": -0.7905
+          },
+          "low": {
+            "accepted_market_count": 4,
+            "mean_unit_net_pnl": -0.11649999999999996,
+            "total_unit_net_pnl": -0.46599999999999986
+          },
+          "medium": {
+            "accepted_market_count": 2,
+            "mean_unit_net_pnl": 0.27475000000000005,
+            "total_unit_net_pnl": 0.5495000000000001
+          },
+          "missing": {
+            "accepted_market_count": 45,
+            "mean_unit_net_pnl": -0.040572222222222225,
+            "total_unit_net_pnl": -1.82575
+          }
+        }
+      },
+      "target_or_future_label_leakage_count": 0,
+      "trading_metrics": {
+        "acceptance_rate": 0.726027397260274,
+        "accepted_down_count": 32,
+        "accepted_market_count": 53,
+        "accepted_up_count": 21,
+        "cost_signal_ratio": null,
+        "entry_spread_cost": 0.2965000000000001,
+        "fees": 0.0106,
+        "first_chronological_half_total_unit_net_pnl": -0.7367499999999998,
+        "gross_price_edge": -1.9265,
+        "largest_winner_removed_total_unit_net_pnl": -3.3574999999999995,
+        "liquidity_impact": 0.00265,
+        "market_count": 73,
+        "mean_unit_net_pnl": -0.03469520547945204,
+        "mean_unit_net_pnl_bootstrap_interval": {
+          "confidence": 0.95,
+          "lower": -0.10294289383561643,
+          "method": "market_bootstrap_percentile_with_NO_TRADE_as_zero",
+          "resamples": 10000,
+          "seed": 26015,
+          "upper": 0.03486044520547944
+        },
+        "second_chronological_half_total_unit_net_pnl": -1.7959999999999998,
+        "slippage": 0.2965000000000001,
+        "total_cost": 0.6062500000000002,
+        "total_unit_net_pnl": -2.5327499999999996
+      }
+    }
+  ],
+  "created_at": "2026-07-29T11:24:51.640929+00:00",
+  "development_market_count": 113,
+  "development_only_forever": true,
+  "fresh_collection_authorized": false,
+  "fresh_collection_started": false,
+  "fresh_outcomes_opened": false,
+  "fresh_validation_evidence_eligible": false,
+  "initial_strictly_prior_training_market_count": 40,
+  "input_corpus_manifest_count": 113,
+  "input_corpus_manifest_set_sha256": "7328607d361273b86d9b691f2c15211dec20a1252e98d4e4fdeda2c04353e0cf",
+  "interpretation": "development_selection_only_no_validation_promotion_or_execution_claim",
+  "lineage_id": "BTC-15M-regime-adaptive-v1",
+  "model_training_completed": true,
+  "model_training_started": true,
+  "parent_oof_reopened_as_validation": false,
+  "promotion_evidence_eligible": false,
+  "role": "candidate_development_selection_only",
+  "rolling_origin_evaluation_market_count": 73,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-regime-adaptive-development-evaluation-report-v1",
+  "selection": {
+    "eligible_candidate_ids": [],
+    "fresh_collection_allowed": false,
+    "required_action": "stop_lineage_without_fresh_collection",
+    "selected_candidate_id": null,
+    "status": "no_candidate_met_all_frozen_development_gates"
+  },
+  "source_commit": "364fd65b08849cb36227a3c4bb1b55a62cc68825",
+  "target_or_future_label_leakage_count": 0
+}

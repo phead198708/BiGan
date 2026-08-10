@@ -6,19 +6,23 @@ import hashlib
 import json
 import math
 import shutil
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from bigan.v8.polymarket.corpus.contracts import (
     BTC_UPDOWN_MARKET_HORIZONS_MS,
+    OPTIONAL_RAW_CORPUS_FILENAMES,
     POLYMARKET_CORPUS_PHASE,
     POLYMARKET_CORPUS_SCHEMA_VERSION,
     RAW_CORPUS_FILENAMES,
     BinanceBTCCandle,
     CorpusOutcome,
+    PolymarketChainlinkPrice,
     PolymarketCorpusBookSnapshot,
     PolymarketCorpusBuildConfig,
     PolymarketCorpusBuildResult,
+    PolymarketCorpusFeatureRow,
     PolymarketCorpusMarket,
     PolymarketCorpusResolutionEvent,
     PolymarketCorpusTrade,
@@ -63,6 +67,16 @@ def build_polymarket_btc_corpus(
         raise FileNotFoundError("missing raw corpus files: " + ", ".join(sorted(missing)))
     raw_payloads = {name: _read_jsonl(path) for name, path in raw_paths.items()}
     raw_hashes = {name: _sha256_file(path) for name, path in sorted(raw_paths.items())}
+    optional_raw_paths = {
+        name: input_dir / name
+        for name in OPTIONAL_RAW_CORPUS_FILENAMES
+        if (input_dir / name).exists()
+    }
+    for name, path in sorted(optional_raw_paths.items()):
+        optional_rows = _read_jsonl(path)
+        if optional_rows:
+            raw_payloads[name] = optional_rows
+            raw_hashes[name] = _sha256_file(path)
 
     markets = _normalize_markets(raw_payloads["raw_polymarket_markets.jsonl"], config)
     rules = _build_rules(markets)
@@ -72,6 +86,9 @@ def build_polymarket_btc_corpus(
     )
     trades = _normalize_trades(raw_payloads["raw_polymarket_trades.jsonl"], markets)
     candles = _normalize_candles(raw_payloads["raw_binance_btcusdt_klines.jsonl"])
+    chainlink_prices = _normalize_chainlink_prices(
+        raw_payloads.get("raw_polymarket_chainlink_prices.jsonl", [])
+    )
     resolution_events = _normalize_resolutions(
         raw_payloads["raw_polymarket_resolutions.jsonl"],
         markets=markets,
@@ -82,6 +99,7 @@ def build_polymarket_btc_corpus(
         book_snapshots=book_snapshots,
         trades=trades,
         btc_candles=candles,
+        chainlink_prices=chainlink_prices,
         config=config,
     )
     label_rows = build_polymarket_corpus_label_rows(
@@ -119,11 +137,31 @@ def build_polymarket_btc_corpus(
         "corpus_summary": output_dir / "polymarket_corpus_summary.json",
         "corpus_manifest": output_dir / "polymarket_corpus_manifest.json",
     }
+    if chainlink_prices:
+        paths["chainlink_prices"] = output_dir / "polymarket_chainlink_prices.jsonl"
+        paths["chainlink_decision_time_evidence_manifest"] = (
+            output_dir / "polymarket_chainlink_decision_time_evidence_manifest.json"
+        )
     _write_jsonl(paths["market_rules"], [rule.to_dict() for rule in rules.values()])
     _write_jsonl(paths["market_metadata"], [market.to_dict() for market in markets])
     _write_jsonl(paths["token_book_snapshots"], [row.to_dict() for row in book_snapshots])
     _write_jsonl(paths["token_trades"], [row.to_dict() for row in trades])
     _write_jsonl(paths["btc_reference_candles"], [row.to_dict() for row in candles])
+    chainlink_integration = _empty_chainlink_feature_integration()
+    if chainlink_prices:
+        _write_jsonl(
+            paths["chainlink_prices"],
+            [row.to_dict() for row in chainlink_prices],
+        )
+        chainlink_integration = _chainlink_feature_integration_manifest(
+            feature_rows=feature_rows,
+            chainlink_prices=chainlink_prices,
+            evidence_path=paths["chainlink_prices"],
+        )
+        _write_json(
+            paths["chainlink_decision_time_evidence_manifest"],
+            chainlink_integration,
+        )
     _write_jsonl(paths["resolution_events"], [row.to_dict() for row in resolution_events])
     _write_jsonl(paths["feature_rows"], [row.to_dict() for row in feature_rows])
     _write_jsonl(paths["label_rows"], [row.to_dict() for row in label_rows])
@@ -170,6 +208,7 @@ def build_polymarket_btc_corpus(
         "label_row_count": len(label_rows),
         "raw_artifact_hashes": raw_hashes,
         "normalized_artifact_hashes": normalized_hashes,
+        "chainlink_decision_time_feature_integration": chainlink_integration,
         "rule_hashes": {market_id: rule.raw_rule_sha256 for market_id, rule in rules.items()},
         "resolution_hashes": {
             event.market_id: event.raw_resolution_sha256 for event in resolution_events
@@ -400,6 +439,54 @@ def _normalize_markets(
                     if row.get("reference_price_start") is not None
                     else row.get("reference_price_at_start")
                 ),
+                trade_collection_mode=(
+                    str(row.get("trade_collection_mode"))
+                    if row.get("trade_collection_mode")
+                    else None
+                ),
+                trade_stream_started_at_ts=_optional_int(
+                    row.get("trade_stream_started_at_ts")
+                ),
+                trade_stream_ended_at_ts=_optional_int(
+                    row.get("trade_stream_ended_at_ts")
+                ),
+                trade_stream_continuity_passed=(
+                    row.get("trade_stream_continuity_passed") is True
+                    if row.get("trade_stream_continuity_passed") is not None
+                    else None
+                ),
+                trade_stream_timestamp_causality_violation_count=_optional_int(
+                    row.get(
+                        "trade_stream_timestamp_causality_violation_count"
+                    )
+                ),
+                trade_api_collection_ts=_optional_int(
+                    row.get("trade_api_collection_ts")
+                ),
+                trade_api_request_failed=(
+                    row.get("trade_api_request_failed") is True
+                    if row.get("trade_api_request_failed") is not None
+                    else None
+                ),
+                trade_rest_rows_truncated=(
+                    row.get("trade_rest_rows_truncated") is True
+                    if row.get("trade_rest_rows_truncated") is not None
+                    else None
+                ),
+                trade_full_round_coverage_complete=(
+                    row.get("trade_full_round_coverage_complete") is True
+                    if row.get("trade_full_round_coverage_complete") is not None
+                    else None
+                ),
+                trade_tape_censored=(
+                    row.get("trade_tape_censored") is True
+                    if row.get("trade_tape_censored") is not None
+                    else None
+                ),
+                trade_collection_reason_codes=tuple(
+                    str(reason)
+                    for reason in row.get("trade_collection_reason_codes") or []
+                ),
                 paper_only=row.get("paper_only", True) is True,
                 capital_at_risk=row.get("capital_at_risk", False) is True,
                 broker_exchange_write_enabled=row.get("broker_exchange_write_enabled", False) is True,
@@ -495,6 +582,12 @@ def _normalize_trades(
                 price=float(row["price"]),
                 size=float(row.get("size") or 0.0),
                 side=str(row.get("side") or "unknown"),
+                source=str(row.get("trade_source_type") or row.get("source") or "polymarket"),
+                transaction_hash=(
+                    str(row.get("transaction_hash"))
+                    if row.get("transaction_hash")
+                    else None
+                ),
                 paper_only=row.get("paper_only", True) is True,
                 capital_at_risk=row.get("capital_at_risk", False) is True,
                 broker_exchange_write_enabled=row.get("broker_exchange_write_enabled", False) is True,
@@ -529,6 +622,127 @@ def _normalize_candles(rows: list[dict[str, Any]]) -> tuple[BinanceBTCCandle, ..
             )
         )
     return tuple(sorted(candles, key=lambda item: item.ts))
+
+
+def _normalize_chainlink_prices(
+    rows: list[dict[str, Any]],
+) -> tuple[PolymarketChainlinkPrice, ...]:
+    prices = []
+    for row in rows:
+        if row.get("timestamp_causality_valid") is False:
+            raise ValueError("Chainlink row timestamp causality is invalid")
+        prices.append(
+            PolymarketChainlinkPrice(
+                source_ts=int(row["source_ts"]),
+                available_at_ts=int(row["available_at_ts"]),
+                price=float(row["price"]),
+                source_type=str(row.get("source_type") or ""),
+                symbol=str(row.get("symbol") or ""),
+                read_only=row.get("read_only", True) is True,
+                paper_only=row.get("paper_only", True) is True,
+                capital_at_risk=row.get("capital_at_risk", False) is True,
+                broker_exchange_write_enabled=(
+                    row.get("broker_exchange_write_enabled", False) is True
+                ),
+                live_exchange_write_enabled=(
+                    row.get("live_exchange_write_enabled", False) is True
+                ),
+                polymarket_write_enabled=(
+                    row.get("polymarket_write_enabled", False) is True
+                ),
+                wallet_signing_enabled=(
+                    row.get("wallet_signing_enabled", False) is True
+                ),
+            )
+        )
+    return tuple(
+        sorted(prices, key=lambda item: (item.source_ts, item.available_at_ts, item.price))
+    )
+
+
+def _empty_chainlink_feature_integration() -> dict[str, Any]:
+    return {
+        "schema_version": "bigan-v8-polymarket-chainlink-decision-time-evidence-v2",
+        "source_type": "polymarket_rtds_chainlink",
+        "decision_time_only": True,
+        "row_count": 0,
+        "feature_row_count": 0,
+        "integrated_feature_row_count": 0,
+        "missing_or_invalid_feature_row_count": 0,
+        "feature_reference_source_distribution": {},
+        "feature_integration_reason_distribution": {},
+        "timestamp_causality_violation_count": 0,
+        "feature_builder_integration_passed": False,
+        "feature_builder_integration_required": True,
+        "read_only": True,
+        **safety_fields(),
+    }
+
+
+def _chainlink_feature_integration_manifest(
+    *,
+    feature_rows: tuple[PolymarketCorpusFeatureRow, ...],
+    chainlink_prices: tuple[PolymarketChainlinkPrice, ...],
+    evidence_path: Path,
+) -> dict[str, Any]:
+    source_distribution: Counter[str] = Counter()
+    reason_distribution: Counter[str] = Counter()
+    integrated_count = 0
+    for row in feature_rows:
+        provenance = row.feature_provenance.get(
+            "reference_price_to_beat_distance_at_decision", {}
+        )
+        source = str(provenance.get("reference_price_to_beat_source") or "missing")
+        source_distribution[source] += 1
+        reasons = []
+        if source != "polymarket_rtds_chainlink_market_start":
+            reasons.append("reference_distance_not_sourced_from_chainlink")
+        source_fields = str(provenance.get("source_fields_used") or "")
+        if (
+            "raw_polymarket_chainlink_prices.price_at_or_before_market_start"
+            not in source_fields
+            or "raw_polymarket_chainlink_prices.price_at_or_before_decision"
+            not in source_fields
+        ):
+            reasons.append("chainlink_reference_source_fields_incomplete")
+        if provenance.get("provenance_valid") is not True:
+            reasons.append("chainlink_reference_provenance_invalid")
+        if int(provenance.get("max_input_ts") or 0) > row.decision_ts:
+            reasons.append("chainlink_reference_max_input_after_decision")
+        if int(provenance.get("available_at_ts") or 0) > row.decision_ts:
+            reasons.append("chainlink_reference_available_after_decision")
+        if row.features.get("reference_price_to_beat_distance_at_decision") is None:
+            reasons.append("chainlink_reference_distance_missing")
+        if reasons:
+            reason_distribution.update(set(reasons))
+        else:
+            integrated_count += 1
+    feature_row_count = len(feature_rows)
+    integration_passed = feature_row_count > 0 and integrated_count == feature_row_count
+    return {
+        "schema_version": "bigan-v8-polymarket-chainlink-decision-time-evidence-v2",
+        "source_type": "polymarket_rtds_chainlink",
+        "decision_time_only": True,
+        "row_count": len(chainlink_prices),
+        "evidence_path": evidence_path.name,
+        "evidence_sha256": _sha256_file(evidence_path),
+        "feature_row_count": feature_row_count,
+        "integrated_feature_row_count": integrated_count,
+        "missing_or_invalid_feature_row_count": feature_row_count - integrated_count,
+        "feature_reference_source_distribution": dict(sorted(source_distribution.items())),
+        "feature_integration_reason_distribution": dict(
+            sorted(reason_distribution.items())
+        ),
+        "timestamp_causality_violation_count": sum(
+            1
+            for row in chainlink_prices
+            if row.source_ts > row.available_at_ts
+        ),
+        "feature_builder_integration_passed": integration_passed,
+        "feature_builder_integration_required": not integration_passed,
+        "read_only": True,
+        **safety_fields(),
+    }
 
 
 def _normalize_resolutions(
@@ -658,6 +872,13 @@ def _optional_positive_float(value: Any) -> float | None:
     if numeric <= 0.0 or not math.isfinite(numeric):
         raise ValueError("reference prices must be positive")
     return numeric
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _optional_float(value: Any) -> float | None:

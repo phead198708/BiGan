@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 from statistics import pstdev
+from typing import Any
 
 from bigan.v8.polymarket.corpus.contracts import (
     BinanceBTCCandle,
+    PolymarketChainlinkPrice,
     PolymarketCorpusBookSnapshot,
     PolymarketCorpusBuildConfig,
     PolymarketCorpusFeatureRow,
     PolymarketCorpusMarket,
     PolymarketCorpusTrade,
+)
+from bigan.v8.polymarket.feature_completeness import (
+    TradeTapeCoverageStatus,
+    build_trade_volume_feature_bundle,
+    derive_trade_tape_coverage_status,
 )
 
 
@@ -20,6 +27,9 @@ def build_polymarket_corpus_feature_rows(
     book_snapshots: tuple[PolymarketCorpusBookSnapshot, ...],
     trades: tuple[PolymarketCorpusTrade, ...],
     btc_candles: tuple[BinanceBTCCandle, ...],
+    chainlink_prices: tuple[PolymarketChainlinkPrice, ...] = (),
+    trade_tape_statuses: tuple[TradeTapeCoverageStatus, ...] = (),
+    require_feature_completeness: bool = False,
     config: PolymarketCorpusBuildConfig,
 ) -> tuple[PolymarketCorpusFeatureRow, ...]:
     """Build strictly point-in-time feature rows for configured markets."""
@@ -27,6 +37,14 @@ def build_polymarket_corpus_feature_rows(
     snapshots_by_market = _snapshots_by_market(book_snapshots)
     trades_by_market = _trades_by_market(trades)
     candles = tuple(sorted(btc_candles, key=lambda item: item.ts))
+    chainlink = tuple(
+        sorted(chainlink_prices, key=lambda item: (item.source_ts, item.available_at_ts))
+    )
+    trade_tape_status_by_key = {
+        (status.market_id, status.decision_ts): status for status in trade_tape_statuses
+    }
+    if len(trade_tape_status_by_key) != len(trade_tape_statuses):
+        raise ValueError("duplicate trade-tape status for market decision")
     rows: list[PolymarketCorpusFeatureRow] = []
     for market in sorted(markets, key=lambda item: (item.market_start_ts, item.market_id)):
         if market.market_family not in config.market_families:
@@ -45,6 +63,15 @@ def build_polymarket_corpus_feature_rows(
             if up_snapshot is None or down_snapshot is None or candle is None:
                 continue
             market_trades = trades_by_market.get(market.market_id, ())
+            trade_tape_status = trade_tape_status_by_key.get(
+                (market.market_id, decision_ts)
+            )
+            if trade_tape_status is None:
+                trade_tape_status = derive_trade_tape_coverage_status(
+                    market=market,
+                    trades=market_trades,
+                    decision_ts=decision_ts,
+                )
             rows.append(
                 _feature_row(
                     market=market,
@@ -56,6 +83,9 @@ def build_polymarket_corpus_feature_rows(
                     market_trades=market_trades,
                     candles=candles,
                     current_candle=candle,
+                    chainlink_prices=chainlink,
+                    trade_tape_status=trade_tape_status,
+                    require_feature_completeness=require_feature_completeness,
                 )
             )
     if not rows:
@@ -74,33 +104,57 @@ def _feature_row(
     market_trades: tuple[PolymarketCorpusTrade, ...],
     candles: tuple[BinanceBTCCandle, ...],
     current_candle: BinanceBTCCandle,
+    chainlink_prices: tuple[PolymarketChainlinkPrice, ...],
+    trade_tape_status: TradeTapeCoverageStatus | None,
+    require_feature_completeness: bool,
 ) -> PolymarketCorpusFeatureRow:
-    reference_context = _reference_price_to_beat_context(
+    reference_context = _chainlink_reference_price_context(
         market=market,
-        candles=candles,
+        chainlink_prices=chainlink_prices,
         decision_ts=decision_ts,
+    ) or _reference_price_to_beat_context(
+        market=market, candles=candles, decision_ts=decision_ts
     )
     reference_price_to_beat = (
         float(reference_context["reference_price_to_beat"])
         if reference_context is not None
         else None
     )
+    reference_current_price = (
+        float(reference_context["current_price_at_decision"])
+        if reference_context is not None
+        and reference_context.get("current_price_at_decision") is not None
+        else current_candle.close_price
+    )
     reference_distance = (
-        (current_candle.close_price - reference_price_to_beat) / reference_price_to_beat
+        (reference_current_price - reference_price_to_beat) / reference_price_to_beat
         if reference_price_to_beat is not None and reference_price_to_beat > 0.0
         else None
     )
-    recent_up_volume = _recent_trade_volume(
-        trades=market_trades,
-        outcome="UP",
+    trade_volume_coverage = _recent_trade_volume_coverage(
+        market=market,
         decision_ts=decision_ts,
         lookback_ms=60_000,
     )
-    recent_down_volume = _recent_trade_volume(
-        trades=market_trades,
-        outcome="DOWN",
-        decision_ts=decision_ts,
-        lookback_ms=60_000,
+    recent_up_volume = (
+        _recent_trade_volume(
+            trades=market_trades,
+            outcome="UP",
+            decision_ts=decision_ts,
+            lookback_ms=60_000,
+        )
+        if trade_volume_coverage["use_volume"]
+        else None
+    )
+    recent_down_volume = (
+        _recent_trade_volume(
+            trades=market_trades,
+            outcome="DOWN",
+            decision_ts=decision_ts,
+            lookback_ms=60_000,
+        )
+        if trade_volume_coverage["use_volume"]
+        else None
     )
     up_spread_bps = _spread_bps(up_snapshot)
     down_spread_bps = _spread_bps(down_snapshot)
@@ -117,6 +171,27 @@ def _feature_row(
         "btc_mid_price": current_candle.close_price,
         "reference_price_to_beat": reference_price_to_beat,
         "reference_price_to_beat_distance_at_decision": reference_distance,
+        "chainlink_price_at_decision": (
+            reference_current_price
+            if reference_context is not None
+            and reference_context.get("source_type")
+            == "polymarket_rtds_chainlink_market_start"
+            else None
+        ),
+        "chainlink_reference_price_at_market_start": (
+            reference_price_to_beat
+            if reference_context is not None
+            and reference_context.get("source_type")
+            == "polymarket_rtds_chainlink_market_start"
+            else None
+        ),
+        "chainlink_reference_distance_at_decision": (
+            reference_distance
+            if reference_context is not None
+            and reference_context.get("source_type")
+            == "polymarket_rtds_chainlink_market_start"
+            else None
+        ),
         "btc_return_10s": _return(candles, decision_ts=decision_ts, lookback_ms=10_000),
         "btc_return_30s": _return(candles, decision_ts=decision_ts, lookback_ms=30_000),
         "btc_return_1m": _return(candles, decision_ts=decision_ts, lookback_ms=60_000),
@@ -201,7 +276,24 @@ def _feature_row(
         else (up_snapshot.liquidity_depth - down_snapshot.liquidity_depth) / liquidity_total,
         "recent_up_trade_volume": recent_up_volume,
         "recent_down_trade_volume": recent_down_volume,
+        "recent_trade_volume_coverage_complete": trade_volume_coverage[
+            "coverage_complete"
+        ],
+        "recent_trade_volume_censored": trade_volume_coverage["censored"],
     }
+    completeness_provenance: dict[str, dict[str, int | str | None]] = {}
+    if require_feature_completeness and trade_tape_status is None:
+        raise ValueError(
+            "future candidate feature row requires trade-tape completeness metadata"
+        )
+    if trade_tape_status is not None:
+        completeness_features, completeness_provenance = (
+            build_trade_volume_feature_bundle(
+                trades=market_trades,
+                status=trade_tape_status,
+            )
+        )
+        features.update(completeness_features)
     max_trade_ts = max(
         (
             trade.available_at_ts
@@ -215,14 +307,22 @@ def _feature_row(
         down_snapshot.ts,
         current_candle.ts,
         int(reference_context["max_input_ts"]) if reference_context else 0,
+        int(reference_context.get("current_source_ts") or 0)
+        if reference_context
+        else 0,
         max_trade_ts,
+        trade_tape_status.max_causal_input_ts if trade_tape_status else 0,
     )
     available_at_ts = max(
         up_snapshot.available_at_ts,
         down_snapshot.available_at_ts,
         current_candle.available_at_ts,
         int(reference_context["available_at_ts"]) if reference_context else 0,
+        int(reference_context.get("current_available_at_ts") or 0)
+        if reference_context
+        else 0,
         max_trade_ts,
+        trade_tape_status.available_at_ts if trade_tape_status else 0,
     )
     provenance = {
         name: {
@@ -234,34 +334,67 @@ def _feature_row(
         }
         for name in features
     }
+    for feature_name in (
+        "recent_up_trade_volume",
+        "recent_down_trade_volume",
+        "recent_trade_volume_coverage_complete",
+        "recent_trade_volume_censored",
+    ):
+        provenance[feature_name].update(
+            {
+                "trade_coverage_required_start_ts": trade_volume_coverage[
+                    "required_start_ts"
+                ],
+                "trade_stream_started_at_ts": market.trade_stream_started_at_ts,
+                "trade_stream_ended_at_ts": market.trade_stream_ended_at_ts,
+                "trade_stream_continuity_passed": (
+                    market.trade_stream_continuity_passed
+                ),
+                "trade_tape_censored": market.trade_tape_censored,
+                "trade_collection_reason_codes": list(
+                    market.trade_collection_reason_codes
+                ),
+            }
+        )
+    for feature_name, metadata in completeness_provenance.items():
+        provenance[feature_name].update(metadata)
     if reference_context is not None:
         reference_provenance = {
             "source": "polymarket_corpus",
             "input_start_ts": int(reference_context["input_start_ts"]),
             "input_end_ts": max(
                 int(reference_context["input_end_ts"]),
-                current_candle.ts,
+                int(reference_context.get("current_source_ts") or current_candle.ts),
             ),
             "available_at_ts": max(
                 int(reference_context["available_at_ts"]),
-                current_candle.available_at_ts,
+                int(
+                    reference_context.get("current_available_at_ts")
+                    or current_candle.available_at_ts
+                ),
             ),
             "lookback_ms": max(0, decision_ts - int(reference_context["input_start_ts"])),
             "source_fields_used": "|".join(
                 (
                     str(reference_context["source_fields_used"]),
-                    "polymarket_btc_reference_candles.close_price_at_decision",
+                    str(
+                        reference_context.get("current_source_fields_used")
+                        or "polymarket_btc_reference_candles.close_price_at_decision"
+                    ),
                 )
             ),
             "max_input_ts": max(
                 int(reference_context["max_input_ts"]),
-                current_candle.ts,
+                int(reference_context.get("current_source_ts") or current_candle.ts),
             ),
             "decision_ts": decision_ts,
             "provenance_valid": (
                 max(
                     int(reference_context["available_at_ts"]),
-                    current_candle.available_at_ts,
+                    int(
+                        reference_context.get("current_available_at_ts")
+                        or current_candle.available_at_ts
+                    ),
                 )
                 <= decision_ts
             ),
@@ -277,6 +410,16 @@ def _feature_row(
         provenance["reference_price_to_beat_distance_at_decision"] = (
             reference_provenance
         )
+        if (
+            reference_context.get("source_type")
+            == "polymarket_rtds_chainlink_market_start"
+        ):
+            for feature_name in (
+                "chainlink_price_at_decision",
+                "chainlink_reference_price_at_market_start",
+                "chainlink_reference_distance_at_decision",
+            ):
+                provenance[feature_name] = dict(reference_provenance)
     return PolymarketCorpusFeatureRow(
         market_id=market.market_id,
         condition_id=market.condition_id,
@@ -406,6 +549,46 @@ def _reference_price_to_beat_context(
     }
 
 
+def _chainlink_reference_price_context(
+    *,
+    market: PolymarketCorpusMarket,
+    chainlink_prices: tuple[PolymarketChainlinkPrice, ...],
+    decision_ts: int,
+) -> dict[str, float | int | str] | None:
+    reference_rows = [
+        row
+        for row in chainlink_prices
+        if row.source_ts <= market.market_start_ts
+        and row.available_at_ts <= decision_ts
+    ]
+    current_rows = [
+        row
+        for row in chainlink_prices
+        if row.source_ts <= decision_ts and row.available_at_ts <= decision_ts
+    ]
+    if not reference_rows or not current_rows:
+        return None
+    reference = reference_rows[-1]
+    current = current_rows[-1]
+    return {
+        "reference_price_to_beat": reference.price,
+        "current_price_at_decision": current.price,
+        "input_start_ts": reference.source_ts,
+        "input_end_ts": reference.source_ts,
+        "available_at_ts": reference.available_at_ts,
+        "max_input_ts": reference.source_ts,
+        "current_source_ts": current.source_ts,
+        "current_available_at_ts": current.available_at_ts,
+        "source_fields_used": (
+            "raw_polymarket_chainlink_prices.price_at_or_before_market_start"
+        ),
+        "current_source_fields_used": (
+            "raw_polymarket_chainlink_prices.price_at_or_before_decision"
+        ),
+        "source_type": "polymarket_rtds_chainlink_market_start",
+    }
+
+
 def _market_start_open_candle(
     candles: tuple[BinanceBTCCandle, ...],
     market_start_ts: int,
@@ -471,6 +654,44 @@ def _recent_trade_volume(
         if trade.outcome == outcome
         and decision_ts - lookback_ms <= trade.available_at_ts <= decision_ts
     )
+
+
+def _recent_trade_volume_coverage(
+    *,
+    market: PolymarketCorpusMarket,
+    decision_ts: int,
+    lookback_ms: int,
+) -> dict[str, Any]:
+    metadata_available = any(
+        value is not None
+        for value in (
+            market.trade_stream_started_at_ts,
+            market.trade_stream_ended_at_ts,
+            market.trade_stream_continuity_passed,
+            market.trade_tape_censored,
+        )
+    )
+    required_start_ts = max(market.market_start_ts, decision_ts - lookback_ms)
+    if not metadata_available:
+        return {
+            "use_volume": True,
+            "coverage_complete": None,
+            "censored": None,
+            "required_start_ts": required_start_ts,
+        }
+    coverage_complete = bool(
+        market.trade_stream_continuity_passed is True
+        and market.trade_stream_started_at_ts is not None
+        and market.trade_stream_ended_at_ts is not None
+        and market.trade_stream_started_at_ts <= required_start_ts
+        and market.trade_stream_ended_at_ts >= decision_ts
+    )
+    return {
+        "use_volume": coverage_complete,
+        "coverage_complete": float(coverage_complete),
+        "censored": float(not coverage_complete),
+        "required_start_ts": required_start_ts,
+    }
 
 
 def _recent_book_update_count(

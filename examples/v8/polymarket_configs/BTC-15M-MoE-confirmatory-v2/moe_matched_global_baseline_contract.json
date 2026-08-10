@@ -1,0 +1,82 @@
+{
+  "artifact": {
+    "byte_identical_to_candidate_global_fallback": true,
+    "candidate_global_fallback_sha256": "a601380d8a76c9094d3a7b3ad71c3ff429ab8bbec8c009cc7e2859dee062c409",
+    "definition": "byte_identical_global_fallback_model",
+    "num_boost_round": 104,
+    "path": "examples/v8/polymarket_artifacts/sha256/fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807/moe_global_fallback.json",
+    "sha256": "a601380d8a76c9094d3a7b3ad71c3ff429ab8bbec8c009cc7e2859dee062c409",
+    "training_market_count": 113
+  },
+  "bootstrap_participation": {
+    "included_for_every_frozen_confirmatory_market": true,
+    "missing_market_drop_allowed": false,
+    "paired_by_market_id_with_candidate": true,
+    "same_resample_indices_as_candidate": true
+  },
+  "contract_id": "matched_global_baseline",
+  "cost_and_behavior": {
+    "NO_TRADE_retained_in_bootstrap": true,
+    "NO_TRADE_unit_net_pnl": 0.0,
+    "complement_quote_proxy_allowed": false,
+    "contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_cost_and_action_contract.json",
+      "sha256": "7a2d2f170cd6b042188f8282014dfbfb7d379e49085bd00807aace1881d7bf43"
+    },
+    "execution_policy": "HOLD_TO_SETTLEMENT",
+    "same_cost_model_as_candidate": true,
+    "same_fixed_action_threshold_as_candidate": true,
+    "sizing": "unit",
+    "true_paired_executable_asks_required": true
+  },
+  "created_at": "2026-07-30T09:00:00+00:00",
+  "features": {
+    "feature_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_feature_contract.json",
+      "sha256": "dbc6e5e000a79548c5e5c74a38366ede4fe112fd3157850b8e3571599ef642bc"
+    },
+    "missing_as_numeric_zero_allowed": false,
+    "missing_value": "nan",
+    "ordered_feature_names": {
+      "path": "examples/v8/polymarket_artifacts/sha256/fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807/ordered_feature_names.json",
+      "sha256": "bf0e05c7997d57e7223890932b548c2fdb402bc8f5a67fc1484085dbc9bedd40"
+    },
+    "same_feature_order_as_candidate": true,
+    "same_pair_normalization_as_candidate": true,
+    "same_side_symmetric_transformation_as_candidate": true
+  },
+  "information_budget": {
+    "candidate_and_baseline_have_equal_development_information_budget": true,
+    "development_market_count": 113,
+    "final_model_retrained_after_round_selection": true,
+    "final_model_uses_validation_labels": true,
+    "final_training_market_count": 113,
+    "round_selection_fitted_model_discarded": true,
+    "round_selection_split_used_only_for_num_boost_round": true,
+    "round_selection_train_market_count": 93,
+    "round_selection_validation_market_count": 20,
+    "selected_num_boost_round": 104
+  },
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "repository_root_used_for_descriptor_resolution": "BiGan-Challenge-Model",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-matched-global-baseline-v2",
+  "state": {
+    "contract_frozen": true,
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  }
+}

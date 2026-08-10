@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigan://v8/execution_layer_v2_regime_conditioned_ev_calibration_row_v2.schema.json",
+  "title": "Execution Layer v2 Regime-Conditioned EV Calibration Row v2",
+  "description": "A settled target is allowed only outside decision_time_features and is consumed only by historical fit or validation evaluation.",
+  "type": "object",
+  "required": [
+    "source_run_id", "source_intent_id", "source_fill_id", "row_identity",
+    "source_lineage", "market_id", "decision_ts", "max_input_ts", "market_close_ts",
+    "selected_side", "selected_action", "action_family",
+    "decision_time_features", "target_net_return_after_cost",
+    "target_provenance"
+  ],
+  "properties": {
+    "source_run_id": {"type": "string", "minLength": 1},
+    "source_intent_id": {"type": "string", "minLength": 1},
+    "source_fill_id": {"type": "string", "minLength": 1},
+    "row_identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_lineage": {
+      "type": "object",
+      "required": [
+        "source_manifest_path", "source_manifest_sha256",
+        "trace_manifest_path", "trace_manifest_sha256",
+        "trace_artifact_path", "trace_artifact_sha256", "trace_row_id",
+        "intent_artifact_path", "intent_artifact_sha256",
+        "fill_artifact_path", "fill_artifact_sha256",
+        "settlement_artifact_path", "settlement_artifact_sha256",
+        "settlement_row_id"
+      ],
+      "properties": {
+        "source_manifest_path": {"type": "string", "minLength": 1},
+        "source_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "trace_manifest_path": {"type": "string", "minLength": 1},
+        "trace_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "trace_artifact_path": {"type": "string", "minLength": 1},
+        "trace_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "trace_row_id": {"type": "string", "minLength": 1},
+        "intent_artifact_path": {"type": "string", "minLength": 1},
+        "intent_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "fill_artifact_path": {"type": "string", "minLength": 1},
+        "fill_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "settlement_artifact_path": {"type": "string", "minLength": 1},
+        "settlement_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "settlement_row_id": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "market_id": {"type": "string", "minLength": 1},
+    "decision_ts": {"type": "number"},
+    "max_input_ts": {"type": "number"},
+    "market_close_ts": {"type": "number"},
+    "selected_side": {"enum": ["UP", "DOWN"]},
+    "selected_action": {
+      "enum": [
+        "BUY_UP_HOLD_TO_SETTLEMENT", "BUY_DOWN_HOLD_TO_SETTLEMENT",
+        "BUY_UP_SELL_BEFORE_CLOSE", "BUY_DOWN_SELL_BEFORE_CLOSE"
+      ]
+    },
+    "action_family": {"enum": ["HOLD_TO_SETTLEMENT", "SELL_BEFORE_CLOSE"]},
+    "decision_time_features": {
+      "type": "object",
+      "required": [
+        "canonical_o_action_score", "action_score_margin", "btc_momentum",
+        "reference_price_to_beat_distance_at_decision",
+        "selected_side_probability", "execution_price",
+        "selected_side_probability_minus_execution_price", "spread_bps",
+        "book_staleness_ms", "queue_fill_proxy", "time_to_close_seconds",
+        "entry_index_within_market",
+        "cumulative_market_exposure_before_entry", "same_side_reentry",
+        "side_flip"
+      ],
+      "properties": {
+        "canonical_o_action_score": {"type": "number"},
+        "action_score_margin": {"type": "number", "minimum": 0},
+        "btc_momentum": {"type": "number"},
+        "reference_price_to_beat_distance_at_decision": {"type": "number"},
+        "selected_side_probability": {"type": "number", "minimum": 0, "maximum": 1},
+        "execution_price": {"type": "number", "minimum": 0, "maximum": 1},
+        "selected_side_probability_minus_execution_price": {"type": "number"},
+        "spread_bps": {"type": "number", "minimum": 0},
+        "book_staleness_ms": {"type": "number", "minimum": 0},
+        "queue_fill_proxy": {"type": "number", "minimum": 0, "maximum": 1},
+        "time_to_close_seconds": {"type": "number", "minimum": 0},
+        "entry_index_within_market": {"type": "number", "minimum": 1},
+        "cumulative_market_exposure_before_entry": {"type": "number", "minimum": 0},
+        "same_side_reentry": {"type": "integer", "enum": [0, 1]},
+        "side_flip": {"type": "integer", "enum": [0, 1]}
+      },
+      "additionalProperties": false
+    },
+    "target_net_return_after_cost": {"type": "number"},
+    "target_provenance": {
+      "type": "object",
+      "required": [
+        "source_type", "source_artifact_path", "source_artifact_sha256",
+        "resolution_status", "resolved_outcome",
+        "outcome_observed_after_market_close", "outcome_observation_time_source"
+      ],
+      "properties": {
+        "source_type": {
+          "enum": [
+            "polymarket_clob_read_only_settlement",
+            "polymarket_gamma_read_only_settlement",
+            "paper_ledger_read_only_settlement_reconciliation"
+          ]
+        },
+        "source_artifact_path": {"type": "string", "minLength": 1},
+        "source_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "resolution_status": {"const": "resolved"},
+        "resolved_outcome": {"enum": ["UP", "DOWN"]},
+        "outcome_observed_after_market_close": {"const": true},
+        "outcome_observation_time_source": {
+          "enum": [
+            "provider_response_clock", "artifact_recorded",
+            "not_recorded_historical"
+          ]
+        },
+        "outcome_observed_at_ts": {"type": ["number", "null"]}
+      },
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {"required": ["selected_action"], "properties": {"selected_action": {"const": "BUY_UP_HOLD_TO_SETTLEMENT"}}},
+      "then": {"properties": {"selected_side": {"const": "UP"}, "action_family": {"const": "HOLD_TO_SETTLEMENT"}}}
+    },
+    {
+      "if": {"required": ["selected_action"], "properties": {"selected_action": {"const": "BUY_DOWN_HOLD_TO_SETTLEMENT"}}},
+      "then": {"properties": {"selected_side": {"const": "DOWN"}, "action_family": {"const": "HOLD_TO_SETTLEMENT"}}}
+    },
+    {
+      "if": {"required": ["selected_action"], "properties": {"selected_action": {"const": "BUY_UP_SELL_BEFORE_CLOSE"}}},
+      "then": {"properties": {"selected_side": {"const": "UP"}, "action_family": {"const": "SELL_BEFORE_CLOSE"}}}
+    },
+    {
+      "if": {"required": ["selected_action"], "properties": {"selected_action": {"const": "BUY_DOWN_SELL_BEFORE_CLOSE"}}},
+      "then": {"properties": {"selected_side": {"const": "DOWN"}, "action_family": {"const": "SELL_BEFORE_CLOSE"}}}
+    }
+  ],
+  "additionalProperties": false
+}

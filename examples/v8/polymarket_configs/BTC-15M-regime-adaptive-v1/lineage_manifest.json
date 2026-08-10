@@ -1,0 +1,75 @@
+{
+  "schema_version": "bigan-btc-15m-regime-adaptive-lineage-manifest-v1",
+  "lineage_id": "BTC-15M-regime-adaptive-v1",
+  "lineage_status": "phase_0_boundary_frozen",
+  "created_at": "2026-07-29T12:00:00+00:00",
+  "protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-regime-adaptive-v1/regime_adaptive_model_protocol.json",
+    "sha256": "c8680f69ff1d44727b68fecad3d9619176b40a44c17f94d9fea6305c73e87a92"
+  },
+  "immutable_parent_evidence": {
+    "role": "phase_1_diagnostics_only",
+    "development_only_forever": true,
+    "promotion_evidence_eligible": false,
+    "artifacts": [
+      {
+        "path": "examples/v8/polymarket_configs/challenge_model_15m_slot_003_rolling_origin_oof_preregistration.json",
+        "sha256": "02eba0ce1a84d7bf53770214d4d547671b7ecc285baedee1caeb077fcd67bbf8"
+      },
+      {
+        "path": "examples/v8/polymarket_configs/challenge_model_15m_slot_003_rolling_origin_oof_result.json",
+        "sha256": "e76708c61e0ca6adc62bcaf492dff71bd662f17dc6c6864fda2c710605e01691"
+      },
+      {
+        "path": "examples/v8/polymarket_training_artifacts/challenge-model-15m-slot-003-rolling-origin-oof-v1/rolling_origin_oof_report.json",
+        "sha256": "25a502bcb821949708f7184bc88f955ae36d9096a8b46592a7f9147bbfa8fd59"
+      },
+      {
+        "path": "examples/v8/polymarket_training_artifacts/challenge-model-15m-slot-003-rolling-origin-oof-v1/rolling_origin_oof_predictions.jsonl",
+        "sha256": "04189b87449e1abef609439206ff75f00305609dc8fdbeed579e380cb402ed52"
+      },
+      {
+        "path": "examples/v8/polymarket_training_artifacts/challenge-model-15m-slot-003-rolling-origin-oof-v1/rolling_origin_fold_audits.jsonl",
+        "sha256": "e732a431c0b14e5f596c8590b595e7cf2250c3e6eec63a0a27a1b4bf2a0b3c8b"
+      }
+    ]
+  },
+  "excluded_from_future_validation": [
+    "challenge-model-15m-slot-003-rolling-origin-oof-v1",
+    "all_preexisting_BTC_15m_development_corpora",
+    "all_preexisting_BTC_15m_validation_or_oos_artifacts",
+    "any_market_not_strictly_later_than_the_frozen_development_boundary"
+  ],
+  "lineage_invariants": {
+    "parent_artifact_bytes_may_change": false,
+    "parent_model_or_hyperparameters_may_be_modified": false,
+    "parent_oof_may_be_reused_as_validation": false,
+    "new_lineage_must_use_distinct_artifact_paths": true,
+    "phase_1_must_complete_before_training": true,
+    "phase_2_through_5_must_freeze_before_fresh_collection": true,
+    "fresh_collection_requires_explicit_attempt_cap_authorization": true,
+    "fresh_outcomes_may_open_before_candidate_decisions_freeze": false,
+    "candidate_may_change_after_fresh_outcomes_open": false,
+    "promotion_is_in_scope": false
+  },
+  "current_state": {
+    "phase_0_complete": true,
+    "phase_1_complete": false,
+    "model_training_started": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}

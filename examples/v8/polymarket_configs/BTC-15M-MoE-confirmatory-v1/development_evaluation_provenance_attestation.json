@@ -1,0 +1,128 @@
+{
+  "schema_version": "bigan-btc-15m-moe-development-provenance-attestation-v1",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v1",
+  "role": "parent_development_provenance_attestation",
+  "created_at": "2026-07-29T12:30:00+00:00",
+  "parent_lineage_id": "BTC-15M-regime-adaptive-v1",
+  "parent_result_commit": "fd848defad7874db5decc96b9ef2de07e8007b1e",
+  "original_source_commit": {
+    "recorded_value": "364fd65b08849cb36227a3c4bb1b55a62cc68825",
+    "exact_commit_reachable": false,
+    "independently_resolvable": false,
+    "failure": "git_object_not_found",
+    "must_not_be_rewritten_in_parent_artifact": true
+  },
+  "reachable_evaluator": {
+    "commit": "364fd65afa4908170dbc2ae5ff4f71c8a2475573",
+    "tree": "e6fdeba77d541cd5fd6b316597f20b4d419cc84c",
+    "commit_timestamp": "2026-07-29T11:23:56+00:00",
+    "commit_subject": "implement governed regime-adaptive candidate evaluation",
+    "shares_recorded_short_prefix": "364fd65",
+    "is_ancestor_of_parent_result_commit": true,
+    "independent_identity_with_recorded_value_proven": false,
+    "interpretation": "strong_workflow_match_but_not_an_exact_resolution_of_the_recorded_commit"
+  },
+  "protocol_freeze_commit": {
+    "commit": "afdb684112db4eae9cffbd1d6832ed0db2d9776a",
+    "tree": "cea9d2ae786e58321baab2a70daf5bf601a6c6fe",
+    "commit_timestamp": "2026-07-29T11:19:08+00:00",
+    "is_ancestor_of_reachable_evaluator_commit": true
+  },
+  "source_file_hashes_at_reachable_evaluator_commit": {
+    "src/bigan/v8/polymarket/regime_adaptive_candidate_evaluation.py": "eca72191ce749e272a4d06ae5904332660f2f03f915aae1cc75d249a8ea1f59d",
+    "src/bigan/v8/polymarket/regime_adaptive_lineage.py": "fc5a69952b3e3efa99348eb4688e92db716461d4b8d6b3ce92b3b42f3f7dea83",
+    "src/bigan/v8/polymarket/challenge_model_15m_training.py": "f0c37adbe9089fed3c60eecc1dc0db8c530bfe7c0ef5828da25d9396148e73cb",
+    "src/bigan/v8/polymarket/challenge_development_lane.py": "4dd762fe15cdb15840f63cbabdc20c9b0e8d27b635c7b16cf4f5053416cb1e25",
+    "src/bigan/v8/polymarket/contracts.py": "f7834fbd9fa8b375180b40b0a8a778a459acf445c6576ee848b1465f59b389cd"
+  },
+  "runtime_versions_recorded_during_attestation": {
+    "python": "3.12.4",
+    "numpy": "2.4.6",
+    "xgboost": "3.2.0",
+    "runtime_versions_recorded_in_parent_result": false
+  },
+  "frozen_protocol_hashes": {
+    "regime_adaptive_model_protocol": "c8680f69ff1d44727b68fecad3d9619176b40a44c17f94d9fea6305c73e87a92",
+    "lineage_manifest": "4d24d95b0f5cb10bdcf1662df64f963d94849b62ed082271e5b6912914cb425a",
+    "temporal_drift_diagnostic_report": "155ba69aed45ca0a92f6370902c2190dd9642053375ffb1404ffd3324ea06509",
+    "regime_feature_contract": "18681952fd6b3e875b24bf3a76808e4102773a82a715d4b01e481a1ba2f55c32",
+    "candidate_family_protocol": "b1008633ddd5fad3228bbf29031bd0cb5f994663cabae10931c1913f639a8c26",
+    "rolling_origin_evaluation_protocol": "47f143606aa3ead42b88bff5601ceb080ca69e0f4b5799d4760f821d279bf5b9",
+    "candidate_budget_protocol": "743308fa6a56c24a71e29c0e5479bc2f49b49c2b5c6eaf15100dca19227ab7c1"
+  },
+  "development_corpus": {
+    "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/finalized_development_corpus_index.jsonl",
+    "sha256": "0c3623e0d6d540a0fae4b71e96e8df3e342e171213212df43473c2b4de2292e6",
+    "market_count": 113,
+    "repository_tracked": false,
+    "availability": "local_pinned_development_content_store"
+  },
+  "evaluation_timeline": {
+    "protocol_json_created_at_metadata": "2026-07-29T12:00:00+00:00",
+    "protocol_git_commit_timestamp": "2026-07-29T11:19:08+00:00",
+    "reachable_evaluator_git_commit_timestamp": "2026-07-29T11:23:56+00:00",
+    "target_access_timestamp": null,
+    "target_access_timestamp_persisted": false,
+    "target_access_lower_bound": "2026-07-29T11:23:56+00:00",
+    "target_access_upper_bound": "2026-07-29T11:24:51.640929+00:00",
+    "evaluation_start_timestamp": null,
+    "evaluation_start_timestamp_persisted": false,
+    "evaluation_completion_timestamp": "2026-07-29T11:24:51.640929+00:00",
+    "result_artifact_commit_timestamp": "2026-07-29T11:29:54+00:00"
+  },
+  "timestamp_reconciliation": {
+    "protocol_definitions_existed_before_target_access": true,
+    "proof": "protocol_commit_is_ancestor_of_reachable_evaluator_commit_and_precedes_the_target_access_time_bound",
+    "json_created_at_metadata_is_chronologically_misleading": true,
+    "metadata_only_correction_required": true,
+    "metadata_only_correction": "use_git_commit_timestamp_as_the_protocol_byte_existence_time_and_preserve_the_original_json_created_at_without_rewrite",
+    "exact_target_access_timestamp_unavailable": true
+  },
+  "result_artifact_hashes": {
+    "development_evaluation_result": "e2bce83faa98319c69ddd7560f8cdd6cb0a6aa983d728710c3c0ab22f7e5b57e",
+    "development_evaluation_manifest": "055bfe27a336e94ad5c7b0647db52a5dd5a798cc51f45428dd439b4d715a213b",
+    "development_evaluation_report": "50413b649f385d8ef31b74427fb687e3aa12249731eab367a1e47657ee516d66",
+    "development_evaluation_report_markdown": "8d281a8bee5740f5b42ca867803af8120b016191056bbd41aa6653aae6c2582f",
+    "development_oof_predictions": "d76640aa1550e3ab7bee32e3dd41be26d2ca156020c628bb85a8ae54a47b60f1",
+    "development_fold_audits": "7f2fe6f9e1e8efb37efbb11328f4b9c96e139b99ceb649c085ac603847d59499"
+  },
+  "rule_and_metric_integrity": {
+    "parent_artifact_rewritten": false,
+    "parent_source_commit_field_rewritten": false,
+    "parent_protocol_or_threshold_changed": false,
+    "candidate_metric_or_result_recomputed_using_changed_rules": false,
+    "independent_metric_reconciliation_required": true,
+    "independent_metric_reconciliation_completed_at_attestation_time": false
+  },
+  "attestation_status": {
+    "protocol_precedence_attested": true,
+    "artifact_hashes_attested": true,
+    "original_source_commit_attested": false,
+    "passed": false,
+    "fail_closed_reason": "recorded_original_source_commit_is_not_an_independently_resolvable_git_object",
+    "new_candidate_freeze_allowed": false,
+    "static_model_training_allowed": false,
+    "fresh_collection_authorized": false
+  },
+  "parent_invariants": {
+    "development_only_forever": true,
+    "promotion_evidence_eligible": false,
+    "fresh_validation_evidence_eligible": false,
+    "fresh_collection_allowed": false,
+    "selected_candidate_id": null,
+    "model_freeze_created": false
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}

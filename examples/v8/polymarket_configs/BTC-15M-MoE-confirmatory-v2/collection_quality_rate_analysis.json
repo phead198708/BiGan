@@ -1,0 +1,48 @@
+{
+  "attempt_cap": 905,
+  "attempt_cap_formula": "ceil(target_quality_valid_market_count/conservative_quality_rate_lower_bound)",
+  "attempt_cap_ready": true,
+  "attempted_market_count": 120,
+  "confidence": 0.975,
+  "conservative_quality_rate_lower_bound": 0.8844740796636988,
+  "conservative_rate_method": "one_sided_97_5pct_wilson_lower_bound",
+  "created_at": "2026-07-30T09:00:00+00:00",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "maximum_quality_valid_markets_per_attempt": 1,
+  "model_outputs_used_for_cap_selection": false,
+  "observed_quality_valid_rate": 0.9416666666666667,
+  "outcomes_labels_or_pnl_read_for_cap_selection": false,
+  "quality_valid_market_count": 113,
+  "role": "outcome_blind_attempt_cap_derivation",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-collection-quality-rate-analysis-v2",
+  "source_attempt_health_ledger": {
+    "path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/development_lane_health_latest.json",
+    "sha256": "c67167eeb08f26531373e9a27608ef0b8932cbb290c8d7e0f65b4f73501c50d5"
+  },
+  "source_fields_used": [
+    "cumulative.attempted_market_count",
+    "cumulative.quality_valid_market_count",
+    "outcomes_labels_or_pnl_read_for_health"
+  ],
+  "state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "target_is_mathematically_reachable_under_cap": true,
+  "target_quality_valid_market_count": 800,
+  "z_value": 1.9599639845400534
+}
