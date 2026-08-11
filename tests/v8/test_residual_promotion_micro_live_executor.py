@@ -72,6 +72,7 @@ CONFIG_PATH = (
 AUTHORIZATION_TEMPLATE_PATH = f"{CONFIG_PATH}/micro_live_authorization_template_v7.json"
 AUTHORIZED_AT_TS_MS = 1_789_948_800_000
 NOW_TS_MS = AUTHORIZED_AT_TS_MS + 301_000
+SETTLEMENT_NOW_TS_MS = AUTHORIZED_AT_TS_MS + 901_000
 
 
 def _market_identity_evidence(
@@ -193,6 +194,154 @@ def _base_feature_and_signal(
 BASE_FEATURE_ROW, BASE_SIGNAL_PAYLOAD, BASE_MARKET_IDENTITY_EVIDENCE = (
     _base_feature_and_signal()
 )
+
+
+def _order_identity(
+    executor: MicroLiveExecutor,
+    client_order_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    prepared = next(
+        (
+            dict(event["payload"])
+            for event in executor.events
+            if event["event_type"] == "ORDER_PREPARED"
+            and event["payload"]["client_order_id"] == client_order_id
+        ),
+        {
+            "client_order_id": client_order_id,
+            "market_id": "0x" + "0" * 64,
+            "token_id": "1",
+            "slug": "btc-updown-15m-1789948800",
+            "submitted_at_ts_ms": NOW_TS_MS,
+            "signal_payload": {
+                "up_token_id": "1",
+                "down_token_id": "2",
+                "market_identity": {"market_end_ts_ms": AUTHORIZED_AT_TS_MS + 900_000},
+            },
+        },
+    )
+    acknowledgement = next(
+        (
+            dict(event["payload"])
+            for event in executor.events
+            if event["event_type"] == "ORDER_ACKNOWLEDGED"
+            and event["payload"]["client_order_id"] == client_order_id
+        ),
+        {"exchange_order_id": "exchange-missing"},
+    )
+    return prepared, acknowledgement
+
+
+def _json_bytes(value: dict[str, Any]) -> bytes:
+    return json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+
+
+def _record_fill(
+    executor: MicroLiveExecutor,
+    *,
+    client_order_id: str,
+    fill_id: str,
+    now_ts_ms: int,
+    quantity: str,
+    price: str,
+    fee_usd: str,
+    transport_event_sha256: str,
+    event_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    del transport_event_sha256  # Opaque caller-provided hashes are no longer trusted.
+    prepared, acknowledgement = _order_identity(executor, client_order_id)
+    event = {
+        "event_type": "FILL",
+        "client_order_id": client_order_id,
+        "exchange_order_id": acknowledgement["exchange_order_id"],
+        "fill_id": fill_id,
+        "market_id": prepared["market_id"],
+        "token_id": prepared["token_id"],
+        "quantity": quantity,
+        "price": price,
+        "fee_usd": fee_usd,
+        "executed_at_ts_ms": now_ts_ms,
+    }
+    event.update(event_overrides or {})
+    return executor.record_fill(
+        client_order_id=client_order_id,
+        fill_id=fill_id,
+        now_ts_ms=now_ts_ms,
+        quantity=quantity,
+        price=price,
+        fee_usd=fee_usd,
+        raw_transport_event=_json_bytes(event),
+    )
+
+
+def _record_order_closed(
+    executor: MicroLiveExecutor,
+    *,
+    client_order_id: str,
+    status: str,
+    now_ts_ms: int,
+    transport_event_sha256: str,
+    event_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    del transport_event_sha256  # Opaque caller-provided hashes are no longer trusted.
+    prepared, acknowledgement = _order_identity(executor, client_order_id)
+    event = {
+        "event_type": "ORDER_CLOSED",
+        "client_order_id": client_order_id,
+        "exchange_order_id": acknowledgement["exchange_order_id"],
+        "market_id": prepared["market_id"],
+        "token_id": prepared["token_id"],
+        "status": status,
+        "effective_at_ts_ms": now_ts_ms,
+    }
+    event.update(event_overrides or {})
+    return executor.record_order_closed(
+        client_order_id=client_order_id,
+        status=status,
+        now_ts_ms=now_ts_ms,
+        raw_transport_event=_json_bytes(event),
+    )
+
+
+def _record_settlement(
+    executor: MicroLiveExecutor,
+    *,
+    client_order_id: str,
+    settlement_id: str,
+    now_ts_ms: int,
+    payout_per_token: str,
+    official_settlement_sha256: str,
+    event_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    del official_settlement_sha256  # Exact official bytes now determine the hash.
+    prepared, _ = _order_identity(executor, client_order_id)
+    signal = dict(prepared["signal_payload"])
+    winning_token_id = (
+        prepared["token_id"]
+        if payout_per_token == "1"
+        else (
+            signal["down_token_id"]
+            if prepared["token_id"] == signal["up_token_id"]
+            else signal["up_token_id"]
+        )
+    )
+    event = {
+        "event_type": "OFFICIAL_SETTLEMENT",
+        "settlement_id": settlement_id,
+        "market_id": prepared["market_id"],
+        "slug": prepared["slug"],
+        "winning_token_id": winning_token_id,
+        "payout_per_token": payout_per_token,
+        "finalized_at_ts_ms": now_ts_ms,
+    }
+    event.update(event_overrides or {})
+    return executor.record_settlement(
+        client_order_id=client_order_id,
+        settlement_id=settlement_id,
+        now_ts_ms=now_ts_ms,
+        payout_per_token=payout_per_token,
+        raw_official_settlement_event=_json_bytes(event),
+    )
 
 
 class FakeTransport:
@@ -1225,7 +1374,8 @@ def test_open_order_and_authorization_lifetime_notional_caps(
             )
         )
         assert result["status"] == "ORDER_ACKNOWLEDGED"
-        lifetime.record_order_closed(
+        _record_order_closed(
+            lifetime,
             client_order_id=result["client_order_id"],
             status="CANCELED",
             now_ts_ms=NOW_TS_MS,
@@ -1344,7 +1494,8 @@ def test_fill_cash_position_settlement_and_restart_reconcile(
     order = executor.submit_signal(
         **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
     )
-    fill = executor.record_fill(
+    fill = _record_fill(
+        executor,
         client_order_id=order["client_order_id"],
         fill_id="fill-001",
         now_ts_ms=NOW_TS_MS,
@@ -1355,7 +1506,8 @@ def test_fill_cash_position_settlement_and_restart_reconcile(
     )
     assert fill["snapshot"]["cash_usd"] == "9.6098"
     assert fill["snapshot"]["positions"]["DOWN"] == "1"
-    assert executor.record_fill(
+    assert _record_fill(
+        executor,
         client_order_id=order["client_order_id"],
         fill_id="fill-001",
         now_ts_ms=NOW_TS_MS,
@@ -1364,10 +1516,11 @@ def test_fill_cash_position_settlement_and_restart_reconcile(
         fee_usd="0.0002",
         transport_event_sha256="f" * 64,
     )["status"] == "IDEMPOTENT_FILL_REPLAY"
-    settled = executor.record_settlement(
+    settled = _record_settlement(
+        executor,
         client_order_id=order["client_order_id"],
         settlement_id="settlement-001",
-        now_ts_ms=NOW_TS_MS,
+        now_ts_ms=SETTLEMENT_NOW_TS_MS,
         payout_per_token="1",
         official_settlement_sha256="1" * 64,
     )
@@ -1391,6 +1544,7 @@ def test_loss_budget_reservation_prevents_realized_loss_cap_overshoot(
     assert verified.maximum_realized_loss_usd == Decimal("1.00")
     transport = FakeTransport()
     executor = MicroLiveExecutor(verified, transport=transport)
+    orders = []
     for index in range(1, 3):
         order = executor.submit_signal(
             **_signal(
@@ -1400,7 +1554,8 @@ def test_loss_budget_reservation_prevents_realized_loss_cap_overshoot(
                 down_token_id=str(30_001 + index * 2),
             )
         )
-        executor.record_fill(
+        _record_fill(
+            executor,
             client_order_id=order["client_order_id"],
             fill_id=f"loss-fill-{index}",
             now_ts_ms=NOW_TS_MS,
@@ -1409,18 +1564,7 @@ def test_loss_budget_reservation_prevents_realized_loss_cap_overshoot(
             fee_usd="0.0002",
             transport_event_sha256=f"{index + 10:064x}",
         )
-        executor.record_settlement(
-            client_order_id=order["client_order_id"],
-            settlement_id=f"loss-settlement-{index}",
-            now_ts_ms=NOW_TS_MS,
-            payout_per_token="0",
-            official_settlement_sha256=f"{index + 20:064x}",
-        )
-    snapshot = executor.reconciliation_snapshot()
-    assert Decimal(snapshot["realized_pnl_usd"]) == Decimal("-0.7804")
-    assert snapshot["maximum_realized_loss_usd"] == "1.00"
-    assert snapshot["loss_budget_consumed_usd"] == "0.7804"
-    assert snapshot["kill_switch_active"] is False
+        orders.append(order)
     blocked = executor.submit_signal(
         **_signal(
             candidate_bundle_sha256=verified.candidate_bundle_sha256,
@@ -1430,6 +1574,20 @@ def test_loss_budget_reservation_prevents_realized_loss_cap_overshoot(
         )
     )
     assert blocked["reason"] == "maximum_loss_reservation_exceeded"
+    for index, order in enumerate(orders, start=1):
+        _record_settlement(
+            executor,
+            client_order_id=order["client_order_id"],
+            settlement_id=f"loss-settlement-{index}",
+            now_ts_ms=SETTLEMENT_NOW_TS_MS,
+            payout_per_token="0",
+            official_settlement_sha256=f"{index + 20:064x}",
+        )
+    snapshot = executor.reconciliation_snapshot()
+    assert Decimal(snapshot["realized_pnl_usd"]) == Decimal("-0.7804")
+    assert snapshot["maximum_realized_loss_usd"] == "1.00"
+    assert snapshot["loss_budget_consumed_usd"] == "0.7804"
+    assert snapshot["kill_switch_active"] is False
     assert len(transport.submit_calls) == 2
 
 
@@ -1462,7 +1620,8 @@ def test_exact_human_loss_limit_persistently_kills_at_boundary(
         if event["event_type"] == "ORDER_PREPARED"
     )
     assert prepared["maximum_loss_usd"] == "0.4302"
-    executor.record_fill(
+    _record_fill(
+        executor,
         client_order_id=order["client_order_id"],
         fill_id="boundary-loss-fill",
         now_ts_ms=NOW_TS_MS,
@@ -1471,10 +1630,11 @@ def test_exact_human_loss_limit_persistently_kills_at_boundary(
         fee_usd="0.0002",
         transport_event_sha256="d" * 64,
     )
-    settled = executor.record_settlement(
+    settled = _record_settlement(
+        executor,
         client_order_id=order["client_order_id"],
         settlement_id="boundary-loss-settlement",
-        now_ts_ms=NOW_TS_MS,
+        now_ts_ms=SETTLEMENT_NOW_TS_MS,
         payout_per_token="0",
         official_settlement_sha256="e" * 64,
     )
@@ -1496,7 +1656,8 @@ def test_fill_fee_above_frozen_cost_contract_persistently_kills(
         **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
     )
     with pytest.raises(MicroLiveExecutionError, match="frozen execution contract"):
-        executor.record_fill(
+        _record_fill(
+            executor,
             client_order_id=order["client_order_id"],
             fill_id="fee-drift-fill",
             now_ts_ms=NOW_TS_MS,
@@ -1511,6 +1672,261 @@ def test_fill_fee_above_frozen_cost_contract_persistently_kills(
     assert len(transport.cancel_calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("client_order_id", "wrong-client-order"),
+        ("exchange_order_id", "wrong-exchange-order"),
+        ("market_id", "0x" + "9" * 64),
+        ("token_id", "999999"),
+    ),
+)
+def test_fill_transport_identity_mismatch_fails_closed(
+    authorized_fixture: dict[str, Any],
+    field: str,
+    value: str,
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    with pytest.raises(MicroLiveExecutionError, match="fill transport identity"):
+        _record_fill(
+            executor,
+            client_order_id=order["client_order_id"],
+            fill_id="identity-mismatch-fill",
+            now_ts_ms=NOW_TS_MS,
+            quantity="1",
+            price="0.39",
+            fee_usd="0.0002",
+            transport_event_sha256="0" * 64,
+            event_overrides={field: value},
+        )
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["fill_count"] == 0
+    assert snapshot["kill_switch_reason"] == "fill_reconciliation_failed"
+    assert len(transport.cancel_calls) == 1
+
+
+def test_late_fill_before_close_effective_time_reconciles_but_after_close_kills(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    close_effective_ts_ms = NOW_TS_MS + 50
+    _record_order_closed(
+        executor,
+        client_order_id=order["client_order_id"],
+        status="CANCELED",
+        now_ts_ms=NOW_TS_MS + 100,
+        transport_event_sha256="0" * 64,
+        event_overrides={"effective_at_ts_ms": close_effective_ts_ms},
+    )
+    reconciled = _record_fill(
+        executor,
+        client_order_id=order["client_order_id"],
+        fill_id="late-observed-pre-close-fill",
+        now_ts_ms=NOW_TS_MS + 200,
+        quantity="1",
+        price="0.39",
+        fee_usd="0.0002",
+        transport_event_sha256="0" * 64,
+        event_overrides={"executed_at_ts_ms": close_effective_ts_ms - 1},
+    )
+    assert reconciled["status"] == "FILL_RECORDED"
+    assert reconciled["snapshot"]["fill_count"] == 1
+    assert reconciled["snapshot"]["open_order_count"] == 0
+
+    rejected_transport = FakeTransport()
+    rejected = MicroLiveExecutor(verified, transport=rejected_transport)
+    rejected_order = rejected.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    _record_order_closed(
+        rejected,
+        client_order_id=rejected_order["client_order_id"],
+        status="CANCELED",
+        now_ts_ms=NOW_TS_MS + 100,
+        transport_event_sha256="0" * 64,
+        event_overrides={"effective_at_ts_ms": close_effective_ts_ms},
+    )
+    with pytest.raises(MicroLiveExecutionError, match="executed after order close"):
+        _record_fill(
+            rejected,
+            client_order_id=rejected_order["client_order_id"],
+            fill_id="post-close-fill",
+            now_ts_ms=NOW_TS_MS + 200,
+            quantity="1",
+            price="0.39",
+            fee_usd="0.0002",
+            transport_event_sha256="0" * 64,
+            event_overrides={"executed_at_ts_ms": close_effective_ts_ms + 1},
+        )
+    assert rejected.reconciliation_snapshot()["kill_switch_active"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("client_order_id", "wrong-client-order"),
+        ("exchange_order_id", "wrong-exchange-order"),
+        ("market_id", "0x" + "6" * 64),
+        ("token_id", "999999"),
+    ),
+)
+def test_order_close_transport_identity_mismatch_fails_closed(
+    authorized_fixture: dict[str, Any],
+    field: str,
+    value: str,
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    with pytest.raises(MicroLiveExecutionError, match="close transport identity"):
+        _record_order_closed(
+            executor,
+            client_order_id=order["client_order_id"],
+            status="CANCELED",
+            now_ts_ms=NOW_TS_MS + 100,
+            transport_event_sha256="0" * 64,
+            event_overrides={field: value},
+        )
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["kill_switch_reason"] == "order_close_reconciliation_failed"
+    assert snapshot["open_order_count"] == 0
+
+
+def test_official_settlement_before_market_end_fails_closed(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    _record_fill(
+        executor,
+        client_order_id=order["client_order_id"],
+        fill_id="premature-settlement-fill",
+        now_ts_ms=NOW_TS_MS,
+        quantity="1",
+        price="0.39",
+        fee_usd="0.0002",
+        transport_event_sha256="0" * 64,
+    )
+    with pytest.raises(MicroLiveExecutionError, match="settlement identity"):
+        _record_settlement(
+            executor,
+            client_order_id=order["client_order_id"],
+            settlement_id="premature-settlement",
+            now_ts_ms=NOW_TS_MS + 1,
+            payout_per_token="1",
+            official_settlement_sha256="0" * 64,
+        )
+    assert executor.reconciliation_snapshot()["settlement_count"] == 0
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("market_id", "0x" + "8" * 64),
+        ("slug", "btc-updown-15m-1789949700"),
+        ("winning_token_id", "999999"),
+    ),
+)
+def test_official_settlement_identity_mismatch_fails_closed(
+    authorized_fixture: dict[str, Any],
+    field: str,
+    value: str,
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    _record_fill(
+        executor,
+        client_order_id=order["client_order_id"],
+        fill_id="settlement-identity-fill",
+        now_ts_ms=NOW_TS_MS,
+        quantity="1",
+        price="0.39",
+        fee_usd="0.0002",
+        transport_event_sha256="0" * 64,
+    )
+    with pytest.raises(MicroLiveExecutionError, match="settlement identity"):
+        _record_settlement(
+            executor,
+            client_order_id=order["client_order_id"],
+            settlement_id="identity-mismatch-settlement",
+            now_ts_ms=SETTLEMENT_NOW_TS_MS,
+            payout_per_token="1",
+            official_settlement_sha256="0" * 64,
+            event_overrides={field: value},
+        )
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["settlement_count"] == 0
+    assert snapshot["kill_switch_reason"] == "settlement_reconciliation_failed"
+
+
+def test_rehashed_lifecycle_raw_event_identity_tamper_fails_restore(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    executor = MicroLiveExecutor(verified, transport=FakeTransport())
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    _record_fill(
+        executor,
+        client_order_id=order["client_order_id"],
+        fill_id="tamper-fill",
+        now_ts_ms=NOW_TS_MS,
+        quantity="1",
+        price="0.39",
+        fee_usd="0.0002",
+        transport_event_sha256="0" * 64,
+    )
+    state = executor.export_state()
+    fill_event = next(
+        event for event in state["events"] if event["event_type"] == "FILL_RECORDED"
+    )
+    raw = json.loads(fill_event["payload"]["raw_transport_event_json"])
+    raw["market_id"] = "0x" + "7" * 64
+    raw_json = json.dumps(raw, separators=(",", ":"), sort_keys=True)
+    fill_event["payload"]["raw_transport_event_json"] = raw_json
+    fill_event["payload"]["transport_event_sha256"] = hashlib.sha256(
+        raw_json.encode()
+    ).hexdigest()
+    previous = "GENESIS"
+    for event in state["events"]:
+        event["previous_event_sha256"] = previous
+        core = {key: value for key, value in event.items() if key != "event_sha256"}
+        event["event_sha256"] = canonical_json_sha256(core)
+        previous = event["event_sha256"]
+    payload = {key: value for key, value in state.items() if key != "state_sha256"}
+    state["state_sha256"] = canonical_json_sha256(payload)
+    with pytest.raises(MicroLiveExecutionError, match="fill payload values"):
+        MicroLiveExecutor.restore(
+            authorization=verified,
+            transport=FakeTransport(),
+            state=state,
+        )
+
+
 def test_conflicting_fill_and_partial_open_settlement_engage_kill_switch(
     authorized_fixture: dict[str, Any],
 ) -> None:
@@ -1520,7 +1936,8 @@ def test_conflicting_fill_and_partial_open_settlement_engage_kill_switch(
     order = executor.submit_signal(
         **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
     )
-    executor.record_fill(
+    _record_fill(
+        executor,
         client_order_id=order["client_order_id"],
         fill_id="fill-partial",
         now_ts_ms=NOW_TS_MS,
@@ -1530,7 +1947,8 @@ def test_conflicting_fill_and_partial_open_settlement_engage_kill_switch(
         transport_event_sha256="a" * 64,
     )
     with pytest.raises(MicroLiveExecutionError, match="conflicting duplicate fill"):
-        executor.record_fill(
+        _record_fill(
+            executor,
             client_order_id=order["client_order_id"],
             fill_id="fill-partial",
             now_ts_ms=NOW_TS_MS,
@@ -1548,7 +1966,8 @@ def test_conflicting_fill_and_partial_open_settlement_engage_kill_switch(
     second_order = second.submit_signal(
         **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
     )
-    second.record_fill(
+    _record_fill(
+        second,
         client_order_id=second_order["client_order_id"],
         fill_id="fill-partial-2",
         now_ts_ms=NOW_TS_MS,
@@ -1558,10 +1977,11 @@ def test_conflicting_fill_and_partial_open_settlement_engage_kill_switch(
         transport_event_sha256="b" * 64,
     )
     with pytest.raises(MicroLiveExecutionError, match="open order cannot settle"):
-        second.record_settlement(
+        _record_settlement(
+            second,
             client_order_id=second_order["client_order_id"],
             settlement_id="settlement-too-early",
-            now_ts_ms=NOW_TS_MS,
+            now_ts_ms=SETTLEMENT_NOW_TS_MS,
             payout_per_token="1",
             official_settlement_sha256="c" * 64,
         )
@@ -1642,7 +2062,8 @@ def test_all_lifecycle_reconciliation_ambiguities_persistently_kill(
 
     unknown_fill = MicroLiveExecutor(verified, transport=FakeTransport())
     with pytest.raises(MicroLiveExecutionError, match="acknowledged order"):
-        unknown_fill.record_fill(
+        _record_fill(
+            unknown_fill,
             client_order_id="missing-order",
             fill_id="missing-fill",
             now_ts_ms=NOW_TS_MS,
@@ -1661,7 +2082,8 @@ def test_all_lifecycle_reconciliation_ambiguities_persistently_kill(
         **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
     )
     with pytest.raises(MicroLiveExecutionError, match="status is invalid"):
-        bad_close.record_order_closed(
+        _record_order_closed(
+            bad_close,
             client_order_id=close_order["client_order_id"],
             status="FILLED",
             now_ts_ms=NOW_TS_MS,
@@ -1678,10 +2100,11 @@ def test_all_lifecycle_reconciliation_ambiguities_persistently_kill(
         **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
     )
     with pytest.raises(MicroLiveExecutionError, match="unfilled order"):
-        bad_settlement.record_settlement(
+        _record_settlement(
+            bad_settlement,
             client_order_id=settlement_order["client_order_id"],
             settlement_id="unfilled-settlement",
-            now_ts_ms=NOW_TS_MS,
+            now_ts_ms=SETTLEMENT_NOW_TS_MS,
             payout_per_token="1",
             official_settlement_sha256="c" * 64,
         )
@@ -1701,7 +2124,8 @@ def test_lifecycle_timestamp_regression_still_persists_kill(
         **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
     )
     with pytest.raises(MicroLiveExecutionError, match="timestamp regressed"):
-        executor.record_fill(
+        _record_fill(
+            executor,
             client_order_id=order["client_order_id"],
             fill_id="regressed-fill",
             now_ts_ms=NOW_TS_MS - 1,

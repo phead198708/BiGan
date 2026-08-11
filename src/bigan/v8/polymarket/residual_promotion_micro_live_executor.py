@@ -30,7 +30,7 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
     ResidualPromotionRuntime,
 )
 
-STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v2"
+STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v3"
 SIGNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-execution-signal-v2"
 IMPLEMENTATION_REPOSITORY_PATH = (
     "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py"
@@ -694,12 +694,14 @@ class MicroLiveExecutor:
         quantity: str,
         price: str,
         fee_usd: str,
-        transport_event_sha256: str,
+        raw_transport_event: bytes,
     ) -> dict[str, Any]:
         """Record one fill; every trusted-time reconciliation error kills."""
 
         _require_positive_timestamp(now_ts_ms, "fill observation")
         try:
+            if self._events and now_ts_ms < int(self._events[-1]["event_ts_ms"]):
+                raise MicroLiveExecutionError("fill observation timestamp regressed")
             return self._record_fill(
                 client_order_id=client_order_id,
                 fill_id=fill_id,
@@ -707,7 +709,7 @@ class MicroLiveExecutor:
                 quantity=quantity,
                 price=price,
                 fee_usd=fee_usd,
-                transport_event_sha256=transport_event_sha256,
+                raw_transport_event=raw_transport_event,
             )
         except MicroLiveExecutionError:
             self.engage_kill_switch(
@@ -725,7 +727,7 @@ class MicroLiveExecutor:
         quantity: str,
         price: str,
         fee_usd: str,
-        transport_event_sha256: str,
+        raw_transport_event: bytes,
     ) -> dict[str, Any]:
         """Apply one externally observed fill to the append-only ledger."""
 
@@ -733,21 +735,66 @@ class MicroLiveExecutor:
         order = view["orders"].get(client_order_id)
         if order is None or order.get("acknowledgement") is None:
             raise MicroLiveExecutionError("fill has no acknowledged order")
-        if order.get("closed_status") is not None or order.get("settlement") is not None:
+        if order.get("settlement") is not None:
             self.engage_kill_switch(reason="fill_after_terminal_state", now_ts_ms=now_ts_ms)
-            raise MicroLiveExecutionError("fill arrived after order close or settlement")
+            raise MicroLiveExecutionError("fill arrived after settlement")
         if not isinstance(fill_id, str) or not fill_id:
             raise MicroLiveExecutionError("fill identity is invalid")
+        prepared = dict(order["prepared"])
+        acknowledgement = dict(order["acknowledgement"])
+        transport_event, raw_json, transport_event_sha256 = _raw_json_object(
+            raw_transport_event,
+            "fill transport event",
+        )
+        expected_transport_keys = {
+            "event_type",
+            "client_order_id",
+            "exchange_order_id",
+            "fill_id",
+            "market_id",
+            "token_id",
+            "quantity",
+            "price",
+            "fee_usd",
+            "executed_at_ts_ms",
+        }
+        executed_at_ts_ms = transport_event.get("executed_at_ts_ms")
+        if not (
+            set(transport_event) == expected_transport_keys
+            and transport_event.get("event_type") == "FILL"
+            and transport_event.get("client_order_id") == client_order_id
+            and transport_event.get("exchange_order_id")
+            == acknowledgement["exchange_order_id"]
+            and transport_event.get("fill_id") == fill_id
+            and transport_event.get("market_id") == prepared["market_id"]
+            and transport_event.get("token_id") == prepared["token_id"]
+            and transport_event.get("quantity") == quantity
+            and transport_event.get("price") == price
+            and transport_event.get("fee_usd") == fee_usd
+            and isinstance(executed_at_ts_ms, int)
+            and not isinstance(executed_at_ts_ms, bool)
+            and prepared["submitted_at_ts_ms"] <= executed_at_ts_ms <= now_ts_ms
+        ):
+            raise MicroLiveExecutionError("fill transport identity is mismatched")
+        close_event = order.get("close_event")
+        if close_event is not None and executed_at_ts_ms > int(
+            close_event["effective_at_ts_ms"]
+        ):
+            self.engage_kill_switch(reason="fill_after_terminal_state", now_ts_ms=now_ts_ms)
+            raise MicroLiveExecutionError("fill executed after order close")
         existing_fill = view["fills"].get(fill_id)
         payload = {
             "client_order_id": client_order_id,
+            "exchange_order_id": acknowledgement["exchange_order_id"],
             "fill_id": fill_id,
+            "market_id": prepared["market_id"],
+            "token_id": prepared["token_id"],
             "quantity": str(_positive_decimal(quantity, "fill quantity")),
             "price": str(_positive_decimal(price, "fill price")),
             "fee_usd": str(_nonnegative_decimal(fee_usd, "fill fee")),
-            "transport_event_sha256": _require_sha256(
-                transport_event_sha256, "fill transport event"
-            ),
+            "executed_at_ts_ms": executed_at_ts_ms,
+            "transport_event_sha256": transport_event_sha256,
+            "raw_transport_event_json": raw_json,
         }
         if existing_fill is not None:
             if existing_fill != payload:
@@ -785,17 +832,19 @@ class MicroLiveExecutor:
         client_order_id: str,
         status: str,
         now_ts_ms: int,
-        transport_event_sha256: str,
+        raw_transport_event: bytes,
     ) -> dict[str, Any]:
         """Record an order close; any reconciliation ambiguity kills."""
 
         _require_positive_timestamp(now_ts_ms, "order close observation")
         try:
+            if self._events and now_ts_ms < int(self._events[-1]["event_ts_ms"]):
+                raise MicroLiveExecutionError("order close observation timestamp regressed")
             return self._record_order_closed(
                 client_order_id=client_order_id,
                 status=status,
                 now_ts_ms=now_ts_ms,
-                transport_event_sha256=transport_event_sha256,
+                raw_transport_event=raw_transport_event,
             )
         except MicroLiveExecutionError:
             self.engage_kill_switch(
@@ -810,7 +859,7 @@ class MicroLiveExecutor:
         client_order_id: str,
         status: str,
         now_ts_ms: int,
-        transport_event_sha256: str,
+        raw_transport_event: bytes,
     ) -> dict[str, Any]:
         if status not in {"CANCELED", "EXPIRED"}:
             raise MicroLiveExecutionError("order close status is invalid")
@@ -821,9 +870,48 @@ class MicroLiveExecutor:
         if order.get("settlement") is not None:
             self.engage_kill_switch(reason="order_close_after_settlement", now_ts_ms=now_ts_ms)
             raise MicroLiveExecutionError("order close arrived after settlement")
-        existing = order.get("closed_status")
+        prepared = dict(order["prepared"])
+        acknowledgement = dict(order["acknowledgement"])
+        transport_event, raw_json, transport_event_sha256 = _raw_json_object(
+            raw_transport_event,
+            "order close transport event",
+        )
+        expected_transport_keys = {
+            "event_type",
+            "client_order_id",
+            "exchange_order_id",
+            "market_id",
+            "token_id",
+            "status",
+            "effective_at_ts_ms",
+        }
+        effective_at_ts_ms = transport_event.get("effective_at_ts_ms")
+        if not (
+            set(transport_event) == expected_transport_keys
+            and transport_event.get("event_type") == "ORDER_CLOSED"
+            and transport_event.get("client_order_id") == client_order_id
+            and transport_event.get("exchange_order_id")
+            == acknowledgement["exchange_order_id"]
+            and transport_event.get("market_id") == prepared["market_id"]
+            and transport_event.get("token_id") == prepared["token_id"]
+            and transport_event.get("status") == status
+            and isinstance(effective_at_ts_ms, int)
+            and not isinstance(effective_at_ts_ms, bool)
+            and prepared["submitted_at_ts_ms"] <= effective_at_ts_ms <= now_ts_ms
+        ):
+            raise MicroLiveExecutionError("order close transport identity is mismatched")
+        payload = {
+            "client_order_id": client_order_id,
+            "exchange_order_id": acknowledgement["exchange_order_id"],
+            "market_id": prepared["market_id"],
+            "token_id": prepared["token_id"],
+            "effective_at_ts_ms": effective_at_ts_ms,
+            "transport_event_sha256": transport_event_sha256,
+            "raw_transport_event_json": raw_json,
+        }
+        existing = order.get("close_event")
         if existing is not None:
-            if existing != status:
+            if existing != payload or order.get("closed_status") != status:
                 self.engage_kill_switch(
                     reason="conflicting_order_close",
                     now_ts_ms=now_ts_ms,
@@ -833,12 +921,7 @@ class MicroLiveExecutor:
         event_type = "ORDER_CANCELED" if status == "CANCELED" else "ORDER_EXPIRED"
         self._append_event(
             event_type,
-            {
-                "client_order_id": client_order_id,
-                "transport_event_sha256": _require_sha256(
-                    transport_event_sha256, "order close transport event"
-                ),
-            },
+            payload,
             event_ts_ms=now_ts_ms,
         )
         return {"status": event_type, "client_order_id": client_order_id}
@@ -850,18 +933,20 @@ class MicroLiveExecutor:
         settlement_id: str,
         now_ts_ms: int,
         payout_per_token: str,
-        official_settlement_sha256: str,
+        raw_official_settlement_event: bytes,
     ) -> dict[str, Any]:
         """Record official settlement; any reconciliation ambiguity kills."""
 
         _require_positive_timestamp(now_ts_ms, "settlement observation")
         try:
+            if self._events and now_ts_ms < int(self._events[-1]["event_ts_ms"]):
+                raise MicroLiveExecutionError("settlement observation timestamp regressed")
             return self._record_settlement(
                 client_order_id=client_order_id,
                 settlement_id=settlement_id,
                 now_ts_ms=now_ts_ms,
                 payout_per_token=payout_per_token,
-                official_settlement_sha256=official_settlement_sha256,
+                raw_official_settlement_event=raw_official_settlement_event,
             )
         except MicroLiveExecutionError:
             self.engage_kill_switch(
@@ -877,7 +962,7 @@ class MicroLiveExecutor:
         settlement_id: str,
         now_ts_ms: int,
         payout_per_token: str,
-        official_settlement_sha256: str,
+        raw_official_settlement_event: bytes,
     ) -> dict[str, Any]:
         view = self._reconcile_view()
         order = view["orders"].get(client_order_id)
@@ -888,13 +973,59 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError("settlement payout must be official binary")
         if not isinstance(settlement_id, str) or not settlement_id:
             raise MicroLiveExecutionError("settlement identity is invalid")
+        prepared = dict(order["prepared"])
+        signal = dict(prepared["signal_payload"])
+        official, raw_json, official_settlement_sha256 = _raw_json_object(
+            raw_official_settlement_event,
+            "official settlement event",
+        )
+        expected_official_keys = {
+            "event_type",
+            "settlement_id",
+            "market_id",
+            "slug",
+            "winning_token_id",
+            "payout_per_token",
+            "finalized_at_ts_ms",
+        }
+        winning_token_id = official.get("winning_token_id")
+        expected_winning_token_id = (
+            prepared["token_id"]
+            if payout == Decimal("1")
+            else (
+                signal["down_token_id"]
+                if prepared["token_id"] == signal["up_token_id"]
+                else signal["up_token_id"]
+            )
+        )
+        finalized_at_ts_ms = official.get("finalized_at_ts_ms")
+        if not (
+            set(official) == expected_official_keys
+            and official.get("event_type") == "OFFICIAL_SETTLEMENT"
+            and official.get("settlement_id") == settlement_id
+            and official.get("market_id") == prepared["market_id"]
+            and official.get("slug") == prepared["slug"]
+            and winning_token_id == expected_winning_token_id
+            and official.get("payout_per_token") == payout_per_token
+            and isinstance(finalized_at_ts_ms, int)
+            and not isinstance(finalized_at_ts_ms, bool)
+            and finalized_at_ts_ms >= int(
+                dict(signal["market_identity"])["market_end_ts_ms"]
+            )
+            and finalized_at_ts_ms <= now_ts_ms
+        ):
+            raise MicroLiveExecutionError("official settlement identity is mismatched")
         payload = {
             "client_order_id": client_order_id,
             "settlement_id": settlement_id,
+            "market_id": prepared["market_id"],
+            "slug": prepared["slug"],
+            "token_id": prepared["token_id"],
+            "winning_token_id": winning_token_id,
             "payout_per_token": str(payout),
-            "official_settlement_sha256": _require_sha256(
-                official_settlement_sha256, "official settlement"
-            ),
+            "finalized_at_ts_ms": finalized_at_ts_ms,
+            "official_settlement_sha256": official_settlement_sha256,
+            "raw_official_settlement_json": raw_json,
         }
         existing = order.get("settlement")
         settlement_elsewhere = view["settlements"].get(settlement_id)
@@ -975,7 +1106,16 @@ class MicroLiveExecutor:
                     "ORDER_CANCELED",
                     {
                         "client_order_id": request["client_order_id"],
+                        "exchange_order_id": request["exchange_order_id"],
+                        "market_id": order["prepared"]["market_id"],
+                        "token_id": order["prepared"]["token_id"],
+                        "effective_at_ts_ms": event_ts_ms,
                         "transport_event_sha256": canonical_json_sha256(response),
+                        "raw_transport_event_json": json.dumps(
+                            response,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
                     },
                     event_ts_ms=event_ts_ms,
                 )
@@ -1545,11 +1685,16 @@ class MicroLiveExecutor:
         if event_type == "FILL_RECORDED":
             if set(payload) != {
                 "client_order_id",
+                "exchange_order_id",
                 "fill_id",
+                "market_id",
+                "token_id",
                 "quantity",
                 "price",
                 "fee_usd",
+                "executed_at_ts_ms",
                 "transport_event_sha256",
+                "raw_transport_event_json",
             }:
                 raise MicroLiveExecutionError("fill payload schema is invalid")
             fill_quantity = _positive_decimal(
@@ -1557,20 +1702,119 @@ class MicroLiveExecutor:
             )
             fill_price = _positive_decimal(payload.get("price"), "stored fill price")
             fill_fee = _nonnegative_decimal(payload.get("fee_usd"), "stored fill fee")
+            transport_event = _stored_raw_json_object(
+                payload.get("raw_transport_event_json"),
+                payload.get("transport_event_sha256"),
+                "stored fill transport event",
+            )
             if (
                 fill_price >= 1
                 or fill_fee > fill_quantity * FROZEN_EXECUTION_FEE_PER_UNIT_USD
-                or not _is_sha256(payload.get("transport_event_sha256"))
+                or set(transport_event)
+                != {
+                    "event_type",
+                    "client_order_id",
+                    "exchange_order_id",
+                    "fill_id",
+                    "market_id",
+                    "token_id",
+                    "quantity",
+                    "price",
+                    "fee_usd",
+                    "executed_at_ts_ms",
+                }
+                or transport_event.get("event_type") != "FILL"
+                or any(
+                    transport_event.get(key) != payload.get(key)
+                    for key in (
+                        "client_order_id",
+                        "exchange_order_id",
+                        "fill_id",
+                        "market_id",
+                        "token_id",
+                        "quantity",
+                        "price",
+                        "fee_usd",
+                        "executed_at_ts_ms",
+                    )
+                )
+                or not isinstance(payload.get("executed_at_ts_ms"), int)
+                or isinstance(payload.get("executed_at_ts_ms"), bool)
+                or payload["executed_at_ts_ms"] > event_ts_ms
             ):
                 raise MicroLiveExecutionError("fill payload values are invalid")
             return
         if event_type in {"ORDER_CANCELED", "ORDER_EXPIRED"}:
-            if set(payload) != {"client_order_id", "transport_event_sha256"} or not (
+            if set(payload) != {
+                "client_order_id",
+                "exchange_order_id",
+                "market_id",
+                "token_id",
+                "effective_at_ts_ms",
+                "transport_event_sha256",
+                "raw_transport_event_json",
+            } or not (
                 isinstance(payload.get("client_order_id"), str)
                 and payload["client_order_id"]
+                and isinstance(payload.get("exchange_order_id"), str)
+                and payload["exchange_order_id"]
+                and isinstance(payload.get("market_id"), str)
+                and _CONDITION_ID.fullmatch(payload["market_id"]) is not None
+                and isinstance(payload.get("token_id"), str)
+                and _TOKEN_ID.fullmatch(payload["token_id"]) is not None
+                and isinstance(payload.get("effective_at_ts_ms"), int)
+                and not isinstance(payload.get("effective_at_ts_ms"), bool)
+                and 0 < payload["effective_at_ts_ms"] <= event_ts_ms
                 and _is_sha256(payload.get("transport_event_sha256"))
             ):
                 raise MicroLiveExecutionError("order close payload is invalid")
+            transport_event = _stored_raw_json_object(
+                payload.get("raw_transport_event_json"),
+                payload.get("transport_event_sha256"),
+                "stored order close transport event",
+            )
+            external_keys = {
+                "event_type",
+                "client_order_id",
+                "exchange_order_id",
+                "market_id",
+                "token_id",
+                "status",
+                "effective_at_ts_ms",
+            }
+            direct_cancel_keys = {
+                "client_order_id",
+                "exchange_order_id",
+                "status",
+            }
+            expected_status = "CANCELED" if event_type == "ORDER_CANCELED" else "EXPIRED"
+            if set(transport_event) == external_keys:
+                valid_transport = (
+                    transport_event.get("event_type") == "ORDER_CLOSED"
+                    and transport_event.get("status") == expected_status
+                    and all(
+                        transport_event.get(key) == payload.get(key)
+                        for key in (
+                            "client_order_id",
+                            "exchange_order_id",
+                            "market_id",
+                            "token_id",
+                            "effective_at_ts_ms",
+                        )
+                    )
+                )
+            else:
+                valid_transport = (
+                    event_type == "ORDER_CANCELED"
+                    and set(transport_event) == direct_cancel_keys
+                    and transport_event.get("status") == "CANCELED"
+                    and transport_event.get("client_order_id")
+                    == payload.get("client_order_id")
+                    and transport_event.get("exchange_order_id")
+                    == payload.get("exchange_order_id")
+                )
+            if not valid_transport:
+                raise MicroLiveExecutionError("order close transport identity is invalid")
             return
         if event_type == "SETTLEMENT_RECORDED":
             payout = _nonnegative_decimal(
@@ -1579,15 +1823,60 @@ class MicroLiveExecutor:
             if set(payload) != {
                 "client_order_id",
                 "settlement_id",
+                "market_id",
+                "slug",
+                "token_id",
+                "winning_token_id",
                 "payout_per_token",
+                "finalized_at_ts_ms",
                 "official_settlement_sha256",
+                "raw_official_settlement_json",
             } or not (
                 isinstance(payload.get("settlement_id"), str)
                 and payload["settlement_id"]
+                and isinstance(payload.get("market_id"), str)
+                and _CONDITION_ID.fullmatch(payload["market_id"]) is not None
+                and isinstance(payload.get("slug"), str)
+                and _SLUG.fullmatch(payload["slug"]) is not None
+                and isinstance(payload.get("token_id"), str)
+                and _TOKEN_ID.fullmatch(payload["token_id"]) is not None
+                and isinstance(payload.get("winning_token_id"), str)
+                and _TOKEN_ID.fullmatch(payload["winning_token_id"]) is not None
                 and payout in {Decimal("0"), Decimal("1")}
+                and isinstance(payload.get("finalized_at_ts_ms"), int)
+                and not isinstance(payload.get("finalized_at_ts_ms"), bool)
+                and 0 < payload["finalized_at_ts_ms"] <= event_ts_ms
                 and _is_sha256(payload.get("official_settlement_sha256"))
             ):
                 raise MicroLiveExecutionError("settlement payload is invalid")
+            official = _stored_raw_json_object(
+                payload.get("raw_official_settlement_json"),
+                payload.get("official_settlement_sha256"),
+                "stored official settlement event",
+            )
+            if set(official) != {
+                "event_type",
+                "settlement_id",
+                "market_id",
+                "slug",
+                "winning_token_id",
+                "payout_per_token",
+                "finalized_at_ts_ms",
+            } or not (
+                official.get("event_type") == "OFFICIAL_SETTLEMENT"
+                and all(
+                    official.get(key) == payload.get(key)
+                    for key in (
+                        "settlement_id",
+                        "market_id",
+                        "slug",
+                        "winning_token_id",
+                        "payout_per_token",
+                        "finalized_at_ts_ms",
+                    )
+                )
+            ):
+                raise MicroLiveExecutionError("settlement transport identity is invalid")
             return
         if event_type == "KILL_SWITCH_ENGAGED":
             if set(payload) != {"reason", "engaged_at_ts_ms"} or not (
@@ -1660,6 +1949,7 @@ class MicroLiveExecutor:
                     "acknowledgement": None,
                     "submission_unknown": False,
                     "closed_status": None,
+                    "close_event": None,
                     "fills": [],
                     "settlement": None,
                 }
@@ -1766,17 +2056,35 @@ class MicroLiveExecutor:
                         order["acknowledgement"] is None
                         or order["closed_status"] is not None
                         or order["settlement"] is not None
+                        or payload.get("exchange_order_id")
+                        != order["acknowledgement"]["exchange_order_id"]
+                        or payload.get("market_id")
+                        != order["prepared"]["market_id"]
+                        or payload.get("token_id")
+                        != order["prepared"]["token_id"]
+                        or int(payload["effective_at_ts_ms"])
+                        < int(order["prepared"]["submitted_at_ts_ms"])
                     ):
                         raise MicroLiveExecutionError("order cancellation lifecycle is invalid")
                     order["closed_status"] = "CANCELED"
+                    order["close_event"] = payload
                 elif event_type == "ORDER_EXPIRED":
                     if (
                         order["acknowledgement"] is None
                         or order["closed_status"] is not None
                         or order["settlement"] is not None
+                        or payload.get("exchange_order_id")
+                        != order["acknowledgement"]["exchange_order_id"]
+                        or payload.get("market_id")
+                        != order["prepared"]["market_id"]
+                        or payload.get("token_id")
+                        != order["prepared"]["token_id"]
+                        or int(payload["effective_at_ts_ms"])
+                        < int(order["prepared"]["submitted_at_ts_ms"])
                     ):
                         raise MicroLiveExecutionError("order expiration lifecycle is invalid")
                     order["closed_status"] = "EXPIRED"
+                    order["close_event"] = payload
                 else:
                     if (
                         order["acknowledgement"] is None
@@ -1788,24 +2096,56 @@ class MicroLiveExecutor:
             elif event_type == "FILL_RECORDED":
                 order = orders.get(str(client_order_id))
                 fill_id = payload.get("fill_id")
+                close_event = None if order is None else order.get("close_event")
                 if (
                     order is None
                     or order["acknowledgement"] is None
-                    or order["closed_status"] is not None
                     or order["settlement"] is not None
                     or not isinstance(fill_id, str)
                     or fill_id in fills
+                    or payload.get("exchange_order_id")
+                    != order["acknowledgement"]["exchange_order_id"]
+                    or payload.get("market_id") != order["prepared"]["market_id"]
+                    or payload.get("token_id") != order["prepared"]["token_id"]
+                    or int(payload["executed_at_ts_ms"])
+                    < int(order["prepared"]["submitted_at_ts_ms"])
+                    or (
+                        close_event is not None
+                        and int(payload["executed_at_ts_ms"])
+                        > int(close_event["effective_at_ts_ms"])
+                    )
                 ):
                     raise MicroLiveExecutionError("fill event identity is invalid")
                 fills[fill_id] = payload
                 order["fills"].append(payload)
             elif event_type == "SETTLEMENT_RECORDED":
                 order = orders.get(str(client_order_id))
+                prepared = None if order is None else dict(order["prepared"])
+                signal = (
+                    None
+                    if prepared is None
+                    else dict(prepared["signal_payload"])
+                )
                 if (
                     order is None
                     or order["acknowledgement"] is None
                     or order["settlement"] is not None
                     or not order["fills"]
+                    or payload.get("market_id") != prepared["market_id"]
+                    or payload.get("slug") != prepared["slug"]
+                    or payload.get("token_id") != prepared["token_id"]
+                    or int(payload["finalized_at_ts_ms"])
+                    < int(dict(signal["market_identity"])["market_end_ts_ms"])
+                    or payload.get("winning_token_id")
+                    != (
+                        prepared["token_id"]
+                        if Decimal(payload["payout_per_token"]) == Decimal("1")
+                        else (
+                            signal["down_token_id"]
+                            if prepared["token_id"] == signal["up_token_id"]
+                            else signal["up_token_id"]
+                        )
+                    )
                 ):
                     raise MicroLiveExecutionError("settlement event identity is invalid")
                 settlement_id = payload.get("settlement_id")
@@ -2192,6 +2532,27 @@ def _decode_provider_json(raw: bytes, label: str) -> Any:
         )
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
         raise MicroLiveExecutionError(f"{label} raw bytes are not strict JSON") from exc
+
+
+def _raw_json_object(raw: Any, label: str) -> tuple[dict[str, Any], str, str]:
+    if not isinstance(raw, bytes) or not raw:
+        raise MicroLiveExecutionError(f"{label} raw bytes are invalid")
+    value = _decode_provider_json(raw, label)
+    if not isinstance(value, Mapping):
+        raise MicroLiveExecutionError(f"{label} is not a JSON object")
+    return dict(value), raw.decode("utf-8"), hashlib.sha256(raw).hexdigest()
+
+
+def _stored_raw_json_object(raw_json: Any, expected_sha256: Any, label: str) -> dict[str, Any]:
+    if not isinstance(raw_json, str) or not raw_json:
+        raise MicroLiveExecutionError(f"{label} raw JSON is invalid")
+    raw = raw_json.encode("utf-8")
+    if not _is_sha256(expected_sha256) or hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise MicroLiveExecutionError(f"{label} SHA-256 mismatch")
+    value = _decode_provider_json(raw, label)
+    if not isinstance(value, Mapping):
+        raise MicroLiveExecutionError(f"{label} is not a JSON object")
+    return dict(value)
 
 
 def _reject_nonfinite_json(value: str) -> None:
