@@ -49,6 +49,8 @@ _EVENT_TYPES = {
     "ORDER_ACKNOWLEDGED",
     "ORDER_REJECTED",
     "ORDER_SUBMISSION_UNKNOWN",
+    "ORDER_SUBMISSION_RECONCILED",
+    "ORDER_SUBMISSION_RECONCILIATION_FAILED",
     "FILL_RECORDED",
     "ORDER_CANCELED",
     "ORDER_EXPIRED",
@@ -70,6 +72,9 @@ class MicroLiveOrderTransport(Protocol):
 
     def cancel_order(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         """Cancel one previously acknowledged order."""
+
+    def lookup_order(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Read one order by its exact client/business identity."""
 
 
 def create_micro_live_executor(
@@ -551,6 +556,96 @@ class MicroLiveExecutor:
             "client_order_id": client_order_id,
             "exchange_order_id": disposition["exchange_order_id"],
             "transport_called": True,
+        }
+
+    def reconcile_unknown_submission(
+        self,
+        *,
+        client_order_id: str,
+        now_ts_ms: int,
+    ) -> dict[str, Any]:
+        """Resolve one unknown submission through a read-only transport lookup.
+
+        Reconciliation never clears the persistent kill switch and never
+        resubmits an order.  An accepted lookup result is immediately exposed
+        to the existing kill-switch cancellation path.
+        """
+
+        _require_positive_timestamp(now_ts_ms, "submission reconciliation")
+        view = self._reconcile_view()
+        order = view["orders"].get(client_order_id)
+        if not (
+            order is not None
+            and order.get("submission_unknown") is True
+            and order.get("acknowledgement") is None
+            and order.get("closed_status") is None
+            and view["kill_switch_active"] is True
+        ):
+            self.engage_kill_switch(
+                reason="submission_reconciliation_precondition_failed",
+                now_ts_ms=now_ts_ms,
+            )
+            raise MicroLiveExecutionError(
+                "submission reconciliation requires one killed unknown order"
+            )
+        prepared = dict(order["prepared"])
+        lookup_request = {
+            "authorization_id": self.authorization.authorization_id,
+            "client_order_id": client_order_id,
+            "business_key": prepared["business_key"],
+            "market_id": prepared["market_id"],
+            "token_id": prepared["token_id"],
+        }
+        try:
+            response = dict(self.transport.lookup_order(copy.deepcopy(lookup_request)))
+            disposition = self._validate_submission_response(prepared, response)
+            exchange_order_id = disposition["exchange_order_id"]
+            if (
+                disposition["status"] == "ACCEPTED"
+                and exchange_order_id in view["orders_by_exchange_id"]
+            ):
+                raise MicroLiveExecutionError(
+                    "reconciled exchange order identity was reused"
+                )
+        except Exception as exc:
+            self._append_event(
+                "ORDER_SUBMISSION_RECONCILIATION_FAILED",
+                {
+                    "client_order_id": client_order_id,
+                    "lookup_request_sha256": canonical_json_sha256(lookup_request),
+                    "error_type": exc.__class__.__name__,
+                },
+                event_ts_ms=max(
+                    now_ts_ms,
+                    int(self._events[-1]["event_ts_ms"]),
+                ),
+            )
+            self.engage_kill_switch(
+                reason="submission_reconciliation_failed",
+                now_ts_ms=now_ts_ms,
+            )
+            raise MicroLiveExecutionError(
+                "unknown submission reconciliation failed closed"
+            ) from exc
+        self._append_event(
+            "ORDER_SUBMISSION_RECONCILED",
+            {
+                **disposition,
+                "lookup_response_sha256": canonical_json_sha256(response),
+            },
+            event_ts_ms=now_ts_ms,
+        )
+        cancel_result = self.engage_kill_switch(
+            reason="submission_reconciled_after_unknown",
+            now_ts_ms=now_ts_ms,
+        )
+        self._reconcile_view()
+        return {
+            "status": f"ORDER_SUBMISSION_RECONCILED_{disposition['status']}",
+            "client_order_id": client_order_id,
+            "exchange_order_id": disposition["exchange_order_id"],
+            "kill_switch_active": True,
+            "cancel_result": cancel_result,
         }
 
     def _audit_signal_decision(
@@ -1382,6 +1477,62 @@ class MicroLiveExecutor:
             ):
                 raise MicroLiveExecutionError("order disposition payload is invalid")
             return
+        if event_type == "ORDER_SUBMISSION_RECONCILED":
+            response_keys = {
+                "client_order_id",
+                "exchange_order_id",
+                "status",
+                "market_id",
+                "token_id",
+                "accepted_quantity",
+                "limit_price",
+            }
+            if set(payload) != {*response_keys, "lookup_response_sha256"}:
+                raise MicroLiveExecutionError(
+                    "submission reconciliation payload is invalid"
+                )
+            response = {key: payload[key] for key in response_keys}
+            accepted_quantity = _positive_decimal(
+                response.get("accepted_quantity"),
+                "reconciled accepted quantity",
+            )
+            limit_price = _positive_decimal(
+                response.get("limit_price"),
+                "reconciled limit price",
+            )
+            if not (
+                response.get("status") in {"ACCEPTED", "REJECTED"}
+                and _is_sha256(response.get("client_order_id"))
+                and isinstance(response.get("exchange_order_id"), str)
+                and response["exchange_order_id"]
+                and isinstance(response.get("market_id"), str)
+                and _CONDITION_ID.fullmatch(response["market_id"]) is not None
+                and isinstance(response.get("token_id"), str)
+                and _TOKEN_ID.fullmatch(response["token_id"]) is not None
+                and accepted_quantity == Decimal("1")
+                and limit_price < 1
+                and payload.get("lookup_response_sha256")
+                == canonical_json_sha256(response)
+            ):
+                raise MicroLiveExecutionError(
+                    "submission reconciliation payload is invalid"
+                )
+            return
+        if event_type == "ORDER_SUBMISSION_RECONCILIATION_FAILED":
+            if set(payload) != {
+                "client_order_id",
+                "lookup_request_sha256",
+                "error_type",
+            } or not (
+                _is_sha256(payload.get("client_order_id"))
+                and _is_sha256(payload.get("lookup_request_sha256"))
+                and isinstance(payload.get("error_type"), str)
+                and payload["error_type"]
+            ):
+                raise MicroLiveExecutionError(
+                    "failed submission reconciliation audit is invalid"
+                )
+            return
         if event_type in {"ORDER_SUBMISSION_UNKNOWN", "ORDER_CANCEL_UNKNOWN"}:
             if set(payload) != {"client_order_id", "error_type"} or not (
                 isinstance(payload.get("client_order_id"), str)
@@ -1518,6 +1669,8 @@ class MicroLiveExecutor:
                 "ORDER_ACKNOWLEDGED",
                 "ORDER_REJECTED",
                 "ORDER_SUBMISSION_UNKNOWN",
+                "ORDER_SUBMISSION_RECONCILED",
+                "ORDER_SUBMISSION_RECONCILIATION_FAILED",
                 "ORDER_CANCELED",
                 "ORDER_EXPIRED",
                 "ORDER_CANCEL_UNKNOWN",
@@ -1554,6 +1707,60 @@ class MicroLiveExecutor:
                     if order["acknowledgement"] is not None or order["closed_status"] is not None:
                         raise MicroLiveExecutionError("unknown submission lifecycle is invalid")
                     order["submission_unknown"] = True
+                elif event_type == "ORDER_SUBMISSION_RECONCILED":
+                    exchange_order_id = payload.get("exchange_order_id")
+                    prepared = order["prepared"]
+                    if (
+                        order["submission_unknown"] is not True
+                        or order["acknowledgement"] is not None
+                        or order["closed_status"] is not None
+                        or payload.get("market_id") != prepared["market_id"]
+                        or payload.get("token_id") != prepared["token_id"]
+                        or payload.get("accepted_quantity") != prepared["quantity"]
+                        or payload.get("limit_price") != prepared["limit_price"]
+                    ):
+                        raise MicroLiveExecutionError(
+                            "submission reconciliation lifecycle is invalid"
+                        )
+                    order["submission_unknown"] = False
+                    if payload.get("status") == "ACCEPTED":
+                        if (
+                            not isinstance(exchange_order_id, str)
+                            or exchange_order_id in exchange_order_ids
+                        ):
+                            raise MicroLiveExecutionError(
+                                "reconciled exchange order identity is duplicated"
+                            )
+                        acknowledgement = {
+                            key: value
+                            for key, value in payload.items()
+                            if key != "lookup_response_sha256"
+                        }
+                        order["acknowledgement"] = acknowledgement
+                        exchange_order_ids[exchange_order_id] = order
+                    elif payload.get("status") == "REJECTED":
+                        order["closed_status"] = "REJECTED"
+                    else:
+                        raise MicroLiveExecutionError(
+                            "submission reconciliation status is invalid"
+                        )
+                elif event_type == "ORDER_SUBMISSION_RECONCILIATION_FAILED":
+                    prepared = order["prepared"]
+                    expected_lookup_request = {
+                        "authorization_id": self.authorization.authorization_id,
+                        "client_order_id": client_order_id,
+                        "business_key": prepared["business_key"],
+                        "market_id": prepared["market_id"],
+                        "token_id": prepared["token_id"],
+                    }
+                    if (
+                        order["submission_unknown"] is not True
+                        or payload.get("lookup_request_sha256")
+                        != canonical_json_sha256(expected_lookup_request)
+                    ):
+                        raise MicroLiveExecutionError(
+                            "failed submission reconciliation lifecycle is invalid"
+                        )
                 elif event_type == "ORDER_CANCELED":
                     if (
                         order["acknowledgement"] is None

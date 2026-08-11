@@ -201,13 +201,18 @@ class FakeTransport:
         *,
         fail_submit: bool = False,
         fail_cancel: bool = False,
+        fail_lookup: bool = False,
         fixed_exchange_order_id: str | None = None,
+        lookup_status: str = "ACCEPTED",
     ) -> None:
         self.fail_submit = fail_submit
         self.fail_cancel = fail_cancel
+        self.fail_lookup = fail_lookup
         self.fixed_exchange_order_id = fixed_exchange_order_id
+        self.lookup_status = lookup_status
         self.submit_calls: list[dict[str, Any]] = []
         self.cancel_calls: list[dict[str, Any]] = []
+        self.lookup_calls: list[dict[str, Any]] = []
 
     def submit_order(self, request: dict[str, Any]) -> dict[str, Any]:
         self.submit_calls.append(copy.deepcopy(request))
@@ -232,6 +237,26 @@ class FakeTransport:
             "client_order_id": request["client_order_id"],
             "exchange_order_id": request["exchange_order_id"],
             "status": "CANCELED",
+        }
+
+    def lookup_order(self, request: dict[str, Any]) -> dict[str, Any]:
+        self.lookup_calls.append(copy.deepcopy(request))
+        if self.fail_lookup:
+            raise RuntimeError("synthetic lookup timeout")
+        submitted = next(
+            row
+            for row in reversed(self.submit_calls)
+            if row["client_order_id"] == request["client_order_id"]
+        )
+        return {
+            "client_order_id": submitted["client_order_id"],
+            "exchange_order_id": self.fixed_exchange_order_id
+            or f"exchange-{submitted['client_order_id'][:12]}",
+            "status": self.lookup_status,
+            "market_id": submitted["market_id"],
+            "token_id": submitted["token_id"],
+            "accepted_quantity": submitted["quantity"],
+            "limit_price": submitted["limit_price"],
         }
 
 
@@ -1556,6 +1581,58 @@ def test_unknown_submission_engages_kill_switch_without_retry(
         )
     assert len(transport.submit_calls) == 1
     assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+
+def test_unknown_submission_read_only_reconciliation_never_resubmits_or_unlocks(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport(fail_submit=True)
+    executor = MicroLiveExecutor(verified, transport=transport)
+    with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    client_order_id = transport.submit_calls[0]["client_order_id"]
+    reconciled = executor.reconcile_unknown_submission(
+        client_order_id=client_order_id,
+        now_ts_ms=NOW_TS_MS + 1,
+    )
+    assert reconciled["status"] == "ORDER_SUBMISSION_RECONCILED_ACCEPTED"
+    assert reconciled["kill_switch_active"] is True
+    assert len(transport.submit_calls) == 1
+    assert len(transport.lookup_calls) == 1
+    assert len(transport.cancel_calls) == 1
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["kill_switch_reason"] == "order_submission_unknown"
+    assert snapshot["open_order_count"] == 0
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=transport,
+        state=executor.export_state(),
+    )
+    assert restored.reconciliation_snapshot() == snapshot
+
+    failing_transport = FakeTransport(fail_submit=True, fail_lookup=True)
+    failing = MicroLiveExecutor(verified, transport=failing_transport)
+    with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+        failing.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    failing_client_order_id = failing_transport.submit_calls[0]["client_order_id"]
+    with pytest.raises(MicroLiveExecutionError, match="reconciliation failed closed"):
+        failing.reconcile_unknown_submission(
+            client_order_id=failing_client_order_id,
+            now_ts_ms=NOW_TS_MS + 1,
+        )
+    assert len(failing_transport.submit_calls) == 1
+    assert len(failing_transport.lookup_calls) == 1
+    assert failing.reconciliation_snapshot()["kill_switch_active"] is True
+    assert any(
+        event["event_type"] == "ORDER_SUBMISSION_RECONCILIATION_FAILED"
+        for event in failing.events
+    )
 
 
 def test_all_lifecycle_reconciliation_ambiguities_persistently_kill(
