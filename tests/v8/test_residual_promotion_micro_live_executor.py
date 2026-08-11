@@ -1115,6 +1115,53 @@ def test_stale_heartbeat_kills_and_cancels_existing_order(
     assert len(transport.cancel_calls) == 1
 
 
+def test_runtime_watchdog_checks_heartbeat_without_waiting_for_a_signal(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    base = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    executor.submit_signal(**base)
+
+    healthy = executor.enforce_runtime_safety(
+        now_ts_ms=NOW_TS_MS + 1_000,
+        operator_heartbeat_ts_ms=NOW_TS_MS + 950,
+    )
+    assert healthy == {
+        "status": "RUNTIME_SAFETY_OK",
+        "checked_at_ts_ms": NOW_TS_MS + 1_000,
+        "operator_heartbeat_ts_ms": NOW_TS_MS + 950,
+        "transport_called": False,
+    }
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is False
+
+    killed = executor.enforce_runtime_safety(
+        now_ts_ms=NOW_TS_MS + 7_000,
+        operator_heartbeat_ts_ms=NOW_TS_MS + 1_000,
+    )
+    assert killed["status"] == "KILL_SWITCH_ENGAGED"
+    assert killed["reason"] == "operator_heartbeat_stale"
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+    assert len(transport.cancel_calls) == 1
+
+
+def test_runtime_watchdog_invalid_clock_persists_kill(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    with pytest.raises(MicroLiveExecutionError, match="watchdog timestamp is invalid"):
+        executor.enforce_runtime_safety(
+            now_ts_ms=0,
+            operator_heartbeat_ts_ms=NOW_TS_MS,
+        )
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["kill_switch_reason"] == "runtime_watchdog_clock_invalid"
+
+
 def test_signal_event_clock_regression_persists_kill_and_rejection_audit(
     authorized_fixture: dict[str, Any],
 ) -> None:

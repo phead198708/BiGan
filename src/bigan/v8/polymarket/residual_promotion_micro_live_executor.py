@@ -143,6 +143,76 @@ class MicroLiveExecutor:
     def events(self) -> tuple[dict[str, Any], ...]:
         return tuple(copy.deepcopy(self._events))
 
+    def enforce_runtime_safety(
+        self,
+        *,
+        now_ts_ms: int,
+        operator_heartbeat_ts_ms: int,
+    ) -> dict[str, Any]:
+        """Enforce time/loss safety even when no new model signal arrives.
+
+        The future operator must call this watchdog independently of signal
+        production.  A stale heartbeat or expired authorization therefore
+        cancels acknowledged open orders instead of waiting for another market
+        decision to exercise the signal-submission checks.
+        """
+
+        if isinstance(now_ts_ms, bool) or not isinstance(now_ts_ms, int) or now_ts_ms <= 0:
+            fallback_ts_ms = (
+                int(self._events[-1]["event_ts_ms"])
+                if self._events
+                else self.authorization.authorized_at_ts_ms
+            )
+            self.engage_kill_switch(
+                reason="runtime_watchdog_clock_invalid",
+                now_ts_ms=fallback_ts_ms,
+            )
+            raise MicroLiveExecutionError("runtime watchdog timestamp is invalid")
+        if self._events and now_ts_ms < int(self._events[-1]["event_ts_ms"]):
+            self.engage_kill_switch(
+                reason="runtime_watchdog_clock_regression",
+                now_ts_ms=now_ts_ms,
+            )
+            raise MicroLiveExecutionError("runtime watchdog clock regressed")
+
+        view = self._reconcile_view()
+        if view["kill_switch_active"]:
+            return {
+                "status": "KILL_SWITCH_ALREADY_ACTIVE",
+                "reason": view["kill_switch_reason"],
+                "transport_called": False,
+            }
+        reason: str | None = None
+        if now_ts_ms < self.authorization.authorized_at_ts_ms:
+            reason = "runtime_clock_before_authorization"
+        elif now_ts_ms >= self.authorization.expires_at_ts_ms:
+            reason = "authorization_expired"
+        elif (
+            isinstance(operator_heartbeat_ts_ms, bool)
+            or not isinstance(operator_heartbeat_ts_ms, int)
+            or operator_heartbeat_ts_ms <= 0
+            or operator_heartbeat_ts_ms > now_ts_ms
+            or now_ts_ms - operator_heartbeat_ts_ms
+            > self.authorization.maximum_operator_heartbeat_age_ms
+        ):
+            reason = "operator_heartbeat_stale"
+        elif _realized_loss_limit_reached(view, self.authorization):
+            reason = "maximum_realized_loss_reached"
+        elif (
+            view["loss_budget_consumed_usd"]
+            > self.authorization.maximum_realized_loss_usd
+        ):
+            reason = "maximum_loss_budget_exceeded"
+
+        if reason is not None:
+            return self.engage_kill_switch(reason=reason, now_ts_ms=now_ts_ms)
+        return {
+            "status": "RUNTIME_SAFETY_OK",
+            "checked_at_ts_ms": now_ts_ms,
+            "operator_heartbeat_ts_ms": operator_heartbeat_ts_ms,
+            "transport_called": False,
+        }
+
     def submit_signal(
         self,
         *,
