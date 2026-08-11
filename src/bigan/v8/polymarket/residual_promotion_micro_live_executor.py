@@ -8,6 +8,8 @@ it is never called unless the separately verified future authorization passes.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -220,6 +222,7 @@ class MicroLiveExecutor:
         feature_row: Mapping[str, Any],
         now_ts_ms: int,
         operator_heartbeat_ts_ms: int,
+        market_identity_evidence: Mapping[str, bytes] | None = None,
     ) -> dict[str, Any]:
         """Submit one authorized intent or return an explicit NO_TRADE block."""
 
@@ -230,6 +233,10 @@ class MicroLiveExecutor:
                 expected_candidate_bundle_sha256=(
                     self.authorization.candidate_bundle_sha256
                 ),
+            )
+            _validate_market_identity_evidence(
+                signal=signal,
+                evidence=market_identity_evidence,
             )
             features = _validated_runtime_binding(
                 signal=signal,
@@ -1867,6 +1874,154 @@ def _validated_market_identity(signal: Mapping[str, Any]) -> None:
         and identity.get("pnl_accessed") is False
     ):
         raise MicroLiveExecutionError("candidate market identity binding is invalid")
+
+
+def _validate_market_identity_evidence(
+    *,
+    signal: Mapping[str, Any],
+    evidence: Any,
+) -> None:
+    """Verify the exact provider bytes behind the signal identity hashes."""
+
+    if not isinstance(evidence, Mapping) or set(evidence) != {
+        "raw_gamma_payload",
+        "raw_clob_revalidation_payload",
+    }:
+        raise MicroLiveExecutionError("market identity evidence schema is not exact")
+    gamma_raw = evidence.get("raw_gamma_payload")
+    clob_raw = evidence.get("raw_clob_revalidation_payload")
+    if not isinstance(gamma_raw, bytes) or not gamma_raw:
+        raise MicroLiveExecutionError("raw Gamma market identity bytes are invalid")
+    if not isinstance(clob_raw, bytes) or not clob_raw:
+        raise MicroLiveExecutionError("raw CLOB revalidation bytes are invalid")
+    identity = dict(signal["market_identity"])
+    if not (
+        hashlib.sha256(gamma_raw).hexdigest()
+        == identity["raw_gamma_payload_sha256"]
+        and hashlib.sha256(clob_raw).hexdigest()
+        == identity["clob_revalidation_payload_sha256"]
+    ):
+        raise MicroLiveExecutionError("market identity raw-byte SHA-256 mismatch")
+    gamma = _decode_provider_json(gamma_raw, "Gamma market identity")
+    clob = _decode_provider_json(clob_raw, "CLOB market identity")
+    slug = str(signal["slug"])
+    market_id = str(signal["market_id"])
+    expected_tokens = {
+        "UP": str(signal["up_token_id"]),
+        "DOWN": str(signal["down_token_id"]),
+    }
+    gamma_rows = _gamma_market_rows(gamma)
+    exact_gamma = [
+        row
+        for row in gamma_rows
+        if str(row.get("slug") or row.get("market_slug") or "") == slug
+    ]
+    if len(exact_gamma) != 1:
+        raise MicroLiveExecutionError("Gamma identity does not resolve exact slug once")
+    gamma_row = exact_gamma[0]
+    gamma_condition = str(
+        gamma_row.get("conditionId") or gamma_row.get("condition_id") or ""
+    )
+    gamma_tokens = _gamma_up_down_tokens(gamma_row)
+    if gamma_condition != market_id or gamma_tokens != expected_tokens:
+        raise MicroLiveExecutionError("Gamma condition or token identity mismatches")
+    if not isinstance(clob, Mapping):
+        raise MicroLiveExecutionError("CLOB market identity payload is not an object")
+    clob_row = dict(clob)
+    clob_condition = str(
+        clob_row.get("condition_id")
+        or clob_row.get("conditionId")
+        or clob_row.get("market")
+        or ""
+    )
+    clob_slug = str(clob_row.get("market_slug") or clob_row.get("slug") or "")
+    clob_tokens = _clob_up_down_tokens(clob_row.get("tokens"))
+    if not (
+        clob_condition == market_id
+        and clob_slug == slug
+        and clob_tokens == expected_tokens
+    ):
+        raise MicroLiveExecutionError("CLOB condition, slug, or token identity mismatches")
+
+
+def _decode_provider_json(raw: bytes, label: str) -> Any:
+    try:
+        return json.loads(
+            raw.decode("utf-8"),
+            parse_constant=_reject_nonfinite_json,
+        )
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise MicroLiveExecutionError(f"{label} raw bytes are not strict JSON") from exc
+
+
+def _reject_nonfinite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _gamma_market_rows(value: Any) -> list[dict[str, Any]]:
+    rows: Any
+    if isinstance(value, list):
+        rows = value
+    elif isinstance(value, Mapping):
+        wrapper = dict(value)
+        if isinstance(wrapper.get("data"), list):
+            rows = wrapper["data"]
+        elif isinstance(wrapper.get("markets"), list):
+            rows = wrapper["markets"]
+        else:
+            rows = [wrapper]
+    else:
+        raise MicroLiveExecutionError("Gamma market identity payload shape is invalid")
+    if not all(isinstance(row, Mapping) for row in rows):
+        raise MicroLiveExecutionError("Gamma market identity row is not an object")
+    return [dict(row) for row in rows]
+
+
+def _json_array(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        return decoded if isinstance(decoded, list) else []
+    return []
+
+
+def _gamma_up_down_tokens(row: Mapping[str, Any]) -> dict[str, str] | None:
+    outcomes = _json_array(row.get("outcomes"))
+    token_ids = _json_array(row.get("clobTokenIds"))
+    if len(outcomes) != len(token_ids):
+        return None
+    return _up_down_tokens(zip(outcomes, token_ids, strict=True))
+
+
+def _clob_up_down_tokens(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, list):
+        return None
+    pairs: list[tuple[Any, Any]] = []
+    for token in value:
+        if not isinstance(token, Mapping):
+            return None
+        row = dict(token)
+        outcome = row.get("outcome") or row.get("name") or row.get("label")
+        token_id = row.get("token_id") or row.get("tokenId") or row.get("asset_id")
+        pairs.append((outcome, token_id))
+    return _up_down_tokens(pairs)
+
+
+def _up_down_tokens(pairs: Any) -> dict[str, str] | None:
+    tokens: dict[str, str] = {}
+    for outcome_value, token_value in pairs:
+        outcome = str(outcome_value or "").strip().upper()
+        token_id = str(token_value or "")
+        if outcome not in {"UP", "DOWN"} or _TOKEN_ID.fullmatch(token_id) is None:
+            return None
+        if outcome in tokens:
+            return None
+        tokens[outcome] = token_id
+    return tokens if set(tokens) == {"UP", "DOWN"} else None
 
 
 def _validated_runtime_binding(

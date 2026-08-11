@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import hashlib
 import json
 import shutil
 from decimal import Decimal
@@ -73,7 +74,47 @@ AUTHORIZED_AT_TS_MS = 1_789_948_800_000
 NOW_TS_MS = AUTHORIZED_AT_TS_MS + 301_000
 
 
-def _base_feature_and_signal() -> tuple[dict[str, Any], dict[str, Any]]:
+def _market_identity_evidence(
+    signal: dict[str, Any],
+) -> dict[str, bytes]:
+    gamma_raw = json.dumps(
+        [
+            {
+                "conditionId": signal["market_id"],
+                "slug": signal["slug"],
+                "outcomes": ["Up", "Down"],
+                "clobTokenIds": [signal["up_token_id"], signal["down_token_id"]],
+            }
+        ],
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    clob_raw = json.dumps(
+        {
+            "condition_id": signal["market_id"],
+            "market_slug": signal["slug"],
+            "tokens": [
+                {"outcome": "Up", "token_id": signal["up_token_id"]},
+                {"outcome": "Down", "token_id": signal["down_token_id"]},
+            ],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    signal["market_identity"]["raw_gamma_payload_sha256"] = hashlib.sha256(
+        gamma_raw
+    ).hexdigest()
+    signal["market_identity"]["clob_revalidation_payload_sha256"] = hashlib.sha256(
+        clob_raw
+    ).hexdigest()
+    return {
+        "raw_gamma_payload": gamma_raw,
+        "raw_clob_revalidation_payload": clob_raw,
+    }
+
+
+def _base_feature_and_signal(
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:
     rows = [
         json.loads(line)
         for line in SOURCE_DATASET.read_text(encoding="utf-8").splitlines()[:2]
@@ -129,8 +170,8 @@ def _base_feature_and_signal() -> tuple[dict[str, Any], dict[str, Any]]:
             "down_token_id": "12345",
             "gamma_fetched_at_ts_ms": AUTHORIZED_AT_TS_MS + 1_000,
             "clob_revalidated_at_ts_ms": decision_ts_ms,
-            "raw_gamma_payload_sha256": "a" * 64,
-            "clob_revalidation_payload_sha256": "b" * 64,
+            "raw_gamma_payload_sha256": "placeholder",
+            "clob_revalidation_payload_sha256": "placeholder",
             "clob_revalidation_passed": True,
             "outcomes_accessed": False,
             "settlement_accessed": False,
@@ -146,10 +187,12 @@ def _base_feature_and_signal() -> tuple[dict[str, Any], dict[str, Any]]:
         "pnl_accessed": False,
         "safety": dict(SAFETY),
     }
-    return feature_row, signal
+    return feature_row, signal, _market_identity_evidence(signal)
 
 
-BASE_FEATURE_ROW, BASE_SIGNAL_PAYLOAD = _base_feature_and_signal()
+BASE_FEATURE_ROW, BASE_SIGNAL_PAYLOAD, BASE_MARKET_IDENTITY_EVIDENCE = (
+    _base_feature_and_signal()
+)
 
 
 class FakeTransport:
@@ -707,6 +750,7 @@ def _signal(**overrides: Any) -> dict[str, Any]:
     payload = {
         "signal_payload": signal_payload,
         "feature_row": feature_row,
+        "market_identity_evidence": copy.deepcopy(BASE_MARKET_IDENTITY_EVIDENCE),
         "now_ts_ms": NOW_TS_MS,
         "operator_heartbeat_ts_ms": NOW_TS_MS - 50,
     }
@@ -731,6 +775,7 @@ def _signal(**overrides: Any) -> dict[str, Any]:
                 signal_payload["market_identity"]["clob_revalidated_at_ts_ms"] = value
         else:
             payload[key] = value
+    payload["market_identity_evidence"] = _market_identity_evidence(signal_payload)
     return payload
 
 
@@ -1030,6 +1075,45 @@ def test_market_identity_token_binding_and_live_revalidation_fail_closed(
     assert stale_executor.reconciliation_snapshot()["kill_switch_reason"] == (
         "market_identity_stale"
     )
+
+
+def test_market_identity_raw_provider_bytes_are_mandatory_and_verified(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+
+    missing = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    missing.pop("market_identity_evidence")
+    missing_executor = MicroLiveExecutor(verified, transport=FakeTransport())
+    with pytest.raises(MicroLiveExecutionError, match="evidence schema"):
+        missing_executor.submit_signal(**missing)
+    assert missing_executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+    byte_drift = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    byte_drift["market_identity_evidence"]["raw_gamma_payload"] += b"\n"
+    drift_executor = MicroLiveExecutor(verified, transport=FakeTransport())
+    with pytest.raises(MicroLiveExecutionError, match="raw-byte SHA-256 mismatch"):
+        drift_executor.submit_signal(**byte_drift)
+    assert drift_executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+    semantic_drift = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    clob = json.loads(
+        semantic_drift["market_identity_evidence"][
+            "raw_clob_revalidation_payload"
+        ]
+    )
+    clob["tokens"][1]["token_id"] = "99999"
+    clob_raw = json.dumps(clob, separators=(",", ":"), sort_keys=True).encode()
+    semantic_drift["market_identity_evidence"][
+        "raw_clob_revalidation_payload"
+    ] = clob_raw
+    semantic_drift["signal_payload"]["market_identity"][
+        "clob_revalidation_payload_sha256"
+    ] = hashlib.sha256(clob_raw).hexdigest()
+    semantic_executor = MicroLiveExecutor(verified, transport=FakeTransport())
+    with pytest.raises(MicroLiveExecutionError, match="CLOB condition, slug, or token"):
+        semantic_executor.submit_signal(**semantic_drift)
+    assert semantic_executor.reconciliation_snapshot()["kill_switch_active"] is True
 
 
 def test_open_order_and_authorization_lifetime_notional_caps(
