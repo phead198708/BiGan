@@ -947,7 +947,7 @@ def _authorization(
 
 def _verified(fixture: dict[str, Any]):
     return verify_micro_live_authorization(
-        fixture["authorization"],
+        _json_bytes(fixture["authorization"]),
         repository_root=fixture["root"],
         evidence_root=fixture["evidence_root"],
         now_ts_ms=fixture["now_ts_ms"],
@@ -1022,7 +1022,7 @@ def test_current_template_cannot_create_executor(
     transport = FakeTransport()
     with pytest.raises(MicroLiveAuthorizationError, match="schema is not exact"):
         create_micro_live_executor(
-            authorization=template,
+            raw_authorization=_json_bytes(template),
             repository_root=authorized_fixture["root"],
             evidence_root=authorized_fixture["evidence_root"],
             now_ts_ms=NOW_TS_MS,
@@ -1070,7 +1070,7 @@ def test_valid_graph_creates_capability_but_does_not_auto_launch(
 ) -> None:
     transport = FakeTransport()
     executor = create_micro_live_executor(
-        authorization=authorized_fixture["authorization"],
+        raw_authorization=_json_bytes(authorized_fixture["authorization"]),
         repository_root=authorized_fixture["root"],
         evidence_root=authorized_fixture["evidence_root"],
         now_ts_ms=NOW_TS_MS,
@@ -1079,6 +1079,43 @@ def test_valid_graph_creates_capability_but_does_not_auto_launch(
     assert executor.events == ()
     assert executor.reconciliation_snapshot()["cash_usd"] == "10.00"
     assert transport.submit_calls == []
+
+
+def test_authorization_requires_strict_raw_bytes_and_binds_exact_payload(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    authorization = authorized_fixture["authorization"]
+    raw_authorization = _json_bytes(authorization)
+    verified = _verified(authorized_fixture)
+    assert verified.authorization_payload_sha256 == hashlib.sha256(
+        raw_authorization
+    ).hexdigest()
+
+    with pytest.raises(MicroLiveAuthorizationError, match="raw bytes are invalid"):
+        verify_micro_live_authorization(
+            authorization,
+            repository_root=authorized_fixture["root"],
+            evidence_root=authorized_fixture["evidence_root"],
+            now_ts_ms=NOW_TS_MS,
+        )
+
+    duplicate_key = raw_authorization[:-1] + b',"executable":true}'
+    with pytest.raises(MicroLiveAuthorizationError, match="strict JSON"):
+        verify_micro_live_authorization(
+            duplicate_key,
+            repository_root=authorized_fixture["root"],
+            evidence_root=authorized_fixture["evidence_root"],
+            now_ts_ms=NOW_TS_MS,
+        )
+
+    numeric_overflow = raw_authorization[:-1] + b',"ambiguous":1e400}'
+    with pytest.raises(MicroLiveAuthorizationError, match="strict JSON"):
+        verify_micro_live_authorization(
+            numeric_overflow,
+            repository_root=authorized_fixture["root"],
+            evidence_root=authorized_fixture["evidence_root"],
+            now_ts_ms=NOW_TS_MS,
+        )
 
 
 def test_submit_is_idempotent_and_one_market_has_one_intent(
@@ -1872,7 +1909,7 @@ def test_exact_human_loss_limit_persistently_kills_at_boundary(
         maximum_realized_loss_usd="0.4302",
     )
     verified = verify_micro_live_authorization(
-        authorization,
+        _json_bytes(authorization),
         repository_root=authorized_fixture["root"],
         evidence_root=evidence_root,
         now_ts_ms=NOW_TS_MS,
@@ -2949,7 +2986,7 @@ def test_authorization_tampering_fails_closed(
     changed[field] = value
     with pytest.raises(MicroLiveAuthorizationError, match=message):
         verify_micro_live_authorization(
-            changed,
+            _json_bytes(changed),
             repository_root=authorized_fixture["root"],
             evidence_root=authorized_fixture["evidence_root"],
             now_ts_ms=NOW_TS_MS,
@@ -2962,7 +2999,7 @@ def test_expired_authorization_and_evidence_sha_drift_fail_closed(
     authorization = authorized_fixture["authorization"]
     with pytest.raises(MicroLiveAuthorizationError, match="validity window"):
         verify_micro_live_authorization(
-            authorization,
+            _json_bytes(authorization),
             repository_root=authorized_fixture["root"],
             evidence_root=authorized_fixture["evidence_root"],
             now_ts_ms=authorization["expires_at_ts_ms"],
@@ -2971,7 +3008,7 @@ def test_expired_authorization_and_evidence_sha_drift_fail_closed(
     changed["required_evidence"]["fresh_evaluation_manifest"]["sha256"] = "0" * 64
     with pytest.raises(MicroLiveAuthorizationError, match="path or SHA-256 mismatch"):
         verify_micro_live_authorization(
-            changed,
+            _json_bytes(changed),
             repository_root=authorized_fixture["root"],
             evidence_root=authorized_fixture["evidence_root"],
             now_ts_ms=NOW_TS_MS,
@@ -3010,7 +3047,7 @@ def test_authorization_evidence_ambiguous_json_fails_closed(
 
     with pytest.raises(MicroLiveAuthorizationError, match="JSON evidence is invalid"):
         verify_micro_live_authorization(
-            authorization,
+            _json_bytes(authorization),
             repository_root=authorized_fixture["root"],
             evidence_root=evidence_root,
             now_ts_ms=NOW_TS_MS,
@@ -3024,7 +3061,7 @@ def test_human_approval_owner_and_timestamp_are_exact(
     changed["human_approval"]["github_login"] = "untrusted-user"
     with pytest.raises(MicroLiveAuthorizationError, match="provenance"):
         verify_micro_live_authorization(
-            changed,
+            _json_bytes(changed),
             repository_root=authorized_fixture["root"],
             evidence_root=authorized_fixture["evidence_root"],
             now_ts_ms=NOW_TS_MS,
@@ -3043,7 +3080,7 @@ def test_human_approval_owner_and_timestamp_are_exact(
     changed["created_at"] = "2026-09-21T00:00:01Z"
     with pytest.raises(MicroLiveAuthorizationError, match="limits or validity"):
         verify_micro_live_authorization(
-            changed,
+            _json_bytes(changed),
             repository_root=authorized_fixture["root"],
             evidence_root=authorized_fixture["evidence_root"],
             now_ts_ms=NOW_TS_MS,

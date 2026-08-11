@@ -108,16 +108,20 @@ _VERIFIED_CAPABILITIES: dict[
 
 
 def verify_micro_live_authorization(
-    authorization: Mapping[str, Any],
+    raw_authorization: bytes,
     *,
     repository_root: Path | str,
     evidence_root: Path | str,
     now_ts_ms: int,
 ) -> VerifiedMicroLiveAuthorization:
-    """Verify the exact evidence graph and explicit human 1% approval."""
+    """Verify strict raw authorization bytes and the complete evidence graph."""
 
     root = Path(repository_root).resolve()
     evidence_base = Path(evidence_root).resolve()
+    authorization = _decode_json_object_bytes(
+        raw_authorization,
+        "micro-live authorization",
+    )
     if isinstance(now_ts_ms, bool) or not isinstance(now_ts_ms, int) or now_ts_ms <= 0:
         raise MicroLiveAuthorizationError("authorization verification time is invalid")
     expected_keys = {
@@ -311,7 +315,7 @@ def verify_micro_live_authorization(
 
     capability = VerifiedMicroLiveAuthorization(
         authorization_id=authorization_id,
-        authorization_payload_sha256=canonical_json_sha256(dict(authorization)),
+        authorization_payload_sha256=hashlib.sha256(raw_authorization).hexdigest(),
         candidate_bundle_sha256=str(candidate_sha),
         capital_base_usd=capital_base,
         maximum_notional_usd=maximum_notional,
@@ -633,16 +637,28 @@ def _verified_evidence_json(
 
 def _load_json(path: Path) -> dict[str, Any]:
     try:
+        return _decode_json_object_bytes(
+            path.read_bytes(),
+            "micro-live JSON evidence",
+        )
+    except (OSError, MicroLiveAuthorizationError) as exc:
+        raise MicroLiveAuthorizationError("micro-live JSON evidence is invalid") from exc
+
+
+def _decode_json_object_bytes(raw: Any, label: str) -> dict[str, Any]:
+    if not isinstance(raw, bytes) or not raw:
+        raise MicroLiveAuthorizationError(f"{label} raw bytes are invalid")
+    try:
         value = json.loads(
-            path.read_text(encoding="utf-8"),
+            raw.decode("utf-8"),
             object_pairs_hook=_reject_duplicate_json_keys,
             parse_constant=_reject_nonfinite_json,
         )
         _validate_finite_json_tree(value)
-    except (OSError, ValueError) as exc:
-        raise MicroLiveAuthorizationError("micro-live JSON evidence is invalid") from exc
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise MicroLiveAuthorizationError(f"{label} is not strict JSON") from exc
     if not isinstance(value, dict):
-        raise MicroLiveAuthorizationError("micro-live JSON evidence root must be an object")
+        raise MicroLiveAuthorizationError(f"{label} root must be an object")
     return value
 
 

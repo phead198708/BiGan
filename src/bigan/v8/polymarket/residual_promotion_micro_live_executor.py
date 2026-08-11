@@ -187,7 +187,7 @@ class _BoundAuthorization:
 
 def create_micro_live_executor(
     *,
-    authorization: Mapping[str, Any],
+    raw_authorization: bytes,
     repository_root: Path | str,
     evidence_root: Path | str,
     now_ts_ms: int,
@@ -196,7 +196,7 @@ def create_micro_live_executor(
     """Create an executor only after the complete future graph verifies."""
 
     verified = verify_micro_live_authorization(
-        authorization,
+        raw_authorization,
         repository_root=repository_root,
         evidence_root=evidence_root,
         now_ts_ms=now_ts_ms,
