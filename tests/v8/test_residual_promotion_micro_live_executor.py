@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import shutil
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from bigan.v8.polymarket.residual_promotion_micro_live_authorization import (
     AUTHORIZATION_SCHEMA_VERSION,
     HUMAN_ATTESTATION_SCHEMA_VERSION,
     MicroLiveAuthorizationError,
+    authorization_capability_is_verified,
     verify_micro_live_authorization,
 )
 from bigan.v8.polymarket.residual_promotion_micro_live_executor import (
@@ -1240,6 +1242,40 @@ def test_signal_envelope_tampering_and_outcome_fields_fail_closed(
     assert transport.submit_calls == []
     assert transport.cancel_calls == []
     assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+
+def test_verified_capability_cannot_be_derived_with_changed_limits(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    derived = replace(verified, maximum_notional_usd=Decimal("999"))
+    assert authorization_capability_is_verified(verified) is True
+    assert authorization_capability_is_verified(derived) is False
+    with pytest.raises(MicroLiveExecutionError, match="capability is unverified"):
+        MicroLiveExecutor(derived, transport=FakeTransport())
+
+
+def test_verified_capability_shallow_copy_is_not_registered(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    copied = copy.copy(verified)
+    assert copied is not verified
+    assert authorization_capability_is_verified(verified) is True
+    assert authorization_capability_is_verified(copied) is False
+    with pytest.raises(MicroLiveExecutionError, match="capability is unverified"):
+        MicroLiveExecutor(copied, transport=FakeTransport())
+
+
+def test_verified_capability_in_place_tampering_invalidates_integrity(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    assert authorization_capability_is_verified(verified) is True
+    object.__setattr__(verified, "maximum_realized_loss_usd", Decimal("999"))
+    assert authorization_capability_is_verified(verified) is False
+    with pytest.raises(MicroLiveExecutionError, match="capability is unverified"):
+        MicroLiveExecutor(verified, transport=FakeTransport())
 
 
 def test_second_frozen_decision_is_audited_and_blocked_without_kill(

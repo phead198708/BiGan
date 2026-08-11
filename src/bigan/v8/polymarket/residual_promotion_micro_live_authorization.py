@@ -6,8 +6,10 @@ wallet.  The currently committed template is intentionally rejected.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -76,7 +78,7 @@ class MicroLiveAuthorizationError(ValueError):
     """Raised when a future micro-live authorization is incomplete or forged."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class VerifiedMicroLiveAuthorization:
     """Capability returned only after the full authorization graph validates."""
 
@@ -94,7 +96,14 @@ class VerifiedMicroLiveAuthorization:
     market_allowlist: tuple[str, ...]
     allowed_actions: tuple[str, ...]
     runtime: ResidualPromotionRuntime
+    _capability_sha256: str
     _seal: object
+
+
+_VERIFIED_CAPABILITIES: dict[
+    int,
+    tuple[weakref.ReferenceType[VerifiedMicroLiveAuthorization], str],
+] = {}
 
 
 def verify_micro_live_authorization(
@@ -299,7 +308,7 @@ def verify_micro_live_authorization(
     ):
         raise MicroLiveAuthorizationError("micro-live authorization state is not explicit")
 
-    return VerifiedMicroLiveAuthorization(
+    capability = VerifiedMicroLiveAuthorization(
         authorization_id=authorization_id,
         authorization_payload_sha256=canonical_json_sha256(dict(authorization)),
         candidate_bundle_sha256=str(candidate_sha),
@@ -314,14 +323,97 @@ def verify_micro_live_authorization(
         market_allowlist=MARKET_ALLOWLIST,
         allowed_actions=ALLOWED_ACTIONS,
         runtime=runtime,
+        _capability_sha256="",
         _seal=_VERIFICATION_SEAL,
     )
+    capability_sha256 = _capability_integrity_sha256(capability)
+    object.__setattr__(capability, "_capability_sha256", capability_sha256)
+    _register_verified_capability(capability, capability_sha256)
+    return capability
 
 
 def authorization_capability_is_verified(value: VerifiedMicroLiveAuthorization) -> bool:
     """Return whether a capability came from this verifier."""
 
-    return isinstance(value, VerifiedMicroLiveAuthorization) and value._seal is _VERIFICATION_SEAL
+    if not (
+        isinstance(value, VerifiedMicroLiveAuthorization)
+        and value._seal is _VERIFICATION_SEAL
+    ):
+        return False
+    registered = _VERIFIED_CAPABILITIES.get(id(value))
+    if registered is None or registered[0]() is not value:
+        return False
+    try:
+        actual_sha256 = _capability_integrity_sha256(value)
+    except Exception:
+        return False
+    return (
+        value._capability_sha256 == registered[1]
+        and actual_sha256 == registered[1]
+    )
+
+
+def _register_verified_capability(
+    capability: VerifiedMicroLiveAuthorization,
+    capability_sha256: str,
+) -> None:
+    capability_id = id(capability)
+
+    def discard(reference: weakref.ReferenceType[VerifiedMicroLiveAuthorization]) -> None:
+        registered = _VERIFIED_CAPABILITIES.get(capability_id)
+        if registered is not None and registered[0] is reference:
+            _VERIFIED_CAPABILITIES.pop(capability_id, None)
+
+    reference = weakref.ref(capability, discard)
+    _VERIFIED_CAPABILITIES[capability_id] = (reference, capability_sha256)
+
+
+def _capability_integrity_sha256(
+    capability: VerifiedMicroLiveAuthorization,
+) -> str:
+    runtime = capability.runtime
+    residual_model_bytes = bytes(runtime.residual_booster.save_raw(raw_format="ubj"))
+    logit_model_bytes = bytes(runtime.logit_booster.save_raw(raw_format="ubj"))
+    loaded_residual_model_sha256 = hashlib.sha256(residual_model_bytes).hexdigest()
+    loaded_logit_model_sha256 = hashlib.sha256(logit_model_bytes).hexdigest()
+    if not (
+        loaded_residual_model_sha256 == runtime.residual_model_sha256
+        and loaded_logit_model_sha256 == runtime.logit_model_sha256
+    ):
+        raise ValueError("loaded micro-live model bytes do not match the frozen runtime")
+    payload = {
+        "schema_version": "verified-micro-live-authorization-capability-v1",
+        "authorization_id": capability.authorization_id,
+        "authorization_payload_sha256": capability.authorization_payload_sha256,
+        "candidate_bundle_sha256": capability.candidate_bundle_sha256,
+        "capital_base_usd": str(capability.capital_base_usd),
+        "maximum_notional_usd": str(capability.maximum_notional_usd),
+        "maximum_realized_loss_usd": str(capability.maximum_realized_loss_usd),
+        "maximum_open_orders": capability.maximum_open_orders,
+        "authorized_at_ts_ms": capability.authorized_at_ts_ms,
+        "expires_at_ts_ms": capability.expires_at_ts_ms,
+        "maximum_signal_age_ms": capability.maximum_signal_age_ms,
+        "maximum_operator_heartbeat_age_ms": (
+            capability.maximum_operator_heartbeat_age_ms
+        ),
+        "market_allowlist": list(capability.market_allowlist),
+        "allowed_actions": list(capability.allowed_actions),
+        "runtime_object_id": id(runtime),
+        "runtime": {
+            "candidate_id": runtime.candidate_id,
+            "lineage_id": runtime.lineage_id,
+            "manifest_sha256": runtime.manifest_sha256,
+            "residual_model_sha256": runtime.residual_model_sha256,
+            "logit_model_sha256": runtime.logit_model_sha256,
+            "adapter_sha256": runtime.adapter_sha256,
+            "maximum_decision_lag_ms": runtime.maximum_decision_lag_ms,
+            "maximum_source_age_ms": runtime.maximum_source_age_ms,
+            "coefficients": list(runtime.coefficients),
+            "loaded_residual_model_sha256": loaded_residual_model_sha256,
+            "loaded_logit_model_sha256": loaded_logit_model_sha256,
+        },
+    }
+    return canonical_json_sha256(payload)
 
 
 def _load_and_reconcile_evidence(
