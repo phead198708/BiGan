@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import shutil
+import tempfile
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -23,10 +24,19 @@ from bigan.v8.phase6 import (
 )
 from bigan.v8.polymarket.challenge_development_lane import sha256_file
 from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.corpus import (
+    write_deterministic_polymarket_corpus_fixtures,
+)
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 from bigan.v8.polymarket.residual_promotion_evaluation import (
     EVALUATION_SCHEMA_VERSION,
     REQUIRED_GATE_NAMES,
+)
+from bigan.v8.polymarket.residual_promotion_feature_evidence import (
+    PROVIDER_FEATURE_FILENAMES,
+    ProviderFeatureEvidenceError,
+    build_provider_bound_feature_rows,
+    verify_provider_feature_evidence,
 )
 from bigan.v8.polymarket.residual_promotion_micro_live_authorization import (
     AUTHORIZATION_SCHEMA_VERSION,
@@ -65,8 +75,7 @@ from bigan.v8.polymarket.residual_promotion_security_review_v2 import (
     SCOPE_SCHEMA_VERSION,
 )
 from bigan.v8.polymarket.residual_promotion_v1 import (
-    SOURCE_DATASET,
-    _runtime_fixture_from_public_rows,
+    load_residual_promotion_runtime,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -118,34 +127,135 @@ def _market_identity_evidence(
     }
 
 
-def _base_feature_and_signal(
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:
-    rows = [
-        json.loads(line)
-        for line in SOURCE_DATASET.read_text(encoding="utf-8").splitlines()[:2]
-    ]
-    fixture = _runtime_fixture_from_public_rows(rows)
-    feature_row = copy.deepcopy(fixture["live_feature_row"])
+def _synthetic_provider_feature_evidence() -> dict[str, bytes]:
+    market_id = "0x" + "1" * 64
+    up_token_id = "67890"
+    down_token_id = "12345"
+    with tempfile.TemporaryDirectory() as raw_directory:
+        raw_dir = Path(raw_directory)
+        write_deterministic_polymarket_corpus_fixtures(raw_dir)
+
+        def load_rows(name: str) -> list[dict[str, Any]]:
+            return [
+                json.loads(line)
+                for line in (raw_dir / name).read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+
+        market = next(
+            row
+            for row in load_rows("raw_polymarket_markets.jsonl")
+            if row["market_family"] == "btc_updown_15m"
+        )
+        original_market_id = str(market["market_id"])
+        delta = AUTHORIZED_AT_TS_MS - int(market["market_start_ts"])
+        market.update(
+            {
+                "market_id": market_id,
+                "condition_id": market_id,
+                "slug": f"btc-updown-15m-{AUTHORIZED_AT_TS_MS // 1_000}",
+                "up_token_id": up_token_id,
+                "down_token_id": down_token_id,
+                "market_start_ts": AUTHORIZED_AT_TS_MS,
+                "market_end_ts": AUTHORIZED_AT_TS_MS + 900_000,
+                "settlement_ts": AUTHORIZED_AT_TS_MS + 900_000,
+                "trade_collection_mode": "websocket",
+                "trade_stream_started_at_ts": AUTHORIZED_AT_TS_MS,
+                "trade_stream_ended_at_ts": AUTHORIZED_AT_TS_MS + 600_000,
+                "trade_stream_continuity_passed": True,
+                "trade_stream_timestamp_causality_violation_count": 0,
+                "trade_api_collection_ts": AUTHORIZED_AT_TS_MS + 600_000,
+                "trade_api_request_failed": False,
+                "trade_rest_rows_truncated": False,
+                "trade_full_round_coverage_complete": True,
+                "trade_tape_censored": False,
+                "trade_collection_reason_codes": [],
+            }
+        )
+        orderbooks = []
+        for row in load_rows("raw_polymarket_orderbooks.jsonl"):
+            if row["market_id"] != original_market_id:
+                continue
+            row.update(
+                {
+                    "market_id": market_id,
+                    "token_id": (
+                        up_token_id if row["outcome"] == "UP" else down_token_id
+                    ),
+                    "ts": int(row["ts"]) + delta,
+                    "available_at_ts": int(row["available_at_ts"]) + delta,
+                }
+            )
+            if row["outcome"] == "UP":
+                for price_field in ("ask_price", "bid_price", "mid_price"):
+                    row[price_field] = round(float(row[price_field]) - 0.11, 2)
+            orderbooks.append(row)
+        trades = []
+        for row in load_rows("raw_polymarket_trades.jsonl"):
+            if row["market_id"] != original_market_id:
+                continue
+            row.update(
+                {
+                    "market_id": market_id,
+                    "token_id": (
+                        up_token_id if row["outcome"] == "UP" else down_token_id
+                    ),
+                    "ts": int(row["ts"]) + delta,
+                    "available_at_ts": int(row["available_at_ts"]) + delta,
+                }
+            )
+            trades.append(row)
+        candles = load_rows("raw_binance_btcusdt_klines.jsonl")
+        for row in candles:
+            for field in ("ts", "close_time", "available_at_ts"):
+                row[field] = int(row[field]) + delta
+
+    def encode(rows: list[dict[str, Any]]) -> bytes:
+        return "".join(
+            json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n"
+            for row in rows
+        ).encode()
+
+    return {
+        "raw_polymarket_markets.jsonl": encode([market]),
+        "raw_polymarket_orderbooks.jsonl": encode(orderbooks),
+        "raw_polymarket_trades.jsonl": encode(trades),
+        "raw_binance_btcusdt_klines.jsonl": encode(candles),
+        "raw_polymarket_chainlink_prices.jsonl": b"",
+    }
+
+
+def _base_feature_and_signal() -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, bytes],
+    dict[str, bytes],
+    dict[int, dict[str, Any]],
+]:
+    provider_evidence = _synthetic_provider_feature_evidence()
+    feature_rows = {
+        int(row["decision_ts"]): copy.deepcopy(row)
+        for row in build_provider_bound_feature_rows(provider_evidence)
+    }
     decision_ts_ms = AUTHORIZED_AT_TS_MS + 300_000
-    feature_row.update(
-        {
-            "market_id": "0x" + "1" * 64,
-            "decision_ts": decision_ts_ms,
-            "available_at_ts": decision_ts_ms,
-            "feature_cutoff_ts": decision_ts_ms,
-            "max_input_ts": decision_ts_ms,
-        }
-    )
-    for provenance in dict(feature_row["feature_provenance"]).values():
-        provenance["available_at_ts"] = decision_ts_ms
-        provenance["max_input_ts"] = decision_ts_ms
-    parity_path = (
+    feature_row = copy.deepcopy(feature_rows[decision_ts_ms])
+    manifest_path = (
         REPO_ROOT
         / "examples/v8/polymarket_configs/"
         "BTC-15M-cost-aware-market-residual-promotion-v1/"
-        "candidate_bundle/offline_live_parity_report.json"
+        "candidate_bundle/bundle_manifest.json"
     )
-    parity = json.loads(parity_path.read_text(encoding="utf-8"))["live_projection"]
+    runtime = load_residual_promotion_runtime(
+        manifest_path=manifest_path,
+        expected_manifest_sha256=sha256_file(manifest_path),
+        repository_root=REPO_ROOT,
+    )
+    projection = runtime.score_feature_row(
+        feature_row,
+        observed_at_ts=decision_ts_ms,
+    )
+    assert projection["model_scored"] is True
+    assert projection["fail_closed"] is False
     raw = dict(feature_row["features"])
     signal = {
         "schema_version": SIGNAL_SCHEMA_VERSION,
@@ -157,7 +267,7 @@ def _base_feature_and_signal(
         "market_family": "BTC-15M",
         "decision_ts_ms": decision_ts_ms,
         "observed_at_ts_ms": decision_ts_ms,
-        "action_values": parity["action_values"],
+        "action_values": projection["action_values"],
         "executable_asks": {
             "UP": str(raw["up_ask"]),
             "DOWN": str(raw["down_ask"]),
@@ -182,9 +292,9 @@ def _base_feature_and_signal(
             "settlement_accessed": False,
             "pnl_accessed": False,
         },
-        "selected_action": parity["selected_action"],
-        "model_scored": parity["model_scored"],
-        "fail_closed": parity["fail_closed"],
+        "selected_action": projection["selected_action"],
+        "model_scored": projection["model_scored"],
+        "fail_closed": projection["fail_closed"],
         "fail_closed_reasons": [],
         "decision_influenced_collection": False,
         "outcomes_accessed": False,
@@ -192,12 +302,76 @@ def _base_feature_and_signal(
         "pnl_accessed": False,
         "safety": dict(SAFETY),
     }
-    return feature_row, signal, _market_identity_evidence(signal)
+    return (
+        feature_row,
+        signal,
+        _market_identity_evidence(signal),
+        provider_evidence,
+        feature_rows,
+    )
 
 
-BASE_FEATURE_ROW, BASE_SIGNAL_PAYLOAD, BASE_MARKET_IDENTITY_EVIDENCE = (
-    _base_feature_and_signal()
-)
+(
+    BASE_FEATURE_ROW,
+    BASE_SIGNAL_PAYLOAD,
+    BASE_MARKET_IDENTITY_EVIDENCE,
+    BASE_PROVIDER_FEATURE_EVIDENCE,
+    BASE_PROVIDER_FEATURE_ROWS,
+) = _base_feature_and_signal()
+
+
+def _provider_feature_evidence_for_signal(
+    signal: dict[str, Any],
+) -> dict[str, bytes]:
+    target_start = int(str(signal["slug"]).rsplit("-", maxsplit=1)[1]) * 1_000
+    delta = target_start - AUTHORIZED_AT_TS_MS
+    output: dict[str, bytes] = {}
+    for name in PROVIDER_FEATURE_FILENAMES:
+        raw = BASE_PROVIDER_FEATURE_EVIDENCE[name]
+        if not raw:
+            output[name] = b""
+            continue
+        rows = [json.loads(line) for line in raw.decode().splitlines() if line]
+        for row in rows:
+            if name == "raw_polymarket_markets.jsonl":
+                row.update(
+                    {
+                        "market_id": signal["market_id"],
+                        "condition_id": signal["market_id"],
+                        "slug": signal["slug"],
+                        "up_token_id": signal["up_token_id"],
+                        "down_token_id": signal["down_token_id"],
+                    }
+                )
+                for field in (
+                    "market_start_ts",
+                    "market_end_ts",
+                    "settlement_ts",
+                    "trade_stream_started_at_ts",
+                    "trade_stream_ended_at_ts",
+                    "trade_api_collection_ts",
+                ):
+                    row[field] = int(row[field]) + delta
+            elif name in {
+                "raw_polymarket_orderbooks.jsonl",
+                "raw_polymarket_trades.jsonl",
+            }:
+                row["market_id"] = signal["market_id"]
+                row["token_id"] = (
+                    signal["up_token_id"]
+                    if row["outcome"] == "UP"
+                    else signal["down_token_id"]
+                )
+                row["ts"] = int(row["ts"]) + delta
+                row["available_at_ts"] = int(row["available_at_ts"]) + delta
+            elif name == "raw_binance_btcusdt_klines.jsonl":
+                for field in ("ts", "close_time", "available_at_ts"):
+                    row[field] = int(row[field]) + delta
+        output[name] = "".join(
+            json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n"
+            for row in rows
+        ).encode()
+    return output
 
 
 def _order_identity(
@@ -240,6 +414,16 @@ def _json_bytes(value: dict[str, Any]) -> bytes:
     return json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
 
 
+def _provider_evidence_with_market_patch(**changes: Any) -> dict[str, bytes]:
+    evidence = dict(BASE_PROVIDER_FEATURE_EVIDENCE)
+    market = json.loads(
+        evidence["raw_polymarket_markets.jsonl"].decode().strip()
+    )
+    market.update(changes)
+    evidence["raw_polymarket_markets.jsonl"] = _json_bytes(market) + b"\n"
+    return evidence
+
+
 class MicroLiveExecutor(_StrictMicroLiveExecutor):
     """Test adapter that materializes mutable fixtures as exact raw bytes."""
 
@@ -255,6 +439,9 @@ class MicroLiveExecutor(_StrictMicroLiveExecutor):
         return super().submit_signal(
             raw_signal_payload=_json_bytes(signal_payload),
             raw_feature_row=_json_bytes(feature_row),
+            provider_feature_evidence=_provider_feature_evidence_for_signal(
+                signal_payload
+            ),
             now_ts_ms=now_ts_ms,
             operator_heartbeat_ts_ms=operator_heartbeat_ts_ms,
             market_identity_evidence=market_identity_evidence,
@@ -992,6 +1179,7 @@ def _signal(**overrides: Any) -> dict[str, Any]:
             signal_payload[key] = value
             if key == "market_id":
                 feature_row["market_id"] = value
+                feature_row["condition_id"] = value
                 signal_payload["market_identity"]["condition_id"] = value
             elif key == "slug":
                 start = int(str(value).rsplit("-", maxsplit=1)[1]) * 1_000
@@ -1175,6 +1363,7 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
     result = executor.submit_signal(
         raw_signal_payload=raw_signal,
         raw_feature_row=raw_feature,
+        provider_feature_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
         now_ts_ms=payload["now_ts_ms"],
         operator_heartbeat_ts_ms=payload["operator_heartbeat_ts_ms"],
         market_identity_evidence=payload["market_identity_evidence"],
@@ -1193,6 +1382,23 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
         raw_feature
     ).hexdigest()
     assert evaluated["raw_feature_row_json"].encode() == raw_feature
+    provider_verification = verify_provider_feature_evidence(
+        raw_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
+        signal=payload["signal_payload"],
+        feature_row=payload["feature_row"],
+    )
+    assert (
+        evaluated["provider_feature_evidence_graph_sha256"]
+        == provider_verification.evidence_graph_sha256
+    )
+    assert (
+        evaluated["provider_feature_file_sha256"]
+        == provider_verification.file_sha256
+    )
+    assert evaluated["raw_provider_feature_evidence_jsonl"] == {
+        name: raw.decode()
+        for name, raw in BASE_PROVIDER_FEATURE_EVIDENCE.items()
+    }
     restored = _StrictMicroLiveExecutor.restore(
         authorization=verified,
         transport=FakeTransport(),
@@ -1246,11 +1452,55 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
             raw_state=_json_bytes(tampered_state),
         )
 
+    provider_tampered_state = executor.export_state()
+    provider_evaluated_event = next(
+        event
+        for event in provider_tampered_state["events"]
+        if event["event_type"] == "SIGNAL_EVALUATED"
+    )
+    provider_evaluated_event["payload"]["raw_provider_feature_evidence_jsonl"][
+        "raw_polymarket_chainlink_prices.jsonl"
+    ] = '{"available_at_ts":1,"price":1,"ts":1}\n'
+    provider_audit_core = {
+        key: value
+        for key, value in provider_evaluated_event["payload"].items()
+        if key != "decision_audit_sha256"
+    }
+    provider_evaluated_event["payload"]["decision_audit_sha256"] = (
+        canonical_json_sha256(provider_audit_core)
+    )
+    previous = "GENESIS"
+    for event in provider_tampered_state["events"]:
+        event["previous_event_sha256"] = previous
+        event_core = {
+            key: value for key, value in event.items() if key != "event_sha256"
+        }
+        event["event_sha256"] = canonical_json_sha256(event_core)
+        previous = event["event_sha256"]
+    provider_state_core = {
+        key: value
+        for key, value in provider_tampered_state.items()
+        if key != "state_sha256"
+    }
+    provider_tampered_state["state_sha256"] = canonical_json_sha256(
+        provider_state_core
+    )
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="stored provider feature evidence",
+    ):
+        _StrictMicroLiveExecutor.restore(
+            authorization=verified,
+            transport=FakeTransport(),
+            raw_state=_json_bytes(provider_tampered_state),
+        )
+
     parsed = _StrictMicroLiveExecutor(verified, transport=FakeTransport())
     with pytest.raises(MicroLiveExecutionError, match="raw bytes are invalid"):
         parsed.submit_signal(
             raw_signal_payload=payload["signal_payload"],
             raw_feature_row=raw_feature,
+            provider_feature_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
             now_ts_ms=payload["now_ts_ms"],
             operator_heartbeat_ts_ms=payload["operator_heartbeat_ts_ms"],
             market_identity_evidence=payload["market_identity_evidence"],
@@ -1262,6 +1512,7 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
         duplicate.submit_signal(
             raw_signal_payload=duplicate_signal,
             raw_feature_row=raw_feature,
+            provider_feature_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
             now_ts_ms=payload["now_ts_ms"],
             operator_heartbeat_ts_ms=payload["operator_heartbeat_ts_ms"],
             market_identity_evidence=payload["market_identity_evidence"],
@@ -1273,9 +1524,111 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
         overflow.submit_signal(
             raw_signal_payload=raw_signal,
             raw_feature_row=overflow_feature,
+            provider_feature_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
             now_ts_ms=payload["now_ts_ms"],
             operator_heartbeat_ts_ms=payload["operator_heartbeat_ts_ms"],
             market_identity_evidence=payload["market_identity_evidence"],
+        )
+
+
+def test_provider_feature_evidence_reconstructs_exact_deterministic_row() -> None:
+    first = verify_provider_feature_evidence(
+        raw_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
+        signal=BASE_SIGNAL_PAYLOAD,
+        feature_row=BASE_FEATURE_ROW,
+    )
+    second = verify_provider_feature_evidence(
+        raw_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
+        signal=BASE_SIGNAL_PAYLOAD,
+        feature_row=BASE_FEATURE_ROW,
+    )
+    assert first == second
+    assert first.reconstructed_feature_row_sha256 == canonical_json_sha256(
+        BASE_FEATURE_ROW
+    )
+    assert first.file_sha256 == {
+        name: hashlib.sha256(raw).hexdigest()
+        for name, raw in BASE_PROVIDER_FEATURE_EVIDENCE.items()
+    }
+    assert len(build_provider_bound_feature_rows(BASE_PROVIDER_FEATURE_EVIDENCE)) == 3
+
+
+def test_provider_feature_evidence_schema_and_raw_types_fail_closed() -> None:
+    missing = dict(BASE_PROVIDER_FEATURE_EVIDENCE)
+    missing.pop("raw_polymarket_chainlink_prices.jsonl")
+    extra = {**BASE_PROVIDER_FEATURE_EVIDENCE, "unexpected.jsonl": b""}
+    semantic_not_raw = dict(BASE_PROVIDER_FEATURE_EVIDENCE)
+    semantic_not_raw["raw_polymarket_chainlink_prices.jsonl"] = ""
+    for evidence in (missing, extra, semantic_not_raw):
+        with pytest.raises(ProviderFeatureEvidenceError):
+            build_provider_bound_feature_rows(evidence)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "ambiguous_raw",
+    (
+        b'{"x":1,"x":2}\n',
+        b'{"x":NaN}\n',
+        b'{"x":Infinity}\n',
+        b'{"x":1e400}\n',
+        b"\xff\n",
+    ),
+)
+def test_provider_feature_evidence_rejects_ambiguous_json(
+    ambiguous_raw: bytes,
+) -> None:
+    evidence = dict(BASE_PROVIDER_FEATURE_EVIDENCE)
+    evidence["raw_polymarket_chainlink_prices.jsonl"] = ambiguous_raw
+    with pytest.raises(ProviderFeatureEvidenceError):
+        build_provider_bound_feature_rows(evidence)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("resolved_outcome", "UP"),
+        ("realized_pnl", 1.0),
+        ("training_label", 1),
+        ("wallet_signing_allowed", True),
+        ("outcomes_accessed", True),
+        ("settlement_accessed", True),
+        ("pnl_accessed", True),
+    ),
+)
+def test_provider_feature_evidence_forbids_results_and_safety_unlocks(
+    field: str,
+    value: Any,
+) -> None:
+    with pytest.raises(ProviderFeatureEvidenceError):
+        build_provider_bound_feature_rows(
+            _provider_evidence_with_market_patch(**{field: value})
+        )
+
+
+def test_provider_feature_evidence_binds_feature_and_market_identity() -> None:
+    feature_drift = copy.deepcopy(BASE_FEATURE_ROW)
+    feature_drift["features"]["up_ask"] += 0.01
+    with pytest.raises(ProviderFeatureEvidenceError, match="does not match submitted"):
+        verify_provider_feature_evidence(
+            raw_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
+            signal=BASE_SIGNAL_PAYLOAD,
+            feature_row=feature_drift,
+        )
+    wrong_slug = copy.deepcopy(BASE_SIGNAL_PAYLOAD)
+    wrong_slug["slug"] = "btc-updown-15m-1789949700"
+    with pytest.raises(ProviderFeatureEvidenceError):
+        verify_provider_feature_evidence(
+            raw_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
+            signal=wrong_slug,
+            feature_row=BASE_FEATURE_ROW,
+        )
+    wrong_token = copy.deepcopy(BASE_SIGNAL_PAYLOAD)
+    wrong_token["up_token_id"] = "99999"
+    with pytest.raises(ProviderFeatureEvidenceError, match="identity"):
+        verify_provider_feature_evidence(
+            raw_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
+            signal=wrong_token,
+            feature_row=BASE_FEATURE_ROW,
         )
 
 
@@ -1341,7 +1694,9 @@ def test_allowlist_no_trade_candidate_and_token_contract_block_without_transport
     )
     failed_closed["feature_row"]["max_input_ts"] -= 10_000
     failed_closed = _bind_signal_to_runtime(failed_closed, verified.runtime)
-    assert executor.submit_signal(**failed_closed)["reason"] == "signal_failed_closed"
+    with pytest.raises(MicroLiveExecutionError, match="not bound to provider bytes"):
+        executor.submit_signal(**failed_closed)
+    executor = MicroLiveExecutor(verified, transport=transport)
     with pytest.raises(MicroLiveExecutionError, match="identity or safety"):
         executor.submit_signal(
             **_signal(
@@ -1372,7 +1727,7 @@ def test_signal_envelope_tampering_and_outcome_fields_fail_closed(
     executor = MicroLiveExecutor(verified, transport=transport)
 
     mismatched = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
-    mismatched["signal_payload"]["selected_action"] = "BUY_UP_HOLD"
+    mismatched["signal_payload"]["selected_action"] = "BUY_DOWN_HOLD"
     with pytest.raises(MicroLiveExecutionError, match="zero-threshold decision"):
         executor.submit_signal(**mismatched)
 
@@ -1384,6 +1739,9 @@ def test_signal_envelope_tampering_and_outcome_fields_fail_closed(
             "BUY_DOWN_HOLD": 0.25,
         },
     )
+    internally_coherent_but_fabricated["signal_payload"][
+        "selected_action"
+    ] = "BUY_DOWN_HOLD"
     with pytest.raises(MicroLiveExecutionError, match="does not match frozen runtime"):
         executor.submit_signal(**internally_coherent_but_fabricated)
 
@@ -1568,17 +1926,7 @@ def test_second_frozen_decision_is_audited_and_blocked_without_kill(
     second["signal_payload"]["market_identity"][
         "clob_revalidated_at_ts_ms"
     ] = second_ts
-    second["feature_row"].update(
-        {
-            "decision_ts": second_ts,
-            "available_at_ts": second_ts,
-            "feature_cutoff_ts": second_ts,
-            "max_input_ts": second_ts,
-        }
-    )
-    for provenance in dict(second["feature_row"]["feature_provenance"]).values():
-        provenance["available_at_ts"] = second_ts
-        provenance["max_input_ts"] = second_ts
+    second["feature_row"] = copy.deepcopy(BASE_PROVIDER_FEATURE_ROWS[second_ts])
     second["now_ts_ms"] = second_ts + 1_000
     second["operator_heartbeat_ts_ms"] = second_ts + 950
     second = _bind_signal_to_runtime(second, verified.runtime)
@@ -1886,7 +2234,8 @@ def test_fill_cash_position_settlement_and_restart_reconcile(
         transport_event_sha256="f" * 64,
     )
     assert fill["snapshot"]["cash_usd"] == "9.6098"
-    assert fill["snapshot"]["positions"]["DOWN"] == "1"
+    selected_side = str(BASE_SIGNAL_PAYLOAD["selected_action"]).split("_")[1]
+    assert fill["snapshot"]["positions"][selected_side] == "1"
     assert _record_fill(
         executor,
         client_order_id=order["client_order_id"],
@@ -1907,7 +2256,7 @@ def test_fill_cash_position_settlement_and_restart_reconcile(
     )
     assert settled["snapshot"]["cash_usd"] == "10.6098"
     assert settled["snapshot"]["realized_pnl_usd"] == "0.6098"
-    assert settled["snapshot"]["positions"]["DOWN"] == "0"
+    assert settled["snapshot"]["positions"][selected_side] == "0"
     state = executor.export_state()
     restored = MicroLiveExecutor.restore(
         authorization=verified,
@@ -2975,7 +3324,7 @@ def test_rehashed_tampered_state_still_fails_closed(
     prepared = next(
         event for event in state["events"] if event["event_type"] == "ORDER_PREPARED"
     )
-    prepared["payload"]["selected_action"] = "BUY_UP_HOLD"
+    prepared["payload"]["selected_action"] = "BUY_DOWN_HOLD"
     previous = "GENESIS"
     for event in state["events"]:
         event["previous_event_sha256"] = previous

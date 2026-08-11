@@ -20,6 +20,12 @@ from typing import Any, Protocol
 
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
+from bigan.v8.polymarket.residual_promotion_feature_evidence import (
+    PROVIDER_FEATURE_FILENAMES,
+    ProviderFeatureEvidenceError,
+    VerifiedProviderFeatureEvidence,
+    verify_provider_feature_evidence,
+)
 from bigan.v8.polymarket.residual_promotion_micro_live_authorization import (
     VerifiedMicroLiveAuthorization,
     authorization_capability_is_verified,
@@ -31,7 +37,7 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
     ResidualPromotionRuntime,
 )
 
-STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v6"
+STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v7"
 SIGNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-execution-signal-v2"
 IMPLEMENTATION_REPOSITORY_PATH = (
     "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py"
@@ -395,6 +401,7 @@ class MicroLiveExecutor:
         *,
         raw_signal_payload: bytes,
         raw_feature_row: bytes,
+        provider_feature_evidence: Mapping[str, bytes],
         now_ts_ms: int,
         operator_heartbeat_ts_ms: int,
         market_identity_evidence: Mapping[str, bytes] | None = None,
@@ -427,6 +434,16 @@ class MicroLiveExecutor:
                 feature_row=feature_row,
                 runtime=self._authorization.runtime,
             )
+            try:
+                verified_feature_evidence = verify_provider_feature_evidence(
+                    raw_evidence=provider_feature_evidence,
+                    signal=signal,
+                    feature_row=features,
+                )
+            except ProviderFeatureEvidenceError as exc:
+                raise MicroLiveExecutionError(
+                    "candidate feature row is not bound to provider bytes"
+                ) from exc
             decision_ts_ms = int(signal["decision_ts_ms"])
             self._validate_clock(
                 now_ts_ms,
@@ -476,6 +493,7 @@ class MicroLiveExecutor:
                 raw_signal_sha256=raw_signal_sha256,
                 raw_feature_json=raw_feature_json,
                 raw_feature_sha256=raw_feature_sha256,
+                provider_feature_evidence=verified_feature_evidence,
                 disposition="BLOCKED_NO_TRADE",
                 reason="kill_switch_active",
                 now_ts_ms=now_ts_ms,
@@ -495,6 +513,7 @@ class MicroLiveExecutor:
                 raw_signal_sha256=raw_signal_sha256,
                 raw_feature_json=raw_feature_json,
                 raw_feature_sha256=raw_feature_sha256,
+                provider_feature_evidence=verified_feature_evidence,
                 disposition="BLOCKED_NO_TRADE",
                 reason="market_not_allowlisted",
                 now_ts_ms=now_ts_ms,
@@ -509,6 +528,7 @@ class MicroLiveExecutor:
                 raw_signal_sha256=raw_signal_sha256,
                 raw_feature_json=raw_feature_json,
                 raw_feature_sha256=raw_feature_sha256,
+                provider_feature_evidence=verified_feature_evidence,
                 disposition="BLOCKED_NO_TRADE",
                 reason="signal_failed_closed",
                 now_ts_ms=now_ts_ms,
@@ -523,6 +543,7 @@ class MicroLiveExecutor:
                 raw_signal_sha256=raw_signal_sha256,
                 raw_feature_json=raw_feature_json,
                 raw_feature_sha256=raw_feature_sha256,
+                provider_feature_evidence=verified_feature_evidence,
                 disposition="BLOCKED_NO_TRADE",
                 reason="signal_selected_no_trade",
                 now_ts_ms=now_ts_ms,
@@ -537,6 +558,7 @@ class MicroLiveExecutor:
                 raw_signal_sha256=raw_signal_sha256,
                 raw_feature_json=raw_feature_json,
                 raw_feature_sha256=raw_feature_sha256,
+                provider_feature_evidence=verified_feature_evidence,
                 disposition="BLOCKED_NO_TRADE",
                 reason="action_not_allowlisted",
                 now_ts_ms=now_ts_ms,
@@ -589,6 +611,16 @@ class MicroLiveExecutor:
             "feature_row": features,
             "raw_feature_row_sha256": raw_feature_sha256,
             "raw_feature_row_json": raw_feature_json,
+            "provider_feature_evidence_graph_sha256": (
+                verified_feature_evidence.evidence_graph_sha256
+            ),
+            "provider_feature_file_sha256": verified_feature_evidence.file_sha256,
+            "provider_reconstructed_feature_row_sha256": (
+                verified_feature_evidence.reconstructed_feature_row_sha256
+            ),
+            "raw_provider_feature_evidence_jsonl": (
+                verified_feature_evidence.raw_jsonl
+            ),
         }
         intent_id = canonical_json_sha256(intent_core)
         client_order_id = intent_id
@@ -603,6 +635,7 @@ class MicroLiveExecutor:
                         raw_signal_sha256=raw_signal_sha256,
                         raw_feature_json=raw_feature_json,
                         raw_feature_sha256=raw_feature_sha256,
+                        provider_feature_evidence=verified_feature_evidence,
                         disposition="BLOCKED_NO_TRADE",
                         reason="one_trade_maximum_per_market",
                         now_ts_ms=now_ts_ms,
@@ -616,6 +649,7 @@ class MicroLiveExecutor:
                     raw_signal_sha256=raw_signal_sha256,
                     raw_feature_json=raw_feature_json,
                     raw_feature_sha256=raw_feature_sha256,
+                    provider_feature_evidence=verified_feature_evidence,
                     disposition="REJECTED_CONFLICT",
                     reason="conflicting_duplicate_intent",
                     now_ts_ms=now_ts_ms,
@@ -634,6 +668,7 @@ class MicroLiveExecutor:
                     raw_signal_sha256=raw_signal_sha256,
                     raw_feature_json=raw_feature_json,
                     raw_feature_sha256=raw_feature_sha256,
+                    provider_feature_evidence=verified_feature_evidence,
                     disposition="IDEMPOTENT_REPLAY",
                     reason="existing_identical_intent",
                     now_ts_ms=now_ts_ms,
@@ -652,6 +687,7 @@ class MicroLiveExecutor:
                 raw_signal_sha256=raw_signal_sha256,
                 raw_feature_json=raw_feature_json,
                 raw_feature_sha256=raw_feature_sha256,
+                provider_feature_evidence=verified_feature_evidence,
                 disposition="BLOCKED_NO_TRADE",
                 reason="existing_order_requires_reconciliation",
                 now_ts_ms=now_ts_ms,
@@ -666,6 +702,7 @@ class MicroLiveExecutor:
                 raw_signal_sha256=raw_signal_sha256,
                 raw_feature_json=raw_feature_json,
                 raw_feature_sha256=raw_feature_sha256,
+                provider_feature_evidence=verified_feature_evidence,
                 disposition="BLOCKED_NO_TRADE",
                 reason="authorization_notional_cap_exceeded",
                 now_ts_ms=now_ts_ms,
@@ -680,6 +717,7 @@ class MicroLiveExecutor:
                 raw_signal_sha256=raw_signal_sha256,
                 raw_feature_json=raw_feature_json,
                 raw_feature_sha256=raw_feature_sha256,
+                provider_feature_evidence=verified_feature_evidence,
                 disposition="BLOCKED_NO_TRADE",
                 reason="maximum_open_orders_reached",
                 now_ts_ms=now_ts_ms,
@@ -697,6 +735,7 @@ class MicroLiveExecutor:
                 raw_signal_sha256=raw_signal_sha256,
                 raw_feature_json=raw_feature_json,
                 raw_feature_sha256=raw_feature_sha256,
+                provider_feature_evidence=verified_feature_evidence,
                 disposition="BLOCKED_NO_TRADE",
                 reason="maximum_loss_reservation_exceeded",
                 now_ts_ms=now_ts_ms,
@@ -711,6 +750,7 @@ class MicroLiveExecutor:
             raw_signal_sha256=raw_signal_sha256,
             raw_feature_json=raw_feature_json,
             raw_feature_sha256=raw_feature_sha256,
+            provider_feature_evidence=verified_feature_evidence,
             disposition="EXECUTION_INTENT",
             reason=None,
             now_ts_ms=now_ts_ms,
@@ -749,6 +789,8 @@ class MicroLiveExecutor:
                 "market_identity_sha256",
                 "market_identity",
                 "raw_feature_row_sha256",
+                "provider_feature_evidence_graph_sha256",
+                "provider_feature_file_sha256",
                 "intent_id",
                 "client_order_id",
                 "submitted_at_ts_ms",
@@ -1037,6 +1079,7 @@ class MicroLiveExecutor:
         raw_signal_sha256: str,
         raw_feature_json: str,
         raw_feature_sha256: str,
+        provider_feature_evidence: VerifiedProviderFeatureEvidence,
         disposition: str,
         reason: str | None,
         now_ts_ms: int,
@@ -1064,6 +1107,16 @@ class MicroLiveExecutor:
             "feature_row": feature_copy,
             "raw_feature_row_sha256": raw_feature_sha256,
             "raw_feature_row_json": raw_feature_json,
+            "provider_feature_evidence_graph_sha256": (
+                provider_feature_evidence.evidence_graph_sha256
+            ),
+            "provider_feature_file_sha256": provider_feature_evidence.file_sha256,
+            "provider_reconstructed_feature_row_sha256": (
+                provider_feature_evidence.reconstructed_feature_row_sha256
+            ),
+            "raw_provider_feature_evidence_jsonl": (
+                provider_feature_evidence.raw_jsonl
+            ),
             "disposition": disposition,
             "reason": reason,
         }
@@ -1861,13 +1914,17 @@ class MicroLiveExecutor:
                 "feature_row",
                 "raw_feature_row_sha256",
                 "raw_feature_row_json",
+                "provider_feature_evidence_graph_sha256",
+                "provider_feature_file_sha256",
+                "provider_reconstructed_feature_row_sha256",
+                "raw_provider_feature_evidence_jsonl",
                 "disposition",
                 "reason",
                 "decision_audit_sha256",
             }
             if set(payload) != expected:
                 raise MicroLiveExecutionError("evaluated signal audit schema is invalid")
-            signal, feature_row = _validated_stored_signal_and_feature(
+            signal, feature_row, _ = _validated_stored_signal_and_feature(
                 payload=payload,
                 expected_candidate_bundle_sha256=(
                     self._authorization.candidate_bundle_sha256
@@ -1957,6 +2014,10 @@ class MicroLiveExecutor:
                 "feature_row",
                 "raw_feature_row_sha256",
                 "raw_feature_row_json",
+                "provider_feature_evidence_graph_sha256",
+                "provider_feature_file_sha256",
+                "provider_reconstructed_feature_row_sha256",
+                "raw_provider_feature_evidence_jsonl",
                 "intent_id",
                 "client_order_id",
             }
@@ -1978,7 +2039,7 @@ class MicroLiveExecutor:
                 or maximum_loss != price * quantity + maximum_fee
             ):
                 raise MicroLiveExecutionError("prepared order economics are invalid")
-            signal, feature_row = _validated_stored_signal_and_feature(
+            signal, feature_row, _ = _validated_stored_signal_and_feature(
                 payload=payload,
                 expected_candidate_bundle_sha256=self._authorization.candidate_bundle_sha256,
                 runtime=self._authorization.runtime,
@@ -2520,6 +2581,12 @@ class MicroLiveExecutor:
                     == payload.get("feature_row_sha256")
                     and pending_execution_audit.get("raw_feature_row_sha256")
                     == payload.get("raw_feature_row_sha256")
+                    and pending_execution_audit.get(
+                        "provider_feature_evidence_graph_sha256"
+                    )
+                    == payload.get("provider_feature_evidence_graph_sha256")
+                    and pending_execution_audit.get("provider_feature_file_sha256")
+                    == payload.get("provider_feature_file_sha256")
                 ):
                     raise MicroLiveExecutionError(
                         "order preparation does not reconcile with execution-intent audit"
@@ -3382,7 +3449,11 @@ def _validated_stored_signal_and_feature(
     payload: Mapping[str, Any],
     expected_candidate_bundle_sha256: str,
     runtime: ResidualPromotionRuntime,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    VerifiedProviderFeatureEvidence,
+]:
     """Re-decode exact stored input bytes before replaying semantic bindings."""
 
     raw_signal = _stored_raw_json_object(
@@ -3417,7 +3488,41 @@ def _validated_stored_signal_and_feature(
         raise MicroLiveExecutionError(
             "stored raw candidate inputs do not match semantic audit copies"
         )
-    return signal, features
+    raw_provider_value = payload.get("raw_provider_feature_evidence_jsonl")
+    if not (
+        isinstance(raw_provider_value, Mapping)
+        and set(raw_provider_value) == set(PROVIDER_FEATURE_FILENAMES)
+        and all(isinstance(value, str) for value in raw_provider_value.values())
+    ):
+        raise MicroLiveExecutionError(
+            "stored raw provider feature evidence schema is invalid"
+        )
+    raw_provider = {
+        name: str(raw_provider_value[name]).encode("utf-8")
+        for name in PROVIDER_FEATURE_FILENAMES
+    }
+    try:
+        verified_provider = verify_provider_feature_evidence(
+            raw_evidence=raw_provider,
+            signal=signal,
+            feature_row=features,
+        )
+    except ProviderFeatureEvidenceError as exc:
+        raise MicroLiveExecutionError(
+            "stored provider feature evidence does not reconstruct input"
+        ) from exc
+    if not (
+        payload.get("provider_feature_evidence_graph_sha256")
+        == verified_provider.evidence_graph_sha256
+        and payload.get("provider_feature_file_sha256")
+        == verified_provider.file_sha256
+        and payload.get("provider_reconstructed_feature_row_sha256")
+        == verified_provider.reconstructed_feature_row_sha256
+    ):
+        raise MicroLiveExecutionError(
+            "stored provider feature evidence hashes do not reconcile"
+        )
+    return signal, features, verified_provider
 
 
 def _reject_forbidden_feature_keys(value: Any, path: str = "") -> None:
