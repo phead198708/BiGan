@@ -584,6 +584,8 @@ def _authorization(
     root: Path,
     evidence_root: Path,
     required: dict[str, dict[str, str]],
+    *,
+    maximum_realized_loss_usd: str = "1.00",
 ) -> dict[str, Any]:
     evidence_payload_sha = canonical_json_sha256(
         {name: value["sha256"] for name, value in sorted(required.items())}
@@ -597,7 +599,7 @@ def _authorization(
         "capital_base_usd": "1000",
         "requested_initial_capital_fraction": "0.01",
         "maximum_notional_usd": "10.00",
-        "maximum_realized_loss_usd": "1.00",
+        "maximum_realized_loss_usd": maximum_realized_loss_usd,
         "maximum_open_orders": 2,
         "market_allowlist": ["BTC-15M"],
         "allowed_actions": ["BUY_UP_HOLD", "BUY_DOWN_HOLD"],
@@ -611,7 +613,7 @@ def _authorization(
     command = (
         "APPROVE BTC-15M-cost-aware-market-residual-promotion-v1 MICRO-LIVE "
         f"authorization_id={authorization_id} capital_base_usd=1000 "
-        "maximum_notional_usd=10.00 maximum_realized_loss_usd=1.00 "
+        f"maximum_notional_usd=10.00 maximum_realized_loss_usd={maximum_realized_loss_usd} "
         "maximum_open_orders=2 "
         f"capital_fraction=0.01 expires_at_ts_ms={identity['expires_at_ts_ms']}"
     )
@@ -1154,10 +1156,10 @@ def test_fill_cash_position_settlement_and_restart_reconcile(
         now_ts_ms=NOW_TS_MS,
         quantity="1",
         price="0.39",
-        fee_usd="0.01",
+        fee_usd="0.0002",
         transport_event_sha256="f" * 64,
     )
-    assert fill["snapshot"]["cash_usd"] == "9.60"
+    assert fill["snapshot"]["cash_usd"] == "9.6098"
     assert fill["snapshot"]["positions"]["DOWN"] == "1"
     assert executor.record_fill(
         client_order_id=order["client_order_id"],
@@ -1165,7 +1167,7 @@ def test_fill_cash_position_settlement_and_restart_reconcile(
         now_ts_ms=NOW_TS_MS,
         quantity="1",
         price="0.39",
-        fee_usd="0.01",
+        fee_usd="0.0002",
         transport_event_sha256="f" * 64,
     )["status"] == "IDEMPOTENT_FILL_REPLAY"
     settled = executor.record_settlement(
@@ -1175,8 +1177,8 @@ def test_fill_cash_position_settlement_and_restart_reconcile(
         payout_per_token="1",
         official_settlement_sha256="1" * 64,
     )
-    assert settled["snapshot"]["cash_usd"] == "10.60"
-    assert settled["snapshot"]["realized_pnl_usd"] == "0.60"
+    assert settled["snapshot"]["cash_usd"] == "10.6098"
+    assert settled["snapshot"]["realized_pnl_usd"] == "0.6098"
     assert settled["snapshot"]["positions"]["DOWN"] == "0"
     state = executor.export_state()
     restored = MicroLiveExecutor.restore(
@@ -1188,14 +1190,14 @@ def test_fill_cash_position_settlement_and_restart_reconcile(
     assert restored.reconciliation_snapshot() == executor.reconciliation_snapshot()
 
 
-def test_realized_loss_limit_is_human_bound_and_persistently_kills(
+def test_loss_budget_reservation_prevents_realized_loss_cap_overshoot(
     authorized_fixture: dict[str, Any],
 ) -> None:
     verified = _verified(authorized_fixture)
     assert verified.maximum_realized_loss_usd == Decimal("1.00")
     transport = FakeTransport()
     executor = MicroLiveExecutor(verified, transport=transport)
-    for index in range(1, 4):
+    for index in range(1, 3):
         order = executor.submit_signal(
             **_signal(
                 candidate_bundle_sha256=verified.candidate_bundle_sha256,
@@ -1210,7 +1212,7 @@ def test_realized_loss_limit_is_human_bound_and_persistently_kills(
             now_ts_ms=NOW_TS_MS,
             quantity="1",
             price="0.39",
-            fee_usd="0.01",
+            fee_usd="0.0002",
             transport_event_sha256=f"{index + 10:064x}",
         )
         executor.record_settlement(
@@ -1221,10 +1223,10 @@ def test_realized_loss_limit_is_human_bound_and_persistently_kills(
             official_settlement_sha256=f"{index + 20:064x}",
         )
     snapshot = executor.reconciliation_snapshot()
-    assert Decimal(snapshot["realized_pnl_usd"]) == Decimal("-1.20")
+    assert Decimal(snapshot["realized_pnl_usd"]) == Decimal("-0.7804")
     assert snapshot["maximum_realized_loss_usd"] == "1.00"
-    assert snapshot["kill_switch_active"] is True
-    assert snapshot["kill_switch_reason"] == "maximum_realized_loss_reached"
+    assert snapshot["loss_budget_consumed_usd"] == "0.7804"
+    assert snapshot["kill_switch_active"] is False
     blocked = executor.submit_signal(
         **_signal(
             candidate_bundle_sha256=verified.candidate_bundle_sha256,
@@ -1233,7 +1235,86 @@ def test_realized_loss_limit_is_human_bound_and_persistently_kills(
             down_token_id="41001",
         )
     )
-    assert blocked["reason"] == "kill_switch_active"
+    assert blocked["reason"] == "maximum_loss_reservation_exceeded"
+    assert len(transport.submit_calls) == 2
+
+
+def test_exact_human_loss_limit_persistently_kills_at_boundary(
+    authorized_fixture: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    evidence_root = tmp_path / "future_evidence"
+    shutil.copytree(authorized_fixture["evidence_root"], evidence_root)
+    authorization = _authorization(
+        authorized_fixture["root"],
+        evidence_root,
+        copy.deepcopy(authorized_fixture["authorization"]["required_evidence"]),
+        maximum_realized_loss_usd="0.4302",
+    )
+    verified = verify_micro_live_authorization(
+        authorization,
+        repository_root=authorized_fixture["root"],
+        evidence_root=evidence_root,
+        now_ts_ms=NOW_TS_MS,
+    )
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    prepared = next(
+        event["payload"]
+        for event in executor.events
+        if event["event_type"] == "ORDER_PREPARED"
+    )
+    assert prepared["maximum_loss_usd"] == "0.4302"
+    executor.record_fill(
+        client_order_id=order["client_order_id"],
+        fill_id="boundary-loss-fill",
+        now_ts_ms=NOW_TS_MS,
+        quantity="1",
+        price="0.43",
+        fee_usd="0.0002",
+        transport_event_sha256="d" * 64,
+    )
+    settled = executor.record_settlement(
+        client_order_id=order["client_order_id"],
+        settlement_id="boundary-loss-settlement",
+        now_ts_ms=NOW_TS_MS,
+        payout_per_token="0",
+        official_settlement_sha256="e" * 64,
+    )
+    assert settled["snapshot"]["realized_pnl_usd"] == "-0.4302"
+    assert settled["snapshot"]["loss_budget_consumed_usd"] == "0.4302"
+    assert settled["snapshot"]["kill_switch_active"] is True
+    assert settled["snapshot"]["kill_switch_reason"] == (
+        "maximum_realized_loss_reached"
+    )
+
+
+def test_fill_fee_above_frozen_cost_contract_persistently_kills(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    with pytest.raises(MicroLiveExecutionError, match="frozen execution contract"):
+        executor.record_fill(
+            client_order_id=order["client_order_id"],
+            fill_id="fee-drift-fill",
+            now_ts_ms=NOW_TS_MS,
+            quantity="1",
+            price="0.39",
+            fee_usd="0.0003",
+            transport_event_sha256="f" * 64,
+        )
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["fill_count"] == 0
+    assert snapshot["kill_switch_reason"] == "fill_fee_above_frozen_contract"
+    assert len(transport.cancel_calls) == 1
 
 
 def test_conflicting_fill_and_partial_open_settlement_engage_kill_switch(
@@ -1251,7 +1332,7 @@ def test_conflicting_fill_and_partial_open_settlement_engage_kill_switch(
         now_ts_ms=NOW_TS_MS,
         quantity="0.5",
         price="0.39",
-        fee_usd="0.01",
+        fee_usd="0.0001",
         transport_event_sha256="a" * 64,
     )
     with pytest.raises(MicroLiveExecutionError, match="conflicting duplicate fill"):
@@ -1261,7 +1342,7 @@ def test_conflicting_fill_and_partial_open_settlement_engage_kill_switch(
             now_ts_ms=NOW_TS_MS,
             quantity="0.5",
             price="0.38",
-            fee_usd="0.01",
+            fee_usd="0.0001",
             transport_event_sha256="a" * 64,
         )
     assert executor.reconciliation_snapshot()["kill_switch_active"] is True
@@ -1279,7 +1360,7 @@ def test_conflicting_fill_and_partial_open_settlement_engage_kill_switch(
         now_ts_ms=NOW_TS_MS,
         quantity="0.5",
         price="0.39",
-        fee_usd="0.01",
+        fee_usd="0.0001",
         transport_event_sha256="b" * 64,
     )
     with pytest.raises(MicroLiveExecutionError, match="open order cannot settle"):
@@ -1321,7 +1402,7 @@ def test_all_lifecycle_reconciliation_ambiguities_persistently_kill(
             now_ts_ms=NOW_TS_MS,
             quantity="1",
             price="0.39",
-            fee_usd="0.01",
+            fee_usd="0.0002",
             transport_event_sha256="a" * 64,
         )
     assert unknown_fill.reconciliation_snapshot()["kill_switch_reason"] == (
@@ -1380,7 +1461,7 @@ def test_lifecycle_timestamp_regression_still_persists_kill(
             now_ts_ms=NOW_TS_MS - 1,
             quantity="1",
             price="0.39",
-            fee_usd="0.01",
+            fee_usd="0.0002",
             transport_event_sha256="d" * 64,
         )
     snapshot = executor.reconciliation_snapshot()

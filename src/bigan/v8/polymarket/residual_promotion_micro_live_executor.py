@@ -39,6 +39,7 @@ _SLUG = re.compile(r"^btc-updown-15m-[1-9][0-9]*$")
 _CONDITION_ID = re.compile(r"^0x[0-9a-f]{64}$")
 _TOKEN_ID = re.compile(r"^[1-9][0-9]*$")
 _FORBIDDEN_FEATURE_KEY_TOKENS = ("outcome", "settlement", "resolution", "pnl")
+FROZEN_EXECUTION_FEE_PER_UNIT_USD = Decimal("0.0002")
 _EVENT_TYPES = {
     "SIGNAL_REJECTED",
     "SIGNAL_EVALUATED",
@@ -119,6 +120,14 @@ class MicroLiveExecutor:
         ]:
             raise MicroLiveExecutionError(
                 "micro-live state crossed realized-loss limit without kill switch"
+            )
+        if (
+            view["loss_budget_consumed_usd"]
+            > self.authorization.maximum_realized_loss_usd
+            and not view["kill_switch_active"]
+        ):
+            raise MicroLiveExecutionError(
+                "micro-live state exceeded loss budget without kill switch"
             )
 
     @classmethod
@@ -261,6 +270,8 @@ class MicroLiveExecutor:
         )
         qty = Decimal("1")
         notional = price * qty
+        maximum_fee = FROZEN_EXECUTION_FEE_PER_UNIT_USD * qty
+        maximum_loss = notional + maximum_fee
         signal_payload_sha256 = canonical_json_sha256(signal)
         business_key = canonical_json_sha256(
             {
@@ -283,6 +294,8 @@ class MicroLiveExecutor:
             "limit_price": str(price),
             "quantity": str(qty),
             "notional_usd": str(notional),
+            "maximum_fee_usd": str(maximum_fee),
+            "maximum_loss_usd": str(maximum_loss),
             "signal_payload_sha256": signal_payload_sha256,
             "signal_payload": signal,
             "market_identity_sha256": canonical_json_sha256(
@@ -364,6 +377,19 @@ class MicroLiveExecutor:
                 operator_heartbeat_ts_ms=operator_heartbeat_ts_ms,
             )
             return _blocked("maximum_open_orders_reached")
+        if (
+            view["loss_budget_consumed_usd"] + maximum_loss
+            > self.authorization.maximum_realized_loss_usd
+        ):
+            self._audit_signal_decision(
+                signal=signal,
+                features=features,
+                disposition="BLOCKED_NO_TRADE",
+                reason="maximum_loss_reservation_exceeded",
+                now_ts_ms=now_ts_ms,
+                operator_heartbeat_ts_ms=operator_heartbeat_ts_ms,
+            )
+            return _blocked("maximum_loss_reservation_exceeded")
 
         self._audit_signal_decision(
             signal=signal,
@@ -399,6 +425,8 @@ class MicroLiveExecutor:
                 "limit_price",
                 "quantity",
                 "notional_usd",
+                "maximum_fee_usd",
+                "maximum_loss_usd",
                 "signal_payload_sha256",
                 "market_identity_sha256",
                 "market_identity",
@@ -552,6 +580,12 @@ class MicroLiveExecutor:
         fill_qty = Decimal(payload["quantity"])
         fill_price = Decimal(payload["price"])
         fee = Decimal(payload["fee_usd"])
+        if fee > fill_qty * FROZEN_EXECUTION_FEE_PER_UNIT_USD:
+            self.engage_kill_switch(
+                reason="fill_fee_above_frozen_contract",
+                now_ts_ms=now_ts_ms,
+            )
+            raise MicroLiveExecutionError("fill fee exceeds frozen execution contract")
         if fill_price > Decimal(order["prepared"]["limit_price"]):
             self.engage_kill_switch(reason="fill_price_above_limit", now_ts_ms=now_ts_ms)
             raise MicroLiveExecutionError("buy fill price exceeds authorized limit")
@@ -797,6 +831,10 @@ class MicroLiveExecutor:
             "maximum_realized_loss_usd": str(
                 self.authorization.maximum_realized_loss_usd
             ),
+            "unsettled_maximum_loss_usd": str(
+                view["unsettled_maximum_loss_usd"]
+            ),
+            "loss_budget_consumed_usd": str(view["loss_budget_consumed_usd"]),
             "positions": {key: str(value) for key, value in sorted(view["positions"].items())},
             "submitted_notional_usd": str(view["submitted_notional_usd"]),
             "open_order_count": view["open_order_count"],
@@ -1115,6 +1153,8 @@ class MicroLiveExecutor:
                 "limit_price",
                 "quantity",
                 "notional_usd",
+                "maximum_fee_usd",
+                "maximum_loss_usd",
                 "signal_payload_sha256",
                 "signal_payload",
                 "market_identity_sha256",
@@ -1128,10 +1168,18 @@ class MicroLiveExecutor:
                 raise MicroLiveExecutionError("prepared order payload schema is invalid")
             price = _positive_decimal(payload.get("limit_price"), "stored limit price")
             quantity = _positive_decimal(payload.get("quantity"), "stored quantity")
+            maximum_fee = _nonnegative_decimal(
+                payload.get("maximum_fee_usd"), "stored maximum fee"
+            )
+            maximum_loss = _positive_decimal(
+                payload.get("maximum_loss_usd"), "stored maximum loss"
+            )
             if (
                 price >= 1
                 or quantity != Decimal("1")
                 or payload.get("notional_usd") != str(price * quantity)
+                or maximum_fee != quantity * FROZEN_EXECUTION_FEE_PER_UNIT_USD
+                or maximum_loss != price * quantity + maximum_fee
             ):
                 raise MicroLiveExecutionError("prepared order economics are invalid")
             signal = _validated_candidate_signal(
@@ -1249,10 +1297,16 @@ class MicroLiveExecutor:
                 "transport_event_sha256",
             }:
                 raise MicroLiveExecutionError("fill payload schema is invalid")
-            _positive_decimal(payload.get("quantity"), "stored fill quantity")
+            fill_quantity = _positive_decimal(
+                payload.get("quantity"), "stored fill quantity"
+            )
             fill_price = _positive_decimal(payload.get("price"), "stored fill price")
-            _nonnegative_decimal(payload.get("fee_usd"), "stored fill fee")
-            if fill_price >= 1 or not _is_sha256(payload.get("transport_event_sha256")):
+            fill_fee = _nonnegative_decimal(payload.get("fee_usd"), "stored fill fee")
+            if (
+                fill_price >= 1
+                or fill_fee > fill_quantity * FROZEN_EXECUTION_FEE_PER_UNIT_USD
+                or not _is_sha256(payload.get("transport_event_sha256"))
+            ):
                 raise MicroLiveExecutionError("fill payload values are invalid")
             return
         if event_type in {"ORDER_CANCELED", "ORDER_EXPIRED"}:
@@ -1456,6 +1510,7 @@ class MicroLiveExecutor:
 
         cash = self.authorization.maximum_notional_usd
         realized_pnl = Decimal("0")
+        unsettled_maximum_loss = Decimal("0")
         positions = {"UP": Decimal("0"), "DOWN": Decimal("0")}
         submitted_notional = Decimal("0")
         open_order_count = 0
@@ -1464,11 +1519,13 @@ class MicroLiveExecutor:
             requested_qty = Decimal(prepared["quantity"])
             submitted_notional += Decimal(prepared["notional_usd"])
             filled_qty = Decimal("0")
+            filled_cost = Decimal("0")
             for fill in order["fills"]:
                 qty = Decimal(fill["quantity"])
                 price = Decimal(fill["price"])
                 fee = Decimal(fill["fee_usd"])
                 filled_qty += qty
+                filled_cost += qty * price + fee
                 cash -= qty * price + fee
                 side = "UP" if prepared["selected_action"] == "BUY_UP_HOLD" else "DOWN"
                 positions[side] += qty
@@ -1485,6 +1542,22 @@ class MicroLiveExecutor:
             if order["is_open"]:
                 open_order_count += 1
             settlement = order.get("settlement")
+            if settlement is None:
+                if order["submission_unknown"] or (
+                    order["acknowledgement"] is None
+                    and order["closed_status"] is None
+                ):
+                    unsettled_maximum_loss += Decimal(
+                        prepared["maximum_loss_usd"]
+                    )
+                elif order["closed_status"] != "REJECTED":
+                    unsettled_maximum_loss += filled_cost
+                    if order["is_open"]:
+                        remaining = order["remaining_quantity"]
+                        unsettled_maximum_loss += remaining * (
+                            Decimal(prepared["limit_price"])
+                            + FROZEN_EXECUTION_FEE_PER_UNIT_USD
+                        )
             if settlement is not None:
                 if filled_qty < requested_qty and order["closed_status"] is None:
                     raise MicroLiveExecutionError(
@@ -1504,6 +1577,9 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError("submitted notional exceeds authorization")
         if open_order_count > self.authorization.maximum_open_orders:
             raise MicroLiveExecutionError("open order count exceeds authorization")
+        loss_budget_consumed = max(-realized_pnl, Decimal("0")) + (
+            unsettled_maximum_loss
+        )
         return {
             "orders": orders,
             "orders_by_business_key": business_keys,
@@ -1511,6 +1587,8 @@ class MicroLiveExecutor:
             "settlements": settlements,
             "cash_usd": cash,
             "realized_pnl_usd": realized_pnl,
+            "unsettled_maximum_loss_usd": unsettled_maximum_loss,
+            "loss_budget_consumed_usd": loss_budget_consumed,
             "positions": positions,
             "submitted_notional_usd": submitted_notional,
             "open_order_count": open_order_count,
