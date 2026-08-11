@@ -32,12 +32,6 @@ from bigan.v8.polymarket.residual_promotion_evaluation import (
     EVALUATION_SCHEMA_VERSION,
     REQUIRED_GATE_NAMES,
 )
-from bigan.v8.polymarket.residual_promotion_feature_evidence import (
-    PROVIDER_FEATURE_FILENAMES,
-    ProviderFeatureEvidenceError,
-    build_provider_bound_feature_rows,
-    verify_provider_feature_evidence,
-)
 from bigan.v8.polymarket.residual_promotion_micro_live_authorization import (
     AUTHORIZATION_SCHEMA_VERSION,
     HUMAN_ATTESTATION_SCHEMA_VERSION,
@@ -46,9 +40,13 @@ from bigan.v8.polymarket.residual_promotion_micro_live_authorization import (
     verify_micro_live_authorization,
 )
 from bigan.v8.polymarket.residual_promotion_micro_live_executor import (
+    PROVIDER_FEATURE_FILENAMES,
     SIGNAL_SCHEMA_VERSION,
     MicroLiveExecutionError,
+    ProviderFeatureEvidenceError,
+    build_provider_bound_feature_rows,
     create_micro_live_executor,
+    verify_provider_feature_evidence,
 )
 from bigan.v8.polymarket.residual_promotion_micro_live_executor import (
     MicroLiveExecutor as _StrictMicroLiveExecutor,
