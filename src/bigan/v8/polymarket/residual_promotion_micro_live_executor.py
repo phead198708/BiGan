@@ -515,6 +515,14 @@ class MicroLiveExecutor:
         try:
             response = dict(self.transport.submit_order(copy.deepcopy(transport_request)))
             disposition = self._validate_submission_response(transport_request, response)
+            if (
+                disposition["status"] == "ACCEPTED"
+                and disposition["exchange_order_id"]
+                in view["orders_by_exchange_id"]
+            ):
+                raise MicroLiveExecutionError(
+                    "exchange order identity was reused across client orders"
+                )
         except Exception as exc:
             self._append_event(
                 "ORDER_SUBMISSION_UNKNOWN",
@@ -1342,7 +1350,7 @@ class MicroLiveExecutor:
                 raise MicroLiveExecutionError("prepared order identity is invalid")
             return
         if event_type in {"ORDER_ACKNOWLEDGED", "ORDER_REJECTED"}:
-            if set(payload) != {
+            expected_keys = {
                 "client_order_id",
                 "exchange_order_id",
                 "status",
@@ -1350,8 +1358,27 @@ class MicroLiveExecutor:
                 "token_id",
                 "accepted_quantity",
                 "limit_price",
-            } or payload.get("status") != (
-                "ACCEPTED" if event_type == "ORDER_ACKNOWLEDGED" else "REJECTED"
+            }
+            if set(payload) != expected_keys:
+                raise MicroLiveExecutionError("order disposition payload is invalid")
+            accepted_quantity = _positive_decimal(
+                payload.get("accepted_quantity"), "stored accepted quantity"
+            )
+            limit_price = _positive_decimal(
+                payload.get("limit_price"), "stored disposition limit price"
+            )
+            if not (
+                payload.get("status")
+                == ("ACCEPTED" if event_type == "ORDER_ACKNOWLEDGED" else "REJECTED")
+                and _is_sha256(payload.get("client_order_id"))
+                and isinstance(payload.get("exchange_order_id"), str)
+                and payload["exchange_order_id"]
+                and isinstance(payload.get("market_id"), str)
+                and _CONDITION_ID.fullmatch(payload["market_id"]) is not None
+                and isinstance(payload.get("token_id"), str)
+                and _TOKEN_ID.fullmatch(payload["token_id"]) is not None
+                and accepted_quantity == Decimal("1")
+                and limit_price < 1
             ):
                 raise MicroLiveExecutionError("order disposition payload is invalid")
             return
@@ -1427,6 +1454,7 @@ class MicroLiveExecutor:
         self._verify_event_chain()
         orders: dict[str, dict[str, Any]] = {}
         business_keys: dict[str, dict[str, Any]] = {}
+        exchange_order_ids: dict[str, dict[str, Any]] = {}
         fills: dict[str, dict[str, Any]] = {}
         settlements: dict[str, dict[str, Any]] = {}
         kill_switch_active = False
@@ -1499,10 +1527,13 @@ class MicroLiveExecutor:
                     raise MicroLiveExecutionError("order lifecycle event lacks preparation")
                 if event_type == "ORDER_ACKNOWLEDGED":
                     prepared = order["prepared"]
+                    exchange_order_id = payload.get("exchange_order_id")
                     if (
                         order["acknowledgement"] is not None
                         or order["closed_status"] is not None
                         or order["submission_unknown"]
+                        or not isinstance(exchange_order_id, str)
+                        or exchange_order_id in exchange_order_ids
                         or payload.get("market_id") != prepared["market_id"]
                         or payload.get("token_id") != prepared["token_id"]
                         or payload.get("accepted_quantity") != prepared["quantity"]
@@ -1510,6 +1541,7 @@ class MicroLiveExecutor:
                     ):
                         raise MicroLiveExecutionError("order acknowledgement is duplicated")
                     order["acknowledgement"] = payload
+                    exchange_order_ids[exchange_order_id] = order
                 elif event_type == "ORDER_REJECTED":
                     if (
                         order["acknowledgement"] is not None
@@ -1660,6 +1692,7 @@ class MicroLiveExecutor:
         return {
             "orders": orders,
             "orders_by_business_key": business_keys,
+            "orders_by_exchange_id": exchange_order_ids,
             "fills": fills,
             "settlements": settlements,
             "cash_usd": cash,

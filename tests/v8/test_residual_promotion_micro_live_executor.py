@@ -196,9 +196,16 @@ BASE_FEATURE_ROW, BASE_SIGNAL_PAYLOAD, BASE_MARKET_IDENTITY_EVIDENCE = (
 
 
 class FakeTransport:
-    def __init__(self, *, fail_submit: bool = False, fail_cancel: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_submit: bool = False,
+        fail_cancel: bool = False,
+        fixed_exchange_order_id: str | None = None,
+    ) -> None:
         self.fail_submit = fail_submit
         self.fail_cancel = fail_cancel
+        self.fixed_exchange_order_id = fixed_exchange_order_id
         self.submit_calls: list[dict[str, Any]] = []
         self.cancel_calls: list[dict[str, Any]] = []
 
@@ -208,7 +215,8 @@ class FakeTransport:
             raise RuntimeError("synthetic transport timeout")
         return {
             "client_order_id": request["client_order_id"],
-            "exchange_order_id": f"exchange-{request['client_order_id'][:12]}",
+            "exchange_order_id": self.fixed_exchange_order_id
+            or f"exchange-{request['client_order_id'][:12]}",
             "status": "ACCEPTED",
             "market_id": request["market_id"],
             "token_id": request["token_id"],
@@ -913,6 +921,36 @@ def test_conflicting_duplicate_engages_kill_switch_and_cancels_open_order(
     assert snapshot["kill_switch_reason"] == "conflicting_duplicate_intent"
     assert len(transport.cancel_calls) == 1
     assert snapshot["open_order_count"] == 0
+
+
+def test_exchange_order_identity_reuse_fails_closed_before_acknowledgement(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport(fixed_exchange_order_id="exchange-shared")
+    executor = MicroLiveExecutor(verified, transport=transport)
+    first = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    assert first["status"] == "ORDER_ACKNOWLEDGED"
+
+    with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+        executor.submit_signal(
+            **_signal(
+                candidate_bundle_sha256=verified.candidate_bundle_sha256,
+                market_id=f"0x{222:064x}",
+                up_token_id="62220",
+                down_token_id="62221",
+            )
+        )
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["kill_switch_reason"] == "order_submission_unknown"
+    assert len(transport.submit_calls) == 2
+    assert len(transport.cancel_calls) == 1
+    assert sum(
+        event["event_type"] == "ORDER_ACKNOWLEDGED" for event in executor.events
+    ) == 1
 
 
 def test_allowlist_no_trade_candidate_and_token_contract_block_without_transport(
@@ -1624,6 +1662,48 @@ def test_rehashed_tampered_state_still_fails_closed(
     payload = {key: value for key, value in state.items() if key != "state_sha256"}
     state["state_sha256"] = canonical_json_sha256(payload)
     with pytest.raises(MicroLiveExecutionError, match="prepared order identity"):
+        MicroLiveExecutor.restore(
+            authorization=verified,
+            transport=FakeTransport(),
+            state=state,
+        )
+
+
+def test_rehashed_duplicate_exchange_order_identity_fails_closed_on_restore(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    executor = MicroLiveExecutor(verified, transport=FakeTransport())
+    executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    executor.submit_signal(
+        **_signal(
+            candidate_bundle_sha256=verified.candidate_bundle_sha256,
+            market_id=f"0x{444:064x}",
+            up_token_id="64440",
+            down_token_id="64441",
+        )
+    )
+    state = executor.export_state()
+    acknowledgements = [
+        event
+        for event in state["events"]
+        if event["event_type"] == "ORDER_ACKNOWLEDGED"
+    ]
+    assert len(acknowledgements) == 2
+    acknowledgements[1]["payload"]["exchange_order_id"] = acknowledgements[0][
+        "payload"
+    ]["exchange_order_id"]
+    previous = "GENESIS"
+    for event in state["events"]:
+        event["previous_event_sha256"] = previous
+        core = {key: value for key, value in event.items() if key != "event_sha256"}
+        event["event_sha256"] = canonical_json_sha256(core)
+        previous = event["event_sha256"]
+    payload = {key: value for key, value in state.items() if key != "state_sha256"}
+    state["state_sha256"] = canonical_json_sha256(payload)
+    with pytest.raises(MicroLiveExecutionError, match="acknowledgement is duplicated"):
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
