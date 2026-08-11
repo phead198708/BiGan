@@ -225,18 +225,64 @@ def _synthetic_provider_feature_evidence() -> dict[str, bytes]:
     }
 
 
+def _causal_provider_feature_evidence(
+    source: dict[str, bytes],
+    *,
+    decision_ts_ms: int,
+) -> dict[str, bytes]:
+    output: dict[str, bytes] = {}
+    for name in PROVIDER_FEATURE_FILENAMES:
+        rows = [
+            json.loads(line)
+            for line in source[name].decode().splitlines()
+            if line
+        ]
+        if name == "raw_polymarket_markets.jsonl":
+            market = rows[0]
+            market["trade_stream_ended_at_ts"] = decision_ts_ms
+            market["trade_api_collection_ts"] = decision_ts_ms
+            market["trade_full_round_coverage_complete"] = None
+        else:
+            rows = [
+                row
+                for row in rows
+                if int(row["available_at_ts"]) <= decision_ts_ms
+            ]
+        output[name] = "".join(
+            json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n"
+            for row in rows
+        ).encode()
+    return output
+
+
 def _base_feature_and_signal() -> tuple[
     dict[str, Any],
     dict[str, Any],
     dict[str, bytes],
     dict[str, bytes],
     dict[int, dict[str, Any]],
+    dict[int, dict[str, bytes]],
 ]:
-    provider_evidence = _synthetic_provider_feature_evidence()
-    feature_rows = {
-        int(row["decision_ts"]): copy.deepcopy(row)
-        for row in build_provider_bound_feature_rows(provider_evidence)
+    full_provider_evidence = _synthetic_provider_feature_evidence()
+    provider_evidence_by_decision = {
+        decision_ts: _causal_provider_feature_evidence(
+            full_provider_evidence,
+            decision_ts_ms=decision_ts,
+        )
+        for decision_ts in (
+            AUTHORIZED_AT_TS_MS + 300_000,
+            AUTHORIZED_AT_TS_MS + 600_000,
+        )
     }
+    feature_rows: dict[int, dict[str, Any]] = {}
+    for decision_ts, evidence in provider_evidence_by_decision.items():
+        feature_rows[decision_ts] = copy.deepcopy(
+            next(
+                row
+                for row in build_provider_bound_feature_rows(evidence)
+                if int(row["decision_ts"]) == decision_ts
+            )
+        )
     decision_ts_ms = AUTHORIZED_AT_TS_MS + 300_000
     feature_row = copy.deepcopy(feature_rows[decision_ts_ms])
     manifest_path = (
@@ -306,8 +352,9 @@ def _base_feature_and_signal() -> tuple[
         feature_row,
         signal,
         _market_identity_evidence(signal),
-        provider_evidence,
+        provider_evidence_by_decision[decision_ts_ms],
         feature_rows,
+        provider_evidence_by_decision,
     )
 
 
@@ -317,6 +364,7 @@ def _base_feature_and_signal() -> tuple[
     BASE_MARKET_IDENTITY_EVIDENCE,
     BASE_PROVIDER_FEATURE_EVIDENCE,
     BASE_PROVIDER_FEATURE_ROWS,
+    BASE_PROVIDER_FEATURE_EVIDENCE_BY_DECISION,
 ) = _base_feature_and_signal()
 
 
@@ -324,10 +372,16 @@ def _provider_feature_evidence_for_signal(
     signal: dict[str, Any],
 ) -> dict[str, bytes]:
     target_start = int(str(signal["slug"]).rsplit("-", maxsplit=1)[1]) * 1_000
+    decision_offset = int(signal["decision_ts_ms"]) - target_start
+    template_decision_ts = AUTHORIZED_AT_TS_MS + decision_offset
+    source = BASE_PROVIDER_FEATURE_EVIDENCE_BY_DECISION.get(
+        template_decision_ts,
+        BASE_PROVIDER_FEATURE_EVIDENCE,
+    )
     delta = target_start - AUTHORIZED_AT_TS_MS
     output: dict[str, bytes] = {}
     for name in PROVIDER_FEATURE_FILENAMES:
-        raw = BASE_PROVIDER_FEATURE_EVIDENCE[name]
+        raw = source[name]
         if not raw:
             output[name] = b""
             continue
@@ -1628,6 +1682,65 @@ def test_provider_feature_evidence_binds_feature_and_market_identity() -> None:
         verify_provider_feature_evidence(
             raw_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
             signal=wrong_token,
+            feature_row=BASE_FEATURE_ROW,
+        )
+
+
+def test_provider_feature_evidence_requires_a_decision_time_causal_prefix() -> None:
+    decision_ts = int(BASE_SIGNAL_PAYLOAD["decision_ts_ms"])
+    for filename in PROVIDER_FEATURE_FILENAMES[1:]:
+        for line in BASE_PROVIDER_FEATURE_EVIDENCE[filename].decode().splitlines():
+            row = json.loads(line)
+            assert int(row["available_at_ts"]) <= decision_ts
+
+    full_round_status = _provider_evidence_with_market_patch(
+        trade_full_round_coverage_complete=True
+    )
+    with pytest.raises(ProviderFeatureEvidenceError, match="terminal coverage"):
+        verify_provider_feature_evidence(
+            raw_evidence=full_round_status,
+            signal=BASE_SIGNAL_PAYLOAD,
+            feature_row=BASE_FEATURE_ROW,
+        )
+
+    future_market_metadata = _provider_evidence_with_market_patch(
+        trade_stream_ended_at_ts=decision_ts + 1
+    )
+    with pytest.raises(ProviderFeatureEvidenceError, match="post-decision"):
+        verify_provider_feature_evidence(
+            raw_evidence=future_market_metadata,
+            signal=BASE_SIGNAL_PAYLOAD,
+            feature_row=BASE_FEATURE_ROW,
+        )
+
+    future_book = dict(BASE_PROVIDER_FEATURE_EVIDENCE)
+    book_rows = [
+        json.loads(line)
+        for line in future_book["raw_polymarket_orderbooks.jsonl"].decode().splitlines()
+    ]
+    post_decision = copy.deepcopy(book_rows[-1])
+    post_decision["ts"] = decision_ts + 1
+    post_decision["available_at_ts"] = decision_ts + 1
+    book_rows.append(post_decision)
+    future_book["raw_polymarket_orderbooks.jsonl"] = b"".join(
+        _json_bytes(row) + b"\n" for row in book_rows
+    )
+    with pytest.raises(ProviderFeatureEvidenceError, match="post-decision"):
+        verify_provider_feature_evidence(
+            raw_evidence=future_book,
+            signal=BASE_SIGNAL_PAYLOAD,
+            feature_row=BASE_FEATURE_ROW,
+        )
+
+    missing_availability = dict(BASE_PROVIDER_FEATURE_EVIDENCE)
+    chainlink_row = {"price": 100_000.0, "source_ts": decision_ts}
+    missing_availability["raw_polymarket_chainlink_prices.jsonl"] = (
+        _json_bytes(chainlink_row) + b"\n"
+    )
+    with pytest.raises(ProviderFeatureEvidenceError, match="timestamp is invalid"):
+        verify_provider_feature_evidence(
+            raw_evidence=missing_availability,
+            signal=BASE_SIGNAL_PAYLOAD,
             feature_row=BASE_FEATURE_ROW,
         )
 

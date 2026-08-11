@@ -64,6 +64,30 @@ _LOCKED_FALSE_KEYS = frozenset(
         "wallet_signing_enabled",
     }
 )
+_DYNAMIC_PROVIDER_FILENAMES = frozenset(PROVIDER_FEATURE_FILENAMES[1:])
+_DECISION_TIME_FIELDS = frozenset(
+    {
+        "available_at_ts",
+        "close_time",
+        "collection_end_ts",
+        "orderbook_latest_covered_decision_ts",
+        "orderbook_observed_collection_end_ts",
+        "provider_published_at_ts",
+        "received_at_ts",
+        "source_ts",
+        "trade_api_collection_ts",
+        "trade_api_newest_ts",
+        "trade_source_receive_time",
+        "trade_stream_ended_at_ts",
+        "ts",
+    }
+)
+_PREMARKET_TERMINAL_STATUS_FIELDS = frozenset(
+    {
+        "orderbook_full_decision_window_coverage_passed",
+        "trade_full_round_coverage_complete",
+    }
+)
 
 
 class ProviderFeatureEvidenceError(ValueError):
@@ -106,6 +130,7 @@ def verify_provider_feature_evidence(
     """Bind one submitted feature row to exact provider bytes and frozen semantics."""
 
     rows, raw_jsonl, file_sha256 = _decode_provider_evidence(raw_evidence)
+    _assert_decision_time_provider_prefix(rows=rows, signal=signal)
     feature_rows = _reconstruct_feature_rows(rows)
     market_id = signal.get("market_id")
     decision_ts = signal.get("decision_ts_ms")
@@ -161,6 +186,91 @@ def verify_provider_feature_evidence(
         reconstructed_feature_row_sha256=reconstructed_sha256,
         evidence_graph_sha256=canonical_json_sha256(graph),
     )
+
+
+def _assert_decision_time_provider_prefix(
+    *,
+    rows: Mapping[str, Sequence[Mapping[str, Any]]],
+    signal: Mapping[str, Any],
+) -> None:
+    decision_ts = signal.get("decision_ts_ms")
+    if (
+        isinstance(decision_ts, bool)
+        or not isinstance(decision_ts, int)
+        or decision_ts <= 0
+    ):
+        raise ProviderFeatureEvidenceError(
+            "provider evidence decision timestamp is invalid"
+        )
+    market_rows = rows[PROVIDER_FEATURE_FILENAMES[0]]
+    if len(market_rows) != 1:
+        raise ProviderFeatureEvidenceError(
+            "provider evidence must contain exactly one BTC-15M market"
+        )
+    market = market_rows[0]
+    market_end_ts = market.get("market_end_ts")
+    if (
+        isinstance(market_end_ts, bool)
+        or not isinstance(market_end_ts, int)
+        or market_end_ts <= decision_ts
+    ):
+        raise ProviderFeatureEvidenceError(
+            "provider evidence market is not open at decision time"
+        )
+    for field in ("trade_api_collection_ts", "trade_stream_ended_at_ts"):
+        _assert_timestamp_not_after_decision(
+            market.get(field),
+            field=field,
+            decision_ts=decision_ts,
+            required=False,
+        )
+    if market.get("trade_full_round_coverage_complete") is True:
+        raise ProviderFeatureEvidenceError(
+            "provider evidence contains pre-close terminal coverage status"
+        )
+
+    for filename in _DYNAMIC_PROVIDER_FILENAMES:
+        for index, row in enumerate(rows[filename]):
+            _assert_timestamp_not_after_decision(
+                row.get("available_at_ts"),
+                field=f"{filename}[{index}].available_at_ts",
+                decision_ts=decision_ts,
+                required=True,
+            )
+            for field in _DECISION_TIME_FIELDS - {"available_at_ts"}:
+                if field in row:
+                    _assert_timestamp_not_after_decision(
+                        row.get(field),
+                        field=f"{filename}[{index}].{field}",
+                        decision_ts=decision_ts,
+                        required=False,
+                    )
+            if any(
+                row.get(field) is True
+                for field in _PREMARKET_TERMINAL_STATUS_FIELDS
+            ):
+                raise ProviderFeatureEvidenceError(
+                    "provider evidence contains pre-close terminal coverage status"
+                )
+
+
+def _assert_timestamp_not_after_decision(
+    value: Any,
+    *,
+    field: str,
+    decision_ts: int,
+    required: bool,
+) -> None:
+    if value is None and not required:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ProviderFeatureEvidenceError(
+            f"provider evidence timestamp is invalid: {field}"
+        )
+    if value > decision_ts:
+        raise ProviderFeatureEvidenceError(
+            f"provider evidence contains post-decision data: {field}"
+        )
 
 
 def _decode_provider_evidence(
