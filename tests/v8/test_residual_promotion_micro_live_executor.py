@@ -369,11 +369,11 @@ class FakeTransport:
         self.cancel_calls: list[dict[str, Any]] = []
         self.lookup_calls: list[dict[str, Any]] = []
 
-    def submit_order(self, request: dict[str, Any]) -> dict[str, Any]:
+    def submit_order(self, request: dict[str, Any]) -> bytes:
         self.submit_calls.append(copy.deepcopy(request))
         if self.fail_submit:
             raise RuntimeError("synthetic transport timeout")
-        return {
+        return _json_bytes({
             "client_order_id": request["client_order_id"],
             "exchange_order_id": self.fixed_exchange_order_id
             or f"exchange-{request['client_order_id'][:12]}",
@@ -382,19 +382,19 @@ class FakeTransport:
             "token_id": request["token_id"],
             "accepted_quantity": request["quantity"],
             "limit_price": request["limit_price"],
-        }
+        })
 
-    def cancel_order(self, request: dict[str, Any]) -> dict[str, Any]:
+    def cancel_order(self, request: dict[str, Any]) -> bytes:
         self.cancel_calls.append(copy.deepcopy(request))
         if self.fail_cancel:
             raise RuntimeError("synthetic cancel timeout")
-        return {
+        return _json_bytes({
             "client_order_id": request["client_order_id"],
             "exchange_order_id": request["exchange_order_id"],
             "status": "CANCELED",
-        }
+        })
 
-    def lookup_order(self, request: dict[str, Any]) -> dict[str, Any]:
+    def lookup_order(self, request: dict[str, Any]) -> bytes:
         self.lookup_calls.append(copy.deepcopy(request))
         if self.fail_lookup:
             raise RuntimeError("synthetic lookup timeout")
@@ -422,8 +422,8 @@ class FakeTransport:
                 ),
             }
             response.update(self.cancel_lookup_overrides)
-            return response
-        return {
+            return _json_bytes(response)
+        return _json_bytes({
             "client_order_id": submitted["client_order_id"],
             "exchange_order_id": self.fixed_exchange_order_id
             or f"exchange-{submitted['client_order_id'][:12]}",
@@ -432,7 +432,7 @@ class FakeTransport:
             "token_id": submitted["token_id"],
             "accepted_quantity": submitted["quantity"],
             "limit_price": submitted["limit_price"],
-        }
+        })
 
 
 @pytest.fixture(scope="module")
@@ -2291,6 +2291,149 @@ def test_unknown_submission_engages_kill_switch_without_retry(
     assert executor.reconciliation_snapshot()["kill_switch_active"] is True
 
 
+def test_transport_response_raw_bytes_are_preserved_and_hash_bound(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    acknowledgement = next(
+        event["payload"]
+        for event in executor.events
+        if event["event_type"] == "ORDER_ACKNOWLEDGED"
+    )
+    raw_acknowledgement = acknowledgement["raw_transport_event_json"].encode()
+    assert acknowledgement["transport_event_sha256"] == hashlib.sha256(
+        raw_acknowledgement
+    ).hexdigest()
+    decoded = json.loads(raw_acknowledgement)
+    assert all(
+        decoded[key] == acknowledgement[key]
+        for key in (
+            "client_order_id",
+            "exchange_order_id",
+            "status",
+            "market_id",
+            "token_id",
+            "accepted_quantity",
+            "limit_price",
+        )
+    )
+
+    executor.engage_kill_switch(reason="raw-cancel-evidence", now_ts_ms=NOW_TS_MS + 1)
+    cancellation = next(
+        event["payload"]
+        for event in executor.events
+        if event["event_type"] == "ORDER_CANCELED"
+    )
+    raw_cancellation = cancellation["raw_transport_event_json"].encode()
+    assert cancellation["transport_event_sha256"] == hashlib.sha256(
+        raw_cancellation
+    ).hexdigest()
+    assert json.loads(raw_cancellation)["status"] == "CANCELED"
+
+
+def test_parsed_submit_response_fails_closed_as_unknown(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    class ParsedSubmitTransport(FakeTransport):
+        def submit_order(self, request: dict[str, Any]) -> Any:
+            return json.loads(super().submit_order(request))
+
+    verified = _verified(authorized_fixture)
+    transport = ParsedSubmitTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    assert len(transport.submit_calls) == 1
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["open_order_count"] == 0
+    assert any(
+        event["event_type"] == "ORDER_SUBMISSION_UNKNOWN"
+        for event in executor.events
+    )
+
+
+@pytest.mark.parametrize("ambiguity", ("duplicate_key", "numeric_overflow"))
+def test_ambiguous_raw_submit_response_fails_closed(
+    authorized_fixture: dict[str, Any],
+    ambiguity: str,
+) -> None:
+    class AmbiguousSubmitTransport(FakeTransport):
+        def submit_order(self, request: dict[str, Any]) -> bytes:
+            raw = super().submit_order(request)
+            if ambiguity == "duplicate_key":
+                return raw[:-1] + b',"status":"ACCEPTED"}'
+            old = f'"limit_price":"{request["limit_price"]}"'.encode()
+            assert old in raw
+            return raw.replace(old, b'"limit_price":1e400')
+
+    verified = _verified(authorized_fixture)
+    transport = AmbiguousSubmitTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+    assert not any(
+        event["event_type"] == "ORDER_ACKNOWLEDGED" for event in executor.events
+    )
+
+
+def test_parsed_cancel_response_remains_unknown_and_killed(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    class ParsedCancelTransport(FakeTransport):
+        def cancel_order(self, request: dict[str, Any]) -> Any:
+            return json.loads(super().cancel_order(request))
+
+    verified = _verified(authorized_fixture)
+    transport = ParsedCancelTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    killed = executor.engage_kill_switch(
+        reason="parsed-cancel-response",
+        now_ts_ms=NOW_TS_MS + 1,
+    )
+    assert killed["unknown_cancel_client_order_ids"] == [order["client_order_id"]]
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["open_order_count"] == 1
+
+
+def test_parsed_lookup_response_cannot_reconcile_unknown_submission(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    class ParsedLookupTransport(FakeTransport):
+        def lookup_order(self, request: dict[str, Any]) -> Any:
+            return json.loads(super().lookup_order(request))
+
+    verified = _verified(authorized_fixture)
+    transport = ParsedLookupTransport(fail_submit=True)
+    executor = MicroLiveExecutor(verified, transport=transport)
+    with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    client_order_id = transport.submit_calls[0]["client_order_id"]
+    with pytest.raises(MicroLiveExecutionError, match="reconciliation failed closed"):
+        executor.reconcile_unknown_submission(
+            client_order_id=client_order_id,
+            now_ts_ms=NOW_TS_MS + 1,
+        )
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+    assert len(transport.lookup_calls) == 1
+
+
 def test_unknown_submission_read_only_reconciliation_never_resubmits_or_unlocks(
     authorized_fixture: dict[str, Any],
 ) -> None:
@@ -2605,6 +2748,19 @@ def test_rehashed_duplicate_exchange_order_identity_fails_closed_on_restore(
     acknowledgements[1]["payload"]["exchange_order_id"] = acknowledgements[0][
         "payload"
     ]["exchange_order_id"]
+    raw_response = json.loads(
+        acknowledgements[1]["payload"]["raw_transport_event_json"]
+    )
+    raw_response["exchange_order_id"] = acknowledgements[1]["payload"][
+        "exchange_order_id"
+    ]
+    raw_response_bytes = _json_bytes(raw_response)
+    acknowledgements[1]["payload"]["raw_transport_event_json"] = (
+        raw_response_bytes.decode("utf-8")
+    )
+    acknowledgements[1]["payload"]["transport_event_sha256"] = hashlib.sha256(
+        raw_response_bytes
+    ).hexdigest()
     previous = "GENESIS"
     for event in state["events"]:
         event["previous_event_sha256"] = previous

@@ -31,7 +31,7 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
     ResidualPromotionRuntime,
 )
 
-STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v3"
+STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v4"
 SIGNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-execution-signal-v2"
 IMPLEMENTATION_REPOSITORY_PATH = (
     "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py"
@@ -68,16 +68,21 @@ class MicroLiveExecutionError(RuntimeError):
 
 
 class MicroLiveOrderTransport(Protocol):
-    """Minimal injected write capability; no concrete implementation is bundled."""
+    """Minimal injected capability returning exact exchange response bytes.
 
-    def submit_order(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
-        """Submit one idempotent order request."""
+    The adapter must not parse or normalize a response before handing it to
+    the executor.  This keeps duplicate-key, non-finite-number, and exact-byte
+    evidence checks inside the fail-closed trust boundary.
+    """
 
-    def cancel_order(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
-        """Cancel one previously acknowledged order."""
+    def submit_order(self, request: Mapping[str, Any]) -> bytes:
+        """Submit one idempotent order request and return raw JSON bytes."""
 
-    def lookup_order(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
-        """Read one order by its exact client/business identity."""
+    def cancel_order(self, request: Mapping[str, Any]) -> bytes:
+        """Cancel one acknowledged order and return raw JSON bytes."""
+
+    def lookup_order(self, request: Mapping[str, Any]) -> bytes:
+        """Read one order by exact identity and return raw JSON bytes."""
 
 
 def _runtime_integrity_sha256(runtime: ResidualPromotionRuntime) -> str:
@@ -664,7 +669,10 @@ class MicroLiveExecutor:
             )
         }
         try:
-            response = dict(self.transport.submit_order(copy.deepcopy(transport_request)))
+            response, raw_response_json, response_sha256 = _raw_json_object(
+                self.transport.submit_order(copy.deepcopy(transport_request)),
+                "order submission response",
+            )
             disposition = self._validate_submission_response(transport_request, response)
             if (
                 disposition["status"] == "ACCEPTED"
@@ -689,13 +697,29 @@ class MicroLiveExecutor:
             )
             raise MicroLiveExecutionError("order submission became unknown; kill switch engaged") from exc
         if disposition["status"] == "REJECTED":
-            self._append_event("ORDER_REJECTED", disposition, event_ts_ms=now_ts_ms)
+            self._append_event(
+                "ORDER_REJECTED",
+                {
+                    **disposition,
+                    "transport_event_sha256": response_sha256,
+                    "raw_transport_event_json": raw_response_json,
+                },
+                event_ts_ms=now_ts_ms,
+            )
             return {
                 "status": "ORDER_REJECTED",
                 "client_order_id": client_order_id,
                 "transport_called": True,
             }
-        self._append_event("ORDER_ACKNOWLEDGED", disposition, event_ts_ms=now_ts_ms)
+        self._append_event(
+            "ORDER_ACKNOWLEDGED",
+            {
+                **disposition,
+                "transport_event_sha256": response_sha256,
+                "raw_transport_event_json": raw_response_json,
+            },
+            event_ts_ms=now_ts_ms,
+        )
         self._reconcile_view()
         return {
             "status": "ORDER_ACKNOWLEDGED",
@@ -747,7 +771,10 @@ class MicroLiveExecutor:
             "token_id": prepared["token_id"],
         }
         try:
-            response = dict(self.transport.lookup_order(copy.deepcopy(lookup_request)))
+            response, raw_response_json, response_sha256 = _raw_json_object(
+                self.transport.lookup_order(copy.deepcopy(lookup_request)),
+                "submission lookup response",
+            )
             disposition = self._validate_submission_response(prepared, response)
             exchange_order_id = disposition["exchange_order_id"]
             if (
@@ -781,7 +808,8 @@ class MicroLiveExecutor:
             "ORDER_SUBMISSION_RECONCILED",
             {
                 **disposition,
-                "lookup_response_sha256": canonical_json_sha256(response),
+                "lookup_response_sha256": response_sha256,
+                "raw_lookup_response_json": raw_response_json,
             },
             event_ts_ms=now_ts_ms,
         )
@@ -849,7 +877,10 @@ class MicroLiveExecutor:
         }
         response: dict[str, Any] | None = None
         try:
-            response = dict(self.transport.lookup_order(copy.deepcopy(lookup_request)))
+            response, raw_response_json, lookup_response_sha256 = _raw_json_object(
+                self.transport.lookup_order(copy.deepcopy(lookup_request)),
+                "cancel lookup response",
+            )
             disposition = self._validate_cancel_lookup_response(
                 order=order,
                 response=response,
@@ -871,14 +902,6 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "unknown cancellation reconciliation failed closed"
             ) from exc
-        raw_response_json = json.dumps(
-            response,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        lookup_response_sha256 = hashlib.sha256(
-            raw_response_json.encode("utf-8")
-        ).hexdigest()
         if disposition["status"] not in {"CANCELED", "EXPIRED"}:
             self._append_event(
                 "ORDER_CANCEL_RECONCILIATION_FAILED",
@@ -1378,7 +1401,10 @@ class MicroLiveExecutor:
                 "reason": reason,
             }
             try:
-                response = dict(self.transport.cancel_order(copy.deepcopy(request)))
+                response, raw_response_json, response_sha256 = _raw_json_object(
+                    self.transport.cancel_order(copy.deepcopy(request)),
+                    "order cancellation response",
+                )
                 if set(response) != {"client_order_id", "exchange_order_id", "status"} or not (
                     response.get("client_order_id") == request["client_order_id"]
                     and response.get("exchange_order_id") == request["exchange_order_id"]
@@ -1393,12 +1419,8 @@ class MicroLiveExecutor:
                         "market_id": order["prepared"]["market_id"],
                         "token_id": order["prepared"]["token_id"],
                         "effective_at_ts_ms": event_ts_ms,
-                        "transport_event_sha256": canonical_json_sha256(response),
-                        "raw_transport_event_json": json.dumps(
-                            response,
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        ),
+                        "transport_event_sha256": response_sha256,
+                        "raw_transport_event_json": raw_response_json,
                     },
                     event_ts_ms=event_ts_ms,
                 )
@@ -1923,7 +1945,7 @@ class MicroLiveExecutor:
                 raise MicroLiveExecutionError("prepared order identity is invalid")
             return
         if event_type in {"ORDER_ACKNOWLEDGED", "ORDER_REJECTED"}:
-            expected_keys = {
+            response_keys = {
                 "client_order_id",
                 "exchange_order_id",
                 "status",
@@ -1932,8 +1954,17 @@ class MicroLiveExecutor:
                 "accepted_quantity",
                 "limit_price",
             }
-            if set(payload) != expected_keys:
+            if set(payload) != {
+                *response_keys,
+                "transport_event_sha256",
+                "raw_transport_event_json",
+            }:
                 raise MicroLiveExecutionError("order disposition payload is invalid")
+            response = _stored_raw_json_object(
+                payload.get("raw_transport_event_json"),
+                payload.get("transport_event_sha256"),
+                "stored order disposition transport response",
+            )
             accepted_quantity = _positive_decimal(
                 payload.get("accepted_quantity"), "stored accepted quantity"
             )
@@ -1952,6 +1983,8 @@ class MicroLiveExecutor:
                 and _TOKEN_ID.fullmatch(payload["token_id"]) is not None
                 and accepted_quantity == Decimal("1")
                 and limit_price < 1
+                and set(response) == response_keys
+                and all(response.get(key) == payload.get(key) for key in response_keys)
             ):
                 raise MicroLiveExecutionError("order disposition payload is invalid")
             return
@@ -1965,11 +1998,19 @@ class MicroLiveExecutor:
                 "accepted_quantity",
                 "limit_price",
             }
-            if set(payload) != {*response_keys, "lookup_response_sha256"}:
+            if set(payload) != {
+                *response_keys,
+                "lookup_response_sha256",
+                "raw_lookup_response_json",
+            }:
                 raise MicroLiveExecutionError(
                     "submission reconciliation payload is invalid"
                 )
-            response = {key: payload[key] for key in response_keys}
+            response = _stored_raw_json_object(
+                payload.get("raw_lookup_response_json"),
+                payload.get("lookup_response_sha256"),
+                "stored submission lookup response",
+            )
             accepted_quantity = _positive_decimal(
                 response.get("accepted_quantity"),
                 "reconciled accepted quantity",
@@ -1989,8 +2030,8 @@ class MicroLiveExecutor:
                 and _TOKEN_ID.fullmatch(response["token_id"]) is not None
                 and accepted_quantity == Decimal("1")
                 and limit_price < 1
-                and payload.get("lookup_response_sha256")
-                == canonical_json_sha256(response)
+                and set(response) == response_keys
+                and all(response.get(key) == payload.get(key) for key in response_keys)
             ):
                 raise MicroLiveExecutionError(
                     "submission reconciliation payload is invalid"
