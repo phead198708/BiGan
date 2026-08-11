@@ -1737,10 +1737,72 @@ def test_fill_cash_position_settlement_and_restart_reconcile(
     restored = MicroLiveExecutor.restore(
         authorization=verified,
         transport=transport,
-        state=state,
+        raw_state=_json_bytes(state),
     )
     assert restored.export_state() == state
     assert restored.reconciliation_snapshot() == executor.reconciliation_snapshot()
+
+
+def test_restart_requires_strict_raw_state_bytes_and_blocks_event_injection(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    raw_state = executor.export_state_bytes()
+    assert raw_state == executor.export_state_bytes()
+    assert json.loads(raw_state) == executor.export_state()
+
+    with pytest.raises(MicroLiveExecutionError, match="raw bytes are invalid"):
+        MicroLiveExecutor.restore(
+            authorization=verified,
+            transport=transport,
+            raw_state=executor.export_state(),
+        )
+
+    state_sha256 = executor.export_state()["state_sha256"]
+    duplicate_key_state = (
+        raw_state[:-1]
+        + f',"state_sha256":"{state_sha256}"}}'.encode()
+    )
+    with pytest.raises(MicroLiveExecutionError, match="strict JSON"):
+        MicroLiveExecutor.restore(
+            authorization=verified,
+            transport=transport,
+            raw_state=duplicate_key_state,
+        )
+
+    numeric_overflow_state = raw_state.replace(
+        b'"events":[]',
+        b'"events":[{"event_ts_ms":1e400}]',
+    )
+    assert numeric_overflow_state != raw_state
+    with pytest.raises(MicroLiveExecutionError, match="strict JSON"):
+        MicroLiveExecutor.restore(
+            authorization=verified,
+            transport=transport,
+            raw_state=numeric_overflow_state,
+        )
+
+    with pytest.raises(TypeError, match="events"):
+        MicroLiveExecutor(
+            verified,
+            transport=transport,
+            events=executor.events,
+        )
+    with pytest.raises(MicroLiveExecutionError, match="strict raw-state restore"):
+        executor._initialize(
+            authorization=verified,
+            transport=transport,
+            events=({"event_type": "FORGED"},),
+        )
+
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=transport,
+        raw_state=raw_state,
+    )
+    assert restored.export_state_bytes() == raw_state
 
 
 def test_loss_budget_reservation_prevents_realized_loss_cap_overshoot(
@@ -2169,7 +2231,7 @@ def test_rehashed_lifecycle_raw_event_identity_tamper_fails_restore(
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
-            state=state,
+            raw_state=_json_bytes(state),
         )
 
 
@@ -2213,7 +2275,7 @@ def test_rehashed_stored_raw_event_duplicate_key_fails_restore(
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
-            state=state,
+            raw_state=_json_bytes(state),
         )
 
 
@@ -2364,7 +2426,7 @@ def test_raw_rejected_submission_is_closed_and_restart_reconciles(
     restored = MicroLiveExecutor.restore(
         authorization=verified,
         transport=transport,
-        state=executor.export_state(),
+        raw_state=executor.export_state_bytes(),
     )
     assert restored.reconciliation_snapshot() == snapshot
 
@@ -2494,7 +2556,7 @@ def test_unknown_submission_read_only_reconciliation_never_resubmits_or_unlocks(
     restored = MicroLiveExecutor.restore(
         authorization=verified,
         transport=transport,
-        state=executor.export_state(),
+        raw_state=executor.export_state_bytes(),
     )
     assert restored.reconciliation_snapshot() == snapshot
 
@@ -2560,7 +2622,7 @@ def test_unknown_cancel_read_only_reconciliation_closes_without_unlock_or_write(
     restored = MicroLiveExecutor.restore(
         authorization=verified,
         transport=transport,
-        state=executor.export_state(),
+        raw_state=executor.export_state_bytes(),
     )
     assert restored.reconciliation_snapshot() == snapshot
 
@@ -2751,7 +2813,7 @@ def test_rehashed_tampered_state_still_fails_closed(
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
-            state=state,
+            raw_state=_json_bytes(state),
         )
 
 
@@ -2806,7 +2868,7 @@ def test_rehashed_duplicate_exchange_order_identity_fails_closed_on_restore(
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
-            state=state,
+            raw_state=_json_bytes(state),
         )
 
 
@@ -2837,7 +2899,7 @@ def test_rehashed_order_without_execution_intent_audit_fails_closed(
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
-            state=state,
+            raw_state=_json_bytes(state),
         )
 
 
@@ -2863,7 +2925,7 @@ def test_rehashed_event_timestamp_regression_still_fails_closed(
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
-            state=state,
+            raw_state=_json_bytes(state),
         )
 
 

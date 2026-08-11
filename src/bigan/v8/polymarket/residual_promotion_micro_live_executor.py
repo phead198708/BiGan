@@ -31,7 +31,7 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
     ResidualPromotionRuntime,
 )
 
-STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v4"
+STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v5"
 SIGNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-execution-signal-v2"
 IMPLEMENTATION_REPOSITORY_PATH = (
     "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py"
@@ -42,6 +42,7 @@ _SLUG = re.compile(r"^btc-updown-15m-[1-9][0-9]*$")
 _CONDITION_ID = re.compile(r"^0x[0-9a-f]{64}$")
 _TOKEN_ID = re.compile(r"^[1-9][0-9]*$")
 _FORBIDDEN_FEATURE_KEY_TOKENS = ("outcome", "settlement", "resolution", "pnl")
+_RAW_STATE_RESTORE_TOKEN = object()
 FROZEN_EXECUTION_FEE_PER_UNIT_USD = Decimal("0.0002")
 _EVENT_TYPES = {
     "SIGNAL_REJECTED",
@@ -211,8 +212,27 @@ class MicroLiveExecutor:
         authorization: VerifiedMicroLiveAuthorization,
         *,
         transport: MicroLiveOrderTransport,
-        events: Sequence[Mapping[str, Any]] = (),
     ) -> None:
+        self._initialize(
+            authorization=authorization,
+            transport=transport,
+            events=(),
+        )
+
+    def _initialize(
+        self,
+        *,
+        authorization: VerifiedMicroLiveAuthorization,
+        transport: MicroLiveOrderTransport,
+        events: Sequence[Mapping[str, Any]],
+        restore_token: object | None = None,
+    ) -> None:
+        """Initialize only fresh state or state decoded by ``restore``."""
+
+        if events and restore_token is not _RAW_STATE_RESTORE_TOKEN:
+            raise MicroLiveExecutionError(
+                "nonempty micro-live events require strict raw-state restore"
+            )
         if not authorization_capability_is_verified(authorization):
             raise MicroLiveExecutionError("micro-live authorization capability is unverified")
         if transport is None:
@@ -1486,14 +1506,25 @@ class MicroLiveExecutor:
             else payload
         )
 
+    def export_state_bytes(self) -> bytes:
+        """Return deterministic strict JSON bytes for durable persistence."""
+
+        return json.dumps(
+            self.export_state(),
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+
     @classmethod
     def restore(
         cls,
         *,
         authorization: VerifiedMicroLiveAuthorization,
         transport: MicroLiveOrderTransport,
-        state: Mapping[str, Any],
+        raw_state: bytes,
     ) -> MicroLiveExecutor:
+        state, _, _ = _raw_json_object(raw_state, "micro-live state")
         if set(state) != {
             "schema_version",
             "authorization_id",
@@ -1515,7 +1546,14 @@ class MicroLiveExecutor:
             and state.get("state_sha256") == canonical_json_sha256(payload)
         ):
             raise MicroLiveExecutionError("micro-live state identity or SHA-256 mismatch")
-        return cls(authorization, transport=transport, events=events)
+        restored = cls.__new__(cls)
+        restored._initialize(
+            authorization=authorization,
+            transport=transport,
+            events=events,
+            restore_token=_RAW_STATE_RESTORE_TOKEN,
+        )
+        return restored
 
     def _validate_clock(
         self,
