@@ -13,6 +13,7 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
@@ -79,6 +80,105 @@ class MicroLiveOrderTransport(Protocol):
         """Read one order by its exact client/business identity."""
 
 
+def _runtime_integrity_sha256(runtime: ResidualPromotionRuntime) -> str:
+    residual_model_sha256 = hashlib.sha256(
+        bytes(runtime.residual_booster.save_raw(raw_format="ubj"))
+    ).hexdigest()
+    logit_model_sha256 = hashlib.sha256(
+        bytes(runtime.logit_booster.save_raw(raw_format="ubj"))
+    ).hexdigest()
+    if not (
+        residual_model_sha256 == runtime.residual_model_sha256
+        and logit_model_sha256 == runtime.logit_model_sha256
+    ):
+        raise MicroLiveExecutionError("bound runtime model bytes are mismatched")
+    return canonical_json_sha256(
+        {
+            "candidate_id": runtime.candidate_id,
+            "lineage_id": runtime.lineage_id,
+            "manifest_sha256": runtime.manifest_sha256,
+            "residual_model_sha256": runtime.residual_model_sha256,
+            "logit_model_sha256": runtime.logit_model_sha256,
+            "adapter_sha256": runtime.adapter_sha256,
+            "maximum_decision_lag_ms": runtime.maximum_decision_lag_ms,
+            "maximum_source_age_ms": runtime.maximum_source_age_ms,
+            "coefficients": list(runtime.coefficients),
+            "loaded_residual_model_sha256": residual_model_sha256,
+            "loaded_logit_model_sha256": logit_model_sha256,
+        }
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundAuthorization:
+    """Immutable operational snapshot of one verified capability."""
+
+    authorization_id: str
+    authorization_payload_sha256: str
+    candidate_bundle_sha256: str
+    capital_base_usd: Decimal
+    maximum_notional_usd: Decimal
+    maximum_realized_loss_usd: Decimal
+    maximum_open_orders: int
+    authorized_at_ts_ms: int
+    expires_at_ts_ms: int
+    maximum_signal_age_ms: int
+    maximum_operator_heartbeat_age_ms: int
+    market_allowlist: tuple[str, ...]
+    allowed_actions: tuple[str, ...]
+    runtime: ResidualPromotionRuntime
+    runtime_integrity_sha256: str
+
+    @classmethod
+    def from_verified(
+        cls,
+        authorization: VerifiedMicroLiveAuthorization,
+    ) -> _BoundAuthorization:
+        runtime = copy.deepcopy(authorization.runtime)
+        return cls(
+            authorization_id=authorization.authorization_id,
+            authorization_payload_sha256=authorization.authorization_payload_sha256,
+            candidate_bundle_sha256=authorization.candidate_bundle_sha256,
+            capital_base_usd=authorization.capital_base_usd,
+            maximum_notional_usd=authorization.maximum_notional_usd,
+            maximum_realized_loss_usd=authorization.maximum_realized_loss_usd,
+            maximum_open_orders=authorization.maximum_open_orders,
+            authorized_at_ts_ms=authorization.authorized_at_ts_ms,
+            expires_at_ts_ms=authorization.expires_at_ts_ms,
+            maximum_signal_age_ms=authorization.maximum_signal_age_ms,
+            maximum_operator_heartbeat_age_ms=(
+                authorization.maximum_operator_heartbeat_age_ms
+            ),
+            market_allowlist=authorization.market_allowlist,
+            allowed_actions=authorization.allowed_actions,
+            runtime=runtime,
+            runtime_integrity_sha256=_runtime_integrity_sha256(runtime),
+        )
+
+    def matches_verified(self, authorization: VerifiedMicroLiveAuthorization) -> bool:
+        return (
+            self.authorization_id == authorization.authorization_id
+            and self.authorization_payload_sha256
+            == authorization.authorization_payload_sha256
+            and self.candidate_bundle_sha256 == authorization.candidate_bundle_sha256
+            and self.capital_base_usd == authorization.capital_base_usd
+            and self.maximum_notional_usd == authorization.maximum_notional_usd
+            and self.maximum_realized_loss_usd
+            == authorization.maximum_realized_loss_usd
+            and self.maximum_open_orders == authorization.maximum_open_orders
+            and self.authorized_at_ts_ms == authorization.authorized_at_ts_ms
+            and self.expires_at_ts_ms == authorization.expires_at_ts_ms
+            and self.maximum_signal_age_ms == authorization.maximum_signal_age_ms
+            and self.maximum_operator_heartbeat_age_ms
+            == authorization.maximum_operator_heartbeat_age_ms
+            and self.market_allowlist == authorization.market_allowlist
+            and self.allowed_actions == authorization.allowed_actions
+            and self.runtime_integrity_sha256
+            == _runtime_integrity_sha256(authorization.runtime)
+            == _runtime_integrity_sha256(self.runtime)
+        )
+
+
 def create_micro_live_executor(
     *,
     authorization: Mapping[str, Any],
@@ -120,11 +220,12 @@ class MicroLiveExecutor:
         ):
             raise MicroLiveExecutionError("micro-live runtime capability is mismatched")
         self.authorization = authorization
+        self._authorization = _BoundAuthorization.from_verified(authorization)
         self.transport = transport
         self._events = [copy.deepcopy(dict(event)) for event in events]
         self._verify_event_chain()
         view = self._reconcile_view()
-        if _realized_loss_limit_reached(view, self.authorization) and not view[
+        if _realized_loss_limit_reached(view, self._authorization) and not view[
             "kill_switch_active"
         ]:
             raise MicroLiveExecutionError(
@@ -132,7 +233,7 @@ class MicroLiveExecutor:
             )
         if (
             view["loss_budget_consumed_usd"]
-            > self.authorization.maximum_realized_loss_usd
+            > self._authorization.maximum_realized_loss_usd
             and not view["kill_switch_active"]
         ):
             raise MicroLiveExecutionError(
@@ -152,6 +253,47 @@ class MicroLiveExecutor:
     def events(self) -> tuple[dict[str, Any], ...]:
         return tuple(copy.deepcopy(self._events))
 
+    def _require_authorization_integrity(
+        self,
+        *,
+        now_ts_ms: int,
+        reconciliation_only: bool = False,
+    ) -> None:
+        if authorization_capability_is_verified(self.authorization):
+            try:
+                if self._authorization.matches_verified(self.authorization):
+                    return
+            except Exception:
+                pass
+        now_is_valid = (
+            isinstance(now_ts_ms, int)
+            and not isinstance(now_ts_ms, bool)
+            and now_ts_ms > 0
+        )
+        event_ts_ms = (
+            now_ts_ms
+            if now_is_valid
+            else (
+                int(self._events[-1]["event_ts_ms"])
+                if self._events
+                else self._authorization.authorized_at_ts_ms
+            )
+        )
+        try:
+            self.engage_kill_switch(
+                reason="authorization_capability_integrity_failed",
+                now_ts_ms=event_ts_ms,
+            )
+        except Exception as exc:
+            raise MicroLiveExecutionError(
+                "micro-live authorization capability changed and kill persistence failed"
+            ) from exc
+        if reconciliation_only:
+            return
+        raise MicroLiveExecutionError(
+            "micro-live authorization capability changed after executor construction"
+        )
+
     def enforce_runtime_safety(
         self,
         *,
@@ -166,11 +308,12 @@ class MicroLiveExecutor:
         decision to exercise the signal-submission checks.
         """
 
+        self._require_authorization_integrity(now_ts_ms=now_ts_ms)
         if isinstance(now_ts_ms, bool) or not isinstance(now_ts_ms, int) or now_ts_ms <= 0:
             fallback_ts_ms = (
                 int(self._events[-1]["event_ts_ms"])
                 if self._events
-                else self.authorization.authorized_at_ts_ms
+                else self._authorization.authorized_at_ts_ms
             )
             self.engage_kill_switch(
                 reason="runtime_watchdog_clock_invalid",
@@ -192,9 +335,9 @@ class MicroLiveExecutor:
                 "transport_called": False,
             }
         reason: str | None = None
-        if now_ts_ms < self.authorization.authorized_at_ts_ms:
+        if now_ts_ms < self._authorization.authorized_at_ts_ms:
             reason = "runtime_clock_before_authorization"
-        elif now_ts_ms >= self.authorization.expires_at_ts_ms:
+        elif now_ts_ms >= self._authorization.expires_at_ts_ms:
             reason = "authorization_expired"
         elif (
             isinstance(operator_heartbeat_ts_ms, bool)
@@ -202,14 +345,14 @@ class MicroLiveExecutor:
             or operator_heartbeat_ts_ms <= 0
             or operator_heartbeat_ts_ms > now_ts_ms
             or now_ts_ms - operator_heartbeat_ts_ms
-            > self.authorization.maximum_operator_heartbeat_age_ms
+            > self._authorization.maximum_operator_heartbeat_age_ms
         ):
             reason = "operator_heartbeat_stale"
-        elif _realized_loss_limit_reached(view, self.authorization):
+        elif _realized_loss_limit_reached(view, self._authorization):
             reason = "maximum_realized_loss_reached"
         elif (
             view["loss_budget_consumed_usd"]
-            > self.authorization.maximum_realized_loss_usd
+            > self._authorization.maximum_realized_loss_usd
         ):
             reason = "maximum_loss_budget_exceeded"
 
@@ -233,12 +376,13 @@ class MicroLiveExecutor:
     ) -> dict[str, Any]:
         """Submit one authorized intent or return an explicit NO_TRADE block."""
 
+        self._require_authorization_integrity(now_ts_ms=now_ts_ms)
         _require_positive_timestamp(now_ts_ms, "signal submission")
         try:
             signal = _validated_candidate_signal(
                 signal_payload,
                 expected_candidate_bundle_sha256=(
-                    self.authorization.candidate_bundle_sha256
+                    self._authorization.candidate_bundle_sha256
                 ),
             )
             _validate_market_identity_evidence(
@@ -248,7 +392,7 @@ class MicroLiveExecutor:
             features = _validated_runtime_binding(
                 signal=signal,
                 feature_row=feature_row,
-                runtime=self.authorization.runtime,
+                runtime=self._authorization.runtime,
             )
             decision_ts_ms = int(signal["decision_ts_ms"])
             self._validate_clock(
@@ -268,9 +412,9 @@ class MicroLiveExecutor:
             self._append_event(
                 "SIGNAL_REJECTED",
                 {
-                    "authorization_id": self.authorization.authorization_id,
+                    "authorization_id": self._authorization.authorization_id,
                     "candidate_bundle_sha256": (
-                        self.authorization.candidate_bundle_sha256
+                        self._authorization.candidate_bundle_sha256
                     ),
                     "reason": "signal_validation_or_clock_failed",
                     "error_type": exc.__class__.__name__,
@@ -283,7 +427,7 @@ class MicroLiveExecutor:
             )
             raise
         view = self._reconcile_view()
-        if _realized_loss_limit_reached(view, self.authorization) and not view[
+        if _realized_loss_limit_reached(view, self._authorization) and not view[
             "kill_switch_active"
         ]:
             self.engage_kill_switch(
@@ -306,7 +450,7 @@ class MicroLiveExecutor:
         market_family = str(signal["market_family"])
         candidate_bundle_sha256 = str(signal["candidate_bundle_sha256"])
         selected_action = str(signal["selected_action"])
-        if market_family not in self.authorization.market_allowlist:
+        if market_family not in self._authorization.market_allowlist:
             self._audit_signal_decision(
                 signal=signal,
                 features=features,
@@ -336,7 +480,7 @@ class MicroLiveExecutor:
                 operator_heartbeat_ts_ms=operator_heartbeat_ts_ms,
             )
             return _blocked("signal_selected_no_trade")
-        if selected_action not in self.authorization.allowed_actions:
+        if selected_action not in self._authorization.allowed_actions:
             self._audit_signal_decision(
                 signal=signal,
                 features=features,
@@ -359,13 +503,13 @@ class MicroLiveExecutor:
         signal_payload_sha256 = canonical_json_sha256(signal)
         business_key = canonical_json_sha256(
             {
-                "authorization_id": self.authorization.authorization_id,
+                "authorization_id": self._authorization.authorization_id,
                 "candidate_bundle_sha256": candidate_bundle_sha256,
                 "market_id": market_id,
             }
         )
         intent_core = {
-            "authorization_id": self.authorization.authorization_id,
+            "authorization_id": self._authorization.authorization_id,
             "candidate_bundle_sha256": candidate_bundle_sha256,
             "business_key": business_key,
             "market_id": market_id,
@@ -441,7 +585,7 @@ class MicroLiveExecutor:
                 operator_heartbeat_ts_ms=operator_heartbeat_ts_ms,
             )
             return _blocked("existing_order_requires_reconciliation", client_order_id)
-        if view["submitted_notional_usd"] + notional > self.authorization.maximum_notional_usd:
+        if view["submitted_notional_usd"] + notional > self._authorization.maximum_notional_usd:
             self._audit_signal_decision(
                 signal=signal,
                 features=features,
@@ -451,7 +595,7 @@ class MicroLiveExecutor:
                 operator_heartbeat_ts_ms=operator_heartbeat_ts_ms,
             )
             return _blocked("authorization_notional_cap_exceeded")
-        if view["open_order_count"] >= self.authorization.maximum_open_orders:
+        if view["open_order_count"] >= self._authorization.maximum_open_orders:
             self._audit_signal_decision(
                 signal=signal,
                 features=features,
@@ -463,7 +607,7 @@ class MicroLiveExecutor:
             return _blocked("maximum_open_orders_reached")
         if (
             view["loss_budget_consumed_usd"] + maximum_loss
-            > self.authorization.maximum_realized_loss_usd
+            > self._authorization.maximum_realized_loss_usd
         ):
             self._audit_signal_decision(
                 signal=signal,
@@ -489,7 +633,7 @@ class MicroLiveExecutor:
             "client_order_id": client_order_id,
             "submitted_at_ts_ms": now_ts_ms,
             "operator_heartbeat_ts_ms": operator_heartbeat_ts_ms,
-            "authorization_payload_sha256": self.authorization.authorization_payload_sha256,
+            "authorization_payload_sha256": self._authorization.authorization_payload_sha256,
         }
         self._append_event("ORDER_PREPARED", prepared, event_ts_ms=now_ts_ms)
         transport_request = {
@@ -573,6 +717,10 @@ class MicroLiveExecutor:
         to the existing kill-switch cancellation path.
         """
 
+        self._require_authorization_integrity(
+            now_ts_ms=now_ts_ms,
+            reconciliation_only=True,
+        )
         _require_positive_timestamp(now_ts_ms, "submission reconciliation")
         view = self._reconcile_view()
         order = view["orders"].get(client_order_id)
@@ -592,7 +740,7 @@ class MicroLiveExecutor:
             )
         prepared = dict(order["prepared"])
         lookup_request = {
-            "authorization_id": self.authorization.authorization_id,
+            "authorization_id": self._authorization.authorization_id,
             "client_order_id": client_order_id,
             "business_key": prepared["business_key"],
             "market_id": prepared["market_id"],
@@ -664,6 +812,10 @@ class MicroLiveExecutor:
         and unresolved.
         """
 
+        self._require_authorization_integrity(
+            now_ts_ms=now_ts_ms,
+            reconciliation_only=True,
+        )
         _require_positive_timestamp(now_ts_ms, "cancel reconciliation")
         if self._events and now_ts_ms < int(self._events[-1]["event_ts_ms"]):
             raise MicroLiveExecutionError("cancel reconciliation timestamp regressed")
@@ -687,7 +839,7 @@ class MicroLiveExecutor:
         prepared = dict(order["prepared"])
         acknowledgement = dict(order["acknowledgement"])
         lookup_request = {
-            "authorization_id": self.authorization.authorization_id,
+            "authorization_id": self._authorization.authorization_id,
             "client_order_id": client_order_id,
             "business_key": prepared["business_key"],
             "exchange_order_id": acknowledgement["exchange_order_id"],
@@ -782,8 +934,8 @@ class MicroLiveExecutor:
         signal_copy = copy.deepcopy(dict(signal))
         feature_copy = copy.deepcopy(dict(features))
         core = {
-            "authorization_id": self.authorization.authorization_id,
-            "candidate_bundle_sha256": self.authorization.candidate_bundle_sha256,
+            "authorization_id": self._authorization.authorization_id,
+            "candidate_bundle_sha256": self._authorization.candidate_bundle_sha256,
             "market_id": signal_copy["market_id"],
             "decision_ts_ms": signal_copy["decision_ts_ms"],
             "operator_heartbeat_ts_ms": operator_heartbeat_ts_ms,
@@ -817,6 +969,10 @@ class MicroLiveExecutor:
     ) -> dict[str, Any]:
         """Record one fill; every trusted-time reconciliation error kills."""
 
+        self._require_authorization_integrity(
+            now_ts_ms=now_ts_ms,
+            reconciliation_only=True,
+        )
         _require_positive_timestamp(now_ts_ms, "fill observation")
         try:
             if self._events and now_ts_ms < int(self._events[-1]["event_ts_ms"]):
@@ -955,6 +1111,10 @@ class MicroLiveExecutor:
     ) -> dict[str, Any]:
         """Record an order close; any reconciliation ambiguity kills."""
 
+        self._require_authorization_integrity(
+            now_ts_ms=now_ts_ms,
+            reconciliation_only=True,
+        )
         _require_positive_timestamp(now_ts_ms, "order close observation")
         try:
             if self._events and now_ts_ms < int(self._events[-1]["event_ts_ms"]):
@@ -1056,6 +1216,10 @@ class MicroLiveExecutor:
     ) -> dict[str, Any]:
         """Record official settlement; any reconciliation ambiguity kills."""
 
+        self._require_authorization_integrity(
+            now_ts_ms=now_ts_ms,
+            reconciliation_only=True,
+        )
         _require_positive_timestamp(now_ts_ms, "settlement observation")
         try:
             if self._events and now_ts_ms < int(self._events[-1]["event_ts_ms"]):
@@ -1172,7 +1336,7 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError("open order cannot settle before cancellation")
         self._append_event("SETTLEMENT_RECORDED", payload, event_ts_ms=now_ts_ms)
         settled_view = self._reconcile_view()
-        if _realized_loss_limit_reached(settled_view, self.authorization):
+        if _realized_loss_limit_reached(settled_view, self._authorization):
             self.engage_kill_switch(
                 reason="maximum_realized_loss_reached",
                 now_ts_ms=now_ts_ms,
@@ -1208,7 +1372,7 @@ class MicroLiveExecutor:
             if not order["is_open"]:
                 continue
             request = {
-                "authorization_id": self.authorization.authorization_id,
+                "authorization_id": self._authorization.authorization_id,
                 "client_order_id": order["prepared"]["client_order_id"],
                 "exchange_order_id": order["acknowledgement"]["exchange_order_id"],
                 "reason": reason,
@@ -1261,14 +1425,14 @@ class MicroLiveExecutor:
 
         view = self._reconcile_view()
         return {
-            "authorization_id": self.authorization.authorization_id,
+            "authorization_id": self._authorization.authorization_id,
             "event_count": len(self._events),
             "kill_switch_active": view["kill_switch_active"],
             "kill_switch_reason": view["kill_switch_reason"],
             "cash_usd": str(view["cash_usd"]),
             "realized_pnl_usd": str(view["realized_pnl_usd"]),
             "maximum_realized_loss_usd": str(
-                self.authorization.maximum_realized_loss_usd
+                self._authorization.maximum_realized_loss_usd
             ),
             "unsettled_maximum_loss_usd": str(
                 view["unsettled_maximum_loss_usd"]
@@ -1289,9 +1453,9 @@ class MicroLiveExecutor:
     def export_state(self, *, include_state_sha: bool = True) -> dict[str, Any]:
         payload = {
             "schema_version": STATE_SCHEMA_VERSION,
-            "authorization_id": self.authorization.authorization_id,
-            "authorization_payload_sha256": self.authorization.authorization_payload_sha256,
-            "candidate_bundle_sha256": self.authorization.candidate_bundle_sha256,
+            "authorization_id": self._authorization.authorization_id,
+            "authorization_payload_sha256": self._authorization.authorization_payload_sha256,
+            "candidate_bundle_sha256": self._authorization.candidate_bundle_sha256,
             "events": copy.deepcopy(self._events),
         }
         return (
@@ -1354,29 +1518,29 @@ class MicroLiveExecutor:
                 now_ts_ms=now_ts_ms,
             )
             raise MicroLiveExecutionError("micro-live event clock regressed")
-        if now_ts_ms >= self.authorization.expires_at_ts_ms:
+        if now_ts_ms >= self._authorization.expires_at_ts_ms:
             self.engage_kill_switch(reason="authorization_expired", now_ts_ms=now_ts_ms)
             raise MicroLiveExecutionError("micro-live authorization expired")
         if not decision_ts_ms <= now_ts_ms or (
-            now_ts_ms - decision_ts_ms > self.authorization.maximum_signal_age_ms
+            now_ts_ms - decision_ts_ms > self._authorization.maximum_signal_age_ms
         ):
             self.engage_kill_switch(reason="signal_stale", now_ts_ms=now_ts_ms)
             raise MicroLiveExecutionError("micro-live signal is stale")
         if not decision_ts_ms <= signal_observed_at_ts_ms <= now_ts_ms or (
             now_ts_ms - signal_observed_at_ts_ms
-            > self.authorization.maximum_signal_age_ms
+            > self._authorization.maximum_signal_age_ms
         ):
             self.engage_kill_switch(reason="signal_observation_stale", now_ts_ms=now_ts_ms)
             raise MicroLiveExecutionError("micro-live signal observation is stale")
         if not operator_heartbeat_ts_ms <= now_ts_ms or (
             now_ts_ms - operator_heartbeat_ts_ms
-            > self.authorization.maximum_operator_heartbeat_age_ms
+            > self._authorization.maximum_operator_heartbeat_age_ms
         ):
             self.engage_kill_switch(reason="operator_heartbeat_stale", now_ts_ms=now_ts_ms)
             raise MicroLiveExecutionError("micro-live operator heartbeat is stale")
         if not identity_revalidated_at_ts_ms <= signal_observed_at_ts_ms or (
             now_ts_ms - identity_revalidated_at_ts_ms
-            > self.authorization.maximum_signal_age_ms
+            > self._authorization.maximum_signal_age_ms
         ):
             self.engage_kill_switch(reason="market_identity_stale", now_ts_ms=now_ts_ms)
             raise MicroLiveExecutionError("micro-live market identity is stale")
@@ -1537,9 +1701,9 @@ class MicroLiveExecutor:
                 "reason",
                 "error_type",
             } or not (
-                payload.get("authorization_id") == self.authorization.authorization_id
+                payload.get("authorization_id") == self._authorization.authorization_id
                 and payload.get("candidate_bundle_sha256")
-                == self.authorization.candidate_bundle_sha256
+                == self._authorization.candidate_bundle_sha256
                 and payload.get("reason") == "signal_validation_or_clock_failed"
                 and isinstance(payload.get("error_type"), str)
                 and payload["error_type"]
@@ -1568,13 +1732,13 @@ class MicroLiveExecutor:
             signal = _validated_candidate_signal(
                 payload.get("signal_payload"),
                 expected_candidate_bundle_sha256=(
-                    self.authorization.candidate_bundle_sha256
+                    self._authorization.candidate_bundle_sha256
                 ),
             )
             feature_row = _validated_runtime_binding(
                 signal=signal,
                 feature_row=payload.get("feature_row"),
-                runtime=self.authorization.runtime,
+                runtime=self._authorization.runtime,
             )
             disposition = payload.get("disposition")
             reason = payload.get("reason")
@@ -1584,24 +1748,24 @@ class MicroLiveExecutor:
                 if key != "decision_audit_sha256"
             }
             if not (
-                payload.get("authorization_id") == self.authorization.authorization_id
+                payload.get("authorization_id") == self._authorization.authorization_id
                 and payload.get("candidate_bundle_sha256")
-                == self.authorization.candidate_bundle_sha256
+                == self._authorization.candidate_bundle_sha256
                 and payload.get("market_id") == signal["market_id"]
                 and payload.get("decision_ts_ms") == signal["decision_ts_ms"]
                 and isinstance(payload.get("operator_heartbeat_ts_ms"), int)
                 and not isinstance(payload.get("operator_heartbeat_ts_ms"), bool)
                 and signal["decision_ts_ms"] <= event_ts_ms
                 and event_ts_ms - signal["decision_ts_ms"]
-                <= self.authorization.maximum_signal_age_ms
+                <= self._authorization.maximum_signal_age_ms
                 and payload["operator_heartbeat_ts_ms"] <= event_ts_ms
                 and event_ts_ms - payload["operator_heartbeat_ts_ms"]
-                <= self.authorization.maximum_operator_heartbeat_age_ms
+                <= self._authorization.maximum_operator_heartbeat_age_ms
                 and dict(signal["market_identity"])["clob_revalidated_at_ts_ms"]
                 <= signal["observed_at_ts_ms"]
                 and event_ts_ms
                 - dict(signal["market_identity"])["clob_revalidated_at_ts_ms"]
-                <= self.authorization.maximum_signal_age_ms
+                <= self._authorization.maximum_signal_age_ms
                 and payload.get("signal_payload_sha256")
                 == canonical_json_sha256(signal)
                 and payload.get("market_identity") == signal["market_identity"]
@@ -1678,18 +1842,18 @@ class MicroLiveExecutor:
                 raise MicroLiveExecutionError("prepared order economics are invalid")
             signal = _validated_candidate_signal(
                 payload.get("signal_payload"),
-                expected_candidate_bundle_sha256=self.authorization.candidate_bundle_sha256,
+                expected_candidate_bundle_sha256=self._authorization.candidate_bundle_sha256,
             )
             feature_row = _validated_runtime_binding(
                 signal=signal,
                 feature_row=payload.get("feature_row"),
-                runtime=self.authorization.runtime,
+                runtime=self._authorization.runtime,
             )
             market_id = payload.get("market_id")
             business_key = canonical_json_sha256(
                 {
-                    "authorization_id": self.authorization.authorization_id,
-                    "candidate_bundle_sha256": self.authorization.candidate_bundle_sha256,
+                    "authorization_id": self._authorization.authorization_id,
+                    "candidate_bundle_sha256": self._authorization.candidate_bundle_sha256,
                     "market_id": market_id,
                 }
             )
@@ -1707,20 +1871,20 @@ class MicroLiveExecutor:
             }
             intent_id = canonical_json_sha256(intent_core)
             if not (
-                payload.get("authorization_id") == self.authorization.authorization_id
+                payload.get("authorization_id") == self._authorization.authorization_id
                 and payload.get("authorization_payload_sha256")
-                == self.authorization.authorization_payload_sha256
+                == self._authorization.authorization_payload_sha256
                 and payload.get("candidate_bundle_sha256")
-                == self.authorization.candidate_bundle_sha256
+                == self._authorization.candidate_bundle_sha256
                 and isinstance(market_id, str)
                 and market_id
                 and isinstance(payload.get("slug"), str)
                 and _SLUG.fullmatch(payload["slug"]) is not None
-                and payload.get("market_family") in self.authorization.market_allowlist
+                and payload.get("market_family") in self._authorization.market_allowlist
                 and isinstance(payload.get("decision_ts_ms"), int)
                 and not isinstance(payload.get("decision_ts_ms"), bool)
                 and payload["decision_ts_ms"] > 0
-                and payload.get("selected_action") in self.authorization.allowed_actions
+                and payload.get("selected_action") in self._authorization.allowed_actions
                 and payload.get("selected_action") == signal["selected_action"]
                 and payload.get("market_id") == signal["market_id"]
                 and payload.get("slug") == signal["slug"]
@@ -1729,15 +1893,15 @@ class MicroLiveExecutor:
                 and payload.get("submitted_at_ts_ms") == event_ts_ms
                 and isinstance(payload.get("operator_heartbeat_ts_ms"), int)
                 and not isinstance(payload.get("operator_heartbeat_ts_ms"), bool)
-                and self.authorization.authorized_at_ts_ms
+                and self._authorization.authorized_at_ts_ms
                 <= event_ts_ms
-                < self.authorization.expires_at_ts_ms
+                < self._authorization.expires_at_ts_ms
                 and signal["decision_ts_ms"] <= event_ts_ms
                 and event_ts_ms - signal["decision_ts_ms"]
-                <= self.authorization.maximum_signal_age_ms
+                <= self._authorization.maximum_signal_age_ms
                 and payload["operator_heartbeat_ts_ms"] <= event_ts_ms
                 and event_ts_ms - payload["operator_heartbeat_ts_ms"]
-                <= self.authorization.maximum_operator_heartbeat_age_ms
+                <= self._authorization.maximum_operator_heartbeat_age_ms
                 and isinstance(payload.get("token_id"), str)
                 and _TOKEN_ID.fullmatch(payload["token_id"]) is not None
                 and payload.get("token_side")
@@ -2184,9 +2348,9 @@ class MicroLiveExecutor:
                     or not isinstance(client_order_id, str)
                     or client_order_id in orders
                     or payload.get("intent_id") != client_order_id
-                    or payload.get("authorization_id") != self.authorization.authorization_id
+                    or payload.get("authorization_id") != self._authorization.authorization_id
                     or payload.get("candidate_bundle_sha256")
-                    != self.authorization.candidate_bundle_sha256
+                    != self._authorization.candidate_bundle_sha256
                 ):
                     raise MicroLiveExecutionError("prepared order identity is invalid")
                 if not (
@@ -2304,7 +2468,7 @@ class MicroLiveExecutor:
                 elif event_type == "ORDER_SUBMISSION_RECONCILIATION_FAILED":
                     prepared = order["prepared"]
                     expected_lookup_request = {
-                        "authorization_id": self.authorization.authorization_id,
+                        "authorization_id": self._authorization.authorization_id,
                         "client_order_id": client_order_id,
                         "business_key": prepared["business_key"],
                         "market_id": prepared["market_id"],
@@ -2350,7 +2514,7 @@ class MicroLiveExecutor:
                             "failed cancel reconciliation lifecycle is invalid"
                         )
                     expected_lookup_request = {
-                        "authorization_id": self.authorization.authorization_id,
+                        "authorization_id": self._authorization.authorization_id,
                         "client_order_id": client_order_id,
                         "business_key": prepared["business_key"],
                         "exchange_order_id": acknowledgement["exchange_order_id"],
@@ -2493,7 +2657,7 @@ class MicroLiveExecutor:
                 "execution-intent audit is missing order preparation"
             )
 
-        cash = self.authorization.maximum_notional_usd
+        cash = self._authorization.maximum_notional_usd
         realized_pnl = Decimal("0")
         unsettled_maximum_loss = Decimal("0")
         positions = {"UP": Decimal("0"), "DOWN": Decimal("0")}
@@ -2558,9 +2722,9 @@ class MicroLiveExecutor:
                 realized_pnl += filled_qty * payout - realized_cost
                 side = "UP" if prepared["selected_action"] == "BUY_UP_HOLD" else "DOWN"
                 positions[side] -= filled_qty
-        if submitted_notional > self.authorization.maximum_notional_usd:
+        if submitted_notional > self._authorization.maximum_notional_usd:
             raise MicroLiveExecutionError("submitted notional exceeds authorization")
-        if open_order_count > self.authorization.maximum_open_orders:
+        if open_order_count > self._authorization.maximum_open_orders:
             raise MicroLiveExecutionError("open order count exceeds authorization")
         loss_budget_consumed = max(-realized_pnl, Decimal("0")) + (
             unsettled_maximum_loss
@@ -2594,7 +2758,7 @@ def _blocked(reason: str, client_order_id: str | None = None) -> dict[str, Any]:
 
 def _realized_loss_limit_reached(
     view: Mapping[str, Any],
-    authorization: VerifiedMicroLiveAuthorization,
+    authorization: VerifiedMicroLiveAuthorization | _BoundAuthorization,
 ) -> bool:
     realized = view.get("realized_pnl_usd")
     if not isinstance(realized, Decimal):

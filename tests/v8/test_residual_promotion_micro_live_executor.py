@@ -1278,6 +1278,103 @@ def test_verified_capability_in_place_tampering_invalidates_integrity(
         MicroLiveExecutor(verified, transport=FakeTransport())
 
 
+def test_post_construction_capability_tampering_kills_and_cancels_open_order(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    object.__setattr__(verified, "maximum_notional_usd", Decimal("999"))
+
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="capability changed after executor construction",
+    ):
+        executor.enforce_runtime_safety(
+            now_ts_ms=NOW_TS_MS + 1,
+            operator_heartbeat_ts_ms=NOW_TS_MS,
+        )
+
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["kill_switch_reason"] == "authorization_capability_integrity_failed"
+    assert snapshot["maximum_realized_loss_usd"] == "1.00"
+    assert len(transport.submit_calls) == 1
+    assert len(transport.cancel_calls) == 1
+    assert transport.cancel_calls[0]["authorization_id"] == verified.authorization_id
+    late_fill = _record_fill(
+        executor,
+        client_order_id=transport.submit_calls[0]["client_order_id"],
+        fill_id="post-tamper-reconciled-fill",
+        now_ts_ms=NOW_TS_MS + 2,
+        quantity="1",
+        price="0.39",
+        fee_usd="0.0002",
+        transport_event_sha256="f" * 64,
+        event_overrides={"executed_at_ts_ms": NOW_TS_MS},
+    )
+    assert late_fill["status"] == "FILL_RECORDED"
+    assert late_fill["snapshot"]["kill_switch_active"] is True
+    assert late_fill["snapshot"]["open_order_count"] == 0
+
+
+def test_post_construction_capability_tampering_blocks_first_submission(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    object.__setattr__(verified, "maximum_open_orders", 10)
+
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="capability changed after executor construction",
+    ):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["kill_switch_reason"] == "authorization_capability_integrity_failed"
+    assert transport.submit_calls == []
+    assert transport.cancel_calls == []
+
+
+def test_post_construction_runtime_tampering_uses_bound_clone_to_cancel(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    object.__setattr__(
+        verified.runtime,
+        "maximum_source_age_ms",
+        verified.runtime.maximum_source_age_ms + 1,
+    )
+
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="capability changed after executor construction",
+    ):
+        executor.enforce_runtime_safety(
+            now_ts_ms=NOW_TS_MS + 1,
+            operator_heartbeat_ts_ms=NOW_TS_MS,
+        )
+
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["kill_switch_reason"] == "authorization_capability_integrity_failed"
+    assert len(transport.submit_calls) == 1
+    assert len(transport.cancel_calls) == 1
+
+
 def test_second_frozen_decision_is_audited_and_blocked_without_kill(
     authorized_fixture: dict[str, Any],
 ) -> None:
