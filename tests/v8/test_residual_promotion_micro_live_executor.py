@@ -354,6 +354,7 @@ class FakeTransport:
         fail_cancel: bool = False,
         fail_lookup: bool = False,
         fixed_exchange_order_id: str | None = None,
+        submit_status: str = "ACCEPTED",
         lookup_status: str = "ACCEPTED",
         cancel_lookup_status: str = "CANCELED",
         cancel_lookup_overrides: dict[str, Any] | None = None,
@@ -362,6 +363,7 @@ class FakeTransport:
         self.fail_cancel = fail_cancel
         self.fail_lookup = fail_lookup
         self.fixed_exchange_order_id = fixed_exchange_order_id
+        self.submit_status = submit_status
         self.lookup_status = lookup_status
         self.cancel_lookup_status = cancel_lookup_status
         self.cancel_lookup_overrides = dict(cancel_lookup_overrides or {})
@@ -377,7 +379,7 @@ class FakeTransport:
             "client_order_id": request["client_order_id"],
             "exchange_order_id": self.fixed_exchange_order_id
             or f"exchange-{request['client_order_id'][:12]}",
-            "status": "ACCEPTED",
+            "status": self.submit_status,
             "market_id": request["market_id"],
             "token_id": request["token_id"],
             "accepted_quantity": request["quantity"],
@@ -2334,6 +2336,37 @@ def test_transport_response_raw_bytes_are_preserved_and_hash_bound(
         raw_cancellation
     ).hexdigest()
     assert json.loads(raw_cancellation)["status"] == "CANCELED"
+
+
+def test_raw_rejected_submission_is_closed_and_restart_reconciles(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport(submit_status="REJECTED")
+    executor = MicroLiveExecutor(verified, transport=transport)
+    result = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    assert result["status"] == "ORDER_REJECTED"
+    rejection = next(
+        event["payload"]
+        for event in executor.events
+        if event["event_type"] == "ORDER_REJECTED"
+    )
+    raw_rejection = rejection["raw_transport_event_json"].encode()
+    assert rejection["transport_event_sha256"] == hashlib.sha256(
+        raw_rejection
+    ).hexdigest()
+    assert json.loads(raw_rejection)["status"] == "REJECTED"
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["open_order_count"] == 0
+    assert snapshot["kill_switch_active"] is False
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=transport,
+        state=executor.export_state(),
+    )
+    assert restored.reconciliation_snapshot() == snapshot
 
 
 def test_parsed_submit_response_fails_closed_as_unknown(
