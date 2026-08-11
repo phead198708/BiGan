@@ -51,6 +51,8 @@ _EVENT_TYPES = {
     "ORDER_SUBMISSION_UNKNOWN",
     "ORDER_SUBMISSION_RECONCILED",
     "ORDER_SUBMISSION_RECONCILIATION_FAILED",
+    "ORDER_CANCEL_RECONCILED",
+    "ORDER_CANCEL_RECONCILIATION_FAILED",
     "FILL_RECORDED",
     "ORDER_CANCELED",
     "ORDER_EXPIRED",
@@ -646,6 +648,123 @@ class MicroLiveExecutor:
             "exchange_order_id": disposition["exchange_order_id"],
             "kill_switch_active": True,
             "cancel_result": cancel_result,
+        }
+
+    def reconcile_unknown_cancellation(
+        self,
+        *,
+        client_order_id: str,
+        now_ts_ms: int,
+    ) -> dict[str, Any]:
+        """Resolve one ambiguous cancel through identity-bound read-only lookup.
+
+        This method never submits or cancels an order and never clears the
+        persistent kill switch.  It closes the local order only when lookup
+        proves CANCELED or EXPIRED; OPEN/FILLED/invalid results remain audited
+        and unresolved.
+        """
+
+        _require_positive_timestamp(now_ts_ms, "cancel reconciliation")
+        if self._events and now_ts_ms < int(self._events[-1]["event_ts_ms"]):
+            raise MicroLiveExecutionError("cancel reconciliation timestamp regressed")
+        view = self._reconcile_view()
+        order = view["orders"].get(client_order_id)
+        if not (
+            order is not None
+            and order.get("acknowledgement") is not None
+            and order.get("cancel_unknown") is True
+            and order.get("closed_status") is None
+            and order.get("settlement") is None
+            and view["kill_switch_active"] is True
+        ):
+            self.engage_kill_switch(
+                reason="cancel_reconciliation_precondition_failed",
+                now_ts_ms=now_ts_ms,
+            )
+            raise MicroLiveExecutionError(
+                "cancel reconciliation requires one killed cancel-unknown order"
+            )
+        prepared = dict(order["prepared"])
+        acknowledgement = dict(order["acknowledgement"])
+        lookup_request = {
+            "authorization_id": self.authorization.authorization_id,
+            "client_order_id": client_order_id,
+            "business_key": prepared["business_key"],
+            "exchange_order_id": acknowledgement["exchange_order_id"],
+            "market_id": prepared["market_id"],
+            "token_id": prepared["token_id"],
+            "lookup_purpose": "cancel_reconciliation",
+        }
+        response: dict[str, Any] | None = None
+        try:
+            response = dict(self.transport.lookup_order(copy.deepcopy(lookup_request)))
+            disposition = self._validate_cancel_lookup_response(
+                order=order,
+                response=response,
+                now_ts_ms=now_ts_ms,
+            )
+        except Exception as exc:
+            self._append_event(
+                "ORDER_CANCEL_RECONCILIATION_FAILED",
+                {
+                    "client_order_id": client_order_id,
+                    "lookup_request_sha256": canonical_json_sha256(lookup_request),
+                    "error_type": exc.__class__.__name__,
+                    "observed_status": None,
+                    "lookup_response_sha256": None,
+                    "raw_lookup_response_json": None,
+                },
+                event_ts_ms=now_ts_ms,
+            )
+            raise MicroLiveExecutionError(
+                "unknown cancellation reconciliation failed closed"
+            ) from exc
+        raw_response_json = json.dumps(
+            response,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        lookup_response_sha256 = hashlib.sha256(
+            raw_response_json.encode("utf-8")
+        ).hexdigest()
+        if disposition["status"] not in {"CANCELED", "EXPIRED"}:
+            self._append_event(
+                "ORDER_CANCEL_RECONCILIATION_FAILED",
+                {
+                    "client_order_id": client_order_id,
+                    "lookup_request_sha256": canonical_json_sha256(lookup_request),
+                    "error_type": None,
+                    "observed_status": disposition["status"],
+                    "lookup_response_sha256": lookup_response_sha256,
+                    "raw_lookup_response_json": raw_response_json,
+                },
+                event_ts_ms=now_ts_ms,
+            )
+            return {
+                "status": f"ORDER_CANCEL_RECONCILIATION_{disposition['status']}",
+                "client_order_id": client_order_id,
+                "kill_switch_active": True,
+                "order_closed": False,
+                "lookup_called": True,
+                "write_transport_called": False,
+            }
+        self._append_event(
+            "ORDER_CANCEL_RECONCILED",
+            {
+                **disposition,
+                "lookup_response_sha256": lookup_response_sha256,
+                "raw_lookup_response_json": raw_response_json,
+            },
+            event_ts_ms=now_ts_ms,
+        )
+        self._reconcile_view()
+        return {
+            "status": f"ORDER_CANCEL_RECONCILED_{disposition['status']}",
+            "client_order_id": client_order_id,
+            "kill_switch_active": True,
+            "order_closed": True,
+            "lookup_called": True,
+            "write_transport_called": False,
         }
 
     def _audit_signal_decision(
@@ -1291,6 +1410,61 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError("order response identity mismatch")
         return dict(response)
 
+    def _validate_cancel_lookup_response(
+        self,
+        *,
+        order: Mapping[str, Any],
+        response: Mapping[str, Any],
+        now_ts_ms: int,
+    ) -> dict[str, Any]:
+        expected_keys = {
+            "client_order_id",
+            "exchange_order_id",
+            "status",
+            "market_id",
+            "token_id",
+            "accepted_quantity",
+            "limit_price",
+            "observed_at_ts_ms",
+            "effective_at_ts_ms",
+        }
+        if set(response) != expected_keys:
+            raise MicroLiveExecutionError("cancel lookup response schema mismatch")
+        prepared = dict(order["prepared"])
+        acknowledgement = dict(order["acknowledgement"])
+        status = response.get("status")
+        observed_at_ts_ms = response.get("observed_at_ts_ms")
+        effective_at_ts_ms = response.get("effective_at_ts_ms")
+        if not (
+            response.get("client_order_id") == prepared["client_order_id"]
+            and response.get("exchange_order_id")
+            == acknowledgement["exchange_order_id"]
+            and response.get("market_id") == prepared["market_id"]
+            and response.get("token_id") == prepared["token_id"]
+            and response.get("accepted_quantity") == prepared["quantity"]
+            and response.get("limit_price") == prepared["limit_price"]
+            and status in {"OPEN", "FILLED", "CANCELED", "EXPIRED"}
+            and isinstance(observed_at_ts_ms, int)
+            and not isinstance(observed_at_ts_ms, bool)
+            and prepared["submitted_at_ts_ms"] <= observed_at_ts_ms <= now_ts_ms
+            and (
+                (
+                    status in {"CANCELED", "EXPIRED"}
+                    and isinstance(effective_at_ts_ms, int)
+                    and not isinstance(effective_at_ts_ms, bool)
+                    and prepared["submitted_at_ts_ms"]
+                    <= effective_at_ts_ms
+                    <= observed_at_ts_ms
+                )
+                or (
+                    status in {"OPEN", "FILLED"}
+                    and effective_at_ts_ms is None
+                )
+            )
+        ):
+            raise MicroLiveExecutionError("cancel lookup response identity mismatch")
+        return dict(response)
+
     def _append_event(
         self,
         event_type: str,
@@ -1673,6 +1847,96 @@ class MicroLiveExecutor:
                     "failed submission reconciliation audit is invalid"
                 )
             return
+        if event_type == "ORDER_CANCEL_RECONCILED":
+            response_keys = {
+                "client_order_id",
+                "exchange_order_id",
+                "status",
+                "market_id",
+                "token_id",
+                "accepted_quantity",
+                "limit_price",
+                "observed_at_ts_ms",
+                "effective_at_ts_ms",
+            }
+            if set(payload) != {
+                *response_keys,
+                "lookup_response_sha256",
+                "raw_lookup_response_json",
+            }:
+                raise MicroLiveExecutionError(
+                    "cancel reconciliation payload is invalid"
+                )
+            response = _stored_raw_json_object(
+                payload.get("raw_lookup_response_json"),
+                payload.get("lookup_response_sha256"),
+                "stored cancel lookup response",
+            )
+            if not (
+                set(response) == response_keys
+                and all(response.get(key) == payload.get(key) for key in response_keys)
+                and payload.get("status") in {"CANCELED", "EXPIRED"}
+                and isinstance(payload.get("effective_at_ts_ms"), int)
+                and not isinstance(payload.get("effective_at_ts_ms"), bool)
+                and isinstance(payload.get("observed_at_ts_ms"), int)
+                and not isinstance(payload.get("observed_at_ts_ms"), bool)
+                and 0
+                < payload["effective_at_ts_ms"]
+                <= payload["observed_at_ts_ms"]
+                <= event_ts_ms
+            ):
+                raise MicroLiveExecutionError(
+                    "cancel reconciliation payload is invalid"
+                )
+            return
+        if event_type == "ORDER_CANCEL_RECONCILIATION_FAILED":
+            if set(payload) != {
+                "client_order_id",
+                "lookup_request_sha256",
+                "error_type",
+                "observed_status",
+                "lookup_response_sha256",
+                "raw_lookup_response_json",
+            } or not (
+                _is_sha256(payload.get("client_order_id"))
+                and _is_sha256(payload.get("lookup_request_sha256"))
+            ):
+                raise MicroLiveExecutionError(
+                    "failed cancel reconciliation audit is invalid"
+                )
+            error_type = payload.get("error_type")
+            observed_status = payload.get("observed_status")
+            if isinstance(error_type, str) and error_type:
+                if any(
+                    payload.get(key) is not None
+                    for key in (
+                        "observed_status",
+                        "lookup_response_sha256",
+                        "raw_lookup_response_json",
+                    )
+                ):
+                    raise MicroLiveExecutionError(
+                        "failed cancel reconciliation audit is invalid"
+                    )
+                return
+            if error_type is not None or observed_status not in {"OPEN", "FILLED"}:
+                raise MicroLiveExecutionError(
+                    "failed cancel reconciliation audit is invalid"
+                )
+            response = _stored_raw_json_object(
+                payload.get("raw_lookup_response_json"),
+                payload.get("lookup_response_sha256"),
+                "stored unresolved cancel lookup response",
+            )
+            if not (
+                response.get("status") == observed_status
+                and response.get("effective_at_ts_ms") is None
+                and response.get("observed_at_ts_ms") <= event_ts_ms
+            ):
+                raise MicroLiveExecutionError(
+                    "failed cancel reconciliation audit is invalid"
+                )
+            return
         if event_type in {"ORDER_SUBMISSION_UNKNOWN", "ORDER_CANCEL_UNKNOWN"}:
             if set(payload) != {"client_order_id", "error_type"} or not (
                 isinstance(payload.get("client_order_id"), str)
@@ -1948,6 +2212,7 @@ class MicroLiveExecutor:
                     "prepared": payload,
                     "acknowledgement": None,
                     "submission_unknown": False,
+                    "cancel_unknown": False,
                     "closed_status": None,
                     "close_event": None,
                     "fills": [],
@@ -1961,6 +2226,8 @@ class MicroLiveExecutor:
                 "ORDER_SUBMISSION_UNKNOWN",
                 "ORDER_SUBMISSION_RECONCILED",
                 "ORDER_SUBMISSION_RECONCILIATION_FAILED",
+                "ORDER_CANCEL_RECONCILED",
+                "ORDER_CANCEL_RECONCILIATION_FAILED",
                 "ORDER_CANCELED",
                 "ORDER_EXPIRED",
                 "ORDER_CANCEL_UNKNOWN",
@@ -2051,6 +2318,66 @@ class MicroLiveExecutor:
                         raise MicroLiveExecutionError(
                             "failed submission reconciliation lifecycle is invalid"
                         )
+                elif event_type == "ORDER_CANCEL_RECONCILED":
+                    prepared = order["prepared"]
+                    acknowledgement = order["acknowledgement"]
+                    if (
+                        acknowledgement is None
+                        or order["cancel_unknown"] is not True
+                        or order["closed_status"] is not None
+                        or order["settlement"] is not None
+                        or payload.get("exchange_order_id")
+                        != acknowledgement["exchange_order_id"]
+                        or payload.get("market_id") != prepared["market_id"]
+                        or payload.get("token_id") != prepared["token_id"]
+                        or payload.get("accepted_quantity") != prepared["quantity"]
+                        or payload.get("limit_price") != prepared["limit_price"]
+                        or payload.get("status") not in {"CANCELED", "EXPIRED"}
+                        or int(payload["effective_at_ts_ms"])
+                        < int(prepared["submitted_at_ts_ms"])
+                    ):
+                        raise MicroLiveExecutionError(
+                            "cancel reconciliation lifecycle is invalid"
+                        )
+                    order["cancel_unknown"] = False
+                    order["closed_status"] = payload["status"]
+                    order["close_event"] = payload
+                elif event_type == "ORDER_CANCEL_RECONCILIATION_FAILED":
+                    prepared = order["prepared"]
+                    acknowledgement = order["acknowledgement"]
+                    if acknowledgement is None:
+                        raise MicroLiveExecutionError(
+                            "failed cancel reconciliation lifecycle is invalid"
+                        )
+                    expected_lookup_request = {
+                        "authorization_id": self.authorization.authorization_id,
+                        "client_order_id": client_order_id,
+                        "business_key": prepared["business_key"],
+                        "exchange_order_id": acknowledgement["exchange_order_id"],
+                        "market_id": prepared["market_id"],
+                        "token_id": prepared["token_id"],
+                        "lookup_purpose": "cancel_reconciliation",
+                    }
+                    if (
+                        order["cancel_unknown"] is not True
+                        or order["closed_status"] is not None
+                        or payload.get("lookup_request_sha256")
+                        != canonical_json_sha256(expected_lookup_request)
+                    ):
+                        raise MicroLiveExecutionError(
+                            "failed cancel reconciliation lifecycle is invalid"
+                        )
+                    if payload.get("observed_status") is not None:
+                        response = _stored_raw_json_object(
+                            payload["raw_lookup_response_json"],
+                            payload["lookup_response_sha256"],
+                            "stored unresolved cancel lookup response",
+                        )
+                        self._validate_cancel_lookup_response(
+                            order=order,
+                            response=response,
+                            now_ts_ms=int(event["event_ts_ms"]),
+                        )
                 elif event_type == "ORDER_CANCELED":
                     if (
                         order["acknowledgement"] is None
@@ -2066,6 +2393,7 @@ class MicroLiveExecutor:
                         < int(order["prepared"]["submitted_at_ts_ms"])
                     ):
                         raise MicroLiveExecutionError("order cancellation lifecycle is invalid")
+                    order["cancel_unknown"] = False
                     order["closed_status"] = "CANCELED"
                     order["close_event"] = payload
                 elif event_type == "ORDER_EXPIRED":
@@ -2083,6 +2411,7 @@ class MicroLiveExecutor:
                         < int(order["prepared"]["submitted_at_ts_ms"])
                     ):
                         raise MicroLiveExecutionError("order expiration lifecycle is invalid")
+                    order["cancel_unknown"] = False
                     order["closed_status"] = "EXPIRED"
                     order["close_event"] = payload
                 else:

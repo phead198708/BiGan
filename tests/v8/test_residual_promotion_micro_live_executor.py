@@ -353,12 +353,16 @@ class FakeTransport:
         fail_lookup: bool = False,
         fixed_exchange_order_id: str | None = None,
         lookup_status: str = "ACCEPTED",
+        cancel_lookup_status: str = "CANCELED",
+        cancel_lookup_overrides: dict[str, Any] | None = None,
     ) -> None:
         self.fail_submit = fail_submit
         self.fail_cancel = fail_cancel
         self.fail_lookup = fail_lookup
         self.fixed_exchange_order_id = fixed_exchange_order_id
         self.lookup_status = lookup_status
+        self.cancel_lookup_status = cancel_lookup_status
+        self.cancel_lookup_overrides = dict(cancel_lookup_overrides or {})
         self.submit_calls: list[dict[str, Any]] = []
         self.cancel_calls: list[dict[str, Any]] = []
         self.lookup_calls: list[dict[str, Any]] = []
@@ -397,6 +401,26 @@ class FakeTransport:
             for row in reversed(self.submit_calls)
             if row["client_order_id"] == request["client_order_id"]
         )
+        if request.get("lookup_purpose") == "cancel_reconciliation":
+            status = self.cancel_lookup_status
+            response = {
+                "client_order_id": submitted["client_order_id"],
+                "exchange_order_id": self.fixed_exchange_order_id
+                or f"exchange-{submitted['client_order_id'][:12]}",
+                "status": status,
+                "market_id": submitted["market_id"],
+                "token_id": submitted["token_id"],
+                "accepted_quantity": submitted["quantity"],
+                "limit_price": submitted["limit_price"],
+                "observed_at_ts_ms": NOW_TS_MS + 2,
+                "effective_at_ts_ms": (
+                    NOW_TS_MS + 1
+                    if status in {"CANCELED", "EXPIRED"}
+                    else None
+                ),
+            }
+            response.update(self.cancel_lookup_overrides)
+            return response
         return {
             "client_order_id": submitted["client_order_id"],
             "exchange_order_id": self.fixed_exchange_order_id
@@ -2052,6 +2076,127 @@ def test_unknown_submission_read_only_reconciliation_never_resubmits_or_unlocks(
     assert any(
         event["event_type"] == "ORDER_SUBMISSION_RECONCILIATION_FAILED"
         for event in failing.events
+    )
+
+
+@pytest.mark.parametrize("closed_status", ("CANCELED", "EXPIRED"))
+def test_unknown_cancel_read_only_reconciliation_closes_without_unlock_or_write(
+    authorized_fixture: dict[str, Any],
+    closed_status: str,
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport(
+        fail_cancel=True,
+        cancel_lookup_status=closed_status,
+    )
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    killed = executor.engage_kill_switch(
+        reason="synthetic_cancel_unknown",
+        now_ts_ms=NOW_TS_MS + 1,
+    )
+    assert killed["unknown_cancel_client_order_ids"] == [order["client_order_id"]]
+    assert executor.reconciliation_snapshot()["open_order_count"] == 1
+    reconciled = executor.reconcile_unknown_cancellation(
+        client_order_id=order["client_order_id"],
+        now_ts_ms=NOW_TS_MS + 2,
+    )
+    assert reconciled == {
+        "status": f"ORDER_CANCEL_RECONCILED_{closed_status}",
+        "client_order_id": order["client_order_id"],
+        "kill_switch_active": True,
+        "order_closed": True,
+        "lookup_called": True,
+        "write_transport_called": False,
+    }
+    assert len(transport.submit_calls) == 1
+    assert len(transport.cancel_calls) == 1
+    assert len(transport.lookup_calls) == 1
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["open_order_count"] == 0
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=transport,
+        state=executor.export_state(),
+    )
+    assert restored.reconciliation_snapshot() == snapshot
+
+
+@pytest.mark.parametrize("observed_status", ("OPEN", "FILLED"))
+def test_unknown_cancel_unresolved_lookup_stays_killed_until_explicit_retry(
+    authorized_fixture: dict[str, Any],
+    observed_status: str,
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport(
+        fail_cancel=True,
+        cancel_lookup_status=observed_status,
+    )
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    executor.engage_kill_switch(
+        reason="synthetic_cancel_unknown",
+        now_ts_ms=NOW_TS_MS + 1,
+    )
+    unresolved = executor.reconcile_unknown_cancellation(
+        client_order_id=order["client_order_id"],
+        now_ts_ms=NOW_TS_MS + 2,
+    )
+    assert unresolved["status"] == f"ORDER_CANCEL_RECONCILIATION_{observed_status}"
+    assert unresolved["order_closed"] is False
+    assert unresolved["write_transport_called"] is False
+    assert len(transport.cancel_calls) == 1
+    assert executor.reconciliation_snapshot()["open_order_count"] == 1
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+    assert any(
+        event["event_type"] == "ORDER_CANCEL_RECONCILIATION_FAILED"
+        for event in executor.events
+    )
+
+    transport.fail_cancel = False
+    retried = executor.engage_kill_switch(
+        reason="explicit_cancel_retry",
+        now_ts_ms=NOW_TS_MS + 3,
+    )
+    assert retried["canceled_client_order_ids"] == [order["client_order_id"]]
+    assert len(transport.cancel_calls) == 2
+    assert executor.reconciliation_snapshot()["open_order_count"] == 0
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+
+def test_unknown_cancel_lookup_identity_drift_fails_closed_and_remains_open(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport(
+        fail_cancel=True,
+        cancel_lookup_overrides={"market_id": "0x" + "5" * 64},
+    )
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    executor.engage_kill_switch(
+        reason="synthetic_cancel_unknown",
+        now_ts_ms=NOW_TS_MS + 1,
+    )
+    with pytest.raises(MicroLiveExecutionError, match="failed closed"):
+        executor.reconcile_unknown_cancellation(
+            client_order_id=order["client_order_id"],
+            now_ts_ms=NOW_TS_MS + 2,
+        )
+    assert len(transport.lookup_calls) == 1
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["open_order_count"] == 1
+    assert any(
+        event["event_type"] == "ORDER_CANCEL_RECONCILIATION_FAILED"
+        for event in executor.events
     )
 
 
