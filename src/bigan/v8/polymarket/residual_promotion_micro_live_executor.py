@@ -31,7 +31,7 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
     ResidualPromotionRuntime,
 )
 
-STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v5"
+STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v6"
 SIGNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-execution-signal-v2"
 IMPLEMENTATION_REPOSITORY_PATH = (
     "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py"
@@ -393,17 +393,25 @@ class MicroLiveExecutor:
     def submit_signal(
         self,
         *,
-        signal_payload: Mapping[str, Any],
-        feature_row: Mapping[str, Any],
+        raw_signal_payload: bytes,
+        raw_feature_row: bytes,
         now_ts_ms: int,
         operator_heartbeat_ts_ms: int,
         market_identity_evidence: Mapping[str, bytes] | None = None,
     ) -> dict[str, Any]:
-        """Submit one authorized intent or return an explicit NO_TRADE block."""
+        """Strictly decode one signal/input pair before any executable decision."""
 
         self._require_authorization_integrity(now_ts_ms=now_ts_ms)
         _require_positive_timestamp(now_ts_ms, "signal submission")
         try:
+            signal_payload, raw_signal_json, raw_signal_sha256 = _raw_json_object(
+                raw_signal_payload,
+                "candidate signal payload",
+            )
+            feature_row, raw_feature_json, raw_feature_sha256 = _raw_json_object(
+                raw_feature_row,
+                "candidate feature row",
+            )
             signal = _validated_candidate_signal(
                 signal_payload,
                 expected_candidate_bundle_sha256=(
@@ -464,6 +472,10 @@ class MicroLiveExecutor:
             self._audit_signal_decision(
                 signal=signal,
                 features=features,
+                raw_signal_json=raw_signal_json,
+                raw_signal_sha256=raw_signal_sha256,
+                raw_feature_json=raw_feature_json,
+                raw_feature_sha256=raw_feature_sha256,
                 disposition="BLOCKED_NO_TRADE",
                 reason="kill_switch_active",
                 now_ts_ms=now_ts_ms,
@@ -479,6 +491,10 @@ class MicroLiveExecutor:
             self._audit_signal_decision(
                 signal=signal,
                 features=features,
+                raw_signal_json=raw_signal_json,
+                raw_signal_sha256=raw_signal_sha256,
+                raw_feature_json=raw_feature_json,
+                raw_feature_sha256=raw_feature_sha256,
                 disposition="BLOCKED_NO_TRADE",
                 reason="market_not_allowlisted",
                 now_ts_ms=now_ts_ms,
@@ -489,6 +505,10 @@ class MicroLiveExecutor:
             self._audit_signal_decision(
                 signal=signal,
                 features=features,
+                raw_signal_json=raw_signal_json,
+                raw_signal_sha256=raw_signal_sha256,
+                raw_feature_json=raw_feature_json,
+                raw_feature_sha256=raw_feature_sha256,
                 disposition="BLOCKED_NO_TRADE",
                 reason="signal_failed_closed",
                 now_ts_ms=now_ts_ms,
@@ -499,6 +519,10 @@ class MicroLiveExecutor:
             self._audit_signal_decision(
                 signal=signal,
                 features=features,
+                raw_signal_json=raw_signal_json,
+                raw_signal_sha256=raw_signal_sha256,
+                raw_feature_json=raw_feature_json,
+                raw_feature_sha256=raw_feature_sha256,
                 disposition="BLOCKED_NO_TRADE",
                 reason="signal_selected_no_trade",
                 now_ts_ms=now_ts_ms,
@@ -509,6 +533,10 @@ class MicroLiveExecutor:
             self._audit_signal_decision(
                 signal=signal,
                 features=features,
+                raw_signal_json=raw_signal_json,
+                raw_signal_sha256=raw_signal_sha256,
+                raw_feature_json=raw_feature_json,
+                raw_feature_sha256=raw_feature_sha256,
                 disposition="BLOCKED_NO_TRADE",
                 reason="action_not_allowlisted",
                 now_ts_ms=now_ts_ms,
@@ -551,12 +579,16 @@ class MicroLiveExecutor:
             "maximum_loss_usd": str(maximum_loss),
             "signal_payload_sha256": signal_payload_sha256,
             "signal_payload": signal,
+            "raw_signal_payload_sha256": raw_signal_sha256,
+            "raw_signal_payload_json": raw_signal_json,
             "market_identity_sha256": canonical_json_sha256(
                 dict(signal["market_identity"])
             ),
             "market_identity": dict(signal["market_identity"]),
             "feature_row_sha256": canonical_json_sha256(features),
             "feature_row": features,
+            "raw_feature_row_sha256": raw_feature_sha256,
+            "raw_feature_row_json": raw_feature_json,
         }
         intent_id = canonical_json_sha256(intent_core)
         client_order_id = intent_id
@@ -567,6 +599,10 @@ class MicroLiveExecutor:
                     self._audit_signal_decision(
                         signal=signal,
                         features=features,
+                        raw_signal_json=raw_signal_json,
+                        raw_signal_sha256=raw_signal_sha256,
+                        raw_feature_json=raw_feature_json,
+                        raw_feature_sha256=raw_feature_sha256,
                         disposition="BLOCKED_NO_TRADE",
                         reason="one_trade_maximum_per_market",
                         now_ts_ms=now_ts_ms,
@@ -576,6 +612,10 @@ class MicroLiveExecutor:
                 self._audit_signal_decision(
                     signal=signal,
                     features=features,
+                    raw_signal_json=raw_signal_json,
+                    raw_signal_sha256=raw_signal_sha256,
+                    raw_feature_json=raw_feature_json,
+                    raw_feature_sha256=raw_feature_sha256,
                     disposition="REJECTED_CONFLICT",
                     reason="conflicting_duplicate_intent",
                     now_ts_ms=now_ts_ms,
@@ -590,6 +630,10 @@ class MicroLiveExecutor:
                 self._audit_signal_decision(
                     signal=signal,
                     features=features,
+                    raw_signal_json=raw_signal_json,
+                    raw_signal_sha256=raw_signal_sha256,
+                    raw_feature_json=raw_feature_json,
+                    raw_feature_sha256=raw_feature_sha256,
                     disposition="IDEMPOTENT_REPLAY",
                     reason="existing_identical_intent",
                     now_ts_ms=now_ts_ms,
@@ -604,6 +648,10 @@ class MicroLiveExecutor:
             self._audit_signal_decision(
                 signal=signal,
                 features=features,
+                raw_signal_json=raw_signal_json,
+                raw_signal_sha256=raw_signal_sha256,
+                raw_feature_json=raw_feature_json,
+                raw_feature_sha256=raw_feature_sha256,
                 disposition="BLOCKED_NO_TRADE",
                 reason="existing_order_requires_reconciliation",
                 now_ts_ms=now_ts_ms,
@@ -614,6 +662,10 @@ class MicroLiveExecutor:
             self._audit_signal_decision(
                 signal=signal,
                 features=features,
+                raw_signal_json=raw_signal_json,
+                raw_signal_sha256=raw_signal_sha256,
+                raw_feature_json=raw_feature_json,
+                raw_feature_sha256=raw_feature_sha256,
                 disposition="BLOCKED_NO_TRADE",
                 reason="authorization_notional_cap_exceeded",
                 now_ts_ms=now_ts_ms,
@@ -624,6 +676,10 @@ class MicroLiveExecutor:
             self._audit_signal_decision(
                 signal=signal,
                 features=features,
+                raw_signal_json=raw_signal_json,
+                raw_signal_sha256=raw_signal_sha256,
+                raw_feature_json=raw_feature_json,
+                raw_feature_sha256=raw_feature_sha256,
                 disposition="BLOCKED_NO_TRADE",
                 reason="maximum_open_orders_reached",
                 now_ts_ms=now_ts_ms,
@@ -637,6 +693,10 @@ class MicroLiveExecutor:
             self._audit_signal_decision(
                 signal=signal,
                 features=features,
+                raw_signal_json=raw_signal_json,
+                raw_signal_sha256=raw_signal_sha256,
+                raw_feature_json=raw_feature_json,
+                raw_feature_sha256=raw_feature_sha256,
                 disposition="BLOCKED_NO_TRADE",
                 reason="maximum_loss_reservation_exceeded",
                 now_ts_ms=now_ts_ms,
@@ -647,6 +707,10 @@ class MicroLiveExecutor:
         self._audit_signal_decision(
             signal=signal,
             features=features,
+            raw_signal_json=raw_signal_json,
+            raw_signal_sha256=raw_signal_sha256,
+            raw_feature_json=raw_feature_json,
+            raw_feature_sha256=raw_feature_sha256,
             disposition="EXECUTION_INTENT",
             reason=None,
             now_ts_ms=now_ts_ms,
@@ -681,8 +745,10 @@ class MicroLiveExecutor:
                 "maximum_fee_usd",
                 "maximum_loss_usd",
                 "signal_payload_sha256",
+                "raw_signal_payload_sha256",
                 "market_identity_sha256",
                 "market_identity",
+                "raw_feature_row_sha256",
                 "intent_id",
                 "client_order_id",
                 "submitted_at_ts_ms",
@@ -967,6 +1033,10 @@ class MicroLiveExecutor:
         *,
         signal: Mapping[str, Any],
         features: Mapping[str, Any],
+        raw_signal_json: str,
+        raw_signal_sha256: str,
+        raw_feature_json: str,
+        raw_feature_sha256: str,
         disposition: str,
         reason: str | None,
         now_ts_ms: int,
@@ -984,12 +1054,16 @@ class MicroLiveExecutor:
             "operator_heartbeat_ts_ms": operator_heartbeat_ts_ms,
             "signal_payload_sha256": canonical_json_sha256(signal_copy),
             "signal_payload": signal_copy,
+            "raw_signal_payload_sha256": raw_signal_sha256,
+            "raw_signal_payload_json": raw_signal_json,
             "market_identity_sha256": canonical_json_sha256(
                 dict(signal_copy["market_identity"])
             ),
             "market_identity": copy.deepcopy(dict(signal_copy["market_identity"])),
             "feature_row_sha256": canonical_json_sha256(feature_copy),
             "feature_row": feature_copy,
+            "raw_feature_row_sha256": raw_feature_sha256,
+            "raw_feature_row_json": raw_feature_json,
             "disposition": disposition,
             "reason": reason,
         }
@@ -1779,25 +1853,25 @@ class MicroLiveExecutor:
                 "operator_heartbeat_ts_ms",
                 "signal_payload_sha256",
                 "signal_payload",
+                "raw_signal_payload_sha256",
+                "raw_signal_payload_json",
                 "market_identity_sha256",
                 "market_identity",
                 "feature_row_sha256",
                 "feature_row",
+                "raw_feature_row_sha256",
+                "raw_feature_row_json",
                 "disposition",
                 "reason",
                 "decision_audit_sha256",
             }
             if set(payload) != expected:
                 raise MicroLiveExecutionError("evaluated signal audit schema is invalid")
-            signal = _validated_candidate_signal(
-                payload.get("signal_payload"),
+            signal, feature_row = _validated_stored_signal_and_feature(
+                payload=payload,
                 expected_candidate_bundle_sha256=(
                     self._authorization.candidate_bundle_sha256
                 ),
-            )
-            feature_row = _validated_runtime_binding(
-                signal=signal,
-                feature_row=payload.get("feature_row"),
                 runtime=self._authorization.runtime,
             )
             disposition = payload.get("disposition")
@@ -1875,10 +1949,14 @@ class MicroLiveExecutor:
                 "maximum_loss_usd",
                 "signal_payload_sha256",
                 "signal_payload",
+                "raw_signal_payload_sha256",
+                "raw_signal_payload_json",
                 "market_identity_sha256",
                 "market_identity",
                 "feature_row_sha256",
                 "feature_row",
+                "raw_feature_row_sha256",
+                "raw_feature_row_json",
                 "intent_id",
                 "client_order_id",
             }
@@ -1900,13 +1978,9 @@ class MicroLiveExecutor:
                 or maximum_loss != price * quantity + maximum_fee
             ):
                 raise MicroLiveExecutionError("prepared order economics are invalid")
-            signal = _validated_candidate_signal(
-                payload.get("signal_payload"),
+            signal, feature_row = _validated_stored_signal_and_feature(
+                payload=payload,
                 expected_candidate_bundle_sha256=self._authorization.candidate_bundle_sha256,
-            )
-            feature_row = _validated_runtime_binding(
-                signal=signal,
-                feature_row=payload.get("feature_row"),
                 runtime=self._authorization.runtime,
             )
             market_id = payload.get("market_id")
@@ -2438,10 +2512,14 @@ class MicroLiveExecutor:
                     == payload.get("decision_ts_ms")
                     and pending_execution_audit.get("signal_payload_sha256")
                     == payload.get("signal_payload_sha256")
+                    and pending_execution_audit.get("raw_signal_payload_sha256")
+                    == payload.get("raw_signal_payload_sha256")
                     and pending_execution_audit.get("market_identity_sha256")
                     == payload.get("market_identity_sha256")
                     and pending_execution_audit.get("feature_row_sha256")
                     == payload.get("feature_row_sha256")
+                    and pending_execution_audit.get("raw_feature_row_sha256")
+                    == payload.get("raw_feature_row_sha256")
                 ):
                     raise MicroLiveExecutionError(
                         "order preparation does not reconcile with execution-intent audit"
@@ -3297,6 +3375,49 @@ def _validated_runtime_binding(
     ):
         raise MicroLiveExecutionError("candidate signal does not match frozen runtime")
     return features
+
+
+def _validated_stored_signal_and_feature(
+    *,
+    payload: Mapping[str, Any],
+    expected_candidate_bundle_sha256: str,
+    runtime: ResidualPromotionRuntime,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Re-decode exact stored input bytes before replaying semantic bindings."""
+
+    raw_signal = _stored_raw_json_object(
+        payload.get("raw_signal_payload_json"),
+        payload.get("raw_signal_payload_sha256"),
+        "stored candidate signal payload",
+    )
+    raw_feature = _stored_raw_json_object(
+        payload.get("raw_feature_row_json"),
+        payload.get("raw_feature_row_sha256"),
+        "stored candidate feature row",
+    )
+    signal = _validated_candidate_signal(
+        raw_signal,
+        expected_candidate_bundle_sha256=expected_candidate_bundle_sha256,
+    )
+    features = _validated_runtime_binding(
+        signal=signal,
+        feature_row=raw_feature,
+        runtime=runtime,
+    )
+    stored_signal = payload.get("signal_payload")
+    stored_feature = payload.get("feature_row")
+    if not (
+        isinstance(stored_signal, Mapping)
+        and isinstance(stored_feature, Mapping)
+        and canonical_json_sha256(signal)
+        == canonical_json_sha256(dict(stored_signal))
+        and canonical_json_sha256(features)
+        == canonical_json_sha256(dict(stored_feature))
+    ):
+        raise MicroLiveExecutionError(
+            "stored raw candidate inputs do not match semantic audit copies"
+        )
+    return signal, features
 
 
 def _reject_forbidden_feature_keys(value: Any, path: str = "") -> None:

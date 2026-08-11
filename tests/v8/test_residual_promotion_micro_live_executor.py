@@ -38,8 +38,10 @@ from bigan.v8.polymarket.residual_promotion_micro_live_authorization import (
 from bigan.v8.polymarket.residual_promotion_micro_live_executor import (
     SIGNAL_SCHEMA_VERSION,
     MicroLiveExecutionError,
-    MicroLiveExecutor,
     create_micro_live_executor,
+)
+from bigan.v8.polymarket.residual_promotion_micro_live_executor import (
+    MicroLiveExecutor as _StrictMicroLiveExecutor,
 )
 from bigan.v8.polymarket.residual_promotion_release_readiness import (
     OPERATIONAL_ROLLBACK_SCHEMA_VERSION,
@@ -236,6 +238,27 @@ def _order_identity(
 
 def _json_bytes(value: dict[str, Any]) -> bytes:
     return json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+
+
+class MicroLiveExecutor(_StrictMicroLiveExecutor):
+    """Test adapter that materializes mutable fixtures as exact raw bytes."""
+
+    def submit_signal(
+        self,
+        *,
+        signal_payload: dict[str, Any],
+        feature_row: dict[str, Any],
+        now_ts_ms: int,
+        operator_heartbeat_ts_ms: int,
+        market_identity_evidence: dict[str, bytes] | None = None,
+    ) -> dict[str, Any]:
+        return super().submit_signal(
+            raw_signal_payload=_json_bytes(signal_payload),
+            raw_feature_row=_json_bytes(feature_row),
+            now_ts_ms=now_ts_ms,
+            operator_heartbeat_ts_ms=operator_heartbeat_ts_ms,
+            market_identity_evidence=market_identity_evidence,
+        )
 
 
 def _record_fill(
@@ -1139,6 +1162,121 @@ def test_submit_is_idempotent_and_one_market_has_one_intent(
         "IDEMPOTENT_REPLAY",
     ]
     assert sum(event["event_type"] == "ORDER_PREPARED" for event in executor.events) == 1
+
+
+def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    payload = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    raw_signal = _json_bytes(payload["signal_payload"])
+    raw_feature = _json_bytes(payload["feature_row"])
+    executor = _StrictMicroLiveExecutor(verified, transport=FakeTransport())
+    result = executor.submit_signal(
+        raw_signal_payload=raw_signal,
+        raw_feature_row=raw_feature,
+        now_ts_ms=payload["now_ts_ms"],
+        operator_heartbeat_ts_ms=payload["operator_heartbeat_ts_ms"],
+        market_identity_evidence=payload["market_identity_evidence"],
+    )
+    assert result["status"] == "ORDER_ACKNOWLEDGED"
+    evaluated = next(
+        event["payload"]
+        for event in executor.events
+        if event["event_type"] == "SIGNAL_EVALUATED"
+    )
+    assert evaluated["raw_signal_payload_sha256"] == hashlib.sha256(
+        raw_signal
+    ).hexdigest()
+    assert evaluated["raw_signal_payload_json"].encode() == raw_signal
+    assert evaluated["raw_feature_row_sha256"] == hashlib.sha256(
+        raw_feature
+    ).hexdigest()
+    assert evaluated["raw_feature_row_json"].encode() == raw_feature
+    restored = _StrictMicroLiveExecutor.restore(
+        authorization=verified,
+        transport=FakeTransport(),
+        raw_state=executor.export_state_bytes(),
+    )
+    assert restored.export_state_bytes() == executor.export_state_bytes()
+
+    tampered_state = executor.export_state()
+    evaluated_event = next(
+        event
+        for event in tampered_state["events"]
+        if event["event_type"] == "SIGNAL_EVALUATED"
+    )
+    changed_raw_feature = json.loads(
+        evaluated_event["payload"]["raw_feature_row_json"]
+    )
+    changed_raw_feature["benign_extra"] = True
+    changed_raw_feature_bytes = _json_bytes(changed_raw_feature)
+    evaluated_event["payload"]["raw_feature_row_json"] = (
+        changed_raw_feature_bytes.decode()
+    )
+    evaluated_event["payload"]["raw_feature_row_sha256"] = hashlib.sha256(
+        changed_raw_feature_bytes
+    ).hexdigest()
+    audit_core = {
+        key: value
+        for key, value in evaluated_event["payload"].items()
+        if key != "decision_audit_sha256"
+    }
+    evaluated_event["payload"]["decision_audit_sha256"] = canonical_json_sha256(
+        audit_core
+    )
+    previous = "GENESIS"
+    for event in tampered_state["events"]:
+        event["previous_event_sha256"] = previous
+        event_core = {
+            key: value for key, value in event.items() if key != "event_sha256"
+        }
+        event["event_sha256"] = canonical_json_sha256(event_core)
+        previous = event["event_sha256"]
+    state_core = {
+        key: value
+        for key, value in tampered_state.items()
+        if key != "state_sha256"
+    }
+    tampered_state["state_sha256"] = canonical_json_sha256(state_core)
+    with pytest.raises(MicroLiveExecutionError, match="do not match semantic"):
+        _StrictMicroLiveExecutor.restore(
+            authorization=verified,
+            transport=FakeTransport(),
+            raw_state=_json_bytes(tampered_state),
+        )
+
+    parsed = _StrictMicroLiveExecutor(verified, transport=FakeTransport())
+    with pytest.raises(MicroLiveExecutionError, match="raw bytes are invalid"):
+        parsed.submit_signal(
+            raw_signal_payload=payload["signal_payload"],
+            raw_feature_row=raw_feature,
+            now_ts_ms=payload["now_ts_ms"],
+            operator_heartbeat_ts_ms=payload["operator_heartbeat_ts_ms"],
+            market_identity_evidence=payload["market_identity_evidence"],
+        )
+
+    duplicate = _StrictMicroLiveExecutor(verified, transport=FakeTransport())
+    duplicate_signal = raw_signal[:-1] + b',"market_id":"0x' + b"2" * 64 + b'"}'
+    with pytest.raises(MicroLiveExecutionError, match="strict JSON"):
+        duplicate.submit_signal(
+            raw_signal_payload=duplicate_signal,
+            raw_feature_row=raw_feature,
+            now_ts_ms=payload["now_ts_ms"],
+            operator_heartbeat_ts_ms=payload["operator_heartbeat_ts_ms"],
+            market_identity_evidence=payload["market_identity_evidence"],
+        )
+
+    overflow = _StrictMicroLiveExecutor(verified, transport=FakeTransport())
+    overflow_feature = raw_feature[:-1] + b',"ambiguous":1e400}'
+    with pytest.raises(MicroLiveExecutionError, match="strict JSON"):
+        overflow.submit_signal(
+            raw_signal_payload=raw_signal,
+            raw_feature_row=overflow_feature,
+            now_ts_ms=payload["now_ts_ms"],
+            operator_heartbeat_ts_ms=payload["operator_heartbeat_ts_ms"],
+            market_identity_evidence=payload["market_identity_evidence"],
+        )
 
 
 def test_conflicting_duplicate_engages_kill_switch_and_cancels_open_order(
