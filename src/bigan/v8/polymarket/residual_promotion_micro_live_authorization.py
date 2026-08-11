@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import weakref
 from collections.abc import Mapping
@@ -632,12 +633,41 @@ def _verified_evidence_json(
 
 def _load_json(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json,
+        )
+        _validate_finite_json_tree(value)
     except (OSError, ValueError) as exc:
         raise MicroLiveAuthorizationError("micro-live JSON evidence is invalid") from exc
     if not isinstance(value, dict):
         raise MicroLiveAuthorizationError("micro-live JSON evidence root must be an object")
     return value
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def _reject_nonfinite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _validate_finite_json_tree(value: Any) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("decoded JSON contains a non-finite number")
+    if isinstance(value, Mapping):
+        for item in value.values():
+            _validate_finite_json_tree(item)
+    elif isinstance(value, list):
+        for item in value:
+            _validate_finite_json_tree(item)
 
 
 def _positive_decimal(value: Any, label: str) -> Decimal:

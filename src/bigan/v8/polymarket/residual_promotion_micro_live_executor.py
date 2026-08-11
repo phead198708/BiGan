@@ -3019,10 +3019,13 @@ def _validate_market_identity_evidence(
 
 def _decode_provider_json(raw: bytes, label: str) -> Any:
     try:
-        return json.loads(
+        value = json.loads(
             raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
             parse_constant=_reject_nonfinite_json,
         )
+        _validate_finite_json_tree(value)
+        return value
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
         raise MicroLiveExecutionError(f"{label} raw bytes are not strict JSON") from exc
 
@@ -3052,6 +3055,26 @@ def _reject_nonfinite_json(value: str) -> None:
     raise ValueError(f"non-finite JSON constant: {value}")
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def _validate_finite_json_tree(value: Any) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("decoded JSON contains a non-finite number")
+    if isinstance(value, Mapping):
+        for item in value.values():
+            _validate_finite_json_tree(item)
+    elif isinstance(value, list):
+        for item in value:
+            _validate_finite_json_tree(item)
+
+
 def _gamma_market_rows(value: Any) -> list[dict[str, Any]]:
     rows: Any
     if isinstance(value, list):
@@ -3076,8 +3099,13 @@ def _json_array(value: Any) -> list[Any]:
         return value
     if isinstance(value, str):
         try:
-            decoded = json.loads(value)
-        except json.JSONDecodeError:
+            decoded = json.loads(
+                value,
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_nonfinite_json,
+            )
+            _validate_finite_json_tree(decoded)
+        except (ValueError, json.JSONDecodeError):
             return []
         return decoded if isinstance(decoded, list) else []
     return []

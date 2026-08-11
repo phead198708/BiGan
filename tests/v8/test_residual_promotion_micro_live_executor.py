@@ -1485,6 +1485,53 @@ def test_market_identity_raw_provider_bytes_are_mandatory_and_verified(
     assert semantic_executor.reconciliation_snapshot()["kill_switch_active"] is True
 
 
+def test_market_identity_provider_json_ambiguity_fails_closed(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+
+    duplicate = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    gamma = json.loads(duplicate["market_identity_evidence"]["raw_gamma_payload"])
+    row_json = json.dumps(gamma[0], separators=(",", ":"), sort_keys=True)
+    duplicate_raw = (
+        '[{"conditionId":"0x'
+        + "0" * 64
+        + '",'
+        + row_json[1:]
+        + "]"
+    ).encode()
+    duplicate["market_identity_evidence"]["raw_gamma_payload"] = duplicate_raw
+    duplicate["signal_payload"]["market_identity"]["raw_gamma_payload_sha256"] = (
+        hashlib.sha256(duplicate_raw).hexdigest()
+    )
+    duplicate_transport = FakeTransport()
+    duplicate_executor = MicroLiveExecutor(verified, transport=duplicate_transport)
+    with pytest.raises(MicroLiveExecutionError, match="strict JSON"):
+        duplicate_executor.submit_signal(**duplicate)
+    assert duplicate_transport.submit_calls == []
+    assert duplicate_executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+    for number in (b"NaN", b"1e400"):
+        nonfinite = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        clob_raw = nonfinite["market_identity_evidence"][
+            "raw_clob_revalidation_payload"
+        ]
+        assert clob_raw.endswith(b"}")
+        nonfinite_raw = clob_raw[:-1] + b',"diagnostic":' + number + b"}"
+        nonfinite["market_identity_evidence"][
+            "raw_clob_revalidation_payload"
+        ] = nonfinite_raw
+        nonfinite["signal_payload"]["market_identity"][
+            "clob_revalidation_payload_sha256"
+        ] = hashlib.sha256(nonfinite_raw).hexdigest()
+        nonfinite_transport = FakeTransport()
+        nonfinite_executor = MicroLiveExecutor(verified, transport=nonfinite_transport)
+        with pytest.raises(MicroLiveExecutionError, match="strict JSON"):
+            nonfinite_executor.submit_signal(**nonfinite)
+        assert nonfinite_transport.submit_calls == []
+        assert nonfinite_executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+
 def test_open_order_and_authorization_lifetime_notional_caps(
     authorized_fixture: dict[str, Any],
 ) -> None:
@@ -1867,6 +1914,46 @@ def test_fill_transport_identity_mismatch_fails_closed(
     assert len(transport.cancel_calls) == 1
 
 
+def test_fill_transport_duplicate_json_key_fails_closed(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    prepared, acknowledgement = _order_identity(executor, order["client_order_id"])
+    event = {
+        "event_type": "FILL",
+        "client_order_id": order["client_order_id"],
+        "exchange_order_id": acknowledgement["exchange_order_id"],
+        "fill_id": "duplicate-key-fill",
+        "market_id": prepared["market_id"],
+        "token_id": prepared["token_id"],
+        "quantity": "1",
+        "price": "0.39",
+        "fee_usd": "0.0002",
+        "executed_at_ts_ms": NOW_TS_MS,
+    }
+    event_json = json.dumps(event, separators=(",", ":"), sort_keys=True)
+    duplicate_raw = ('{"market_id":"0x' + "0" * 64 + '",' + event_json[1:]).encode()
+    with pytest.raises(MicroLiveExecutionError, match="strict JSON"):
+        executor.record_fill(
+            client_order_id=order["client_order_id"],
+            fill_id="duplicate-key-fill",
+            now_ts_ms=NOW_TS_MS,
+            quantity="1",
+            price="0.39",
+            fee_usd="0.0002",
+            raw_transport_event=duplicate_raw,
+        )
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["fill_count"] == 0
+    assert snapshot["kill_switch_reason"] == "fill_reconciliation_failed"
+    assert len(transport.cancel_calls) == 1
+
+
 def test_late_fill_before_close_effective_time_reconciles_but_after_close_kills(
     authorized_fixture: dict[str, Any],
 ) -> None:
@@ -2077,6 +2164,50 @@ def test_rehashed_lifecycle_raw_event_identity_tamper_fails_restore(
     payload = {key: value for key, value in state.items() if key != "state_sha256"}
     state["state_sha256"] = canonical_json_sha256(payload)
     with pytest.raises(MicroLiveExecutionError, match="fill payload values"):
+        MicroLiveExecutor.restore(
+            authorization=verified,
+            transport=FakeTransport(),
+            state=state,
+        )
+
+
+def test_rehashed_stored_raw_event_duplicate_key_fails_restore(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    executor = MicroLiveExecutor(verified, transport=FakeTransport())
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    _record_fill(
+        executor,
+        client_order_id=order["client_order_id"],
+        fill_id="stored-duplicate-fill",
+        now_ts_ms=NOW_TS_MS,
+        quantity="1",
+        price="0.39",
+        fee_usd="0.0002",
+        transport_event_sha256="0" * 64,
+    )
+    state = executor.export_state()
+    fill_event = next(
+        event for event in state["events"] if event["event_type"] == "FILL_RECORDED"
+    )
+    raw_json = fill_event["payload"]["raw_transport_event_json"]
+    duplicate_json = '{"market_id":"0x' + "0" * 64 + '",' + raw_json[1:]
+    fill_event["payload"]["raw_transport_event_json"] = duplicate_json
+    fill_event["payload"]["transport_event_sha256"] = hashlib.sha256(
+        duplicate_json.encode()
+    ).hexdigest()
+    previous = "GENESIS"
+    for event in state["events"]:
+        event["previous_event_sha256"] = previous
+        core = {key: value for key, value in event.items() if key != "event_sha256"}
+        event["event_sha256"] = canonical_json_sha256(core)
+        previous = event["event_sha256"]
+    payload = {key: value for key, value in state.items() if key != "state_sha256"}
+    state["state_sha256"] = canonical_json_sha256(payload)
+    with pytest.raises(MicroLiveExecutionError, match="strict JSON"):
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
@@ -2592,6 +2723,45 @@ def test_expired_authorization_and_evidence_sha_drift_fail_closed(
             changed,
             repository_root=authorized_fixture["root"],
             evidence_root=authorized_fixture["evidence_root"],
+            now_ts_ms=NOW_TS_MS,
+        )
+
+
+@pytest.mark.parametrize(
+    "ambiguity",
+    ("duplicate_key", "nonfinite_constant", "numeric_overflow"),
+)
+def test_authorization_evidence_ambiguous_json_fails_closed(
+    authorized_fixture: dict[str, Any],
+    tmp_path: Path,
+    ambiguity: str,
+) -> None:
+    evidence_root = tmp_path / "ambiguous_authorization_evidence"
+    shutil.copytree(authorized_fixture["evidence_root"], evidence_root)
+    authorization = copy.deepcopy(authorized_fixture["authorization"])
+    descriptor = authorization["human_approval"]["github_comment_payload"]
+    path = evidence_root / descriptor["path"]
+    original = path.read_text(encoding="utf-8").lstrip()
+    if ambiguity == "duplicate_key":
+        ambiguous = '{"id":0,' + original[1:]
+    elif ambiguity == "nonfinite_constant":
+        payload = json.loads(original)
+        needle = f'"id": {payload["id"]}'
+        assert needle in original
+        ambiguous = original.replace(needle, '"id": NaN', 1)
+    else:
+        payload = json.loads(original)
+        needle = f'"id": {payload["id"]}'
+        assert needle in original
+        ambiguous = original.replace(needle, '"id": 1e400', 1)
+    path.write_text(ambiguous, encoding="utf-8")
+    descriptor["sha256"] = sha256_file(path)
+
+    with pytest.raises(MicroLiveAuthorizationError, match="JSON evidence is invalid"):
+        verify_micro_live_authorization(
+            authorization,
+            repository_root=authorized_fixture["root"],
+            evidence_root=evidence_root,
             now_ts_ms=NOW_TS_MS,
         )
 
