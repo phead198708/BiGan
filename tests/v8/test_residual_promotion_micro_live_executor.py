@@ -473,11 +473,54 @@ def _json_bytes(value: dict[str, Any]) -> bytes:
     return json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
 
 
+class _TestDurableRiskDomainLease:
+    """Test stand-in for the future deployment-owned external lease service."""
+
+    durable_monotonic_binding = True
+
+    def __init__(
+        self,
+        authority_root: Path | str,
+        *,
+        lease_id: str | None = None,
+    ) -> None:
+        self.authority_root = Path(authority_root).resolve()
+        self.authority_root.mkdir(parents=True, exist_ok=True)
+        self.lease_id = lease_id or auth_module.TRUSTED_RISK_DOMAIN_LEASE_ID
+        self._lock = threading.RLock()
+
+    def claim_risk_domain(
+        self,
+        *,
+        authorization_id: str,
+        risk_domain_id: str,
+        journal_namespace_id: str,
+    ) -> bytes:
+        binding_path = self.authority_root / f"{risk_domain_id}.json"
+        receipt = {
+            "schema_version": executor_module.JOURNAL_NAMESPACE_SCHEMA_VERSION,
+            "lease_id": self.lease_id,
+            "authorization_id": authorization_id,
+            "risk_domain_id": risk_domain_id,
+            "journal_namespace_id": journal_namespace_id,
+        }
+        raw = _json_bytes(receipt)
+        with self._lock:
+            if binding_path.exists():
+                if binding_path.read_bytes() != raw:
+                    raise RuntimeError("risk domain already claimed")
+            else:
+                binding_path.write_bytes(raw)
+        return raw
+
+
 def _new_journal() -> AtomicFileMicroLiveStateJournal:
     base = Path(tempfile.mkdtemp(prefix="bigan-wal-test-"))
     return AtomicFileMicroLiveStateJournal(
         base / "journal",
-        namespace_authority_root=base / "namespace-authority",
+        risk_domain_lease=_TestDurableRiskDomainLease(
+            base / "external-risk-domain-lease"
+        ),
     )
 
 
@@ -670,6 +713,7 @@ class FakeTransport:
         self.submit_calls: list[dict[str, Any]] = []
         self.cancel_calls: list[dict[str, Any]] = []
         self.lookup_calls: list[dict[str, Any]] = []
+        self.fence_calls: list[dict[str, Any]] = []
 
     def submit_order(self, request: dict[str, Any]) -> bytes:
         self.submit_calls.append(copy.deepcopy(request))
@@ -736,6 +780,76 @@ class FakeTransport:
             "limit_price": submitted["limit_price"],
         })
 
+    def fence_order_invocation(self, request: dict[str, Any]) -> bytes:
+        self.fence_calls.append(copy.deepcopy(request))
+        return _json_bytes(
+            {
+                "authorization_id": request["authorization_id"],
+                "client_order_id": request["client_order_id"],
+                "transport_invocation_id": request["transport_invocation_id"],
+                "observed_status": request["observed_status"],
+                "side_effects_fenced": True,
+            }
+        )
+
+
+class LateAcceptAfterRejectedLookupTransport(FakeTransport):
+    """A timed-out worker that accepts only after an initial REJECTED lookup."""
+
+    maximum_call_duration_ms = 100
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.submit_started = threading.Event()
+        self.release_submit = threading.Event()
+        self.submit_finished = threading.Event()
+
+    def submit_order(self, request: dict[str, Any]) -> bytes:
+        self.submit_calls.append(copy.deepcopy(request))
+        self.submit_started.set()
+        self.release_submit.wait(timeout=10)
+        self.submit_finished.set()
+        return _json_bytes(
+            {
+                "client_order_id": request["client_order_id"],
+                "exchange_order_id": f"exchange-{request['client_order_id'][:12]}",
+                "status": "ACCEPTED",
+                "market_id": request["market_id"],
+                "token_id": request["token_id"],
+                "accepted_quantity": request["quantity"],
+                "limit_price": request["limit_price"],
+            }
+        )
+
+    def lookup_order(self, request: dict[str, Any]) -> bytes:
+        self.lookup_calls.append(copy.deepcopy(request))
+        submitted = self.submit_calls[-1]
+        return _json_bytes(
+            {
+                "client_order_id": submitted["client_order_id"],
+                "exchange_order_id": f"exchange-{submitted['client_order_id'][:12]}",
+                "status": (
+                    "ACCEPTED" if self.submit_finished.is_set() else "REJECTED"
+                ),
+                "market_id": submitted["market_id"],
+                "token_id": submitted["token_id"],
+                "accepted_quantity": submitted["quantity"],
+                "limit_price": submitted["limit_price"],
+            }
+        )
+
+    def fence_order_invocation(self, request: dict[str, Any]) -> bytes:
+        self.fence_calls.append(copy.deepcopy(request))
+        return _json_bytes(
+            {
+                "authorization_id": request["authorization_id"],
+                "client_order_id": request["client_order_id"],
+                "transport_invocation_id": request["transport_invocation_id"],
+                "observed_status": request["observed_status"],
+                "side_effects_fenced": self.submit_finished.is_set(),
+            }
+        )
+
 
 class SimulatedProcessCrash(BaseException):
     """Crash injection deliberately bypassing ordinary Exception handlers."""
@@ -746,7 +860,9 @@ class CrashAfterCommittedEventJournal(AtomicFileMicroLiveStateJournal):
         base = Path(directory)
         super().__init__(
             base / "journal",
-            namespace_authority_root=base / "namespace-authority",
+            risk_domain_lease=_TestDurableRiskDomainLease(
+                base / "external-risk-domain-lease"
+            ),
         )
         self.target_event_type: str | None = None
 
@@ -814,7 +930,7 @@ def _multiprocess_hold_journal_lock(
 ) -> None:
     journal = AtomicFileMicroLiveStateJournal(
         root,
-        namespace_authority_root=authority_root,
+        risk_domain_lease=_TestDurableRiskDomainLease(authority_root),
     )
     with journal._exclusive_lock():  # noqa: SLF001 - deliberate process-lock probe
         entered.set()
@@ -829,7 +945,7 @@ def _multiprocess_probe_journal_lock(
 ) -> None:
     journal = AtomicFileMicroLiveStateJournal(
         root,
-        namespace_authority_root=authority_root,
+        risk_domain_lease=_TestDurableRiskDomainLease(authority_root),
     )
     entered.set()
     with journal._exclusive_lock():  # noqa: SLF001 - deliberate process-lock probe
@@ -1362,6 +1478,7 @@ def _verified(
             _json_bytes(authorization)
         ).hexdigest(),
         candidate_bundle_sha256=authorization["candidate_bundle"]["sha256"],
+        risk_domain_lease_id=auth_module.TRUSTED_RISK_DOMAIN_LEASE_ID,
         capital_base_usd=Decimal(authorization["capital_base_usd"]),
         maximum_notional_usd=Decimal(authorization["maximum_notional_usd"]),
         maximum_realized_loss_usd=Decimal(
@@ -1548,7 +1665,7 @@ def test_current_gate_declares_complete_successor_deployment_closure() -> None:
         "concrete_exchange_transport",
         "signer_wallet_boundary",
         "durable_single_writer_journal",
-        "unique_journal_namespace_authority",
+        "external_durable_monotonic_risk_domain_lease",
         "trusted_clock_source",
         "independent_watchdog_scheduler",
         "independent_emergency_kill_channel",
@@ -3913,7 +4030,7 @@ def test_two_executor_instances_share_one_process_safe_budget_reservation(
     initial_snapshot = journal.snapshot()
     second_journal = AtomicFileMicroLiveStateJournal(
         journal.root,
-        namespace_authority_root=journal.namespace_authority_root,
+        risk_domain_lease=journal.risk_domain_lease,
     )
     second_transport = FakeTransport()
     second = MicroLiveExecutor.restore(
@@ -3945,19 +4062,51 @@ def test_same_authorization_cannot_reset_risk_budget_in_a_second_journal_root(
     tmp_path: Path,
 ) -> None:
     verified = _verified(authorized_fixture)
-    authority_root = tmp_path / "trusted-deployment-namespace"
+    lease = _TestDurableRiskDomainLease(
+        tmp_path / "external-risk-domain-lease"
+    )
     first = AtomicFileMicroLiveStateJournal(
         tmp_path / "journal-one",
-        namespace_authority_root=authority_root,
+        risk_domain_lease=lease,
     )
     MicroLiveExecutor(verified, transport=FakeTransport(), journal=first)
     second = AtomicFileMicroLiveStateJournal(
         tmp_path / "journal-two",
-        namespace_authority_root=authority_root,
+        risk_domain_lease=lease,
     )
     with pytest.raises(
         MicroLiveExecutionError,
-        match="already bound to another journal",
+        match="external risk-domain lease claim failed closed",
+    ):
+        MicroLiveExecutor(verified, transport=FakeTransport(), journal=second)
+    assert not second.state_path.exists()
+
+
+def test_changing_journal_and_local_authority_dirs_cannot_reset_risk_domain(
+    authorized_fixture: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    verified = _verified(authorized_fixture)
+    first_lease = _TestDurableRiskDomainLease(tmp_path / "authority-one")
+    first = AtomicFileMicroLiveStateJournal(
+        tmp_path / "journal-one",
+        risk_domain_lease=first_lease,
+    )
+    MicroLiveExecutor(verified, transport=FakeTransport(), journal=first)
+
+    # A different local service directory necessarily has a different trusted
+    # deployment identity and cannot satisfy the authorization binding.
+    second_lease = _TestDurableRiskDomainLease(
+        tmp_path / "authority-two",
+        lease_id="f" * 64,
+    )
+    second = AtomicFileMicroLiveStateJournal(
+        tmp_path / "journal-two",
+        risk_domain_lease=second_lease,
+    )
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="journal lease is not bound to the authorization capability",
     ):
         MicroLiveExecutor(verified, transport=FakeTransport(), journal=second)
     assert not second.state_path.exists()
@@ -4260,6 +4409,49 @@ def test_hung_lookup_times_out_and_remains_conservatively_killed(
     transport.release.set()
 
 
+def test_rejected_lookup_cannot_finalize_until_late_submit_is_fenced(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = LateAcceptAfterRejectedLookupTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+
+    with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    assert transport.submit_started.is_set()
+    client_order_id = transport.submit_calls[0]["client_order_id"]
+
+    with pytest.raises(MicroLiveExecutionError, match="reconciliation failed closed"):
+        executor.reconcile_unknown_submission(
+            client_order_id=client_order_id,
+            now_ts_ms=NOW_TS_MS + 1,
+        )
+    assert transport.fence_calls[-1]["observed_status"] == "REJECTED"
+    assert not any(
+        event["event_type"] == "ORDER_SUBMISSION_RECONCILED"
+        for event in executor.events
+    )
+    unknown_order = executor._reconcile_view()["orders"][client_order_id]
+    assert unknown_order["submission_unknown"] is True
+    assert unknown_order["closed_status"] is None
+
+    transport.release_submit.set()
+    assert transport.submit_finished.wait(timeout=5)
+    reconciled = executor.reconcile_unknown_submission(
+        client_order_id=client_order_id,
+        now_ts_ms=NOW_TS_MS + 2,
+    )
+    assert reconciled["status"] == "ORDER_SUBMISSION_RECONCILED_ACCEPTED"
+    assert transport.fence_calls[-1]["observed_status"] == "ACCEPTED"
+    assert len(transport.cancel_calls) == 1
+    order = executor._reconcile_view()["orders"][client_order_id]
+    assert order["submission_unknown"] is False
+    assert order["acknowledgement"] is not None
+    assert order["closed_status"] == "CANCELED"
+
+
 def test_hung_cancel_persists_emergency_kill_then_cancel_unknown(
     authorized_fixture: dict[str, Any],
 ) -> None:
@@ -4382,14 +4574,78 @@ def test_resource_limits_accept_exact_boundary_and_reject_max_plus_one(
         executor_module._require_bounded_state_bytes(b"x" * 17)
 
 
+def test_all_journal_files_use_descriptor_bounded_exact_size_reads(
+    authorized_fixture: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    executor = MicroLiveExecutor(verified, transport=FakeTransport(), journal=journal)
+    executor.engage_kill_switch(reason="bounded-read-test", now_ts_ms=NOW_TS_MS)
+    paths = {
+        "binding": journal.risk_domain_receipt_path,
+        "emergency-kill": journal.emergency_kill_path,
+        "wal": journal.state_path,
+    }
+    for label, source_path in paths.items():
+        raw = source_path.read_bytes()
+        assert executor_module._read_bounded_stable_regular_file(
+            source_path,
+            maximum_bytes=len(raw),
+            label=label,
+        ) == raw
+        oversized = tmp_path / f"{label}.max-plus-one"
+        oversized.write_bytes(raw + b"x")
+        with pytest.raises(MicroLiveExecutionError, match="exceeds byte limit"):
+            executor_module._read_bounded_stable_regular_file(
+                oversized,
+                maximum_bytes=len(raw),
+                label=label,
+            )
+
+    symlink = tmp_path / "wal-symlink"
+    symlink.symlink_to(journal.state_path)
+    with pytest.raises(MicroLiveExecutionError, match="unreadable|regular file"):
+        executor_module._read_bounded_stable_regular_file(
+            symlink,
+            maximum_bytes=journal.state_path.stat().st_size,
+            label="wal symlink",
+        )
+
+    changing = tmp_path / "changing-wal"
+    replacement = tmp_path / "replacement-wal"
+    changing.write_bytes(b"stable-size")
+    replacement.write_bytes(b"other-bytes")
+    original_read = executor_module.os.read
+    swapped = False
+
+    def replace_path_after_read(descriptor: int, count: int) -> bytes:
+        nonlocal swapped
+        chunk = original_read(descriptor, count)
+        if not swapped:
+            swapped = True
+            replacement.replace(changing)
+        return chunk
+
+    monkeypatch.setattr(executor_module.os, "read", replace_path_after_read)
+    with pytest.raises(MicroLiveExecutionError, match="changed during bounded read"):
+        executor_module._read_bounded_stable_regular_file(
+            changing,
+            maximum_bytes=len(b"stable-size"),
+            label="changing wal",
+        )
+
+
 @pytest.mark.parametrize("transport_fails", (False, True))
 def test_event_capacity_reserves_all_post_side_effect_safety_transitions(
     authorized_fixture: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     transport_fails: bool,
 ) -> None:
-    monkeypatch.setattr(executor_module, "MAX_EVENT_COUNT", 20)
+    monkeypatch.setattr(executor_module, "MAX_EVENT_COUNT", 30)
     monkeypatch.setattr(executor_module, "EVENT_RECOVERY_RESERVE", 12)
+    monkeypatch.setattr(executor_module, "MAXIMUM_FILL_EVENTS_PER_ORDER", 2)
     verified = _verified(authorized_fixture)
     transport = FakeTransport()
     executor = MicroLiveExecutor(verified, transport=transport)
@@ -4439,6 +4695,95 @@ def test_event_capacity_reserves_all_post_side_effect_safety_transitions(
         raw_state=committed.raw_state,
     )
     assert restored.reconciliation_snapshot()["kill_switch_active"] is True
+
+
+def test_boundary_order_can_persist_partial_full_close_settlement_and_restart(
+    authorized_fixture: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(executor_module, "MAX_EVENT_COUNT", 40)
+    monkeypatch.setattr(executor_module, "EVENT_RECOVERY_RESERVE", 12)
+    monkeypatch.setattr(executor_module, "MAXIMUM_FILL_EVENTS_PER_ORDER", 2)
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    first_signal = _signal(
+        candidate_bundle_sha256=verified.candidate_bundle_sha256
+    )
+    assert executor.submit_signal(**first_signal)["status"] == "ORDER_ACKNOWLEDGED"
+    for _ in range(19):
+        assert executor.submit_signal(**first_signal)["status"] == "IDEMPOTENT_REPLAY"
+
+    view = executor._reconcile_view()
+    assert (
+        len(executor.events)
+        + 2
+        + executor_module._required_lifecycle_event_capacity(view)
+        + executor_module._new_order_lifecycle_capacity()
+        == executor_module.MAX_EVENT_COUNT
+    )
+    boundary_signal = _signal(
+        candidate_bundle_sha256=verified.candidate_bundle_sha256,
+        market_id=f"0x{990:064x}",
+        up_token_id="99000",
+        down_token_id="99001",
+    )
+    accepted = executor.submit_signal(**boundary_signal)
+    client_order_id = accepted["client_order_id"]
+    assert accepted["status"] == "ORDER_ACKNOWLEDGED"
+    _record_fill(
+        executor,
+        client_order_id=client_order_id,
+        fill_id="boundary-partial",
+        now_ts_ms=NOW_TS_MS + 1,
+        quantity="0.4",
+        price="0.1",
+        fee_usd="0.00008",
+        transport_event_sha256="ignored",
+    )
+    _record_fill(
+        executor,
+        client_order_id=client_order_id,
+        fill_id="boundary-full",
+        now_ts_ms=NOW_TS_MS + 2,
+        quantity="0.6",
+        price="0.1",
+        fee_usd="0.00012",
+        transport_event_sha256="ignored",
+    )
+    _record_order_closed(
+        executor,
+        client_order_id=client_order_id,
+        status="CANCELED",
+        now_ts_ms=NOW_TS_MS + 3,
+        transport_event_sha256="ignored",
+    )
+    _record_settlement(
+        executor,
+        client_order_id=client_order_id,
+        settlement_id="boundary-settlement",
+        now_ts_ms=SETTLEMENT_NOW_TS_MS,
+        payout_per_token="1",
+        official_settlement_sha256="ignored",
+    )
+    event_types = [event["event_type"] for event in executor.events]
+    assert event_types[-4:] == [
+        "FILL_RECORDED",
+        "FILL_RECORDED",
+        "ORDER_CANCELED",
+        "SETTLEMENT_RECORDED",
+    ]
+    committed = executor._journal.snapshot()
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=transport,
+        journal=executor._journal,
+        raw_state=committed.raw_state,
+    )
+    restored_order = restored._reconcile_view()["orders"][client_order_id]
+    assert restored_order["filled_quantity"] == Decimal("1.0")
+    assert restored_order["closed_status"] == "CANCELED"
+    assert restored_order["settlement"]["settlement_id"] == "boundary-settlement"
 
 
 @pytest.mark.parametrize("bad_now", (0, True, "not-an-int", NOW_TS_MS - 1))

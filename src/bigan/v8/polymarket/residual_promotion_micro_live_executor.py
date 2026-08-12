@@ -15,6 +15,7 @@ import math
 import os
 import queue
 import re
+import stat
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -46,11 +47,11 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
     ResidualPromotionRuntime,
 )
 
-STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v10"
+STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v11"
 SIGNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-execution-signal-v2"
 JOURNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-durable-journal-v1"
 JOURNAL_NAMESPACE_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-journal-namespace-v1"
+    "bigan-btc-15m-residual-promotion-journal-namespace-lease-receipt-v2"
 )
 EMERGENCY_KILL_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-emergency-kill-v1"
@@ -74,9 +75,12 @@ MAX_JSON_DEPTH = 32
 MAX_PROVIDER_ROWS_PER_STREAM = 100_000
 MAX_EVENT_COUNT = 4_096
 EVENT_RECOVERY_RESERVE = 64
+MAXIMUM_FILL_EVENTS_PER_ORDER = 16
 MAX_RESTORED_STATE_BYTES = 67_108_864
 MAX_TRANSPORT_CALL_DURATION_MS = 1_000
 _JOURNAL_HEADER_MAX_BYTES = 4_096
+_JOURNAL_BINDING_MAX_BYTES = 4_096
+_EMERGENCY_KILL_MAX_BYTES = 16_384
 PROVIDER_FEATURE_FILENAMES = (
     "raw_polymarket_markets.jsonl",
     "raw_polymarket_orderbooks.jsonl",
@@ -176,6 +180,8 @@ _RECOVERY_EVENT_TYPES = {
     "ORDER_CANCEL_UNKNOWN",
     "ORDER_CANCEL_RECONCILED",
     "ORDER_CANCEL_RECONCILIATION_FAILED",
+    "FILL_RECORDED",
+    "SETTLEMENT_RECORDED",
     "KILL_SWITCH_ENGAGED",
 }
 
@@ -208,6 +214,32 @@ class EmergencyKillSnapshot:
     payload_sha256: str
 
 
+class DurableRiskDomainLease(Protocol):
+    """Deployment-owned monotonic authority outside every journal directory.
+
+    The concrete lease service is intentionally part of the still-missing
+    deployment closure.  A journal caller cannot choose or replace its
+    namespace root: it receives one already-provisioned lease capability.
+    """
+
+    @property
+    def durable_monotonic_binding(self) -> bool:
+        """Return whether claims survive process and journal-root replacement."""
+
+    @property
+    def lease_id(self) -> str:
+        """Return the SHA-256 identity frozen by the deployment composition."""
+
+    def claim_risk_domain(
+        self,
+        *,
+        authorization_id: str,
+        risk_domain_id: str,
+        journal_namespace_id: str,
+    ) -> bytes:
+        """Atomically bind one risk domain and return exact receipt bytes."""
+
+
 class DurableJournalTransaction(Protocol):
     """Exclusive single-writer transaction held across a risk-bearing action."""
 
@@ -225,6 +257,10 @@ class MicroLiveStateJournal(Protocol):
     @property
     def durable_single_writer(self) -> bool:
         """Return whether fsync plus cross-process exclusion is provided."""
+
+    @property
+    def risk_domain_lease_id(self) -> str:
+        """Return the deployment-frozen external lease identity."""
 
     def bind_risk_domain(
         self,
@@ -302,36 +338,39 @@ class AtomicFileMicroLiveStateJournal:
         self,
         directory: Path | str,
         *,
-        namespace_authority_root: Path | str,
+        risk_domain_lease: DurableRiskDomainLease,
     ) -> None:
         root = Path(directory).resolve()
-        authority_root = Path(namespace_authority_root).resolve()
         root.mkdir(parents=True, exist_ok=True)
-        authority_root.mkdir(parents=True, exist_ok=True)
         if not root.is_dir():
             raise MicroLiveExecutionError("micro-live journal root is not a directory")
-        if not authority_root.is_dir():
+        if not (
+            risk_domain_lease is not None
+            and risk_domain_lease.durable_monotonic_binding is True
+            and _is_sha256(risk_domain_lease.lease_id)
+        ):
             raise MicroLiveExecutionError(
-                "micro-live journal namespace authority is not a directory"
+                "trusted durable risk-domain lease capability is missing"
             )
         self.root = root
-        self.namespace_authority_root = authority_root
+        self.risk_domain_lease = risk_domain_lease
         self.state_path = root / "micro_live_state.wal"
         self.lock_path = root / "micro_live_state.lock"
         self.emergency_kill_path = root / "micro_live_emergency_kill.json"
         self.emergency_kill_lock_path = root / "micro_live_emergency_kill.lock"
-        self.namespace_lock_path = authority_root / "micro_live_namespace.lock"
-        self.namespace_bindings_root = authority_root / "risk_domain_bindings"
-        self.namespace_bindings_root.mkdir(exist_ok=True)
+        self.risk_domain_receipt_path = root / "micro_live_risk_domain_receipt.json"
         self._thread_lock = threading.RLock()
         self._emergency_thread_lock = threading.RLock()
-        self._namespace_thread_lock = threading.RLock()
         self._authorization_id: str | None = None
         self._risk_domain_id: str | None = None
 
     @property
     def durable_single_writer(self) -> bool:
         return True
+
+    @property
+    def risk_domain_lease_id(self) -> str:
+        return self.risk_domain_lease.lease_id
 
     def bind_risk_domain(
         self,
@@ -342,38 +381,57 @@ class AtomicFileMicroLiveStateJournal:
         if not isinstance(authorization_id, str) or not authorization_id:
             raise MicroLiveExecutionError("journal authorization identity is invalid")
         _require_sha256(risk_domain_id, "journal risk domain")
-        binding_path = self.namespace_bindings_root / f"{risk_domain_id}.json"
-        payload = {
+        root_stat = self.root.stat()
+        journal_namespace_id = canonical_json_sha256(
+            {
+                "resolved_journal_root": str(self.root),
+                "root_device": root_stat.st_dev,
+                "root_inode": root_stat.st_ino,
+            }
+        )
+        try:
+            raw_receipt = self.risk_domain_lease.claim_risk_domain(
+                authorization_id=authorization_id,
+                risk_domain_id=risk_domain_id,
+                journal_namespace_id=journal_namespace_id,
+            )
+        except Exception as exc:
+            raise MicroLiveExecutionError(
+                "external risk-domain lease claim failed closed"
+            ) from exc
+        receipt, receipt_json, _ = _raw_json_object(
+            raw_receipt,
+            "risk-domain lease receipt",
+        )
+        canonical_receipt = receipt_json.encode("utf-8")
+        expected_receipt = {
             "schema_version": JOURNAL_NAMESPACE_SCHEMA_VERSION,
+            "lease_id": self.risk_domain_lease.lease_id,
             "authorization_id": authorization_id,
             "risk_domain_id": risk_domain_id,
-            "journal_root": str(self.root),
+            "journal_namespace_id": journal_namespace_id,
         }
-        raw_payload = json.dumps(
-            payload,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        with self._namespace_lock():
-            if binding_path.exists():
-                try:
-                    existing = binding_path.read_bytes()
-                except OSError as exc:
-                    raise MicroLiveExecutionError(
-                        "journal risk-domain binding is unreadable"
-                    ) from exc
-                if existing != raw_payload:
-                    raise MicroLiveExecutionError(
-                        "authorization risk domain is already bound to another journal"
-                    )
-            else:
-                self._atomic_write(
-                    path=binding_path,
-                    raw_payload=raw_payload,
+        if receipt != expected_receipt:
+            raise MicroLiveExecutionError(
+                "external risk-domain lease receipt is mismatched"
+            )
+        if self.risk_domain_receipt_path.exists():
+            existing = _read_bounded_stable_regular_file(
+                self.risk_domain_receipt_path,
+                maximum_bytes=_JOURNAL_BINDING_MAX_BYTES,
+                label="journal risk-domain receipt",
+            )
+            if existing != canonical_receipt:
+                raise MicroLiveExecutionError(
+                    "journal risk-domain receipt is mismatched"
                 )
-            self._authorization_id = authorization_id
-            self._risk_domain_id = risk_domain_id
+        else:
+            self._atomic_write(
+                path=self.risk_domain_receipt_path,
+                raw_payload=canonical_receipt,
+            )
+        self._authorization_id = authorization_id
+        self._risk_domain_id = risk_domain_id
 
     def persist_emergency_kill(
         self,
@@ -485,21 +543,6 @@ class AtomicFileMicroLiveStateJournal:
                 os.close(descriptor)
 
     @contextmanager
-    def _namespace_lock(self) -> Iterator[None]:
-        with self._namespace_thread_lock:
-            descriptor = os.open(
-                self.namespace_lock_path,
-                os.O_RDWR | os.O_CREAT,
-                0o600,
-            )
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
-                yield
-            finally:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-                os.close(descriptor)
-
-    @contextmanager
     def _emergency_lock(self) -> Iterator[None]:
         with self._emergency_thread_lock:
             descriptor = os.open(
@@ -597,12 +640,11 @@ class AtomicFileMicroLiveStateJournal:
                 temporary_path.unlink()
 
     def _read_emergency_kill_locked(self) -> EmergencyKillSnapshot:
-        try:
-            raw_payload = self.emergency_kill_path.read_bytes()
-        except OSError as exc:
-            raise MicroLiveExecutionError(
-                "emergency kill record is unreadable"
-            ) from exc
+        raw_payload = _read_bounded_stable_regular_file(
+            self.emergency_kill_path,
+            maximum_bytes=_EMERGENCY_KILL_MAX_BYTES,
+            label="emergency kill record",
+        )
         value, _, _ = _raw_json_object(
             raw_payload,
             "emergency kill record",
@@ -648,12 +690,13 @@ class AtomicFileMicroLiveStateJournal:
         )
 
     def _read_locked(self) -> DurableJournalSnapshot:
-        try:
-            raw = self.state_path.read_bytes()
-        except OSError as exc:
-            raise MicroLiveExecutionError("micro-live journal state is absent") from exc
-        if len(raw) > MAX_RESTORED_STATE_BYTES + _JOURNAL_HEADER_MAX_BYTES + 1:
-            raise MicroLiveExecutionError("micro-live journal state exceeds byte limit")
+        raw = _read_bounded_stable_regular_file(
+            self.state_path,
+            maximum_bytes=(
+                MAX_RESTORED_STATE_BYTES + _JOURNAL_HEADER_MAX_BYTES + 1
+            ),
+            label="micro-live journal state",
+        )
         header_raw, separator, raw_state = raw.partition(b"\n")
         if not separator or not header_raw or len(header_raw) > _JOURNAL_HEADER_MAX_BYTES:
             raise MicroLiveExecutionError("micro-live journal envelope is invalid")
@@ -730,6 +773,14 @@ class MicroLiveOrderTransport(Protocol):
     def lookup_order(self, request: Mapping[str, Any]) -> bytes:
         """Read one order by exact identity and return raw JSON bytes."""
 
+    def fence_order_invocation(self, request: Mapping[str, Any]) -> bytes:
+        """Prove a timed-out submit can no longer create a later side effect.
+
+        Returning ``side_effects_fenced=true`` is an adapter-level durable
+        guarantee, not a point-in-time lookup.  Until that proof is returned,
+        the executor keeps the submission UNKNOWN even if lookup says REJECTED.
+        """
+
 
 def _runtime_integrity_sha256(runtime: ResidualPromotionRuntime) -> str:
     residual_model_sha256 = hashlib.sha256(
@@ -767,6 +818,7 @@ class _BoundAuthorization:
     authorization_id: str
     authorization_payload_sha256: str
     candidate_bundle_sha256: str
+    risk_domain_lease_id: str
     capital_base_usd: Decimal
     maximum_notional_usd: Decimal
     maximum_realized_loss_usd: Decimal
@@ -790,6 +842,7 @@ class _BoundAuthorization:
             authorization_id=authorization.authorization_id,
             authorization_payload_sha256=authorization.authorization_payload_sha256,
             candidate_bundle_sha256=authorization.candidate_bundle_sha256,
+            risk_domain_lease_id=authorization.risk_domain_lease_id,
             capital_base_usd=authorization.capital_base_usd,
             maximum_notional_usd=authorization.maximum_notional_usd,
             maximum_realized_loss_usd=authorization.maximum_realized_loss_usd,
@@ -812,6 +865,7 @@ class _BoundAuthorization:
             and self.authorization_payload_sha256
             == authorization.authorization_payload_sha256
             and self.candidate_bundle_sha256 == authorization.candidate_bundle_sha256
+            and self.risk_domain_lease_id == authorization.risk_domain_lease_id
             and self.capital_base_usd == authorization.capital_base_usd
             and self.maximum_notional_usd == authorization.maximum_notional_usd
             and self.maximum_realized_loss_usd
@@ -922,6 +976,10 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "micro-live durable single-writer journal capability is missing"
             )
+        if journal.risk_domain_lease_id != authorization.risk_domain_lease_id:
+            raise MicroLiveExecutionError(
+                "micro-live journal lease is not bound to the authorization capability"
+            )
         if not (
             authorization.runtime.lineage_id == LINEAGE_ID
             and authorization.runtime.candidate_id == CANDIDATE_ID
@@ -929,9 +987,9 @@ class MicroLiveExecutor:
             == authorization.candidate_bundle_sha256
         ):
             raise MicroLiveExecutionError("micro-live runtime capability is mismatched")
-        if 4 * authorization.maximum_open_orders + 4 > EVENT_RECOVERY_RESERVE:
+        if _new_order_lifecycle_capacity() > EVENT_RECOVERY_RESERVE:
             raise MicroLiveExecutionError(
-                "micro-live recovery event reserve cannot cover the risk limit"
+                "micro-live recovery event reserve cannot cover one accepted order"
             )
         self.authorization = authorization
         self._authorization = _BoundAuthorization.from_verified(authorization)
@@ -941,6 +999,7 @@ class MicroLiveExecutor:
                 "candidate_bundle_sha256": (
                     self._authorization.candidate_bundle_sha256
                 ),
+                "risk_domain_lease_id": self._authorization.risk_domain_lease_id,
                 "lineage_id": LINEAGE_ID,
             }
         )
@@ -1097,7 +1156,11 @@ class MicroLiveExecutor:
     ) -> None:
         if authorization_capability_is_verified(self.authorization):
             try:
-                if self._authorization.matches_verified(self.authorization):
+                if (
+                    self._authorization.matches_verified(self.authorization)
+                    and self._journal.risk_domain_lease_id
+                    == self._authorization.risk_domain_lease_id
+                ):
                     return
             except Exception:
                 pass
@@ -1370,7 +1433,13 @@ class MicroLiveExecutor:
             )
             raise
         view = self._reconcile_view()
-        if len(self._events) + 2 > _routine_event_limit():
+        if (
+            len(self._events)
+            + 2
+            + _required_lifecycle_event_capacity(view)
+            + _new_order_lifecycle_capacity()
+            > MAX_EVENT_COUNT
+        ):
             self.engage_kill_switch(
                 reason="journal_routine_capacity_exhausted",
                 now_ts_ms=now_ts_ms,
@@ -1523,6 +1592,14 @@ class MicroLiveExecutor:
         }
         intent_id = canonical_json_sha256(intent_core)
         client_order_id = intent_id
+        transport_invocation_id = canonical_json_sha256(
+            {
+                "authorization_id": self._authorization.authorization_id,
+                "client_order_id": client_order_id,
+                "operation": "submit_order",
+                "invocation_number": 1,
+            }
+        )
         existing = view["orders_by_business_key"].get(business_key)
         if existing is not None:
             if existing["intent_id"] != intent_id:
@@ -1659,6 +1736,7 @@ class MicroLiveExecutor:
             **intent_core,
             "intent_id": intent_id,
             "client_order_id": client_order_id,
+            "transport_invocation_id": transport_invocation_id,
             "submitted_at_ts_ms": now_ts_ms,
             "operator_heartbeat_ts_ms": operator_heartbeat_ts_ms,
             "authorization_payload_sha256": self._authorization.authorization_payload_sha256,
@@ -1692,6 +1770,7 @@ class MicroLiveExecutor:
                 "provider_feature_file_sha256",
                 "intent_id",
                 "client_order_id",
+                "transport_invocation_id",
                 "submitted_at_ts_ms",
             )
         }
@@ -1765,11 +1844,11 @@ class MicroLiveExecutor:
         client_order_id: str,
         now_ts_ms: int,
     ) -> dict[str, Any]:
-        """Resolve one unknown submission through a read-only transport lookup.
+        """Resolve one unknown submission through lookup plus a durable fence.
 
         Reconciliation never clears the persistent kill switch and never
-        resubmits an order.  An accepted lookup result is immediately exposed
-        to the existing kill-switch cancellation path.
+        resubmits an order.  A lookup result is nonterminal until the transport
+        proves that the original invocation cannot create a later side effect.
         """
 
         self._require_authorization_integrity(
@@ -1804,6 +1883,11 @@ class MicroLiveExecutor:
             "market_id": prepared["market_id"],
             "token_id": prepared["token_id"],
         }
+        raw_response_json: str | None = None
+        response_sha256: str | None = None
+        raw_fence_response_json: str | None = None
+        fence_response_sha256: str | None = None
+        fence_request: dict[str, Any] | None = None
         try:
             response, raw_response_json, response_sha256 = _raw_json_object(
                 self._bounded_transport_call(
@@ -1821,12 +1905,45 @@ class MicroLiveExecutor:
                 raise MicroLiveExecutionError(
                     "reconciled exchange order identity was reused"
                 )
+            fence_request = {
+                "authorization_id": self._authorization.authorization_id,
+                "client_order_id": client_order_id,
+                "business_key": prepared["business_key"],
+                "market_id": prepared["market_id"],
+                "token_id": prepared["token_id"],
+                "transport_invocation_id": prepared["transport_invocation_id"],
+                "observed_status": disposition["status"],
+                "lookup_response_sha256": response_sha256,
+            }
+            fence_response, raw_fence_response_json, fence_response_sha256 = (
+                _raw_json_object(
+                    self._bounded_transport_call(
+                        operation="fence_order_invocation",
+                        request=fence_request,
+                    ),
+                    "submission invocation fence response",
+                )
+            )
+            self._validate_submission_fence_response(
+                prepared=prepared,
+                disposition=disposition,
+                response=fence_response,
+            )
         except Exception as exc:
             self._append_event(
                 "ORDER_SUBMISSION_RECONCILIATION_FAILED",
                 {
                     "client_order_id": client_order_id,
                     "lookup_request_sha256": canonical_json_sha256(lookup_request),
+                    "lookup_response_sha256": response_sha256,
+                    "raw_lookup_response_json": raw_response_json,
+                    "fence_request_sha256": (
+                        canonical_json_sha256(fence_request)
+                        if fence_request is not None
+                        else None
+                    ),
+                    "fence_response_sha256": fence_response_sha256,
+                    "raw_fence_response_json": raw_fence_response_json,
                     "error_type": exc.__class__.__name__,
                 },
                 event_ts_ms=max(
@@ -1847,6 +1964,9 @@ class MicroLiveExecutor:
                 **disposition,
                 "lookup_response_sha256": response_sha256,
                 "raw_lookup_response_json": raw_response_json,
+                "transport_invocation_id": prepared["transport_invocation_id"],
+                "fence_response_sha256": fence_response_sha256,
+                "raw_fence_response_json": raw_fence_response_json,
             },
             event_ts_ms=now_ts_ms,
         )
@@ -2165,6 +2285,14 @@ class MicroLiveExecutor:
                 )
                 raise MicroLiveExecutionError("conflicting duplicate fill failed closed")
             return {"status": "IDEMPOTENT_FILL_REPLAY", "fill_id": fill_id}
+        if len(order["fills"]) >= MAXIMUM_FILL_EVENTS_PER_ORDER:
+            self.engage_kill_switch(
+                reason="maximum_fill_events_per_order_exceeded",
+                now_ts_ms=now_ts_ms,
+            )
+            raise MicroLiveExecutionError(
+                "fill event count exceeds the bounded lifecycle contract"
+            )
         fill_qty = Decimal(payload["quantity"])
         fill_price = Decimal(payload["price"])
         fee = Decimal(payload["fee_usd"])
@@ -2622,6 +2750,7 @@ class MicroLiveExecutor:
             "authorization_id": self._authorization.authorization_id,
             "authorization_payload_sha256": self._authorization.authorization_payload_sha256,
             "candidate_bundle_sha256": self._authorization.candidate_bundle_sha256,
+            "risk_domain_lease_id": self._authorization.risk_domain_lease_id,
             "events": copy.deepcopy(self._events),
         }
         return (
@@ -2649,10 +2778,19 @@ class MicroLiveExecutor:
         journal: MicroLiveStateJournal,
         raw_state: bytes,
     ) -> MicroLiveExecutor:
+        if not authorization_capability_is_verified(authorization):
+            raise MicroLiveExecutionError(
+                "micro-live restore authorization capability is unverified"
+            )
+        if journal.risk_domain_lease_id != authorization.risk_domain_lease_id:
+            raise MicroLiveExecutionError(
+                "micro-live restore journal lease is authorization-mismatched"
+            )
         restore_risk_domain_id = canonical_json_sha256(
             {
                 "authorization_id": authorization.authorization_id,
                 "candidate_bundle_sha256": authorization.candidate_bundle_sha256,
+                "risk_domain_lease_id": authorization.risk_domain_lease_id,
                 "lineage_id": LINEAGE_ID,
             }
         )
@@ -2672,6 +2810,7 @@ class MicroLiveExecutor:
             "authorization_id",
             "authorization_payload_sha256",
             "candidate_bundle_sha256",
+            "risk_domain_lease_id",
             "events",
             "state_sha256",
         }:
@@ -2689,6 +2828,8 @@ class MicroLiveExecutor:
             and payload.get("authorization_payload_sha256")
             == authorization.authorization_payload_sha256
             and payload.get("candidate_bundle_sha256") == authorization.candidate_bundle_sha256
+            and payload.get("risk_domain_lease_id")
+            == authorization.risk_domain_lease_id
             and isinstance(events, list)
             and len(events) <= MAX_EVENT_COUNT
             and state.get("state_sha256") == canonical_json_sha256(payload)
@@ -2889,6 +3030,34 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError("order response identity mismatch")
         return dict(response)
 
+    def _validate_submission_fence_response(
+        self,
+        *,
+        prepared: Mapping[str, Any],
+        disposition: Mapping[str, Any],
+        response: Mapping[str, Any],
+    ) -> None:
+        expected_keys = {
+            "authorization_id",
+            "client_order_id",
+            "transport_invocation_id",
+            "observed_status",
+            "side_effects_fenced",
+        }
+        if not (
+            set(response) == expected_keys
+            and response.get("authorization_id")
+            == self._authorization.authorization_id
+            and response.get("client_order_id") == prepared["client_order_id"]
+            and response.get("transport_invocation_id")
+            == prepared["transport_invocation_id"]
+            and response.get("observed_status") == disposition["status"]
+            and response.get("side_effects_fenced") is True
+        ):
+            raise MicroLiveExecutionError(
+                "submission invocation is not durably fenced"
+            )
+
     def _validate_cancel_lookup_response(
         self,
         *,
@@ -2967,6 +3136,22 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "micro-live routine event capacity is exhausted"
             )
+        if event_type in _RECOVERY_EVENT_TYPES:
+            view_before = self._reconcile_view()
+            required_before = _required_lifecycle_event_capacity(view_before)
+            progress = event_type not in {
+                "SIGNAL_REJECTED",
+                "ORDER_SUBMISSION_RECONCILIATION_FAILED",
+                "ORDER_CANCEL_RECONCILIATION_FAILED",
+            }
+            required_after_upper_bound = max(
+                required_before - (1 if progress else 0),
+                0,
+            )
+            if next_event_count + required_after_upper_bound > MAX_EVENT_COUNT:
+                raise MicroLiveExecutionError(
+                    "micro-live lifecycle reserve would be exhausted"
+                )
         _require_positive_timestamp(event_ts_ms, "event")
         if self._events and event_ts_ms < self._events[-1]["event_ts_ms"]:
             raise MicroLiveExecutionError("micro-live event timestamp regressed")
@@ -3179,6 +3364,7 @@ class MicroLiveExecutor:
                 "raw_provider_feature_evidence_jsonl",
                 "intent_id",
                 "client_order_id",
+                "transport_invocation_id",
             }
             if set(payload) != expected:
                 raise MicroLiveExecutionError("prepared order payload schema is invalid")
@@ -3221,9 +3407,18 @@ class MicroLiveExecutor:
                     "operator_heartbeat_ts_ms",
                     "intent_id",
                     "client_order_id",
+                    "transport_invocation_id",
                 }
             }
             intent_id = canonical_json_sha256(intent_core)
+            transport_invocation_id = canonical_json_sha256(
+                {
+                    "authorization_id": self._authorization.authorization_id,
+                    "client_order_id": intent_id,
+                    "operation": "submit_order",
+                    "invocation_number": 1,
+                }
+            )
             if not (
                 payload.get("authorization_id") == self._authorization.authorization_id
                 and payload.get("authorization_payload_sha256")
@@ -3273,6 +3468,8 @@ class MicroLiveExecutor:
                 and payload.get("business_key") == business_key
                 and payload.get("intent_id") == intent_id
                 and payload.get("client_order_id") == intent_id
+                and payload.get("transport_invocation_id")
+                == transport_invocation_id
             ):
                 raise MicroLiveExecutionError("prepared order identity is invalid")
             return
@@ -3366,6 +3563,9 @@ class MicroLiveExecutor:
                 *response_keys,
                 "lookup_response_sha256",
                 "raw_lookup_response_json",
+                "transport_invocation_id",
+                "fence_response_sha256",
+                "raw_fence_response_json",
             }:
                 raise MicroLiveExecutionError(
                     "submission reconciliation payload is invalid"
@@ -3374,6 +3574,11 @@ class MicroLiveExecutor:
                 payload.get("raw_lookup_response_json"),
                 payload.get("lookup_response_sha256"),
                 "stored submission lookup response",
+            )
+            fence_response = _stored_raw_json_object(
+                payload.get("raw_fence_response_json"),
+                payload.get("fence_response_sha256"),
+                "stored submission invocation fence response",
             )
             accepted_quantity = _positive_decimal(
                 response.get("accepted_quantity"),
@@ -3396,6 +3601,31 @@ class MicroLiveExecutor:
                 and limit_price < 1
                 and set(response) == response_keys
                 and all(response.get(key) == payload.get(key) for key in response_keys)
+                and payload.get("transport_invocation_id")
+                == canonical_json_sha256(
+                    {
+                        "authorization_id": self._authorization.authorization_id,
+                        "client_order_id": response["client_order_id"],
+                        "operation": "submit_order",
+                        "invocation_number": 1,
+                    }
+                )
+                and set(fence_response)
+                == {
+                    "authorization_id",
+                    "client_order_id",
+                    "transport_invocation_id",
+                    "observed_status",
+                    "side_effects_fenced",
+                }
+                and fence_response.get("authorization_id")
+                == self._authorization.authorization_id
+                and fence_response.get("client_order_id")
+                == response["client_order_id"]
+                and fence_response.get("transport_invocation_id")
+                == payload.get("transport_invocation_id")
+                and fence_response.get("observed_status") == response["status"]
+                and fence_response.get("side_effects_fenced") is True
             ):
                 raise MicroLiveExecutionError(
                     "submission reconciliation payload is invalid"
@@ -3405,15 +3635,70 @@ class MicroLiveExecutor:
             if set(payload) != {
                 "client_order_id",
                 "lookup_request_sha256",
+                "lookup_response_sha256",
+                "raw_lookup_response_json",
+                "fence_request_sha256",
+                "fence_response_sha256",
+                "raw_fence_response_json",
                 "error_type",
             } or not (
                 _is_sha256(payload.get("client_order_id"))
                 and _is_sha256(payload.get("lookup_request_sha256"))
+                and (
+                    payload.get("lookup_response_sha256") is None
+                    or _is_sha256(payload.get("lookup_response_sha256"))
+                )
+                and (
+                    payload.get("raw_lookup_response_json") is None
+                    or isinstance(payload.get("raw_lookup_response_json"), str)
+                )
+                and (
+                    payload.get("fence_request_sha256") is None
+                    or _is_sha256(payload.get("fence_request_sha256"))
+                )
+                and (
+                    payload.get("fence_response_sha256") is None
+                    or _is_sha256(payload.get("fence_response_sha256"))
+                )
+                and (
+                    payload.get("raw_fence_response_json") is None
+                    or isinstance(payload.get("raw_fence_response_json"), str)
+                )
                 and isinstance(payload.get("error_type"), str)
                 and payload["error_type"]
             ):
                 raise MicroLiveExecutionError(
                     "failed submission reconciliation audit is invalid"
+                )
+            lookup_pair = (
+                payload.get("lookup_response_sha256"),
+                payload.get("raw_lookup_response_json"),
+            )
+            fence_pair = (
+                payload.get("fence_response_sha256"),
+                payload.get("raw_fence_response_json"),
+            )
+            if (lookup_pair[0] is None) != (lookup_pair[1] is None) or (
+                fence_pair[0] is None
+            ) != (fence_pair[1] is None):
+                raise MicroLiveExecutionError(
+                    "failed submission reconciliation raw evidence is incomplete"
+                )
+            if lookup_pair[0] is not None:
+                _stored_raw_json_object(
+                    lookup_pair[1],
+                    lookup_pair[0],
+                    "stored failed submission lookup response",
+                )
+            if fence_pair[0] is not None:
+                if payload.get("fence_request_sha256") is None:
+                    raise MicroLiveExecutionError(
+                        "failed submission fence request is absent"
+                    )
+                _stored_raw_json_object(
+                    fence_pair[1],
+                    fence_pair[0],
+                    "stored failed submission fence response",
                 )
             return
         if event_type == "ORDER_CANCEL_RECONCILED":
@@ -3890,7 +4175,14 @@ class MicroLiveExecutor:
                         acknowledgement = {
                             key: value
                             for key, value in payload.items()
-                            if key != "lookup_response_sha256"
+                            if key
+                            not in {
+                                "lookup_response_sha256",
+                                "raw_lookup_response_json",
+                                "transport_invocation_id",
+                                "fence_response_sha256",
+                                "raw_fence_response_json",
+                            }
                         }
                         order["acknowledgement"] = acknowledgement
                         exchange_order_ids[exchange_order_id] = order
@@ -4205,6 +4497,55 @@ def _realized_loss_limit_reached(
     if not isinstance(realized, Decimal):
         raise MicroLiveExecutionError("realized PnL reconciliation is invalid")
     return realized <= -authorization.maximum_realized_loss_usd
+
+
+def _new_order_lifecycle_capacity() -> int:
+    """Worst-case durable events remaining after one new preparation.
+
+    This covers UNKNOWN + kill + fenced reconciliation, bounded partial fills,
+    cancellation intent/result, and settlement.  The count is intentionally
+    conservative so a boundary order can always complete its lifecycle.
+    """
+
+    return MAXIMUM_FILL_EVENTS_PER_ORDER + 8
+
+
+def _required_lifecycle_event_capacity(view: Mapping[str, Any]) -> int:
+    """Return still-reserved event slots for every nonterminal order."""
+
+    orders = view.get("orders")
+    if not isinstance(orders, Mapping):
+        raise MicroLiveExecutionError("lifecycle reserve view is invalid")
+    required = 0
+    unresolved_exists = False
+    for raw_order in orders.values():
+        if not isinstance(raw_order, Mapping):
+            raise MicroLiveExecutionError("lifecycle reserve order is invalid")
+        order = raw_order
+        fills = order.get("fills")
+        if not isinstance(fills, list) or len(fills) > MAXIMUM_FILL_EVENTS_PER_ORDER:
+            raise MicroLiveExecutionError("bounded fill lifecycle is invalid")
+        if order.get("settlement") is not None or order.get("closed_status") == "REJECTED":
+            continue
+        unresolved_exists = True
+        acknowledgement = order.get("acknowledgement")
+        closed_status = order.get("closed_status")
+        if acknowledgement is None:
+            # Submission disposition/fence plus the complete accepted path.
+            required += _new_order_lifecycle_capacity()
+            continue
+        if closed_status is not None:
+            if fills:
+                required += 1  # official settlement
+            continue
+        remaining_fill_events = MAXIMUM_FILL_EVENTS_PER_ORDER - len(fills)
+        required += remaining_fill_events
+        required += 3  # cancel/close intent, terminal close, settlement
+        if order.get("cancel_unknown") is True:
+            required += 1  # conservative cancel reconciliation
+    if unresolved_exists and view.get("kill_switch_active") is not True:
+        required += 1
+    return required
 
 
 def _validated_candidate_signal(
@@ -5172,6 +5513,100 @@ def _require_event_count(event_count: Any) -> int:
     ):
         raise MicroLiveExecutionError("micro-live event count exceeds limit")
     return event_count
+
+
+def _read_bounded_stable_regular_file(
+    path: Path,
+    *,
+    maximum_bytes: int,
+    label: str,
+) -> bytes:
+    """Read one immutable-size regular file without following symlinks.
+
+    Size is checked from the open descriptor before allocation, at most
+    ``maximum_bytes + 1`` bytes are ever retained, and descriptor metadata is
+    compared before/after the read so replacement or mutation fails closed.
+    """
+
+    if not (
+        isinstance(maximum_bytes, int)
+        and not isinstance(maximum_bytes, bool)
+        and maximum_bytes >= 0
+    ):
+        raise MicroLiveExecutionError(f"{label} byte limit is invalid")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        flags |= nofollow
+    else:
+        try:
+            path_before_open = os.lstat(path)
+        except OSError as exc:
+            raise MicroLiveExecutionError(f"{label} is unreadable") from exc
+        if stat.S_ISLNK(path_before_open.st_mode):
+            raise MicroLiveExecutionError(f"{label} symbolic link is forbidden")
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise MicroLiveExecutionError(f"{label} is unreadable") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise MicroLiveExecutionError(f"{label} is not a regular file")
+        if before.st_size < 0 or before.st_size > maximum_bytes:
+            raise MicroLiveExecutionError(f"{label} exceeds byte limit")
+        chunks: list[bytes] = []
+        retained = 0
+        while retained <= maximum_bytes:
+            chunk = os.read(descriptor, min(1_048_576, maximum_bytes + 1 - retained))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            retained += len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        stable_fields_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        stable_fields_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        try:
+            path_after = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            raise MicroLiveExecutionError(
+                f"{label} path changed during bounded read"
+            ) from exc
+        path_identity_after = (
+            path_after.st_dev,
+            path_after.st_ino,
+            path_after.st_mode,
+            path_after.st_size,
+            path_after.st_mtime_ns,
+            path_after.st_ctime_ns,
+        )
+        if not (
+            len(raw) <= maximum_bytes
+            and len(raw) == before.st_size
+            and stable_fields_after == stable_fields_before
+            and path_identity_after == stable_fields_before
+        ):
+            raise MicroLiveExecutionError(f"{label} changed during bounded read")
+        return raw
+    except OSError as exc:
+        raise MicroLiveExecutionError(f"{label} bounded read failed") from exc
+    finally:
+        os.close(descriptor)
 
 
 def _routine_event_limit() -> int:

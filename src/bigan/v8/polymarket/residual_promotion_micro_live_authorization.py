@@ -68,7 +68,7 @@ REQUIRED_SUCCESSOR_DEPLOYMENT_COMPONENTS = (
     "concrete_exchange_transport",
     "signer_wallet_boundary",
     "durable_single_writer_journal",
-    "unique_journal_namespace_authority",
+    "external_durable_monotonic_risk_domain_lease",
     "trusted_clock_source",
     "independent_watchdog_scheduler",
     "independent_emergency_kill_channel",
@@ -79,6 +79,9 @@ REQUIRED_SUCCESSOR_DEPLOYMENT_COMPONENTS = (
     "owner_authenticated_capital_approval",
 )
 MAX_AUTHORIZATION_JSON_BYTES = 1_048_576
+TRUSTED_RISK_DOMAIN_LEASE_ID = (
+    "8f8095ecb36c141825baa4791f640c013dc581cc7042ea4747edf164c24fe7a8"
+)
 MAX_EVIDENCE_JSON_BYTES = 16_777_216
 MAX_JSON_DEPTH = 32
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -107,6 +110,7 @@ class VerifiedMicroLiveAuthorization:
     authorization_id: str
     authorization_payload_sha256: str
     candidate_bundle_sha256: str
+    risk_domain_lease_id: str
     capital_base_usd: Decimal
     maximum_notional_usd: Decimal
     maximum_realized_loss_usd: Decimal
@@ -344,6 +348,7 @@ def verify_micro_live_authorization(
         authorization_id=authorization_id,
         authorization_payload_sha256=hashlib.sha256(raw_authorization).hexdigest(),
         candidate_bundle_sha256=str(candidate_sha),
+        risk_domain_lease_id=TRUSTED_RISK_DOMAIN_LEASE_ID,
         capital_base_usd=capital_base,
         maximum_notional_usd=maximum_notional,
         maximum_realized_loss_usd=maximum_realized_loss,
@@ -414,10 +419,11 @@ def _capability_integrity_sha256(
     ):
         raise ValueError("loaded micro-live model bytes do not match the frozen runtime")
     payload = {
-        "schema_version": "verified-micro-live-authorization-capability-v1",
+        "schema_version": "verified-micro-live-authorization-capability-v2",
         "authorization_id": capability.authorization_id,
         "authorization_payload_sha256": capability.authorization_payload_sha256,
         "candidate_bundle_sha256": capability.candidate_bundle_sha256,
+        "risk_domain_lease_id": capability.risk_domain_lease_id,
         "capital_base_usd": str(capability.capital_base_usd),
         "maximum_notional_usd": str(capability.maximum_notional_usd),
         "maximum_realized_loss_usd": str(capability.maximum_realized_loss_usd),
@@ -769,6 +775,7 @@ __all__ = [
     "MAXIMUM_SIGNAL_AGE_MS",
     "MicroLiveAuthorizationError",
     "REQUIRED_SUCCESSOR_DEPLOYMENT_COMPONENTS",
+    "TRUSTED_RISK_DOMAIN_LEASE_ID",
     "TRUSTED_APPROVER_LOGINS",
     "VerifiedMicroLiveAuthorization",
     "authorization_capability_is_verified",
