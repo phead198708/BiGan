@@ -6,6 +6,7 @@ import ast
 import copy
 import hashlib
 import json
+import multiprocessing
 import shutil
 import tempfile
 import threading
@@ -473,7 +474,11 @@ def _json_bytes(value: dict[str, Any]) -> bytes:
 
 
 def _new_journal() -> AtomicFileMicroLiveStateJournal:
-    return AtomicFileMicroLiveStateJournal(Path(tempfile.mkdtemp(prefix="bigan-wal-test-")))
+    base = Path(tempfile.mkdtemp(prefix="bigan-wal-test-"))
+    return AtomicFileMicroLiveStateJournal(
+        base / "journal",
+        namespace_authority_root=base / "namespace-authority",
+    )
 
 
 def _journal_with_state(raw_state: bytes) -> AtomicFileMicroLiveStateJournal:
@@ -640,6 +645,8 @@ def _record_settlement(
 
 
 class FakeTransport:
+    maximum_call_duration_ms = 100
+
     def __init__(
         self,
         *,
@@ -736,7 +743,11 @@ class SimulatedProcessCrash(BaseException):
 
 class CrashAfterCommittedEventJournal(AtomicFileMicroLiveStateJournal):
     def __init__(self, directory: Path | str) -> None:
-        super().__init__(directory)
+        base = Path(directory)
+        super().__init__(
+            base / "journal",
+            namespace_authority_root=base / "namespace-authority",
+        )
         self.target_event_type: str | None = None
 
     def arm(self, event_type: str) -> None:
@@ -761,6 +772,68 @@ class CrashAfterAcceptedCancelTransport(FakeTransport):
     def cancel_order(self, request: dict[str, Any]) -> bytes:
         super().cancel_order(request)
         raise SimulatedProcessCrash
+
+
+class HungTransport(FakeTransport):
+    maximum_call_duration_ms = 250
+
+    def __init__(self, *, hung_operation: str) -> None:
+        super().__init__()
+        self.hung_operation = hung_operation
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def _hang(self) -> None:
+        self.started.set()
+        self.release.wait(timeout=10)
+
+    def submit_order(self, request: dict[str, Any]) -> bytes:
+        if self.hung_operation == "submit_order":
+            self.submit_calls.append(copy.deepcopy(request))
+            self._hang()
+        return super().submit_order(request)
+
+    def cancel_order(self, request: dict[str, Any]) -> bytes:
+        if self.hung_operation == "cancel_order":
+            self.cancel_calls.append(copy.deepcopy(request))
+            self._hang()
+        return super().cancel_order(request)
+
+    def lookup_order(self, request: dict[str, Any]) -> bytes:
+        if self.hung_operation == "lookup_order":
+            self.lookup_calls.append(copy.deepcopy(request))
+            self._hang()
+        return super().lookup_order(request)
+
+
+def _multiprocess_hold_journal_lock(
+    root: str,
+    authority_root: str,
+    entered: Any,
+    release: Any,
+) -> None:
+    journal = AtomicFileMicroLiveStateJournal(
+        root,
+        namespace_authority_root=authority_root,
+    )
+    with journal._exclusive_lock():  # noqa: SLF001 - deliberate process-lock probe
+        entered.set()
+        release.wait(timeout=10)
+
+
+def _multiprocess_probe_journal_lock(
+    root: str,
+    authority_root: str,
+    entered: Any,
+    acquired: Any,
+) -> None:
+    journal = AtomicFileMicroLiveStateJournal(
+        root,
+        namespace_authority_root=authority_root,
+    )
+    entered.set()
+    with journal._exclusive_lock():  # noqa: SLF001 - deliberate process-lock probe
+        acquired.set()
 
 
 @pytest.fixture(scope="module")
@@ -1445,6 +1518,29 @@ def test_legacy_local_graph_cannot_create_a_production_capability(
     assert transport.submit_calls == []
 
 
+def test_executor_rejects_transport_without_mandatory_bounded_deadline(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+
+    class UnboundedTransport:
+        def submit_order(self, request: dict[str, Any]) -> bytes:
+            raise AssertionError(request)
+
+        def cancel_order(self, request: dict[str, Any]) -> bytes:
+            raise AssertionError(request)
+
+        def lookup_order(self, request: dict[str, Any]) -> bytes:
+            raise AssertionError(request)
+
+    with pytest.raises(MicroLiveExecutionError, match="deadline capability"):
+        MicroLiveExecutor(
+            verified,
+            transport=UnboundedTransport(),
+            journal=_new_journal(),
+        )
+
+
 def test_current_gate_declares_complete_successor_deployment_closure() -> None:
     assert auth_module.CURRENT_AUTHORIZATION_GATE_STATE.startswith("NO_GO_")
     assert set(auth_module.REQUIRED_SUCCESSOR_DEPLOYMENT_COMPONENTS) == {
@@ -1452,8 +1548,11 @@ def test_current_gate_declares_complete_successor_deployment_closure() -> None:
         "concrete_exchange_transport",
         "signer_wallet_boundary",
         "durable_single_writer_journal",
+        "unique_journal_namespace_authority",
         "trusted_clock_source",
         "independent_watchdog_scheduler",
+        "independent_emergency_kill_channel",
+        "bounded_transport_deadlines",
         "deployment_configuration",
         "deployment_artifact",
         "trusted_release_service_attestation",
@@ -3812,7 +3911,10 @@ def test_two_executor_instances_share_one_process_safe_budget_reservation(
     first_transport = FakeTransport()
     first = MicroLiveExecutor(verified, transport=first_transport, journal=journal)
     initial_snapshot = journal.snapshot()
-    second_journal = AtomicFileMicroLiveStateJournal(journal.root)
+    second_journal = AtomicFileMicroLiveStateJournal(
+        journal.root,
+        namespace_authority_root=journal.namespace_authority_root,
+    )
     second_transport = FakeTransport()
     second = MicroLiveExecutor.restore(
         authorization=verified,
@@ -3836,6 +3938,58 @@ def test_two_executor_instances_share_one_process_safe_budget_reservation(
     assert len(first_transport.submit_calls) == 1
     assert second_transport.submit_calls == []
     assert journal.snapshot().generation == first._generation
+
+
+def test_same_authorization_cannot_reset_risk_budget_in_a_second_journal_root(
+    authorized_fixture: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    verified = _verified(authorized_fixture)
+    authority_root = tmp_path / "trusted-deployment-namespace"
+    first = AtomicFileMicroLiveStateJournal(
+        tmp_path / "journal-one",
+        namespace_authority_root=authority_root,
+    )
+    MicroLiveExecutor(verified, transport=FakeTransport(), journal=first)
+    second = AtomicFileMicroLiveStateJournal(
+        tmp_path / "journal-two",
+        namespace_authority_root=authority_root,
+    )
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="already bound to another journal",
+    ):
+        MicroLiveExecutor(verified, transport=FakeTransport(), journal=second)
+    assert not second.state_path.exists()
+
+
+def test_real_processes_serialize_on_the_same_journal_root(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("fork")
+    root = str(tmp_path / "journal")
+    authority_root = str(tmp_path / "trusted-deployment-namespace")
+    holder_entered = context.Event()
+    holder_release = context.Event()
+    probe_entered = context.Event()
+    probe_acquired = context.Event()
+    holder = context.Process(
+        target=_multiprocess_hold_journal_lock,
+        args=(root, authority_root, holder_entered, holder_release),
+    )
+    probe = context.Process(
+        target=_multiprocess_probe_journal_lock,
+        args=(root, authority_root, probe_entered, probe_acquired),
+    )
+    holder.start()
+    assert holder_entered.wait(timeout=5)
+    probe.start()
+    assert probe_entered.wait(timeout=5)
+    assert not probe_acquired.wait(timeout=0.2)
+    holder_release.set()
+    assert probe_acquired.wait(timeout=5)
+    holder.join(timeout=5)
+    probe.join(timeout=5)
+    assert holder.exitcode == 0
+    assert probe.exitcode == 0
 
 
 @pytest.mark.parametrize(
@@ -3907,6 +4061,77 @@ def test_submit_crash_after_exchange_accept_before_result_fsync_recovers_unknown
     assert len(transport.submit_calls) == 1
 
 
+def test_restore_completes_unknown_to_kill_crash_prefix(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = CrashAfterCommittedEventJournal(
+        Path(tempfile.mkdtemp(prefix="bigan-unknown-kill-crash-test-"))
+    )
+    transport = FakeTransport(fail_submit=True)
+    executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
+    journal.arm("ORDER_SUBMISSION_UNKNOWN")
+    with pytest.raises(SimulatedProcessCrash):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    assert len(transport.submit_calls) == 1
+    committed = journal.snapshot()
+    assert b'"ORDER_SUBMISSION_UNKNOWN"' in committed.raw_state
+    assert b'"KILL_SWITCH_ENGAGED"' not in committed.raw_state
+
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=transport,
+        journal=journal,
+        raw_state=committed.raw_state,
+    )
+    snapshot = restored.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert len(transport.submit_calls) == 1
+
+
+def test_restore_completes_kill_to_cancel_unknown_without_duplicate_cancel(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = CrashAfterCommittedEventJournal(
+        Path(tempfile.mkdtemp(prefix="bigan-kill-cancel-crash-test-"))
+    )
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
+    executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    journal.arm("KILL_SWITCH_ENGAGED")
+    with pytest.raises(SimulatedProcessCrash):
+        executor.engage_kill_switch(
+            reason="synthetic_kill_cancel_prefix",
+            now_ts_ms=NOW_TS_MS + 1,
+        )
+    assert transport.cancel_calls == []
+    committed = journal.snapshot()
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=transport,
+        journal=journal,
+        raw_state=committed.raw_state,
+    )
+    event_types = [event["event_type"] for event in restored.events]
+    assert event_types.count("ORDER_CANCEL_PREPARED") == 1
+    assert event_types.count("ORDER_CANCEL_UNKNOWN") == 1
+    assert transport.cancel_calls == []
+
+    restored.enforce_runtime_safety(
+        now_ts_ms=NOW_TS_MS + 2,
+        operator_heartbeat_ts_ms=NOW_TS_MS + 1,
+    )
+    event_types = [event["event_type"] for event in restored.events]
+    assert event_types.count("ORDER_CANCEL_PREPARED") == 1
+    assert event_types.count("ORDER_CANCEL_UNKNOWN") == 1
+    assert transport.cancel_calls == []
+
+
 @pytest.mark.parametrize(
     ("mode", "expected_cancel_calls", "expected_closed"),
     (
@@ -3958,6 +4183,106 @@ def test_cancel_crash_boundaries_are_wal_recoverable(
         event["event_type"] == "ORDER_CANCEL_UNKNOWN"
         for event in restored.events
     ) is (not expected_closed)
+
+
+def test_hung_submit_cannot_starve_independent_watchdog_kill(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    transport = HungTransport(hung_operation="submit_order")
+    executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
+    failures: list[BaseException] = []
+
+    def submit() -> None:
+        try:
+            executor.submit_signal(
+                **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    submit_thread = threading.Thread(target=submit)
+    submit_thread.start()
+    assert transport.started.wait(timeout=5)
+    watchdog_thread = threading.Thread(
+        target=lambda: executor.enforce_runtime_safety(
+            now_ts_ms=NOW_TS_MS + 7_000,
+            operator_heartbeat_ts_ms=NOW_TS_MS,
+        )
+    )
+    watchdog_thread.start()
+    deadline = time.monotonic() + 0.15
+    emergency = journal.emergency_kill_snapshot()
+    while emergency is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+        emergency = journal.emergency_kill_snapshot()
+    assert emergency is not None
+    assert emergency.reason == "operator_heartbeat_stale"
+    submit_thread.join(timeout=5)
+    watchdog_thread.join(timeout=5)
+    assert not submit_thread.is_alive()
+    assert not watchdog_thread.is_alive()
+    assert any(isinstance(exc, MicroLiveExecutionError) for exc in failures)
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert any(
+        event["event_type"] == "ORDER_SUBMISSION_UNKNOWN"
+        for event in executor.events
+    )
+    transport.release.set()
+
+
+def test_hung_lookup_times_out_and_remains_conservatively_killed(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = HungTransport(hung_operation="lookup_order")
+    transport.fail_submit = True
+    executor = MicroLiveExecutor(verified, transport=transport)
+    with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    client_order_id = transport.submit_calls[0]["client_order_id"]
+    started = time.monotonic()
+    with pytest.raises(MicroLiveExecutionError, match="reconciliation failed closed"):
+        executor.reconcile_unknown_submission(
+            client_order_id=client_order_id,
+            now_ts_ms=NOW_TS_MS + 1,
+        )
+    assert time.monotonic() - started < 1.0
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+    assert any(
+        event["event_type"] == "ORDER_SUBMISSION_RECONCILIATION_FAILED"
+        for event in executor.events
+    )
+    transport.release.set()
+
+
+def test_hung_cancel_persists_emergency_kill_then_cancel_unknown(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    transport = HungTransport(hung_operation="cancel_order")
+    executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
+    executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    started = time.monotonic()
+    killed = executor.engage_kill_switch(
+        reason="hung_cancel_test",
+        now_ts_ms=NOW_TS_MS + 1,
+    )
+    assert time.monotonic() - started < 1.0
+    assert journal.emergency_kill_snapshot() is not None
+    assert killed["unknown_cancel_client_order_ids"]
+    assert any(
+        event["event_type"] == "ORDER_CANCEL_UNKNOWN"
+        for event in executor.events
+    )
+    transport.release.set()
 
 
 def test_concurrent_different_market_submissions_respect_one_order_limit(
@@ -4055,6 +4380,65 @@ def test_resource_limits_accept_exact_boundary_and_reject_max_plus_one(
     assert executor_module._require_bounded_state_bytes(b"x" * 16) == b"x" * 16
     with pytest.raises(MicroLiveExecutionError, match="byte limit"):
         executor_module._require_bounded_state_bytes(b"x" * 17)
+
+
+@pytest.mark.parametrize("transport_fails", (False, True))
+def test_event_capacity_reserves_all_post_side_effect_safety_transitions(
+    authorized_fixture: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    transport_fails: bool,
+) -> None:
+    monkeypatch.setattr(executor_module, "MAX_EVENT_COUNT", 20)
+    monkeypatch.setattr(executor_module, "EVENT_RECOVERY_RESERVE", 12)
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    first_signal = _signal(
+        candidate_bundle_sha256=verified.candidate_bundle_sha256
+    )
+    assert executor.submit_signal(**first_signal)["status"] == "ORDER_ACKNOWLEDGED"
+    for _ in range(3):
+        assert executor.submit_signal(**first_signal)["status"] == "IDEMPOTENT_REPLAY"
+    assert len(executor.events) == 6
+    transport.fail_submit = transport_fails
+    second = _signal(
+        candidate_bundle_sha256=verified.candidate_bundle_sha256,
+        market_id=f"0x{888:064x}",
+        up_token_id="88800",
+        down_token_id="88801",
+    )
+    if transport_fails:
+        with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+            executor.submit_signal(**second)
+        event_types = [event["event_type"] for event in executor.events]
+        assert "ORDER_SUBMISSION_UNKNOWN" in event_types
+        assert "KILL_SWITCH_ENGAGED" in event_types
+        assert "ORDER_CANCEL_PREPARED" in event_types
+        assert "ORDER_CANCELED" in event_types
+    else:
+        assert executor.submit_signal(**second)["status"] == "ORDER_ACKNOWLEDGED"
+        assert len(executor.events) == 9
+        third = _signal(
+            candidate_bundle_sha256=verified.candidate_bundle_sha256,
+            market_id=f"0x{889:064x}",
+            up_token_id="88900",
+            down_token_id="88901",
+        )
+        blocked = executor.submit_signal(**third)
+        assert blocked["reason"] == "journal_routine_capacity_exhausted"
+        assert len(transport.submit_calls) == 2
+        event_types = [event["event_type"] for event in executor.events]
+        assert event_types.count("ORDER_CANCEL_PREPARED") == 2
+        assert event_types.count("ORDER_CANCELED") == 2
+    assert len(executor.events) <= executor_module.MAX_EVENT_COUNT
+    committed = executor._journal.snapshot()
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=transport,
+        journal=executor._journal,
+        raw_state=committed.raw_state,
+    )
+    assert restored.reconciliation_snapshot()["kill_switch_active"] is True
 
 
 @pytest.mark.parametrize("bad_now", (0, True, "not-an-int", NOW_TS_MS - 1))
