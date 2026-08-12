@@ -8,13 +8,18 @@ it is never called unless the separately verified future authorization passes.
 from __future__ import annotations
 
 import copy
+import fcntl
 import hashlib
 import json
 import math
+import os
 import re
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from functools import wraps
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -40,8 +45,9 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
     ResidualPromotionRuntime,
 )
 
-STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v8"
+STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v9"
 SIGNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-execution-signal-v2"
+JOURNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-durable-journal-v1"
 IMPLEMENTATION_REPOSITORY_PATH = (
     "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py"
 )
@@ -53,6 +59,15 @@ _TOKEN_ID = re.compile(r"^[1-9][0-9]*$")
 _FORBIDDEN_FEATURE_KEY_TOKENS = ("outcome", "settlement", "resolution", "pnl")
 _RAW_STATE_RESTORE_TOKEN = object()
 FROZEN_EXECUTION_FEE_PER_UNIT_USD = Decimal("0.0002")
+MAX_RAW_JSON_BYTES = 1_048_576
+MAX_TRANSPORT_RESPONSE_BYTES = 1_048_576
+MAX_PROVIDER_STREAM_BYTES = 16_777_216
+MAX_PROVIDER_AGGREGATE_BYTES = 33_554_432
+MAX_JSON_DEPTH = 32
+MAX_PROVIDER_ROWS_PER_STREAM = 100_000
+MAX_EVENT_COUNT = 4_096
+MAX_RESTORED_STATE_BYTES = 67_108_864
+_JOURNAL_HEADER_MAX_BYTES = 4_096
 PROVIDER_FEATURE_FILENAMES = (
     "raw_polymarket_markets.jsonl",
     "raw_polymarket_orderbooks.jsonl",
@@ -124,6 +139,7 @@ _EVENT_TYPES = {
     "SIGNAL_REJECTED",
     "SIGNAL_EVALUATED",
     "ORDER_PREPARED",
+    "ORDER_CANCEL_PREPARED",
     "ORDER_ACKNOWLEDGED",
     "ORDER_REJECTED",
     "ORDER_SUBMISSION_UNKNOWN",
@@ -146,6 +162,241 @@ class MicroLiveExecutionError(RuntimeError):
 
 class ProviderFeatureEvidenceError(ValueError):
     """Raised when exact provider inputs cannot prove one causal feature row."""
+
+
+@dataclass(frozen=True, slots=True)
+class DurableJournalSnapshot:
+    """One fsync-committed exact executor state and its monotonic generation."""
+
+    generation: int
+    state_sha256: str
+    raw_state: bytes
+
+
+class DurableJournalTransaction(Protocol):
+    """Exclusive single-writer transaction held across a risk-bearing action."""
+
+    @property
+    def generation(self) -> int:
+        """Return the latest generation held by this transaction."""
+
+    def commit(self, *, expected_generation: int, raw_state: bytes) -> int:
+        """Fsync one exact next-generation state with compare-and-swap semantics."""
+
+
+class MicroLiveStateJournal(Protocol):
+    """Durable journal capability required by every executor instance."""
+
+    @property
+    def durable_single_writer(self) -> bool:
+        """Return whether fsync plus cross-process exclusion is provided."""
+
+    def initialize(self, raw_state: bytes) -> DurableJournalSnapshot:
+        """Create the generation-zero state, rejecting an existing journal."""
+
+    @contextmanager
+    def transaction(
+        self,
+        *,
+        expected_generation: int,
+    ) -> Iterator[DurableJournalTransaction]:
+        """Hold an exclusive cross-process transaction at the expected generation."""
+
+    def snapshot(self) -> DurableJournalSnapshot:
+        """Read and independently verify the latest committed state."""
+
+
+class _AtomicFileJournalTransaction:
+    def __init__(
+        self,
+        journal: AtomicFileMicroLiveStateJournal,
+        snapshot: DurableJournalSnapshot,
+    ) -> None:
+        self._journal = journal
+        self._generation = snapshot.generation
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    def commit(self, *, expected_generation: int, raw_state: bytes) -> int:
+        if expected_generation != self._generation:
+            raise MicroLiveExecutionError(
+                "micro-live journal transaction generation is stale"
+            )
+        next_generation = expected_generation + 1
+        self._journal._commit_locked(  # noqa: SLF001 - journal transaction boundary
+            expected_generation=expected_generation,
+            next_generation=next_generation,
+            raw_state=raw_state,
+        )
+        self._generation = next_generation
+        return next_generation
+
+
+class AtomicFileMicroLiveStateJournal:
+    """Fsync/CAS journal with a process lock and atomic single-file replacement.
+
+    The lock is held for the complete validate -> reserve -> persist -> external
+    side effect -> persist transaction.  The state file contains a bounded JSON
+    header followed by the exact strict-JSON executor state bytes.
+    """
+
+    def __init__(self, directory: Path | str) -> None:
+        root = Path(directory).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        if not root.is_dir():
+            raise MicroLiveExecutionError("micro-live journal root is not a directory")
+        self.root = root
+        self.state_path = root / "micro_live_state.wal"
+        self.lock_path = root / "micro_live_state.lock"
+        self._thread_lock = threading.RLock()
+
+    @property
+    def durable_single_writer(self) -> bool:
+        return True
+
+    def initialize(self, raw_state: bytes) -> DurableJournalSnapshot:
+        _require_bounded_state_bytes(raw_state)
+        with self._exclusive_lock():
+            if self.state_path.exists():
+                raise MicroLiveExecutionError(
+                    "micro-live journal already exists; strict restore is required"
+                )
+            generation = _state_generation(raw_state)
+            if generation != 0:
+                raise MicroLiveExecutionError(
+                    "new micro-live journal must start at generation zero"
+                )
+            self._write_locked(generation=generation, raw_state=raw_state)
+            return self._read_locked()
+
+    @contextmanager
+    def transaction(
+        self,
+        *,
+        expected_generation: int,
+    ) -> Iterator[DurableJournalTransaction]:
+        with self._exclusive_lock():
+            snapshot = self._read_locked()
+            if snapshot.generation != expected_generation:
+                raise MicroLiveExecutionError(
+                    "micro-live journal high-water generation is stale"
+                )
+            transaction = _AtomicFileJournalTransaction(self, snapshot)
+            yield transaction
+
+    def snapshot(self) -> DurableJournalSnapshot:
+        with self._exclusive_lock():
+            return self._read_locked()
+
+    @contextmanager
+    def _exclusive_lock(self) -> Iterator[None]:
+        with self._thread_lock:
+            descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+    def _commit_locked(
+        self,
+        *,
+        expected_generation: int,
+        next_generation: int,
+        raw_state: bytes,
+    ) -> None:
+        current = self._read_locked()
+        if not (
+            current.generation == expected_generation
+            and next_generation == expected_generation + 1
+            and _state_generation(raw_state) == next_generation
+        ):
+            raise MicroLiveExecutionError("micro-live journal CAS failed closed")
+        self._write_locked(generation=next_generation, raw_state=raw_state)
+
+    def _write_locked(self, *, generation: int, raw_state: bytes) -> None:
+        _require_bounded_state_bytes(raw_state)
+        state_sha256 = hashlib.sha256(raw_state).hexdigest()
+        header = json.dumps(
+            {
+                "generation": generation,
+                "schema_version": JOURNAL_SCHEMA_VERSION,
+                "state_sha256": state_sha256,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if len(header) > _JOURNAL_HEADER_MAX_BYTES or b"\n" in header:
+            raise MicroLiveExecutionError("micro-live journal header is invalid")
+        temporary_path = self.root / f".micro_live_state.{os.getpid()}.{threading.get_ident()}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        descriptor = os.open(temporary_path, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                stream.write(header)
+                stream.write(b"\n")
+                stream.write(raw_state)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.close(descriptor)
+            descriptor = -1
+            os.replace(temporary_path, self.state_path)
+            directory_descriptor = os.open(self.root, os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary_path.exists():
+                temporary_path.unlink()
+
+    def _read_locked(self) -> DurableJournalSnapshot:
+        try:
+            raw = self.state_path.read_bytes()
+        except OSError as exc:
+            raise MicroLiveExecutionError("micro-live journal state is absent") from exc
+        if len(raw) > MAX_RESTORED_STATE_BYTES + _JOURNAL_HEADER_MAX_BYTES + 1:
+            raise MicroLiveExecutionError("micro-live journal state exceeds byte limit")
+        header_raw, separator, raw_state = raw.partition(b"\n")
+        if not separator or not header_raw or len(header_raw) > _JOURNAL_HEADER_MAX_BYTES:
+            raise MicroLiveExecutionError("micro-live journal envelope is invalid")
+        try:
+            header = json.loads(
+                header_raw.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_nonfinite_json,
+            )
+            _validate_finite_json_tree(header)
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+            raise MicroLiveExecutionError("micro-live journal header is not strict JSON") from exc
+        if not (
+            isinstance(header, dict)
+            and set(header) == {"generation", "schema_version", "state_sha256"}
+            and header.get("schema_version") == JOURNAL_SCHEMA_VERSION
+            and isinstance(header.get("generation"), int)
+            and not isinstance(header.get("generation"), bool)
+            and int(header["generation"]) >= 0
+            and _SHA256.fullmatch(str(header.get("state_sha256") or "")) is not None
+        ):
+            raise MicroLiveExecutionError("micro-live journal header schema is invalid")
+        _require_bounded_state_bytes(raw_state)
+        generation = int(header["generation"])
+        state_sha256 = hashlib.sha256(raw_state).hexdigest()
+        if not (
+            state_sha256 == header["state_sha256"]
+            and _state_generation(raw_state) == generation
+        ):
+            raise MicroLiveExecutionError("micro-live journal state hash is invalid")
+        return DurableJournalSnapshot(
+            generation=generation,
+            state_sha256=state_sha256,
+            raw_state=raw_state,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +541,7 @@ def create_micro_live_executor(
     evidence_root: Path | str,
     now_ts_ms: int,
     transport: MicroLiveOrderTransport,
+    journal: MicroLiveStateJournal,
 ) -> MicroLiveExecutor:
     """Create an executor only after the complete future graph verifies."""
 
@@ -299,7 +551,22 @@ def create_micro_live_executor(
         evidence_root=evidence_root,
         now_ts_ms=now_ts_ms,
     )
-    return MicroLiveExecutor._from_verified_authorization(verified, transport=transport)
+    return MicroLiveExecutor._from_verified_authorization(
+        verified,
+        transport=transport,
+        journal=journal,
+    )
+
+
+def _durable_entry(method: Any) -> Any:
+    """Serialize one complete risk-bearing entry across threads and processes."""
+
+    @wraps(method)
+    def wrapped(self: MicroLiveExecutor, *args: Any, **kwargs: Any) -> Any:
+        with self._durable_transaction():
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 class MicroLiveExecutor:
@@ -310,11 +577,15 @@ class MicroLiveExecutor:
         authorization: VerifiedMicroLiveAuthorization,
         *,
         transport: MicroLiveOrderTransport,
+        journal: MicroLiveStateJournal,
     ) -> None:
         self._initialize(
             authorization=authorization,
             transport=transport,
+            journal=journal,
             events=(),
+            generation=0,
+            initialize_journal=True,
         )
 
     def _initialize(
@@ -322,7 +593,10 @@ class MicroLiveExecutor:
         *,
         authorization: VerifiedMicroLiveAuthorization,
         transport: MicroLiveOrderTransport,
+        journal: MicroLiveStateJournal,
         events: Sequence[Mapping[str, Any]],
+        generation: int,
+        initialize_journal: bool,
         restore_token: object | None = None,
     ) -> None:
         """Initialize only fresh state or state decoded by ``restore``."""
@@ -335,6 +609,10 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError("micro-live authorization capability is unverified")
         if transport is None:
             raise MicroLiveExecutionError("micro-live transport capability is missing")
+        if journal is None or journal.durable_single_writer is not True:
+            raise MicroLiveExecutionError(
+                "micro-live durable single-writer journal capability is missing"
+            )
         if not (
             authorization.runtime.lineage_id == LINEAGE_ID
             and authorization.runtime.candidate_id == CANDIDATE_ID
@@ -345,7 +623,13 @@ class MicroLiveExecutor:
         self.authorization = authorization
         self._authorization = _BoundAuthorization.from_verified(authorization)
         self.transport = transport
+        self._journal = journal
+        self._generation = generation
+        self._transaction_depth = 0
+        self._active_journal_transaction: DurableJournalTransaction | None = None
+        self._executor_thread_lock = threading.RLock()
         self._events = [copy.deepcopy(dict(event)) for event in events]
+        _require_event_count(len(self._events))
         self._verify_event_chain()
         view = self._reconcile_view()
         if _realized_loss_limit_reached(view, self._authorization) and not view[
@@ -362,6 +646,8 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "micro-live state exceeded loss budget without kill switch"
             )
+        if initialize_journal:
+            self._journal.initialize(self.export_state_bytes())
 
     @classmethod
     def _from_verified_authorization(
@@ -369,12 +655,41 @@ class MicroLiveExecutor:
         authorization: VerifiedMicroLiveAuthorization,
         *,
         transport: MicroLiveOrderTransport,
+        journal: MicroLiveStateJournal,
     ) -> MicroLiveExecutor:
-        return cls(authorization, transport=transport)
+        return cls(authorization, transport=transport, journal=journal)
 
     @property
     def events(self) -> tuple[dict[str, Any], ...]:
-        return tuple(copy.deepcopy(self._events))
+        with self._executor_thread_lock:
+            return tuple(copy.deepcopy(self._events))
+
+    @contextmanager
+    def _durable_transaction(self) -> Iterator[None]:
+        """Hold one reentrant executor lock plus journal process lease/CAS view."""
+
+        with self._executor_thread_lock:
+            if self._transaction_depth:
+                self._transaction_depth += 1
+                try:
+                    yield
+                finally:
+                    self._transaction_depth -= 1
+                return
+            with self._journal.transaction(
+                expected_generation=self._generation,
+            ) as transaction:
+                if transaction.generation != self._generation:
+                    raise MicroLiveExecutionError(
+                        "micro-live journal transaction opened at stale generation"
+                    )
+                self._transaction_depth = 1
+                self._active_journal_transaction = transaction
+                try:
+                    yield
+                finally:
+                    self._active_journal_transaction = None
+                    self._transaction_depth = 0
 
     def _require_authorization_integrity(
         self,
@@ -417,6 +732,54 @@ class MicroLiveExecutor:
             "micro-live authorization capability changed after executor construction"
         )
 
+    def _safe_persistence_timestamp(self) -> int:
+        return (
+            int(self._events[-1]["event_ts_ms"])
+            if self._events
+            else self._authorization.authorized_at_ts_ms
+        )
+
+    def _require_risk_entry_clock(
+        self,
+        now_ts_ms: Any,
+        *,
+        operation: str,
+        signal_rejection: bool = False,
+    ) -> int:
+        valid = (
+            isinstance(now_ts_ms, int)
+            and not isinstance(now_ts_ms, bool)
+            and now_ts_ms > 0
+        )
+        regressed = bool(
+            valid
+            and self._events
+            and int(now_ts_ms) < int(self._events[-1]["event_ts_ms"])
+        )
+        if valid and not regressed:
+            return int(now_ts_ms)
+        fallback_ts_ms = self._safe_persistence_timestamp()
+        failure = "clock_regression" if regressed else "clock_invalid"
+        if signal_rejection:
+            self._append_event(
+                "SIGNAL_REJECTED",
+                {
+                    "authorization_id": self._authorization.authorization_id,
+                    "candidate_bundle_sha256": self._authorization.candidate_bundle_sha256,
+                    "reason": "signal_validation_or_clock_failed",
+                    "error_type": "InvalidTrustedClock",
+                },
+                event_ts_ms=fallback_ts_ms,
+            )
+        self.engage_kill_switch(
+            reason=f"{operation}_{failure}",
+            now_ts_ms=fallback_ts_ms,
+        )
+        label = operation.replace("_", " ")
+        message = "timestamp regressed" if regressed else "timestamp is invalid"
+        raise MicroLiveExecutionError(f"{label} {message}")
+
+    @_durable_entry
     def enforce_runtime_safety(
         self,
         *,
@@ -432,23 +795,10 @@ class MicroLiveExecutor:
         """
 
         self._require_authorization_integrity(now_ts_ms=now_ts_ms)
-        if isinstance(now_ts_ms, bool) or not isinstance(now_ts_ms, int) or now_ts_ms <= 0:
-            fallback_ts_ms = (
-                int(self._events[-1]["event_ts_ms"])
-                if self._events
-                else self._authorization.authorized_at_ts_ms
-            )
-            self.engage_kill_switch(
-                reason="runtime_watchdog_clock_invalid",
-                now_ts_ms=fallback_ts_ms,
-            )
-            raise MicroLiveExecutionError("runtime watchdog timestamp is invalid")
-        if self._events and now_ts_ms < int(self._events[-1]["event_ts_ms"]):
-            self.engage_kill_switch(
-                reason="runtime_watchdog_clock_regression",
-                now_ts_ms=now_ts_ms,
-            )
-            raise MicroLiveExecutionError("runtime watchdog clock regressed")
+        now_ts_ms = self._require_risk_entry_clock(
+            now_ts_ms,
+            operation="runtime_watchdog",
+        )
 
         view = self._reconcile_view()
         if view["kill_switch_active"]:
@@ -488,6 +838,7 @@ class MicroLiveExecutor:
             "transport_called": False,
         }
 
+    @_durable_entry
     def submit_signal(
         self,
         *,
@@ -501,7 +852,11 @@ class MicroLiveExecutor:
         """Strictly decode one signal/input pair before any executable decision."""
 
         self._require_authorization_integrity(now_ts_ms=now_ts_ms)
-        _require_positive_timestamp(now_ts_ms, "signal submission")
+        now_ts_ms = self._require_risk_entry_clock(
+            now_ts_ms,
+            operation="signal_submission",
+            signal_rejection=True,
+        )
         try:
             signal_payload, raw_signal_json, raw_signal_sha256 = _raw_json_object(
                 raw_signal_payload,
@@ -948,6 +1303,7 @@ class MicroLiveExecutor:
             "transport_called": True,
         }
 
+    @_durable_entry
     def reconcile_unknown_submission(
         self,
         *,
@@ -965,7 +1321,10 @@ class MicroLiveExecutor:
             now_ts_ms=now_ts_ms,
             reconciliation_only=True,
         )
-        _require_positive_timestamp(now_ts_ms, "submission reconciliation")
+        now_ts_ms = self._require_risk_entry_clock(
+            now_ts_ms,
+            operation="submission_reconciliation",
+        )
         view = self._reconcile_view()
         order = view["orders"].get(client_order_id)
         if not (
@@ -1046,6 +1405,7 @@ class MicroLiveExecutor:
             "cancel_result": cancel_result,
         }
 
+    @_durable_entry
     def reconcile_unknown_cancellation(
         self,
         *,
@@ -1064,9 +1424,10 @@ class MicroLiveExecutor:
             now_ts_ms=now_ts_ms,
             reconciliation_only=True,
         )
-        _require_positive_timestamp(now_ts_ms, "cancel reconciliation")
-        if self._events and now_ts_ms < int(self._events[-1]["event_ts_ms"]):
-            raise MicroLiveExecutionError("cancel reconciliation timestamp regressed")
+        now_ts_ms = self._require_risk_entry_clock(
+            now_ts_ms,
+            operation="cancel_reconciliation",
+        )
         view = self._reconcile_view()
         order = view["orders"].get(client_order_id)
         if not (
@@ -1218,6 +1579,7 @@ class MicroLiveExecutor:
             event_ts_ms=now_ts_ms,
         )
 
+    @_durable_entry
     def record_fill(
         self,
         *,
@@ -1235,10 +1597,11 @@ class MicroLiveExecutor:
             now_ts_ms=now_ts_ms,
             reconciliation_only=True,
         )
-        _require_positive_timestamp(now_ts_ms, "fill observation")
+        now_ts_ms = self._require_risk_entry_clock(
+            now_ts_ms,
+            operation="fill_observation",
+        )
         try:
-            if self._events and now_ts_ms < int(self._events[-1]["event_ts_ms"]):
-                raise MicroLiveExecutionError("fill observation timestamp regressed")
             return self._record_fill(
                 client_order_id=client_order_id,
                 fill_id=fill_id,
@@ -1363,6 +1726,7 @@ class MicroLiveExecutor:
         snapshot = self.reconciliation_snapshot()
         return {"status": "FILL_RECORDED", "fill_id": fill_id, "snapshot": snapshot}
 
+    @_durable_entry
     def record_order_closed(
         self,
         *,
@@ -1377,10 +1741,11 @@ class MicroLiveExecutor:
             now_ts_ms=now_ts_ms,
             reconciliation_only=True,
         )
-        _require_positive_timestamp(now_ts_ms, "order close observation")
+        now_ts_ms = self._require_risk_entry_clock(
+            now_ts_ms,
+            operation="order_close_observation",
+        )
         try:
-            if self._events and now_ts_ms < int(self._events[-1]["event_ts_ms"]):
-                raise MicroLiveExecutionError("order close observation timestamp regressed")
             return self._record_order_closed(
                 client_order_id=client_order_id,
                 status=status,
@@ -1467,6 +1832,7 @@ class MicroLiveExecutor:
         )
         return {"status": event_type, "client_order_id": client_order_id}
 
+    @_durable_entry
     def record_settlement(
         self,
         *,
@@ -1482,10 +1848,11 @@ class MicroLiveExecutor:
             now_ts_ms=now_ts_ms,
             reconciliation_only=True,
         )
-        _require_positive_timestamp(now_ts_ms, "settlement observation")
+        now_ts_ms = self._require_risk_entry_clock(
+            now_ts_ms,
+            operation="settlement_observation",
+        )
         try:
-            if self._events and now_ts_ms < int(self._events[-1]["event_ts_ms"]):
-                raise MicroLiveExecutionError("settlement observation timestamp regressed")
             return self._record_settlement(
                 client_order_id=client_order_id,
                 settlement_id=settlement_id,
@@ -1609,22 +1976,31 @@ class MicroLiveExecutor:
             "snapshot": self.reconciliation_snapshot(),
         }
 
+    @_durable_entry
     def engage_kill_switch(self, *, reason: str, now_ts_ms: int) -> dict[str, Any]:
         """Irreversibly stop submissions and best-effort cancel open orders."""
 
         if not isinstance(reason, str) or not reason:
             raise MicroLiveExecutionError("kill-switch reason is invalid")
-        if isinstance(now_ts_ms, bool) or not isinstance(now_ts_ms, int) or now_ts_ms <= 0:
-            raise MicroLiveExecutionError("kill-switch timestamp is invalid")
-        event_ts_ms = max(
-            now_ts_ms,
-            int(self._events[-1]["event_ts_ms"]) if self._events else now_ts_ms,
+        clock_invalid = (
+            isinstance(now_ts_ms, bool)
+            or not isinstance(now_ts_ms, int)
+            or now_ts_ms <= 0
+        )
+        latest_ts_ms = self._safe_persistence_timestamp()
+        clock_regressed = bool(not clock_invalid and now_ts_ms < latest_ts_ms)
+        clock_failure = clock_invalid or clock_regressed
+        event_ts_ms = latest_ts_ms if clock_failure else max(now_ts_ms, latest_ts_ms)
+        effective_reason = (
+            "kill_switch_clock_regression"
+            if clock_regressed
+            else "kill_switch_clock_invalid" if clock_invalid else reason
         )
         view = self._reconcile_view()
         if not view["kill_switch_active"]:
             self._append_event(
                 "KILL_SWITCH_ENGAGED",
-                {"reason": reason, "engaged_at_ts_ms": event_ts_ms},
+                {"reason": effective_reason, "engaged_at_ts_ms": event_ts_ms},
                 event_ts_ms=event_ts_ms,
             )
             view = self._reconcile_view()
@@ -1633,11 +2009,33 @@ class MicroLiveExecutor:
         for order in view["orders"].values():
             if not order["is_open"]:
                 continue
+            existing_cancel = order.get("cancel_prepared")
+            if existing_cancel is None:
+                cancel_core = {
+                    "authorization_id": self._authorization.authorization_id,
+                    "client_order_id": order["prepared"]["client_order_id"],
+                    "exchange_order_id": order["acknowledgement"]["exchange_order_id"],
+                    "market_id": order["prepared"]["market_id"],
+                    "token_id": order["prepared"]["token_id"],
+                    "reason": effective_reason,
+                    "requested_at_ts_ms": event_ts_ms,
+                }
+                cancel_intent_id = canonical_json_sha256(cancel_core)
+                self._append_event(
+                    "ORDER_CANCEL_PREPARED",
+                    {**cancel_core, "cancel_intent_id": cancel_intent_id},
+                    event_ts_ms=event_ts_ms,
+                )
+            else:
+                cancel_intent_id = str(existing_cancel["cancel_intent_id"])
+                cancel_core = {
+                    key: value
+                    for key, value in dict(existing_cancel).items()
+                    if key != "cancel_intent_id"
+                }
             request = {
-                "authorization_id": self._authorization.authorization_id,
-                "client_order_id": order["prepared"]["client_order_id"],
-                "exchange_order_id": order["acknowledgement"]["exchange_order_id"],
-                "reason": reason,
+                **cancel_core,
+                "cancel_intent_id": cancel_intent_id,
             }
             try:
                 response, raw_response_json, response_sha256 = _raw_json_object(
@@ -1674,12 +2072,15 @@ class MicroLiveExecutor:
                     event_ts_ms=event_ts_ms,
                 )
                 unknown.append(str(request["client_order_id"]))
-        return {
+        result = {
             "status": "KILL_SWITCH_ENGAGED",
-            "reason": reason,
+            "reason": effective_reason,
             "canceled_client_order_ids": canceled,
             "unknown_cancel_client_order_ids": unknown,
         }
+        if clock_failure:
+            raise MicroLiveExecutionError("kill-switch trusted clock is invalid")
+        return result
 
     def reconciliation_snapshot(self) -> dict[str, Any]:
         """Return a deterministic cash/order/position reconciliation snapshot."""
@@ -1714,6 +2115,7 @@ class MicroLiveExecutor:
     def export_state(self, *, include_state_sha: bool = True) -> dict[str, Any]:
         payload = {
             "schema_version": STATE_SCHEMA_VERSION,
+            "journal_generation": self._generation,
             "authorization_id": self._authorization.authorization_id,
             "authorization_payload_sha256": self._authorization.authorization_payload_sha256,
             "candidate_bundle_sha256": self._authorization.candidate_bundle_sha256,
@@ -1741,11 +2143,17 @@ class MicroLiveExecutor:
         *,
         authorization: VerifiedMicroLiveAuthorization,
         transport: MicroLiveOrderTransport,
+        journal: MicroLiveStateJournal,
         raw_state: bytes,
     ) -> MicroLiveExecutor:
-        state, _, _ = _raw_json_object(raw_state, "micro-live state")
+        state, _, _ = _raw_json_object(
+            raw_state,
+            "micro-live state",
+            maximum_bytes=MAX_RESTORED_STATE_BYTES,
+        )
         if set(state) != {
             "schema_version",
+            "journal_generation",
             "authorization_id",
             "authorization_payload_sha256",
             "candidate_bundle_sha256",
@@ -1755,24 +2163,88 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError("micro-live state schema is invalid")
         payload = {key: copy.deepcopy(value) for key, value in state.items() if key != "state_sha256"}
         events = payload.get("events")
+        generation = payload.get("journal_generation")
         if not (
             payload.get("schema_version") == STATE_SCHEMA_VERSION
+            and isinstance(generation, int)
+            and not isinstance(generation, bool)
+            and generation >= 0
             and payload.get("authorization_id") == authorization.authorization_id
             and payload.get("authorization_payload_sha256")
             == authorization.authorization_payload_sha256
             and payload.get("candidate_bundle_sha256") == authorization.candidate_bundle_sha256
             and isinstance(events, list)
+            and len(events) <= MAX_EVENT_COUNT
             and state.get("state_sha256") == canonical_json_sha256(payload)
         ):
             raise MicroLiveExecutionError("micro-live state identity or SHA-256 mismatch")
+        snapshot = journal.snapshot()
+        if not (
+            journal.durable_single_writer is True
+            and snapshot.generation == generation
+            and snapshot.raw_state == raw_state
+            and snapshot.state_sha256 == hashlib.sha256(raw_state).hexdigest()
+        ):
+            raise MicroLiveExecutionError(
+                "micro-live restore state is not the journal high-water snapshot"
+            )
         restored = cls.__new__(cls)
         restored._initialize(
             authorization=authorization,
             transport=transport,
+            journal=journal,
             events=events,
+            generation=int(generation),
+            initialize_journal=False,
             restore_token=_RAW_STATE_RESTORE_TOKEN,
         )
+        restored._recover_incomplete_external_side_effects()
         return restored
+
+    def _recover_incomplete_external_side_effects(self) -> None:
+        """Persist conservative UNKNOWN states for crash-interrupted side effects."""
+
+        with self._durable_transaction():
+            view = self._reconcile_view()
+            event_ts_ms = (
+                int(self._events[-1]["event_ts_ms"])
+                if self._events
+                else self._authorization.authorized_at_ts_ms
+            )
+            recovered_submission = False
+            for order in view["orders"].values():
+                if (
+                    order["acknowledgement"] is None
+                    and order["closed_status"] is None
+                    and order["submission_unknown"] is not True
+                ):
+                    self._append_event(
+                        "ORDER_SUBMISSION_UNKNOWN",
+                        {
+                            "client_order_id": order["prepared"]["client_order_id"],
+                            "error_type": "CrashRecoveryIncompleteSubmission",
+                        },
+                        event_ts_ms=event_ts_ms,
+                    )
+                    recovered_submission = True
+                if (
+                    order.get("cancel_prepared") is not None
+                    and order["closed_status"] is None
+                    and order["cancel_unknown"] is not True
+                ):
+                    self._append_event(
+                        "ORDER_CANCEL_UNKNOWN",
+                        {
+                            "client_order_id": order["prepared"]["client_order_id"],
+                            "error_type": "CrashRecoveryIncompleteCancellation",
+                        },
+                        event_ts_ms=event_ts_ms,
+                    )
+            if recovered_submission:
+                self.engage_kill_switch(
+                    reason="crash_recovery_incomplete_submission",
+                    now_ts_ms=event_ts_ms,
+                )
 
     def _validate_clock(
         self,
@@ -1915,8 +2387,14 @@ class MicroLiveExecutor:
         *,
         event_ts_ms: int,
     ) -> None:
+        transaction = self._active_journal_transaction
+        if transaction is None or self._transaction_depth <= 0:
+            raise MicroLiveExecutionError(
+                "micro-live event append requires a durable journal transaction"
+            )
         if event_type not in _EVENT_TYPES:
             raise MicroLiveExecutionError("micro-live event type is invalid")
+        _require_event_count(len(self._events) + 1)
         _require_positive_timestamp(event_ts_ms, "event")
         if self._events and event_ts_ms < self._events[-1]["event_ts_ms"]:
             raise MicroLiveExecutionError("micro-live event timestamp regressed")
@@ -1929,7 +2407,24 @@ class MicroLiveExecutor:
             "event_type": event_type,
             "payload": copy.deepcopy(dict(payload)),
         }
-        self._events.append({**core, "event_sha256": canonical_json_sha256(core)})
+        event = {**core, "event_sha256": canonical_json_sha256(core)}
+        previous_generation = self._generation
+        self._events.append(event)
+        self._generation = previous_generation + 1
+        try:
+            raw_state = self.export_state_bytes()
+            committed_generation = transaction.commit(
+                expected_generation=previous_generation,
+                raw_state=raw_state,
+            )
+            if committed_generation != self._generation:
+                raise MicroLiveExecutionError(
+                    "micro-live journal committed an unexpected generation"
+                )
+        except Exception:
+            self._generation = previous_generation
+            self._events.pop()
+            raise
 
     def _verify_event_chain(self) -> None:
         previous = GENESIS
@@ -2208,6 +2703,38 @@ class MicroLiveExecutor:
                 and payload.get("client_order_id") == intent_id
             ):
                 raise MicroLiveExecutionError("prepared order identity is invalid")
+            return
+        if event_type == "ORDER_CANCEL_PREPARED":
+            expected = {
+                "authorization_id",
+                "client_order_id",
+                "exchange_order_id",
+                "market_id",
+                "token_id",
+                "reason",
+                "requested_at_ts_ms",
+                "cancel_intent_id",
+            }
+            if set(payload) != expected:
+                raise MicroLiveExecutionError("prepared cancellation schema is invalid")
+            core = {
+                key: value for key, value in payload.items() if key != "cancel_intent_id"
+            }
+            if not (
+                payload.get("authorization_id") == self._authorization.authorization_id
+                and _is_sha256(payload.get("client_order_id"))
+                and isinstance(payload.get("exchange_order_id"), str)
+                and payload["exchange_order_id"]
+                and isinstance(payload.get("market_id"), str)
+                and _CONDITION_ID.fullmatch(payload["market_id"]) is not None
+                and isinstance(payload.get("token_id"), str)
+                and _TOKEN_ID.fullmatch(payload["token_id"]) is not None
+                and isinstance(payload.get("reason"), str)
+                and payload["reason"]
+                and payload.get("requested_at_ts_ms") == event_ts_ms
+                and payload.get("cancel_intent_id") == canonical_json_sha256(core)
+            ):
+                raise MicroLiveExecutionError("prepared cancellation payload is invalid")
             return
         if event_type in {"ORDER_ACKNOWLEDGED", "ORDER_REJECTED"}:
             response_keys = {
@@ -2692,6 +3219,7 @@ class MicroLiveExecutor:
                     "prepared": payload,
                     "acknowledgement": None,
                     "submission_unknown": False,
+                    "cancel_prepared": None,
                     "cancel_unknown": False,
                     "closed_status": None,
                     "close_event": None,
@@ -2706,6 +3234,7 @@ class MicroLiveExecutor:
                 "ORDER_SUBMISSION_UNKNOWN",
                 "ORDER_SUBMISSION_RECONCILED",
                 "ORDER_SUBMISSION_RECONCILIATION_FAILED",
+                "ORDER_CANCEL_PREPARED",
                 "ORDER_CANCEL_RECONCILED",
                 "ORDER_CANCEL_RECONCILIATION_FAILED",
                 "ORDER_CANCELED",
@@ -2715,7 +3244,24 @@ class MicroLiveExecutor:
                 order = orders.get(str(client_order_id))
                 if order is None:
                     raise MicroLiveExecutionError("order lifecycle event lacks preparation")
-                if event_type == "ORDER_ACKNOWLEDGED":
+                if event_type == "ORDER_CANCEL_PREPARED":
+                    prepared = order["prepared"]
+                    acknowledgement = order["acknowledgement"]
+                    if (
+                        acknowledgement is None
+                        or order["cancel_prepared"] is not None
+                        or order["closed_status"] is not None
+                        or payload.get("client_order_id") != prepared["client_order_id"]
+                        or payload.get("exchange_order_id")
+                        != acknowledgement["exchange_order_id"]
+                        or payload.get("market_id") != prepared["market_id"]
+                        or payload.get("token_id") != prepared["token_id"]
+                    ):
+                        raise MicroLiveExecutionError(
+                            "prepared cancellation lifecycle is invalid"
+                        )
+                    order["cancel_prepared"] = payload
+                elif event_type == "ORDER_ACKNOWLEDGED":
                     prepared = order["prepared"]
                     exchange_order_id = payload.get("exchange_order_id")
                     if (
@@ -2803,6 +3349,7 @@ class MicroLiveExecutor:
                     acknowledgement = order["acknowledgement"]
                     if (
                         acknowledgement is None
+                        or order["cancel_prepared"] is None
                         or order["cancel_unknown"] is not True
                         or order["closed_status"] is not None
                         or order["settlement"] is not None
@@ -2825,7 +3372,7 @@ class MicroLiveExecutor:
                 elif event_type == "ORDER_CANCEL_RECONCILIATION_FAILED":
                     prepared = order["prepared"]
                     acknowledgement = order["acknowledgement"]
-                    if acknowledgement is None:
+                    if acknowledgement is None or order["cancel_prepared"] is None:
                         raise MicroLiveExecutionError(
                             "failed cancel reconciliation lifecycle is invalid"
                         )
@@ -2897,6 +3444,7 @@ class MicroLiveExecutor:
                 else:
                     if (
                         order["acknowledgement"] is None
+                        or order["cancel_prepared"] is None
                         or order["closed_status"] is not None
                         or order["settlement"] is not None
                     ):
@@ -3279,9 +3827,17 @@ def _validate_market_identity_evidence(
         raise MicroLiveExecutionError("market identity evidence schema is not exact")
     gamma_raw = evidence.get("raw_gamma_payload")
     clob_raw = evidence.get("raw_clob_revalidation_payload")
-    if not isinstance(gamma_raw, bytes) or not gamma_raw:
+    if (
+        not isinstance(gamma_raw, bytes)
+        or not gamma_raw
+        or len(gamma_raw) > MAX_RAW_JSON_BYTES
+    ):
         raise MicroLiveExecutionError("raw Gamma market identity bytes are invalid")
-    if not isinstance(clob_raw, bytes) or not clob_raw:
+    if (
+        not isinstance(clob_raw, bytes)
+        or not clob_raw
+        or len(clob_raw) > MAX_RAW_JSON_BYTES
+    ):
         raise MicroLiveExecutionError("raw CLOB revalidation bytes are invalid")
     identity = dict(signal["market_identity"])
     if not (
@@ -3333,7 +3889,14 @@ def _validate_market_identity_evidence(
         raise MicroLiveExecutionError("CLOB condition, slug, or token identity mismatches")
 
 
-def _decode_provider_json(raw: bytes, label: str) -> Any:
+def _decode_provider_json(
+    raw: bytes,
+    label: str,
+    *,
+    maximum_bytes: int = MAX_RAW_JSON_BYTES,
+) -> Any:
+    if not isinstance(raw, bytes) or not raw or len(raw) > maximum_bytes:
+        raise MicroLiveExecutionError(f"{label} raw byte limit is invalid or exceeded")
     try:
         value = json.loads(
             raw.decode("utf-8"),
@@ -3342,14 +3905,19 @@ def _decode_provider_json(raw: bytes, label: str) -> Any:
         )
         _validate_finite_json_tree(value)
         return value
-    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
         raise MicroLiveExecutionError(f"{label} raw bytes are not strict JSON") from exc
 
 
-def _raw_json_object(raw: Any, label: str) -> tuple[dict[str, Any], str, str]:
-    if not isinstance(raw, bytes) or not raw:
+def _raw_json_object(
+    raw: Any,
+    label: str,
+    *,
+    maximum_bytes: int = MAX_RAW_JSON_BYTES,
+) -> tuple[dict[str, Any], str, str]:
+    if not isinstance(raw, bytes) or not raw or len(raw) > maximum_bytes:
         raise MicroLiveExecutionError(f"{label} raw bytes are invalid")
-    value = _decode_provider_json(raw, label)
+    value = _decode_provider_json(raw, label, maximum_bytes=maximum_bytes)
     if not isinstance(value, Mapping):
         raise MicroLiveExecutionError(f"{label} is not a JSON object")
     return dict(value), raw.decode("utf-8"), hashlib.sha256(raw).hexdigest()
@@ -3380,15 +3948,17 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
-def _validate_finite_json_tree(value: Any) -> None:
+def _validate_finite_json_tree(value: Any, *, depth: int = 0) -> None:
+    if depth > MAX_JSON_DEPTH:
+        raise ValueError("decoded JSON exceeds maximum nesting depth")
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("decoded JSON contains a non-finite number")
     if isinstance(value, Mapping):
         for item in value.values():
-            _validate_finite_json_tree(item)
+            _validate_finite_json_tree(item, depth=depth + 1)
     elif isinstance(value, list):
         for item in value:
-            _validate_finite_json_tree(item)
+            _validate_finite_json_tree(item, depth=depth + 1)
 
 
 def _gamma_market_rows(value: Any) -> list[dict[str, Any]]:
@@ -3790,6 +4360,7 @@ def _decode_provider_feature_evidence(
         raise ProviderFeatureEvidenceError(
             "provider feature evidence schema is not exact"
         )
+    _require_provider_byte_limits(raw_evidence)
     rows: dict[str, list[dict[str, Any]]] = {}
     raw_jsonl: dict[str, str] = {}
     file_sha256: dict[str, str] = {}
@@ -3798,6 +4369,10 @@ def _decode_provider_feature_evidence(
         if not isinstance(raw, bytes):
             raise ProviderFeatureEvidenceError(
                 f"provider feature evidence is not raw bytes: {name}"
+            )
+        if len(raw) > MAX_PROVIDER_STREAM_BYTES:
+            raise ProviderFeatureEvidenceError(
+                f"provider feature evidence exceeds stream byte limit: {name}"
             )
         decoded_rows, text = _strict_provider_jsonl(raw, name)
         if name in _REQUIRED_NONEMPTY_PROVIDER_FILES and not decoded_rows:
@@ -3869,6 +4444,10 @@ def _strict_provider_jsonl(
     raw: bytes,
     label: str,
 ) -> tuple[list[dict[str, Any]], str]:
+    if not isinstance(raw, bytes) or len(raw) > MAX_PROVIDER_STREAM_BYTES:
+        raise ProviderFeatureEvidenceError(
+            f"provider feature evidence exceeds stream byte limit: {label}"
+        )
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -3878,6 +4457,7 @@ def _strict_provider_jsonl(
     if not raw:
         return [], text
     lines = text.splitlines()
+    _require_provider_row_count(len(lines), label=label)
     if not lines or any(not line.strip() for line in lines):
         raise ProviderFeatureEvidenceError(
             f"provider feature evidence contains an empty JSONL row: {label}"
@@ -3891,7 +4471,7 @@ def _strict_provider_jsonl(
                 parse_constant=_reject_nonfinite_json,
             )
             _validate_finite_json_tree(value)
-        except (ValueError, json.JSONDecodeError) as exc:
+        except (ValueError, json.JSONDecodeError, RecursionError) as exc:
             raise ProviderFeatureEvidenceError(
                 f"provider feature evidence is not strict JSONL: {label}"
             ) from exc
@@ -3994,6 +4574,82 @@ def _require_positive_timestamp(value: Any, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise MicroLiveExecutionError(f"{label} timestamp is invalid")
     return value
+
+
+def _require_bounded_state_bytes(raw_state: Any) -> bytes:
+    if (
+        not isinstance(raw_state, bytes)
+        or not raw_state
+        or len(raw_state) > MAX_RESTORED_STATE_BYTES
+    ):
+        raise MicroLiveExecutionError("micro-live state exceeds byte limit")
+    return raw_state
+
+
+def _require_event_count(event_count: Any) -> int:
+    if (
+        isinstance(event_count, bool)
+        or not isinstance(event_count, int)
+        or event_count < 0
+        or event_count > MAX_EVENT_COUNT
+    ):
+        raise MicroLiveExecutionError("micro-live event count exceeds limit")
+    return event_count
+
+
+def _require_provider_byte_limits(raw_evidence: Any) -> None:
+    if not isinstance(raw_evidence, Mapping) or any(
+        not isinstance(raw_evidence.get(name), bytes)
+        for name in PROVIDER_FEATURE_FILENAMES
+    ):
+        raise ProviderFeatureEvidenceError(
+            "provider feature evidence contains a non-byte stream"
+        )
+    if any(
+        len(raw_evidence[name]) > MAX_PROVIDER_STREAM_BYTES
+        for name in PROVIDER_FEATURE_FILENAMES
+    ):
+        raise ProviderFeatureEvidenceError(
+            "provider feature evidence exceeds stream byte limit"
+        )
+    if (
+        sum(len(raw_evidence[name]) for name in PROVIDER_FEATURE_FILENAMES)
+        > MAX_PROVIDER_AGGREGATE_BYTES
+    ):
+        raise ProviderFeatureEvidenceError(
+            "provider feature evidence exceeds aggregate byte limit"
+        )
+
+
+def _require_provider_row_count(row_count: Any, *, label: str) -> int:
+    if (
+        isinstance(row_count, bool)
+        or not isinstance(row_count, int)
+        or row_count < 0
+        or row_count > MAX_PROVIDER_ROWS_PER_STREAM
+    ):
+        raise ProviderFeatureEvidenceError(
+            f"provider feature evidence exceeds row limit: {label}"
+        )
+    return row_count
+
+
+def _state_generation(raw_state: bytes) -> int:
+    _require_bounded_state_bytes(raw_state)
+    value, _, _ = _raw_json_object(
+        raw_state,
+        "micro-live journal state",
+        maximum_bytes=MAX_RESTORED_STATE_BYTES,
+    )
+    generation = value.get("journal_generation")
+    if (
+        value.get("schema_version") != STATE_SCHEMA_VERSION
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+    ):
+        raise MicroLiveExecutionError("micro-live journal state generation is invalid")
+    return generation
 
 
 def _require_sha256(value: Any, label: str) -> str:

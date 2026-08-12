@@ -60,6 +60,24 @@ MARKET_ALLOWLIST = ("BTC-15M",)
 ALLOWED_ACTIONS = ("BUY_UP_HOLD", "BUY_DOWN_HOLD")
 ISSUE_NUMBER = 264
 TRUSTED_APPROVER_LOGINS = ("phead198708",)
+CURRENT_AUTHORIZATION_GATE_STATE = (
+    "NO_GO_LEGACY_LOCAL_PROVENANCE_AND_DEPLOYMENT_CLOSURE_INCOMPLETE"
+)
+REQUIRED_SUCCESSOR_DEPLOYMENT_COMPONENTS = (
+    "deployment_composition_root",
+    "concrete_exchange_transport",
+    "signer_wallet_boundary",
+    "durable_single_writer_journal",
+    "trusted_clock_source",
+    "independent_watchdog_scheduler",
+    "deployment_configuration",
+    "deployment_artifact",
+    "trusted_release_service_attestation",
+    "owner_authenticated_capital_approval",
+)
+MAX_AUTHORIZATION_JSON_BYTES = 1_048_576
+MAX_EVIDENCE_JSON_BYTES = 16_777_216
+MAX_JSON_DEPTH = 32
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMENT_URL = re.compile(
     r"^https://github\.com/phead198708/BiGan/issues/264"
@@ -121,6 +139,7 @@ def verify_micro_live_authorization(
     authorization = _decode_json_object_bytes(
         raw_authorization,
         "micro-live authorization",
+        maximum_bytes=MAX_AUTHORIZATION_JSON_BYTES,
     )
     if isinstance(now_ts_ms, bool) or not isinstance(now_ts_ms, int) or now_ts_ms <= 0:
         raise MicroLiveAuthorizationError("authorization verification time is invalid")
@@ -167,6 +186,11 @@ def verify_micro_live_authorization(
         and authorization.get("candidate_id") == CANDIDATE_ID
     ):
         raise MicroLiveAuthorizationError("micro-live authorization identity is invalid")
+    raise MicroLiveAuthorizationError(
+        "legacy local review and owner-approval provenance is non-authorizing; "
+        "an externally authenticated successor deployment-closure protocol is required; "
+        f"gate_state={CURRENT_AUTHORIZATION_GATE_STATE}"
+    )
 
     template = _verified_repository_json(root, AUTHORIZATION_TEMPLATE_REPOSITORY_PATH)
     contract = _verified_repository_json(root, CONTRACT_REPOSITORY_PATH)
@@ -637,16 +661,30 @@ def _verified_evidence_json(
 
 def _load_json(path: Path) -> dict[str, Any]:
     try:
+        if path.stat().st_size > MAX_EVIDENCE_JSON_BYTES:
+            raise MicroLiveAuthorizationError(
+                "micro-live JSON evidence exceeds byte limit"
+            )
         return _decode_json_object_bytes(
             path.read_bytes(),
             "micro-live JSON evidence",
+            maximum_bytes=MAX_EVIDENCE_JSON_BYTES,
         )
     except (OSError, MicroLiveAuthorizationError) as exc:
         raise MicroLiveAuthorizationError("micro-live JSON evidence is invalid") from exc
 
 
-def _decode_json_object_bytes(raw: Any, label: str) -> dict[str, Any]:
-    if not isinstance(raw, bytes) or not raw:
+def _decode_json_object_bytes(
+    raw: Any,
+    label: str,
+    *,
+    maximum_bytes: int = MAX_EVIDENCE_JSON_BYTES,
+) -> dict[str, Any]:
+    if (
+        not isinstance(raw, bytes)
+        or not raw
+        or len(raw) > maximum_bytes
+    ):
         raise MicroLiveAuthorizationError(f"{label} raw bytes are invalid")
     try:
         value = json.loads(
@@ -655,7 +693,7 @@ def _decode_json_object_bytes(raw: Any, label: str) -> dict[str, Any]:
             parse_constant=_reject_nonfinite_json,
         )
         _validate_finite_json_tree(value)
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise MicroLiveAuthorizationError(f"{label} is not strict JSON") from exc
     if not isinstance(value, dict):
         raise MicroLiveAuthorizationError(f"{label} root must be an object")
@@ -675,15 +713,17 @@ def _reject_nonfinite_json(value: str) -> None:
     raise ValueError(f"non-finite JSON constant: {value}")
 
 
-def _validate_finite_json_tree(value: Any) -> None:
+def _validate_finite_json_tree(value: Any, *, depth: int = 0) -> None:
+    if depth > MAX_JSON_DEPTH:
+        raise ValueError("decoded JSON exceeds maximum nesting depth")
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("decoded JSON contains a non-finite number")
     if isinstance(value, Mapping):
         for item in value.values():
-            _validate_finite_json_tree(item)
+            _validate_finite_json_tree(item, depth=depth + 1)
     elif isinstance(value, list):
         for item in value:
-            _validate_finite_json_tree(item)
+            _validate_finite_json_tree(item, depth=depth + 1)
 
 
 def _positive_decimal(value: Any, label: str) -> Decimal:
@@ -717,6 +757,7 @@ def _is_sha256(value: Any) -> bool:
 __all__ = [
     "ALLOWED_ACTIONS",
     "AUTHORIZATION_SCHEMA_VERSION",
+    "CURRENT_AUTHORIZATION_GATE_STATE",
     "HUMAN_ATTESTATION_SCHEMA_VERSION",
     "IMPLEMENTATION_REPOSITORY_PATH",
     "MARKET_ALLOWLIST",
@@ -724,6 +765,7 @@ __all__ = [
     "MAXIMUM_OPERATOR_HEARTBEAT_AGE_MS",
     "MAXIMUM_SIGNAL_AGE_MS",
     "MicroLiveAuthorizationError",
+    "REQUIRED_SUCCESSOR_DEPLOYMENT_COMPONENTS",
     "TRUSTED_APPROVER_LOGINS",
     "VerifiedMicroLiveAuthorization",
     "authorization_capability_is_verified",

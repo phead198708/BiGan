@@ -8,6 +8,8 @@ import hashlib
 import json
 import shutil
 import tempfile
+import threading
+import time
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -22,6 +24,8 @@ from bigan.v8.phase6 import (
     RollbackPlan,
     run_phase6_cicd_pipeline,
 )
+from bigan.v8.polymarket import residual_promotion_micro_live_authorization as auth_module
+from bigan.v8.polymarket import residual_promotion_micro_live_executor as executor_module
 from bigan.v8.polymarket.challenge_development_lane import sha256_file
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.corpus import (
@@ -36,12 +40,14 @@ from bigan.v8.polymarket.residual_promotion_micro_live_authorization import (
     AUTHORIZATION_SCHEMA_VERSION,
     HUMAN_ATTESTATION_SCHEMA_VERSION,
     MicroLiveAuthorizationError,
+    VerifiedMicroLiveAuthorization,
     authorization_capability_is_verified,
     verify_micro_live_authorization,
 )
 from bigan.v8.polymarket.residual_promotion_micro_live_executor import (
     PROVIDER_FEATURE_FILENAMES,
     SIGNAL_SCHEMA_VERSION,
+    AtomicFileMicroLiveStateJournal,
     MicroLiveExecutionError,
     ProviderFeatureEvidenceError,
     build_provider_bound_feature_rows,
@@ -466,6 +472,18 @@ def _json_bytes(value: dict[str, Any]) -> bytes:
     return json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
 
 
+def _new_journal() -> AtomicFileMicroLiveStateJournal:
+    return AtomicFileMicroLiveStateJournal(Path(tempfile.mkdtemp(prefix="bigan-wal-test-")))
+
+
+def _journal_with_state(raw_state: bytes) -> AtomicFileMicroLiveStateJournal:
+    journal = _new_journal()
+    generation = int(json.loads(raw_state)["journal_generation"])
+    with journal._exclusive_lock():
+        journal._write_locked(generation=generation, raw_state=raw_state)
+    return journal
+
+
 def _provider_evidence_with_market_patch(**changes: Any) -> dict[str, bytes]:
     evidence = dict(BASE_PROVIDER_FEATURE_EVIDENCE)
     market = json.loads(
@@ -478,6 +496,19 @@ def _provider_evidence_with_market_patch(**changes: Any) -> dict[str, bytes]:
 
 class MicroLiveExecutor(_StrictMicroLiveExecutor):
     """Test adapter that materializes mutable fixtures as exact raw bytes."""
+
+    def __init__(
+        self,
+        authorization: Any,
+        *,
+        transport: Any,
+        journal: AtomicFileMicroLiveStateJournal | None = None,
+    ) -> None:
+        super().__init__(
+            authorization,
+            transport=transport,
+            journal=journal or _new_journal(),
+        )
 
     def submit_signal(
         self,
@@ -697,6 +728,39 @@ class FakeTransport:
             "accepted_quantity": submitted["quantity"],
             "limit_price": submitted["limit_price"],
         })
+
+
+class SimulatedProcessCrash(BaseException):
+    """Crash injection deliberately bypassing ordinary Exception handlers."""
+
+
+class CrashAfterCommittedEventJournal(AtomicFileMicroLiveStateJournal):
+    def __init__(self, directory: Path | str) -> None:
+        super().__init__(directory)
+        self.target_event_type: str | None = None
+
+    def arm(self, event_type: str) -> None:
+        self.target_event_type = event_type
+
+    def _write_locked(self, *, generation: int, raw_state: bytes) -> None:
+        super()._write_locked(generation=generation, raw_state=raw_state)
+        state = json.loads(raw_state)
+        events = state.get("events") or []
+        if events and events[-1]["event_type"] == self.target_event_type:
+            self.target_event_type = None
+            raise SimulatedProcessCrash
+
+
+class CrashAfterAcceptedSubmitTransport(FakeTransport):
+    def submit_order(self, request: dict[str, Any]) -> bytes:
+        super().submit_order(request)
+        raise SimulatedProcessCrash
+
+
+class CrashAfterAcceptedCancelTransport(FakeTransport):
+    def cancel_order(self, request: dict[str, Any]) -> bytes:
+        super().cancel_order(request)
+        raise SimulatedProcessCrash
 
 
 @pytest.fixture(scope="module")
@@ -1207,13 +1271,46 @@ def _authorization(
     }
 
 
-def _verified(fixture: dict[str, Any]):
-    return verify_micro_live_authorization(
-        _json_bytes(fixture["authorization"]),
+def _verified(
+    fixture: dict[str, Any],
+    authorization_override: dict[str, Any] | None = None,
+):
+    """Issue an explicit unit-test capability without exercising the blocked v7 gate."""
+
+    authorization = authorization_override or fixture["authorization"]
+    runtime = load_residual_promotion_runtime(
+        manifest_path=CANDIDATE_BUNDLE_REPOSITORY_PATH,
+        expected_manifest_sha256=authorization["candidate_bundle"]["sha256"],
         repository_root=fixture["root"],
-        evidence_root=fixture["evidence_root"],
-        now_ts_ms=fixture["now_ts_ms"],
     )
+    capability = VerifiedMicroLiveAuthorization(
+        authorization_id=authorization["authorization_id"],
+        authorization_payload_sha256=hashlib.sha256(
+            _json_bytes(authorization)
+        ).hexdigest(),
+        candidate_bundle_sha256=authorization["candidate_bundle"]["sha256"],
+        capital_base_usd=Decimal(authorization["capital_base_usd"]),
+        maximum_notional_usd=Decimal(authorization["maximum_notional_usd"]),
+        maximum_realized_loss_usd=Decimal(
+            authorization["maximum_realized_loss_usd"]
+        ),
+        maximum_open_orders=int(authorization["maximum_open_orders"]),
+        authorized_at_ts_ms=int(authorization["authorized_at_ts_ms"]),
+        expires_at_ts_ms=int(authorization["expires_at_ts_ms"]),
+        maximum_signal_age_ms=int(authorization["maximum_signal_age_ms"]),
+        maximum_operator_heartbeat_age_ms=int(
+            authorization["maximum_operator_heartbeat_age_ms"]
+        ),
+        market_allowlist=tuple(authorization["market_allowlist"]),
+        allowed_actions=tuple(authorization["allowed_actions"]),
+        runtime=runtime,
+        _capability_sha256="",
+        _seal=auth_module._VERIFICATION_SEAL,
+    )
+    capability_sha256 = auth_module._capability_integrity_sha256(capability)
+    object.__setattr__(capability, "_capability_sha256", capability_sha256)
+    auth_module._register_verified_capability(capability, capability_sha256)
+    return capability
 
 
 def _signal(**overrides: Any) -> dict[str, Any]:
@@ -1290,6 +1387,7 @@ def test_current_template_cannot_create_executor(
             evidence_root=authorized_fixture["evidence_root"],
             now_ts_ms=NOW_TS_MS,
             transport=transport,
+            journal=_new_journal(),
         )
     assert transport.submit_calls == []
     assert transport.cancel_calls == []
@@ -1328,20 +1426,74 @@ def test_executor_bundles_no_network_wallet_or_credential_adapter() -> None:
         assert "getenv(" not in source
 
 
-def test_valid_graph_creates_capability_but_does_not_auto_launch(
+def test_legacy_local_graph_cannot_create_a_production_capability(
     authorized_fixture: dict[str, Any],
 ) -> None:
     transport = FakeTransport()
-    executor = create_micro_live_executor(
-        raw_authorization=_json_bytes(authorized_fixture["authorization"]),
-        repository_root=authorized_fixture["root"],
-        evidence_root=authorized_fixture["evidence_root"],
-        now_ts_ms=NOW_TS_MS,
-        transport=transport,
-    )
-    assert executor.events == ()
-    assert executor.reconciliation_snapshot()["cash_usd"] == "10.00"
+    with pytest.raises(
+        MicroLiveAuthorizationError,
+        match="externally authenticated successor deployment-closure protocol",
+    ):
+        create_micro_live_executor(
+            raw_authorization=_json_bytes(authorized_fixture["authorization"]),
+            repository_root=authorized_fixture["root"],
+            evidence_root=authorized_fixture["evidence_root"],
+            now_ts_ms=NOW_TS_MS,
+            transport=transport,
+            journal=_new_journal(),
+        )
     assert transport.submit_calls == []
+
+
+def test_current_gate_declares_complete_successor_deployment_closure() -> None:
+    assert auth_module.CURRENT_AUTHORIZATION_GATE_STATE.startswith("NO_GO_")
+    assert set(auth_module.REQUIRED_SUCCESSOR_DEPLOYMENT_COMPONENTS) == {
+        "deployment_composition_root",
+        "concrete_exchange_transport",
+        "signer_wallet_boundary",
+        "durable_single_writer_journal",
+        "trusted_clock_source",
+        "independent_watchdog_scheduler",
+        "deployment_configuration",
+        "deployment_artifact",
+        "trusted_release_service_attestation",
+        "owner_authenticated_capital_approval",
+    }
+
+
+@pytest.mark.parametrize(
+    "fabrication",
+    (
+        "nonexistent_review",
+        "nonexistent_comment",
+        "omitted_real_authors",
+        "self_review",
+        "locally_fabricated_payload",
+    ),
+)
+def test_all_legacy_local_provenance_fabrications_remain_non_authorizing(
+    authorized_fixture: dict[str, Any],
+    fabrication: str,
+) -> None:
+    authorization = copy.deepcopy(authorized_fixture["authorization"])
+    if fabrication == "nonexistent_comment":
+        authorization["human_approval"]["comment_id"] = 9_999_999_999
+    elif fabrication == "locally_fabricated_payload":
+        authorization["human_approval"]["github_login"] = "fabricated-owner"
+    else:
+        # The legacy security-review evidence is deliberately local JSON.  Its
+        # claimed review/author provenance cannot change the hard NO_GO state.
+        authorization["human_approval"]["github_login"] = "phead198708"
+    with pytest.raises(
+        MicroLiveAuthorizationError,
+        match="externally authenticated successor deployment-closure protocol",
+    ):
+        verify_micro_live_authorization(
+            _json_bytes(authorization),
+            repository_root=authorized_fixture["root"],
+            evidence_root=authorized_fixture["evidence_root"],
+            now_ts_ms=NOW_TS_MS,
+        )
 
 
 def test_authorization_requires_strict_raw_bytes_and_binds_exact_payload(
@@ -1411,7 +1563,11 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
     payload = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
     raw_signal = _json_bytes(payload["signal_payload"])
     raw_feature = _json_bytes(payload["feature_row"])
-    executor = _StrictMicroLiveExecutor(verified, transport=FakeTransport())
+    executor = _StrictMicroLiveExecutor(
+        verified,
+        transport=FakeTransport(),
+        journal=_new_journal(),
+    )
     result = executor.submit_signal(
         raw_signal_payload=raw_signal,
         raw_feature_row=raw_feature,
@@ -1454,6 +1610,7 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
     restored = _StrictMicroLiveExecutor.restore(
         authorization=verified,
         transport=FakeTransport(),
+        journal=executor._journal,
         raw_state=executor.export_state_bytes(),
     )
     assert restored.export_state_bytes() == executor.export_state_bytes()
@@ -1498,10 +1655,12 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
     }
     tampered_state["state_sha256"] = canonical_json_sha256(state_core)
     with pytest.raises(MicroLiveExecutionError, match="do not match semantic"):
+        tampered_raw_state = _json_bytes(tampered_state)
         _StrictMicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
-            raw_state=_json_bytes(tampered_state),
+            journal=_journal_with_state(tampered_raw_state),
+            raw_state=tampered_raw_state,
         )
 
     provider_tampered_state = executor.export_state()
@@ -1541,13 +1700,19 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
         MicroLiveExecutionError,
         match="stored provider feature evidence",
     ):
+        provider_tampered_raw_state = _json_bytes(provider_tampered_state)
         _StrictMicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
-            raw_state=_json_bytes(provider_tampered_state),
+            journal=_journal_with_state(provider_tampered_raw_state),
+            raw_state=provider_tampered_raw_state,
         )
 
-    parsed = _StrictMicroLiveExecutor(verified, transport=FakeTransport())
+    parsed = _StrictMicroLiveExecutor(
+        verified,
+        transport=FakeTransport(),
+        journal=_new_journal(),
+    )
     with pytest.raises(MicroLiveExecutionError, match="raw bytes are invalid"):
         parsed.submit_signal(
             raw_signal_payload=payload["signal_payload"],
@@ -1558,7 +1723,11 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
             market_identity_evidence=payload["market_identity_evidence"],
         )
 
-    duplicate = _StrictMicroLiveExecutor(verified, transport=FakeTransport())
+    duplicate = _StrictMicroLiveExecutor(
+        verified,
+        transport=FakeTransport(),
+        journal=_new_journal(),
+    )
     duplicate_signal = raw_signal[:-1] + b',"market_id":"0x' + b"2" * 64 + b'"}'
     with pytest.raises(MicroLiveExecutionError, match="strict JSON"):
         duplicate.submit_signal(
@@ -1570,7 +1739,11 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
             market_identity_evidence=payload["market_identity_evidence"],
         )
 
-    overflow = _StrictMicroLiveExecutor(verified, transport=FakeTransport())
+    overflow = _StrictMicroLiveExecutor(
+        verified,
+        transport=FakeTransport(),
+        journal=_new_journal(),
+    )
     overflow_feature = raw_feature[:-1] + b',"ambiguous":1e400}'
     with pytest.raises(MicroLiveExecutionError, match="strict JSON"):
         overflow.submit_signal(
@@ -2021,6 +2194,33 @@ def test_post_construction_runtime_tampering_uses_bound_clone_to_cancel(
     assert len(transport.cancel_calls) == 1
 
 
+def test_authorization_resource_limits_accept_boundary_and_reject_max_plus_one() -> None:
+    exact_bytes = b"{}" + b" " * (auth_module.MAX_AUTHORIZATION_JSON_BYTES - 2)
+    assert auth_module._decode_json_object_bytes(  # noqa: SLF001
+        exact_bytes,
+        "authorization boundary",
+        maximum_bytes=auth_module.MAX_AUTHORIZATION_JSON_BYTES,
+    ) == {}
+    with pytest.raises(MicroLiveAuthorizationError, match="raw bytes are invalid"):
+        auth_module._decode_json_object_bytes(  # noqa: SLF001
+            exact_bytes + b" ",
+            "authorization boundary",
+            maximum_bytes=auth_module.MAX_AUTHORIZATION_JSON_BYTES,
+        )
+
+    exact_depth = b'{"x":' + (b"[" * 31) + b"0" + (b"]" * 31) + b"}"
+    assert auth_module._decode_json_object_bytes(  # noqa: SLF001
+        exact_depth,
+        "authorization depth",
+    )["x"] is not None
+    too_deep = b'{"x":' + (b"[" * 32) + b"0" + (b"]" * 32) + b"}"
+    with pytest.raises(MicroLiveAuthorizationError, match="strict JSON"):
+        auth_module._decode_json_object_bytes(  # noqa: SLF001
+            too_deep,
+            "authorization depth",
+        )
+
+
 def test_second_frozen_decision_is_audited_and_blocked_without_kill(
     authorized_fixture: dict[str, Any],
 ) -> None:
@@ -2308,7 +2508,7 @@ def test_signal_event_clock_regression_persists_kill_and_rejection_audit(
     executor.submit_signal(
         **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
     )
-    with pytest.raises(MicroLiveExecutionError, match="event clock regressed"):
+    with pytest.raises(MicroLiveExecutionError, match="signal submission timestamp regressed"):
         executor.submit_signal(
             **_signal(
                 candidate_bundle_sha256=verified.candidate_bundle_sha256,
@@ -2320,7 +2520,7 @@ def test_signal_event_clock_regression_persists_kill_and_rejection_audit(
         )
     snapshot = executor.reconciliation_snapshot()
     assert snapshot["kill_switch_active"] is True
-    assert snapshot["kill_switch_reason"] == "event_clock_regression"
+    assert snapshot["kill_switch_reason"] == "signal_submission_clock_regression"
     assert len(transport.cancel_calls) == 1
     assert any(event["event_type"] == "SIGNAL_REJECTED" for event in executor.events)
 
@@ -2372,6 +2572,7 @@ def test_fill_cash_position_settlement_and_restart_reconcile(
     restored = MicroLiveExecutor.restore(
         authorization=verified,
         transport=transport,
+        journal=executor._journal,
         raw_state=_json_bytes(state),
     )
     assert restored.export_state() == state
@@ -2392,6 +2593,7 @@ def test_restart_requires_strict_raw_state_bytes_and_blocks_event_injection(
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=transport,
+            journal=executor._journal,
             raw_state=executor.export_state(),
         )
 
@@ -2404,6 +2606,7 @@ def test_restart_requires_strict_raw_state_bytes_and_blocks_event_injection(
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=transport,
+            journal=executor._journal,
             raw_state=duplicate_key_state,
         )
 
@@ -2416,6 +2619,7 @@ def test_restart_requires_strict_raw_state_bytes_and_blocks_event_injection(
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=transport,
+            journal=executor._journal,
             raw_state=numeric_overflow_state,
         )
 
@@ -2429,12 +2633,16 @@ def test_restart_requires_strict_raw_state_bytes_and_blocks_event_injection(
         executor._initialize(
             authorization=verified,
             transport=transport,
+            journal=executor._journal,
             events=({"event_type": "FORGED"},),
+            generation=0,
+            initialize_journal=False,
         )
 
     restored = MicroLiveExecutor.restore(
         authorization=verified,
         transport=transport,
+        journal=executor._journal,
         raw_state=raw_state,
     )
     assert restored.export_state_bytes() == raw_state
@@ -2506,12 +2714,7 @@ def test_exact_human_loss_limit_persistently_kills_at_boundary(
         copy.deepcopy(authorized_fixture["authorization"]["required_evidence"]),
         maximum_realized_loss_usd="0.4302",
     )
-    verified = verify_micro_live_authorization(
-        _json_bytes(authorization),
-        repository_root=authorized_fixture["root"],
-        evidence_root=evidence_root,
-        now_ts_ms=NOW_TS_MS,
-    )
+    verified = _verified(authorized_fixture, authorization)
     transport = FakeTransport()
     executor = MicroLiveExecutor(verified, transport=transport)
     order = executor.submit_signal(
@@ -2863,10 +3066,12 @@ def test_rehashed_lifecycle_raw_event_identity_tamper_fails_restore(
     payload = {key: value for key, value in state.items() if key != "state_sha256"}
     state["state_sha256"] = canonical_json_sha256(payload)
     with pytest.raises(MicroLiveExecutionError, match="fill payload values"):
+        tampered_raw_state = _json_bytes(state)
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
-            raw_state=_json_bytes(state),
+            journal=_journal_with_state(tampered_raw_state),
+            raw_state=tampered_raw_state,
         )
 
 
@@ -2906,11 +3111,13 @@ def test_rehashed_stored_raw_event_duplicate_key_fails_restore(
         previous = event["event_sha256"]
     payload = {key: value for key, value in state.items() if key != "state_sha256"}
     state["state_sha256"] = canonical_json_sha256(payload)
+    raw_state = _json_bytes(state)
     with pytest.raises(MicroLiveExecutionError, match="strict JSON"):
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
-            raw_state=_json_bytes(state),
+            journal=_journal_with_state(raw_state),
+            raw_state=raw_state,
         )
 
 
@@ -3061,6 +3268,7 @@ def test_raw_rejected_submission_is_closed_and_restart_reconciles(
     restored = MicroLiveExecutor.restore(
         authorization=verified,
         transport=transport,
+        journal=executor._journal,
         raw_state=executor.export_state_bytes(),
     )
     assert restored.reconciliation_snapshot() == snapshot
@@ -3191,6 +3399,7 @@ def test_unknown_submission_read_only_reconciliation_never_resubmits_or_unlocks(
     restored = MicroLiveExecutor.restore(
         authorization=verified,
         transport=transport,
+        journal=executor._journal,
         raw_state=executor.export_state_bytes(),
     )
     assert restored.reconciliation_snapshot() == snapshot
@@ -3257,6 +3466,7 @@ def test_unknown_cancel_read_only_reconciliation_closes_without_unlock_or_write(
     restored = MicroLiveExecutor.restore(
         authorization=verified,
         transport=transport,
+        journal=executor._journal,
         raw_state=executor.export_state_bytes(),
     )
     assert restored.reconciliation_snapshot() == snapshot
@@ -3418,7 +3628,7 @@ def test_lifecycle_timestamp_regression_still_persists_kill(
         )
     snapshot = executor.reconciliation_snapshot()
     assert snapshot["kill_switch_active"] is True
-    assert snapshot["kill_switch_reason"] == "fill_reconciliation_failed"
+    assert snapshot["kill_switch_reason"] == "fill_observation_clock_regression"
     assert snapshot["fill_count"] == 0
     assert len(transport.cancel_calls) == 1
 
@@ -3444,11 +3654,13 @@ def test_rehashed_tampered_state_still_fails_closed(
         previous = event["event_sha256"]
     payload = {key: value for key, value in state.items() if key != "state_sha256"}
     state["state_sha256"] = canonical_json_sha256(payload)
+    raw_state = _json_bytes(state)
     with pytest.raises(MicroLiveExecutionError, match="prepared order identity"):
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
-            raw_state=_json_bytes(state),
+            journal=_journal_with_state(raw_state),
+            raw_state=raw_state,
         )
 
 
@@ -3499,11 +3711,13 @@ def test_rehashed_duplicate_exchange_order_identity_fails_closed_on_restore(
         previous = event["event_sha256"]
     payload = {key: value for key, value in state.items() if key != "state_sha256"}
     state["state_sha256"] = canonical_json_sha256(payload)
+    raw_state = _json_bytes(state)
     with pytest.raises(MicroLiveExecutionError, match="acknowledgement is duplicated"):
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
-            raw_state=_json_bytes(state),
+            journal=_journal_with_state(raw_state),
+            raw_state=raw_state,
         )
 
 
@@ -3530,11 +3744,13 @@ def test_rehashed_order_without_execution_intent_audit_fails_closed(
         previous = event["event_sha256"]
     payload = {key: value for key, value in state.items() if key != "state_sha256"}
     state["state_sha256"] = canonical_json_sha256(payload)
+    raw_state = _json_bytes(state)
     with pytest.raises(MicroLiveExecutionError, match="prepared order identity"):
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
-            raw_state=_json_bytes(state),
+            journal=_journal_with_state(raw_state),
+            raw_state=raw_state,
         )
 
 
@@ -3556,33 +3772,371 @@ def test_rehashed_event_timestamp_regression_still_fails_closed(
         previous = event["event_sha256"]
     payload = {key: value for key, value in state.items() if key != "state_sha256"}
     state["state_sha256"] = canonical_json_sha256(payload)
+    raw_state = _json_bytes(state)
     with pytest.raises(MicroLiveExecutionError, match="event chain"):
         MicroLiveExecutor.restore(
             authorization=verified,
             transport=FakeTransport(),
-            raw_state=_json_bytes(state),
+            journal=_journal_with_state(raw_state),
+            raw_state=raw_state,
         )
 
 
+def test_journal_rejects_a_valid_older_prefix_after_newer_commit(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    executor = MicroLiveExecutor(verified, transport=FakeTransport())
+    older_prefix = executor.export_state_bytes()
+    executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    with pytest.raises(MicroLiveExecutionError, match="high-water snapshot"):
+        MicroLiveExecutor.restore(
+            authorization=verified,
+            transport=FakeTransport(),
+            journal=executor._journal,
+            raw_state=older_prefix,
+        )
+
+
+def test_two_executor_instances_share_one_process_safe_budget_reservation(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    """A stale second process must fail before it can reach its transport."""
+
+    authorization = copy.deepcopy(authorized_fixture["authorization"])
+    authorization["maximum_open_orders"] = 1
+    verified = _verified(authorized_fixture, authorization)
+    journal = _new_journal()
+    first_transport = FakeTransport()
+    first = MicroLiveExecutor(verified, transport=first_transport, journal=journal)
+    initial_snapshot = journal.snapshot()
+    second_journal = AtomicFileMicroLiveStateJournal(journal.root)
+    second_transport = FakeTransport()
+    second = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=second_transport,
+        journal=second_journal,
+        raw_state=initial_snapshot.raw_state,
+    )
+
+    first.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    stale_signal = _signal(
+        candidate_bundle_sha256=verified.candidate_bundle_sha256,
+        market_id=f"0x{777:064x}",
+        up_token_id="77700",
+        down_token_id="77701",
+    )
+    with pytest.raises(MicroLiveExecutionError, match="high-water generation is stale"):
+        second.submit_signal(**stale_signal)
+
+    assert len(first_transport.submit_calls) == 1
+    assert second_transport.submit_calls == []
+    assert journal.snapshot().generation == first._generation
+
+
 @pytest.mark.parametrize(
-    ("field", "value", "message"),
+    ("crash_event", "expected_transport_calls", "expected_unknown"),
     (
-        ("explicit_human_approval_recorded", False, "state is not explicit"),
-        ("micro_live_authorized", False, "state is not explicit"),
-        ("automatic_launch_allowed", True, "state is not explicit"),
-        ("requested_initial_capital_fraction", "0.02", "limits or validity"),
-        ("maximum_realized_loss_usd", "10.01", "limits or validity"),
+        ("ORDER_PREPARED", 0, True),
+        ("ORDER_ACKNOWLEDGED", 1, False),
+    ),
+)
+def test_submit_crash_after_fsync_boundary_recovers_without_resubmit(
+    authorized_fixture: dict[str, Any],
+    crash_event: str,
+    expected_transport_calls: int,
+    expected_unknown: bool,
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = CrashAfterCommittedEventJournal(
+        Path(tempfile.mkdtemp(prefix="bigan-crash-wal-test-"))
+    )
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
+    journal.arm(crash_event)
+    with pytest.raises(SimulatedProcessCrash):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    assert len(transport.submit_calls) == expected_transport_calls
+    committed = journal.snapshot()
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=transport,
+        journal=journal,
+        raw_state=committed.raw_state,
+    )
+    unknown_count = sum(
+        event["event_type"] == "ORDER_SUBMISSION_UNKNOWN"
+        for event in restored.events
+    )
+    assert bool(unknown_count) is expected_unknown
+    assert len(transport.submit_calls) == expected_transport_calls
+    if expected_unknown:
+        assert restored.reconciliation_snapshot()["kill_switch_active"] is True
+
+
+def test_submit_crash_after_exchange_accept_before_result_fsync_recovers_unknown(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    transport = CrashAfterAcceptedSubmitTransport()
+    executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
+    with pytest.raises(SimulatedProcessCrash):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    assert len(transport.submit_calls) == 1
+    committed = journal.snapshot()
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=transport,
+        journal=journal,
+        raw_state=committed.raw_state,
+    )
+    assert any(
+        event["event_type"] == "ORDER_SUBMISSION_UNKNOWN"
+        for event in restored.events
+    )
+    assert restored.reconciliation_snapshot()["kill_switch_active"] is True
+    assert len(transport.submit_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_cancel_calls", "expected_closed"),
+    (
+        ("prepared_commit", 0, False),
+        ("accepted_before_result", 1, False),
+        ("result_commit", 1, True),
+    ),
+)
+def test_cancel_crash_boundaries_are_wal_recoverable(
+    authorized_fixture: dict[str, Any],
+    mode: str,
+    expected_cancel_calls: int,
+    expected_closed: bool,
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = CrashAfterCommittedEventJournal(
+        Path(tempfile.mkdtemp(prefix="bigan-cancel-crash-wal-test-"))
+    )
+    transport: FakeTransport = (
+        CrashAfterAcceptedCancelTransport()
+        if mode == "accepted_before_result"
+        else FakeTransport()
+    )
+    executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
+    executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    if mode == "prepared_commit":
+        journal.arm("ORDER_CANCEL_PREPARED")
+    elif mode == "result_commit":
+        journal.arm("ORDER_CANCELED")
+    with pytest.raises(SimulatedProcessCrash):
+        executor.engage_kill_switch(
+            reason="synthetic_crash_boundary",
+            now_ts_ms=NOW_TS_MS + 1,
+        )
+    assert len(transport.cancel_calls) == expected_cancel_calls
+    committed = journal.snapshot()
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=transport,
+        journal=journal,
+        raw_state=committed.raw_state,
+    )
+    assert restored.reconciliation_snapshot()["open_order_count"] == (
+        0 if expected_closed else 1
+    )
+    assert any(
+        event["event_type"] == "ORDER_CANCEL_UNKNOWN"
+        for event in restored.events
+    ) is (not expected_closed)
+
+
+def test_concurrent_different_market_submissions_respect_one_order_limit(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    authorization = copy.deepcopy(authorized_fixture["authorization"])
+    authorization["maximum_open_orders"] = 1
+    verified = _verified(authorized_fixture, authorization)
+
+    class SlowTransport(FakeTransport):
+        def submit_order(self, request: dict[str, Any]) -> bytes:
+            time.sleep(0.05)
+            return super().submit_order(request)
+
+    transport = SlowTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    start = threading.Barrier(3)
+    results: list[dict[str, Any]] = []
+    failures: list[BaseException] = []
+
+    def run(index: int) -> None:
+        start.wait()
+        try:
+            results.append(
+                executor.submit_signal(
+                    **_signal(
+                        candidate_bundle_sha256=verified.candidate_bundle_sha256,
+                        market_id=f"0x{500 + index:064x}",
+                        up_token_id=str(70_000 + index * 2),
+                        down_token_id=str(70_001 + index * 2),
+                    )
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - assertion captures it
+            failures.append(exc)
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in (1, 2)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+    assert failures == []
+    assert len(transport.submit_calls) == 1
+    assert sorted(result["status"] for result in results) == [
+        "BLOCKED_NO_TRADE",
+        "ORDER_ACKNOWLEDGED",
+    ]
+    assert executor.reconciliation_snapshot()["open_order_count"] == 1
+
+
+def test_resource_limits_accept_exact_boundary_and_reject_max_plus_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exact_json = b"{}" + b" " * (executor_module.MAX_RAW_JSON_BYTES - 2)
+    assert executor_module._decode_provider_json(exact_json, "boundary") == {}
+    with pytest.raises(MicroLiveExecutionError, match="byte limit"):
+        executor_module._decode_provider_json(exact_json + b" ", "boundary")
+
+    exact_depth = (b"[" * executor_module.MAX_JSON_DEPTH) + b"0" + (
+        b"]" * executor_module.MAX_JSON_DEPTH
+    )
+    executor_module._decode_provider_json(exact_depth, "depth")
+    too_deep = b"[" + exact_depth + b"]"
+    with pytest.raises(MicroLiveExecutionError, match="strict JSON"):
+        executor_module._decode_provider_json(too_deep, "depth")
+
+    monkeypatch.setattr(executor_module, "MAX_PROVIDER_STREAM_BYTES", 8)
+    monkeypatch.setattr(executor_module, "MAX_PROVIDER_AGGREGATE_BYTES", 16)
+    exact_streams = dict.fromkeys(executor_module.PROVIDER_FEATURE_FILENAMES, b"")
+    exact_streams[executor_module.PROVIDER_FEATURE_FILENAMES[0]] = b"x" * 8
+    exact_streams[executor_module.PROVIDER_FEATURE_FILENAMES[1]] = b"x" * 8
+    executor_module._require_provider_byte_limits(exact_streams)
+    aggregate_overflow = dict(exact_streams)
+    aggregate_overflow[executor_module.PROVIDER_FEATURE_FILENAMES[2]] = b"x"
+    with pytest.raises(ProviderFeatureEvidenceError, match="aggregate byte limit"):
+        executor_module._require_provider_byte_limits(aggregate_overflow)
+    stream_overflow = dict.fromkeys(executor_module.PROVIDER_FEATURE_FILENAMES, b"")
+    stream_overflow[executor_module.PROVIDER_FEATURE_FILENAMES[0]] = b"x" * 9
+    with pytest.raises(ProviderFeatureEvidenceError, match="stream byte limit"):
+        executor_module._require_provider_byte_limits(stream_overflow)
+
+    monkeypatch.setattr(executor_module, "MAX_PROVIDER_ROWS_PER_STREAM", 3)
+    assert executor_module._require_provider_row_count(3, label="boundary") == 3
+    with pytest.raises(ProviderFeatureEvidenceError, match="row limit"):
+        executor_module._require_provider_row_count(4, label="boundary")
+
+    monkeypatch.setattr(executor_module, "MAX_EVENT_COUNT", 3)
+    assert executor_module._require_event_count(3) == 3
+    with pytest.raises(MicroLiveExecutionError, match="event count"):
+        executor_module._require_event_count(4)
+
+    monkeypatch.setattr(executor_module, "MAX_RESTORED_STATE_BYTES", 16)
+    assert executor_module._require_bounded_state_bytes(b"x" * 16) == b"x" * 16
+    with pytest.raises(MicroLiveExecutionError, match="byte limit"):
+        executor_module._require_bounded_state_bytes(b"x" * 17)
+
+
+@pytest.mark.parametrize("bad_now", (0, True, "not-an-int", NOW_TS_MS - 1))
+@pytest.mark.parametrize("entry", ("submit", "fill", "close", "settlement"))
+def test_every_risk_entry_invalid_clock_persists_kill(
+    authorized_fixture: dict[str, Any],
+    entry: str,
+    bad_now: Any,
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    with pytest.raises(MicroLiveExecutionError, match="timestamp"):
+        if entry == "submit":
+            executor.submit_signal(
+                **_signal(
+                    candidate_bundle_sha256=verified.candidate_bundle_sha256,
+                    market_id=f"0x{901:064x}",
+                    up_token_id="99010",
+                    down_token_id="99011",
+                    now_ts_ms=bad_now,
+                )
+            )
+        elif entry == "fill":
+            _record_fill(
+                executor,
+                client_order_id=order["client_order_id"],
+                fill_id="invalid-clock-fill",
+                now_ts_ms=bad_now,
+                quantity="1",
+                price="0.39",
+                fee_usd="0.0002",
+                transport_event_sha256="a" * 64,
+            )
+        elif entry == "close":
+            _record_order_closed(
+                executor,
+                client_order_id=order["client_order_id"],
+                status="CANCELED",
+                now_ts_ms=bad_now,
+                transport_event_sha256="b" * 64,
+            )
+        else:
+            _record_settlement(
+                executor,
+                client_order_id=order["client_order_id"],
+                settlement_id="invalid-clock-settlement",
+                now_ts_ms=bad_now,
+                payout_per_token="1",
+                official_settlement_sha256="c" * 64,
+            )
+    snapshot = executor.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert "clock_" in str(snapshot["kill_switch_reason"])
+    journal_state = executor._journal.snapshot()
+    assert b'"KILL_SWITCH_ENGAGED"' in journal_state.raw_state
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("explicit_human_approval_recorded", False),
+        ("micro_live_authorized", False),
+        ("automatic_launch_allowed", True),
+        ("requested_initial_capital_fraction", "0.02"),
+        ("maximum_realized_loss_usd", "10.01"),
     ),
 )
 def test_authorization_tampering_fails_closed(
     authorized_fixture: dict[str, Any],
     field: str,
     value: Any,
-    message: str,
 ) -> None:
     changed = copy.deepcopy(authorized_fixture["authorization"])
     changed[field] = value
-    with pytest.raises(MicroLiveAuthorizationError, match=message):
+    with pytest.raises(
+        MicroLiveAuthorizationError,
+        match="externally authenticated successor deployment-closure protocol",
+    ):
         verify_micro_live_authorization(
             _json_bytes(changed),
             repository_root=authorized_fixture["root"],
@@ -3595,7 +4149,10 @@ def test_expired_authorization_and_evidence_sha_drift_fail_closed(
     authorized_fixture: dict[str, Any],
 ) -> None:
     authorization = authorized_fixture["authorization"]
-    with pytest.raises(MicroLiveAuthorizationError, match="validity window"):
+    with pytest.raises(
+        MicroLiveAuthorizationError,
+        match="externally authenticated successor deployment-closure protocol",
+    ):
         verify_micro_live_authorization(
             _json_bytes(authorization),
             repository_root=authorized_fixture["root"],
@@ -3604,7 +4161,10 @@ def test_expired_authorization_and_evidence_sha_drift_fail_closed(
         )
     changed = copy.deepcopy(authorization)
     changed["required_evidence"]["fresh_evaluation_manifest"]["sha256"] = "0" * 64
-    with pytest.raises(MicroLiveAuthorizationError, match="path or SHA-256 mismatch"):
+    with pytest.raises(
+        MicroLiveAuthorizationError,
+        match="externally authenticated successor deployment-closure protocol",
+    ):
         verify_micro_live_authorization(
             _json_bytes(changed),
             repository_root=authorized_fixture["root"],
@@ -3643,7 +4203,10 @@ def test_authorization_evidence_ambiguous_json_fails_closed(
     path.write_text(ambiguous, encoding="utf-8")
     descriptor["sha256"] = sha256_file(path)
 
-    with pytest.raises(MicroLiveAuthorizationError, match="JSON evidence is invalid"):
+    with pytest.raises(
+        MicroLiveAuthorizationError,
+        match="externally authenticated successor deployment-closure protocol",
+    ):
         verify_micro_live_authorization(
             _json_bytes(authorization),
             repository_root=authorized_fixture["root"],
@@ -3657,7 +4220,10 @@ def test_human_approval_owner_and_timestamp_are_exact(
 ) -> None:
     changed = copy.deepcopy(authorized_fixture["authorization"])
     changed["human_approval"]["github_login"] = "untrusted-user"
-    with pytest.raises(MicroLiveAuthorizationError, match="provenance"):
+    with pytest.raises(
+        MicroLiveAuthorizationError,
+        match="externally authenticated successor deployment-closure protocol",
+    ):
         verify_micro_live_authorization(
             _json_bytes(changed),
             repository_root=authorized_fixture["root"],
@@ -3676,7 +4242,10 @@ def test_human_approval_owner_and_timestamp_are_exact(
 
     changed = copy.deepcopy(authorized_fixture["authorization"])
     changed["created_at"] = "2026-09-21T00:00:01Z"
-    with pytest.raises(MicroLiveAuthorizationError, match="limits or validity"):
+    with pytest.raises(
+        MicroLiveAuthorizationError,
+        match="externally authenticated successor deployment-closure protocol",
+    ):
         verify_micro_live_authorization(
             _json_bytes(changed),
             repository_root=authorized_fixture["root"],
