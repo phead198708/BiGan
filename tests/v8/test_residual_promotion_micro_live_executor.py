@@ -514,12 +514,39 @@ class _TestDurableRiskDomainLease:
         return raw
 
 
+def _verified_test_risk_domain_lease(
+    backend: _TestDurableRiskDomainLease,
+) -> executor_module.VerifiedRiskDomainLeaseCapability:
+    """Mint the exact capability a verified deployment closure would inject."""
+
+    capability = executor_module.VerifiedRiskDomainLeaseCapability(
+        lease_id=backend.lease_id,
+        service_identity_sha256=canonical_json_sha256(
+            {"authority_root": str(backend.authority_root)}
+        ),
+        tenant_id="bigan-test-tenant",
+        key_identity_sha256=canonical_json_sha256(
+            {"test_key": "micro-live-risk-domain-lease"}
+        ),
+        backend=backend,
+        _capability_sha256="",
+        _seal=executor_module._RISK_DOMAIN_LEASE_CAPABILITY_SEAL,
+    )
+    object.__setattr__(
+        capability,
+        "_capability_sha256",
+        executor_module._risk_domain_lease_capability_sha256(capability),
+    )
+    executor_module._register_verified_risk_domain_lease_capability(capability)
+    return capability
+
+
 def _new_journal() -> AtomicFileMicroLiveStateJournal:
     base = Path(tempfile.mkdtemp(prefix="bigan-wal-test-"))
     return AtomicFileMicroLiveStateJournal(
         base / "journal",
-        risk_domain_lease=_TestDurableRiskDomainLease(
-            base / "external-risk-domain-lease"
+        risk_domain_lease=_verified_test_risk_domain_lease(
+            _TestDurableRiskDomainLease(base / "external-risk-domain-lease")
         ),
     )
 
@@ -593,6 +620,29 @@ def _record_fill(
 ) -> dict[str, Any]:
     del transport_event_sha256  # Opaque caller-provided hashes are no longer trusted.
     prepared, acknowledgement = _order_identity(executor, client_order_id)
+    view = executor._reconcile_view()
+    order = view["orders"].get(client_order_id)
+    existing_fill = view["fills"].get(fill_id)
+    if order is None:
+        fill_event_sequence = 1
+        cumulative_filled_quantity = quantity
+        cumulative_fill_count = 1
+    elif existing_fill is None:
+        fill_event_sequence = len(order["fills"]) + 1
+        cumulative_filled_quantity = str(
+            order["filled_quantity"] + Decimal(quantity)
+        )
+        cumulative_fill_count = (
+            int(order["fills"][-1]["cumulative_fill_count"]) + 1
+            if order["fills"]
+            else 1
+        )
+    else:
+        fill_event_sequence = int(existing_fill["fill_event_sequence"])
+        cumulative_filled_quantity = str(
+            existing_fill["cumulative_filled_quantity"]
+        )
+        cumulative_fill_count = int(existing_fill["cumulative_fill_count"])
     event = {
         "event_type": "FILL",
         "client_order_id": client_order_id,
@@ -604,8 +654,12 @@ def _record_fill(
         "price": price,
         "fee_usd": fee_usd,
         "executed_at_ts_ms": now_ts_ms,
+        "fill_event_sequence": fill_event_sequence,
+        "cumulative_filled_quantity": cumulative_filled_quantity,
+        "cumulative_fill_count": cumulative_fill_count,
     }
-    event.update(event_overrides or {})
+    overrides = dict(event_overrides or {})
+    event.update(overrides)
     return executor.record_fill(
         client_order_id=client_order_id,
         fill_id=fill_id,
@@ -613,6 +667,9 @@ def _record_fill(
         quantity=quantity,
         price=price,
         fee_usd=fee_usd,
+        fill_event_sequence=fill_event_sequence,
+        cumulative_filled_quantity=cumulative_filled_quantity,
+        cumulative_fill_count=cumulative_fill_count,
         raw_transport_event=_json_bytes(event),
     )
 
@@ -628,6 +685,11 @@ def _record_order_closed(
 ) -> dict[str, Any]:
     del transport_event_sha256  # Opaque caller-provided hashes are no longer trusted.
     prepared, acknowledgement = _order_identity(executor, client_order_id)
+    order = executor._reconcile_view()["orders"][client_order_id]
+    final_fill_fields = executor_module._final_fill_delivery_fields(
+        order,
+        now_ts_ms,
+    )
     event = {
         "event_type": "ORDER_CLOSED",
         "client_order_id": client_order_id,
@@ -635,9 +697,26 @@ def _record_order_closed(
         "market_id": prepared["market_id"],
         "token_id": prepared["token_id"],
         "status": status,
-        "effective_at_ts_ms": now_ts_ms,
+        **final_fill_fields,
     }
-    event.update(event_overrides or {})
+    overrides = dict(event_overrides or {})
+    event.update(overrides)
+    if (
+        "effective_at_ts_ms" in overrides
+        and "final_fill_watermark" not in overrides
+    ):
+        event["final_fill_watermark"] = (
+            executor_module._authoritative_final_fill_watermark(
+                client_order_id=client_order_id,
+                exchange_order_id=acknowledgement["exchange_order_id"],
+                cumulative_filled_quantity=event[
+                    "cumulative_filled_quantity"
+                ],
+                final_fill_event_sequence=event["final_fill_event_sequence"],
+                final_fill_count=event["final_fill_count"],
+                effective_at_ts_ms=event["effective_at_ts_ms"],
+            )
+        )
     return executor.record_order_closed(
         client_order_id=client_order_id,
         status=status,
@@ -689,6 +768,11 @@ def _record_settlement(
 
 class FakeTransport:
     maximum_call_duration_ms = 100
+    authoritative_cumulative_fill_delivery = True
+
+    @property
+    def maximum_fill_delivery_events_per_order(self) -> int:
+        return executor_module.MAXIMUM_FILL_DELIVERY_EVENTS_PER_ORDER
 
     def __init__(
         self,
@@ -738,6 +822,14 @@ class FakeTransport:
             "client_order_id": request["client_order_id"],
             "exchange_order_id": request["exchange_order_id"],
             "status": "CANCELED",
+            "effective_at_ts_ms": request["effective_at_ts_ms"],
+            "cumulative_filled_quantity": request[
+                "cumulative_filled_quantity"
+            ],
+            "final_fill_event_sequence": request["final_fill_event_sequence"],
+            "final_fill_count": request["final_fill_count"],
+            "final_fill_watermark": request["final_fill_watermark"],
+            "fill_delivery_complete": request["fill_delivery_complete"],
         })
 
     def lookup_order(self, request: dict[str, Any]) -> bytes:
@@ -751,6 +843,46 @@ class FakeTransport:
         )
         if request.get("lookup_purpose") == "cancel_reconciliation":
             status = self.cancel_lookup_status
+            effective_at_ts_ms = (
+                NOW_TS_MS + 1
+                if status in {"CANCELED", "EXPIRED"}
+                else None
+            )
+            terminal_fields = (
+                {
+                    "cumulative_filled_quantity": request[
+                        "expected_cumulative_filled_quantity"
+                    ],
+                    "final_fill_event_sequence": request[
+                        "expected_final_fill_event_sequence"
+                    ],
+                    "final_fill_count": request["expected_final_fill_count"],
+                    "final_fill_watermark": (
+                        executor_module._authoritative_final_fill_watermark(
+                            client_order_id=submitted["client_order_id"],
+                            exchange_order_id=self.fixed_exchange_order_id
+                            or f"exchange-{submitted['client_order_id'][:12]}",
+                            cumulative_filled_quantity=request[
+                                "expected_cumulative_filled_quantity"
+                            ],
+                            final_fill_event_sequence=request[
+                                "expected_final_fill_event_sequence"
+                            ],
+                            final_fill_count=request["expected_final_fill_count"],
+                            effective_at_ts_ms=effective_at_ts_ms,
+                        )
+                    ),
+                    "fill_delivery_complete": True,
+                }
+                if effective_at_ts_ms is not None
+                else {
+                    "cumulative_filled_quantity": None,
+                    "final_fill_event_sequence": None,
+                    "final_fill_count": None,
+                    "final_fill_watermark": None,
+                    "fill_delivery_complete": False,
+                }
+            )
             response = {
                 "client_order_id": submitted["client_order_id"],
                 "exchange_order_id": self.fixed_exchange_order_id
@@ -761,11 +893,8 @@ class FakeTransport:
                 "accepted_quantity": submitted["quantity"],
                 "limit_price": submitted["limit_price"],
                 "observed_at_ts_ms": NOW_TS_MS + 2,
-                "effective_at_ts_ms": (
-                    NOW_TS_MS + 1
-                    if status in {"CANCELED", "EXPIRED"}
-                    else None
-                ),
+                "effective_at_ts_ms": effective_at_ts_ms,
+                **terminal_fields,
             }
             response.update(self.cancel_lookup_overrides)
             return _json_bytes(response)
@@ -787,7 +916,6 @@ class FakeTransport:
                 "authorization_id": request["authorization_id"],
                 "client_order_id": request["client_order_id"],
                 "transport_invocation_id": request["transport_invocation_id"],
-                "observed_status": request["observed_status"],
                 "side_effects_fenced": True,
             }
         )
@@ -803,6 +931,7 @@ class LateAcceptAfterRejectedLookupTransport(FakeTransport):
         self.submit_started = threading.Event()
         self.release_submit = threading.Event()
         self.submit_finished = threading.Event()
+        self.fence_started = threading.Event()
 
     def submit_order(self, request: dict[str, Any]) -> bytes:
         self.submit_calls.append(copy.deepcopy(request))
@@ -840,13 +969,14 @@ class LateAcceptAfterRejectedLookupTransport(FakeTransport):
 
     def fence_order_invocation(self, request: dict[str, Any]) -> bytes:
         self.fence_calls.append(copy.deepcopy(request))
+        self.fence_started.set()
+        self.submit_finished.wait(timeout=10)
         return _json_bytes(
             {
                 "authorization_id": request["authorization_id"],
                 "client_order_id": request["client_order_id"],
                 "transport_invocation_id": request["transport_invocation_id"],
-                "observed_status": request["observed_status"],
-                "side_effects_fenced": self.submit_finished.is_set(),
+                "side_effects_fenced": True,
             }
         )
 
@@ -860,8 +990,8 @@ class CrashAfterCommittedEventJournal(AtomicFileMicroLiveStateJournal):
         base = Path(directory)
         super().__init__(
             base / "journal",
-            risk_domain_lease=_TestDurableRiskDomainLease(
-                base / "external-risk-domain-lease"
+            risk_domain_lease=_verified_test_risk_domain_lease(
+                _TestDurableRiskDomainLease(base / "external-risk-domain-lease")
             ),
         )
         self.target_event_type: str | None = None
@@ -930,7 +1060,9 @@ def _multiprocess_hold_journal_lock(
 ) -> None:
     journal = AtomicFileMicroLiveStateJournal(
         root,
-        risk_domain_lease=_TestDurableRiskDomainLease(authority_root),
+        risk_domain_lease=_verified_test_risk_domain_lease(
+            _TestDurableRiskDomainLease(authority_root)
+        ),
     )
     with journal._exclusive_lock():  # noqa: SLF001 - deliberate process-lock probe
         entered.set()
@@ -945,7 +1077,9 @@ def _multiprocess_probe_journal_lock(
 ) -> None:
     journal = AtomicFileMicroLiveStateJournal(
         root,
-        risk_domain_lease=_TestDurableRiskDomainLease(authority_root),
+        risk_domain_lease=_verified_test_risk_domain_lease(
+            _TestDurableRiskDomainLease(authority_root)
+        ),
     )
     entered.set()
     with journal._exclusive_lock():  # noqa: SLF001 - deliberate process-lock probe
@@ -2340,20 +2474,21 @@ def test_post_construction_capability_tampering_kills_and_cancels_open_order(
     assert len(transport.submit_calls) == 1
     assert len(transport.cancel_calls) == 1
     assert transport.cancel_calls[0]["authorization_id"] == verified.authorization_id
-    late_fill = _record_fill(
-        executor,
-        client_order_id=transport.submit_calls[0]["client_order_id"],
-        fill_id="post-tamper-reconciled-fill",
-        now_ts_ms=NOW_TS_MS + 2,
-        quantity="1",
-        price="0.39",
-        fee_usd="0.0002",
-        transport_event_sha256="f" * 64,
-        event_overrides={"executed_at_ts_ms": NOW_TS_MS},
-    )
-    assert late_fill["status"] == "FILL_RECORDED"
-    assert late_fill["snapshot"]["kill_switch_active"] is True
-    assert late_fill["snapshot"]["open_order_count"] == 0
+    with pytest.raises(MicroLiveExecutionError, match="authoritative order close"):
+        _record_fill(
+            executor,
+            client_order_id=transport.submit_calls[0]["client_order_id"],
+            fill_id="post-tamper-reconciled-fill",
+            now_ts_ms=NOW_TS_MS + 2,
+            quantity="1",
+            price="0.39",
+            fee_usd="0.0002",
+            transport_event_sha256="f" * 64,
+            event_overrides={"executed_at_ts_ms": NOW_TS_MS},
+        )
+    closed_snapshot = executor.reconciliation_snapshot()
+    assert closed_snapshot["fill_count"] == 0
+    assert closed_snapshot["open_order_count"] == 0
 
 
 def test_post_construction_capability_tampering_blocks_first_submission(
@@ -2773,6 +2908,13 @@ def test_fill_cash_position_settlement_and_restart_reconcile(
         fee_usd="0.0002",
         transport_event_sha256="f" * 64,
     )["status"] == "IDEMPOTENT_FILL_REPLAY"
+    _record_order_closed(
+        executor,
+        client_order_id=order["client_order_id"],
+        status="CANCELED",
+        now_ts_ms=NOW_TS_MS + 1,
+        transport_event_sha256="ignored",
+    )
     settled = _record_settlement(
         executor,
         client_order_id=order["client_order_id"],
@@ -2902,6 +3044,14 @@ def test_loss_budget_reservation_prevents_realized_loss_cap_overshoot(
     )
     assert blocked["reason"] == "maximum_loss_reservation_exceeded"
     for index, order in enumerate(orders, start=1):
+        _record_order_closed(
+            executor,
+            client_order_id=order["client_order_id"],
+            status="CANCELED",
+            now_ts_ms=NOW_TS_MS + index,
+            transport_event_sha256="ignored",
+        )
+    for index, order in enumerate(orders, start=1):
         _record_settlement(
             executor,
             client_order_id=order["client_order_id"],
@@ -2951,6 +3101,13 @@ def test_exact_human_loss_limit_persistently_kills_at_boundary(
         price="0.43",
         fee_usd="0.0002",
         transport_event_sha256="d" * 64,
+    )
+    _record_order_closed(
+        executor,
+        client_order_id=order["client_order_id"],
+        status="CANCELED",
+        now_ts_ms=NOW_TS_MS + 1,
+        transport_event_sha256="ignored",
     )
     settled = _record_settlement(
         executor,
@@ -3053,6 +3210,9 @@ def test_fill_transport_duplicate_json_key_fails_closed(
         "price": "0.39",
         "fee_usd": "0.0002",
         "executed_at_ts_ms": NOW_TS_MS,
+        "fill_event_sequence": 1,
+        "cumulative_filled_quantity": "1",
+        "cumulative_fill_count": 1,
     }
     event_json = json.dumps(event, separators=(",", ":"), sort_keys=True)
     duplicate_raw = ('{"market_id":"0x' + "0" * 64 + '",' + event_json[1:]).encode()
@@ -3064,6 +3224,9 @@ def test_fill_transport_duplicate_json_key_fails_closed(
             quantity="1",
             price="0.39",
             fee_usd="0.0002",
+            fill_event_sequence=1,
+            cumulative_filled_quantity="1",
+            cumulative_fill_count=1,
             raw_transport_event=duplicate_raw,
         )
     snapshot = executor.reconciliation_snapshot()
@@ -3072,7 +3235,7 @@ def test_fill_transport_duplicate_json_key_fails_closed(
     assert len(transport.cancel_calls) == 1
 
 
-def test_late_fill_before_close_effective_time_reconciles_but_after_close_kills(
+def test_authoritative_close_rejects_a_late_delivered_pre_close_fill(
     authorized_fixture: dict[str, Any],
 ) -> None:
     verified = _verified(authorized_fixture)
@@ -3090,47 +3253,19 @@ def test_late_fill_before_close_effective_time_reconciles_but_after_close_kills(
         transport_event_sha256="0" * 64,
         event_overrides={"effective_at_ts_ms": close_effective_ts_ms},
     )
-    reconciled = _record_fill(
-        executor,
-        client_order_id=order["client_order_id"],
-        fill_id="late-observed-pre-close-fill",
-        now_ts_ms=NOW_TS_MS + 200,
-        quantity="1",
-        price="0.39",
-        fee_usd="0.0002",
-        transport_event_sha256="0" * 64,
-        event_overrides={"executed_at_ts_ms": close_effective_ts_ms - 1},
-    )
-    assert reconciled["status"] == "FILL_RECORDED"
-    assert reconciled["snapshot"]["fill_count"] == 1
-    assert reconciled["snapshot"]["open_order_count"] == 0
-
-    rejected_transport = FakeTransport()
-    rejected = MicroLiveExecutor(verified, transport=rejected_transport)
-    rejected_order = rejected.submit_signal(
-        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
-    )
-    _record_order_closed(
-        rejected,
-        client_order_id=rejected_order["client_order_id"],
-        status="CANCELED",
-        now_ts_ms=NOW_TS_MS + 100,
-        transport_event_sha256="0" * 64,
-        event_overrides={"effective_at_ts_ms": close_effective_ts_ms},
-    )
-    with pytest.raises(MicroLiveExecutionError, match="executed after order close"):
+    with pytest.raises(MicroLiveExecutionError, match="authoritative order close"):
         _record_fill(
-            rejected,
-            client_order_id=rejected_order["client_order_id"],
-            fill_id="post-close-fill",
+            executor,
+            client_order_id=order["client_order_id"],
+            fill_id="late-delivered-pre-close-fill",
             now_ts_ms=NOW_TS_MS + 200,
             quantity="1",
             price="0.39",
             fee_usd="0.0002",
             transport_event_sha256="0" * 64,
-            event_overrides={"executed_at_ts_ms": close_effective_ts_ms + 1},
+            event_overrides={"executed_at_ts_ms": close_effective_ts_ms - 1},
         )
-    assert rejected.reconciliation_snapshot()["kill_switch_active"] is True
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
 
 
 @pytest.mark.parametrize(
@@ -3187,6 +3322,13 @@ def test_official_settlement_before_market_end_fails_closed(
         fee_usd="0.0002",
         transport_event_sha256="0" * 64,
     )
+    _record_order_closed(
+        executor,
+        client_order_id=order["client_order_id"],
+        status="CANCELED",
+        now_ts_ms=NOW_TS_MS,
+        transport_event_sha256="ignored",
+    )
     with pytest.raises(MicroLiveExecutionError, match="settlement identity"):
         _record_settlement(
             executor,
@@ -3228,6 +3370,13 @@ def test_official_settlement_identity_mismatch_fails_closed(
         price="0.39",
         fee_usd="0.0002",
         transport_event_sha256="0" * 64,
+    )
+    _record_order_closed(
+        executor,
+        client_order_id=order["client_order_id"],
+        status="CANCELED",
+        now_ts_ms=NOW_TS_MS,
+        transport_event_sha256="ignored",
     )
     with pytest.raises(MicroLiveExecutionError, match="settlement identity"):
         _record_settlement(
@@ -3386,7 +3535,10 @@ def test_conflicting_fill_and_partial_open_settlement_engage_kill_switch(
         fee_usd="0.0001",
         transport_event_sha256="b" * 64,
     )
-    with pytest.raises(MicroLiveExecutionError, match="open order cannot settle"):
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="authoritative final fill delivery watermark",
+    ):
         _record_settlement(
             second,
             client_order_id=second_order["client_order_id"],
@@ -4030,7 +4182,7 @@ def test_two_executor_instances_share_one_process_safe_budget_reservation(
     initial_snapshot = journal.snapshot()
     second_journal = AtomicFileMicroLiveStateJournal(
         journal.root,
-        risk_domain_lease=journal.risk_domain_lease,
+        risk_domain_lease=journal.risk_domain_lease_capability,
     )
     second_transport = FakeTransport()
     second = MicroLiveExecutor.restore(
@@ -4062,8 +4214,8 @@ def test_same_authorization_cannot_reset_risk_budget_in_a_second_journal_root(
     tmp_path: Path,
 ) -> None:
     verified = _verified(authorized_fixture)
-    lease = _TestDurableRiskDomainLease(
-        tmp_path / "external-risk-domain-lease"
+    lease = _verified_test_risk_domain_lease(
+        _TestDurableRiskDomainLease(tmp_path / "external-risk-domain-lease")
     )
     first = AtomicFileMicroLiveStateJournal(
         tmp_path / "journal-one",
@@ -4082,34 +4234,47 @@ def test_same_authorization_cannot_reset_risk_budget_in_a_second_journal_root(
     assert not second.state_path.exists()
 
 
-def test_changing_journal_and_local_authority_dirs_cannot_reset_risk_domain(
+def test_copied_lease_id_from_an_independent_backend_is_not_a_capability(
     authorized_fixture: dict[str, Any],
     tmp_path: Path,
 ) -> None:
     verified = _verified(authorized_fixture)
-    first_lease = _TestDurableRiskDomainLease(tmp_path / "authority-one")
+    first_backend = _TestDurableRiskDomainLease(tmp_path / "authority-one")
+    first_lease = _verified_test_risk_domain_lease(first_backend)
     first = AtomicFileMicroLiveStateJournal(
         tmp_path / "journal-one",
         risk_domain_lease=first_lease,
     )
     MicroLiveExecutor(verified, transport=FakeTransport(), journal=first)
 
-    # A different local service directory necessarily has a different trusted
-    # deployment identity and cannot satisfy the authorization binding.
-    second_lease = _TestDurableRiskDomainLease(
+    # An independently provisioned backend can copy every public assertion,
+    # including the trusted lease ID and durable boolean.  It still cannot
+    # initialize because deployment closure never minted this exact object.
+    second_backend = _TestDurableRiskDomainLease(
         tmp_path / "authority-two",
-        lease_id="f" * 64,
+        lease_id=first_backend.lease_id,
     )
-    second = AtomicFileMicroLiveStateJournal(
-        tmp_path / "journal-two",
-        risk_domain_lease=second_lease,
+    copied_capability = replace(
+        first_lease,
+        backend=second_backend,
+        service_identity_sha256=canonical_json_sha256(
+            {"authority_root": str(second_backend.authority_root)}
+        ),
+    )
+    object.__setattr__(
+        copied_capability,
+        "_capability_sha256",
+        executor_module._risk_domain_lease_capability_sha256(copied_capability),
     )
     with pytest.raises(
         MicroLiveExecutionError,
-        match="journal lease is not bound to the authorization capability",
+        match="trusted durable risk-domain lease capability is missing",
     ):
-        MicroLiveExecutor(verified, transport=FakeTransport(), journal=second)
-    assert not second.state_path.exists()
+        AtomicFileMicroLiveStateJournal(
+            tmp_path / "journal-two",
+            risk_domain_lease=copied_capability,
+        )
+    assert not (tmp_path / "journal-two" / "micro_live_state.wal").exists()
 
 
 def test_real_processes_serialize_on_the_same_journal_root(tmp_path: Path) -> None:
@@ -4409,7 +4574,7 @@ def test_hung_lookup_times_out_and_remains_conservatively_killed(
     transport.release.set()
 
 
-def test_rejected_lookup_cannot_finalize_until_late_submit_is_fenced(
+def test_fence_precedes_authoritative_lookup_when_timed_out_submit_accepts_late(
     authorized_fixture: dict[str, Any],
 ) -> None:
     verified = _verified(authorized_fixture)
@@ -4423,33 +4588,79 @@ def test_rejected_lookup_cannot_finalize_until_late_submit_is_fenced(
     assert transport.submit_started.is_set()
     client_order_id = transport.submit_calls[0]["client_order_id"]
 
-    with pytest.raises(MicroLiveExecutionError, match="reconciliation failed closed"):
-        executor.reconcile_unknown_submission(
-            client_order_id=client_order_id,
-            now_ts_ms=NOW_TS_MS + 1,
-        )
-    assert transport.fence_calls[-1]["observed_status"] == "REJECTED"
-    assert not any(
-        event["event_type"] == "ORDER_SUBMISSION_RECONCILED"
-        for event in executor.events
-    )
+    results: list[dict[str, Any]] = []
+    failures: list[BaseException] = []
+
+    def reconcile() -> None:
+        try:
+            results.append(executor.reconcile_unknown_submission(
+                client_order_id=client_order_id,
+                now_ts_ms=NOW_TS_MS + 1,
+            ))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    reconcile_thread = threading.Thread(target=reconcile)
+    reconcile_thread.start()
+    assert transport.fence_started.wait(timeout=5)
+    assert transport.lookup_calls == []
     unknown_order = executor._reconcile_view()["orders"][client_order_id]
     assert unknown_order["submission_unknown"] is True
     assert unknown_order["closed_status"] is None
 
     transport.release_submit.set()
     assert transport.submit_finished.wait(timeout=5)
-    reconciled = executor.reconcile_unknown_submission(
-        client_order_id=client_order_id,
-        now_ts_ms=NOW_TS_MS + 2,
-    )
+    reconcile_thread.join(timeout=5)
+    assert not reconcile_thread.is_alive()
+    assert failures == []
+    assert len(results) == 1
+    reconciled = results[0]
     assert reconciled["status"] == "ORDER_SUBMISSION_RECONCILED_ACCEPTED"
-    assert transport.fence_calls[-1]["observed_status"] == "ACCEPTED"
+    assert len(transport.fence_calls) == 1
+    assert len(transport.lookup_calls) == 1
     assert len(transport.cancel_calls) == 1
     order = executor._reconcile_view()["orders"][client_order_id]
     assert order["submission_unknown"] is False
     assert order["acknowledgement"] is not None
     assert order["closed_status"] == "CANCELED"
+
+
+def test_unfenced_submission_remains_unknown_without_any_lookup(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = LateAcceptAfterRejectedLookupTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    client_order_id = transport.submit_calls[0]["client_order_id"]
+    failures: list[BaseException] = []
+
+    def reconcile() -> None:
+        try:
+            executor.reconcile_unknown_submission(
+                client_order_id=client_order_id,
+                now_ts_ms=NOW_TS_MS + 1,
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    thread = threading.Thread(target=reconcile)
+    thread.start()
+    assert transport.fence_started.wait(timeout=5)
+    assert transport.lookup_calls == []
+    # Deliberately leave the original invocation outstanding long enough for
+    # the bounded fence call to fail closed.
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert any(isinstance(exc, MicroLiveExecutionError) for exc in failures)
+    assert transport.lookup_calls == []
+    order = executor._reconcile_view()["orders"][client_order_id]
+    assert order["submission_unknown"] is True
+    assert order["closed_status"] is None
+    transport.release_submit.set()
 
 
 def test_hung_cancel_persists_emergency_kill_then_cancel_unknown(
@@ -4645,7 +4856,11 @@ def test_event_capacity_reserves_all_post_side_effect_safety_transitions(
 ) -> None:
     monkeypatch.setattr(executor_module, "MAX_EVENT_COUNT", 30)
     monkeypatch.setattr(executor_module, "EVENT_RECOVERY_RESERVE", 12)
-    monkeypatch.setattr(executor_module, "MAXIMUM_FILL_EVENTS_PER_ORDER", 2)
+    monkeypatch.setattr(
+        executor_module,
+        "MAXIMUM_FILL_DELIVERY_EVENTS_PER_ORDER",
+        2,
+    )
     verified = _verified(authorized_fixture)
     transport = FakeTransport()
     executor = MicroLiveExecutor(verified, transport=transport)
@@ -4703,7 +4918,11 @@ def test_boundary_order_can_persist_partial_full_close_settlement_and_restart(
 ) -> None:
     monkeypatch.setattr(executor_module, "MAX_EVENT_COUNT", 40)
     monkeypatch.setattr(executor_module, "EVENT_RECOVERY_RESERVE", 12)
-    monkeypatch.setattr(executor_module, "MAXIMUM_FILL_EVENTS_PER_ORDER", 2)
+    monkeypatch.setattr(
+        executor_module,
+        "MAXIMUM_FILL_DELIVERY_EVENTS_PER_ORDER",
+        2,
+    )
     verified = _verified(authorized_fixture)
     transport = FakeTransport()
     executor = MicroLiveExecutor(verified, transport=transport)
@@ -4784,6 +5003,143 @@ def test_boundary_order_can_persist_partial_full_close_settlement_and_restart(
     assert restored_order["filled_quantity"] == Decimal("1.0")
     assert restored_order["closed_status"] == "CANCELED"
     assert restored_order["settlement"]["settlement_id"] == "boundary-settlement"
+
+
+def test_preparation_reserves_worst_case_wal_bytes_before_exchange_acceptance(
+    authorized_fixture: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verified = _verified(authorized_fixture)
+    signal = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    probe = MicroLiveExecutor(verified, transport=FakeTransport())
+    assert probe.submit_signal(**signal)["status"] == "ORDER_ACKNOWLEDGED"
+
+    original_events = probe._events
+    original_generation = probe._generation
+    probe._events = [copy.deepcopy(event) for event in probe.events[:2]]
+    probe._generation = 2
+    try:
+        prepared_state_bytes = probe.export_state_bytes()
+        prepared_recovery_events = (
+            executor_module._required_lifecycle_event_capacity(
+                probe._reconcile_view()
+            )
+        )
+    finally:
+        probe._events = original_events
+        probe._generation = original_generation
+    exact_preparation_boundary = len(prepared_state_bytes) + (
+        prepared_recovery_events
+        * executor_module.MAX_SERIALIZED_RECOVERY_EVENT_BYTES
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "MAX_RESTORED_STATE_BYTES",
+        exact_preparation_boundary,
+    )
+
+    accepted_transport = FakeTransport()
+    accepted = MicroLiveExecutor(verified, transport=accepted_transport)
+    accepted_result = accepted.submit_signal(**signal)
+    assert accepted_result["status"] == "ORDER_ACKNOWLEDGED"
+    assert len(accepted_transport.submit_calls) == 1
+    assert accepted._journal.snapshot().raw_state == accepted.export_state_bytes()
+
+    monkeypatch.setattr(
+        executor_module,
+        "MAX_RESTORED_STATE_BYTES",
+        exact_preparation_boundary - 1,
+    )
+    blocked_transport = FakeTransport()
+    blocked = MicroLiveExecutor(verified, transport=blocked_transport)
+    blocked_result = blocked.submit_signal(**signal)
+    assert blocked_result["reason"] == "journal_byte_capacity_exhausted"
+    assert blocked_transport.submit_calls == []
+    assert blocked.reconciliation_snapshot()["kill_switch_active"] is True
+
+
+def test_more_than_sixteen_fills_reconcile_through_final_watermark_and_restart(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    for index in range(1, 18):
+        quantity = "0.05" if index <= 16 else "0.2"
+        fee = "0.00001" if index <= 16 else "0.00004"
+        _record_fill(
+            executor,
+            client_order_id=order["client_order_id"],
+            fill_id=f"multi-fill-{index:02d}",
+            now_ts_ms=NOW_TS_MS + index,
+            quantity=quantity,
+            price="0.39",
+            fee_usd=fee,
+            transport_event_sha256="ignored",
+        )
+    closed = _record_order_closed(
+        executor,
+        client_order_id=order["client_order_id"],
+        status="CANCELED",
+        now_ts_ms=NOW_TS_MS + 18,
+        transport_event_sha256="ignored",
+    )
+    assert closed["status"] == "ORDER_CANCELED"
+    view = executor._reconcile_view()
+    closed_order = view["orders"][order["client_order_id"]]
+    assert len(closed_order["fills"]) == 17
+    assert closed_order["close_event"]["final_fill_event_sequence"] == 17
+    assert closed_order["close_event"]["final_fill_count"] == 17
+    committed = executor._journal.snapshot()
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=transport,
+        journal=executor._journal,
+        raw_state=committed.raw_state,
+    )
+    assert restored.reconciliation_snapshot()["fill_count"] == 17
+
+
+def test_signal_rejection_at_lifecycle_boundary_kills_and_cancels_before_audit(
+    authorized_fixture: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    required = executor_module._required_lifecycle_event_capacity(
+        executor._reconcile_view()
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "MAX_EVENT_COUNT",
+        len(executor.events) + required,
+    )
+
+    with pytest.raises(MicroLiveExecutionError, match="strict JSON"):
+        _StrictMicroLiveExecutor.submit_signal(
+            executor,
+            raw_signal_payload=b"{",
+            raw_feature_row=_json_bytes(BASE_FEATURE_ROW),
+            provider_feature_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
+            now_ts_ms=NOW_TS_MS + 1,
+            operator_heartbeat_ts_ms=NOW_TS_MS,
+        )
+    event_types = [event["event_type"] for event in executor.events]
+    assert "SIGNAL_REJECTED" not in event_types
+    assert event_types[-3:] == [
+        "KILL_SWITCH_ENGAGED",
+        "ORDER_CANCEL_PREPARED",
+        "ORDER_CANCELED",
+    ]
+    assert executor._journal.emergency_kill_snapshot() is not None
+    assert executor.reconciliation_snapshot()["open_order_count"] == 0
 
 
 @pytest.mark.parametrize("bad_now", (0, True, "not-an-int", NOW_TS_MS - 1))

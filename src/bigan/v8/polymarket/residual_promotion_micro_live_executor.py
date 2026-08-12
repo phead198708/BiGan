@@ -17,8 +17,9 @@ import queue
 import re
 import stat
 import threading
+import weakref
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import wraps
@@ -47,7 +48,7 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
     ResidualPromotionRuntime,
 )
 
-STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v11"
+STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v12"
 SIGNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-execution-signal-v2"
 JOURNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-durable-journal-v1"
 JOURNAL_NAMESPACE_SCHEMA_VERSION = (
@@ -69,18 +70,24 @@ _RAW_STATE_RESTORE_TOKEN = object()
 FROZEN_EXECUTION_FEE_PER_UNIT_USD = Decimal("0.0002")
 MAX_RAW_JSON_BYTES = 1_048_576
 MAX_TRANSPORT_RESPONSE_BYTES = 1_048_576
+MAX_EXECUTION_TRANSPORT_EVENT_BYTES = 65_536
 MAX_PROVIDER_STREAM_BYTES = 16_777_216
 MAX_PROVIDER_AGGREGATE_BYTES = 33_554_432
 MAX_JSON_DEPTH = 32
 MAX_PROVIDER_ROWS_PER_STREAM = 100_000
 MAX_EVENT_COUNT = 4_096
-EVENT_RECOVERY_RESERVE = 64
-MAXIMUM_FILL_EVENTS_PER_ORDER = 16
+EVENT_RECOVERY_RESERVE = 128
+MAXIMUM_FILL_DELIVERY_EVENTS_PER_ORDER = 64
 MAX_RESTORED_STATE_BYTES = 67_108_864
 MAX_TRANSPORT_CALL_DURATION_MS = 1_000
 _JOURNAL_HEADER_MAX_BYTES = 4_096
 _JOURNAL_BINDING_MAX_BYTES = 4_096
 _EMERGENCY_KILL_MAX_BYTES = 16_384
+# A strict JSON byte can require up to six encoded bytes when stored inside the
+# WAL's raw-JSON string.  The fixed envelope covers all non-raw event fields.
+MAX_SERIALIZED_RECOVERY_EVENT_BYTES = (
+    6 * MAX_EXECUTION_TRANSPORT_EVENT_BYTES + 32_768
+)
 PROVIDER_FEATURE_FILENAMES = (
     "raw_polymarket_markets.jsonl",
     "raw_polymarket_orderbooks.jsonl",
@@ -214,7 +221,7 @@ class EmergencyKillSnapshot:
     payload_sha256: str
 
 
-class DurableRiskDomainLease(Protocol):
+class DurableRiskDomainLeaseBackend(Protocol):
     """Deployment-owned monotonic authority outside every journal directory.
 
     The concrete lease service is intentionally part of the still-missing
@@ -240,6 +247,90 @@ class DurableRiskDomainLease(Protocol):
         """Atomically bind one risk domain and return exact receipt bytes."""
 
 
+_RISK_DOMAIN_LEASE_CAPABILITY_SEAL = object()
+_VERIFIED_RISK_DOMAIN_LEASE_CAPABILITIES: dict[
+    int,
+    tuple[weakref.ReferenceType[VerifiedRiskDomainLeaseCapability], str],
+] = {}
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class VerifiedRiskDomainLeaseCapability:
+    """Uncopyable deployment-closure capability for one external lease service."""
+
+    lease_id: str
+    service_identity_sha256: str
+    tenant_id: str
+    key_identity_sha256: str
+    backend: DurableRiskDomainLeaseBackend
+    _capability_sha256: str
+    _seal: object
+
+
+def _risk_domain_lease_capability_sha256(
+    capability: VerifiedRiskDomainLeaseCapability,
+) -> str:
+    return canonical_json_sha256(
+        {
+            "schema_version": "verified-risk-domain-lease-capability-v1",
+            "lease_id": capability.lease_id,
+            "service_identity_sha256": capability.service_identity_sha256,
+            "tenant_id": capability.tenant_id,
+            "key_identity_sha256": capability.key_identity_sha256,
+            "backend_object_id": id(capability.backend),
+        }
+    )
+
+
+def _register_verified_risk_domain_lease_capability(
+    capability: VerifiedRiskDomainLeaseCapability,
+) -> None:
+    capability_sha256 = _risk_domain_lease_capability_sha256(capability)
+    if not (
+        capability._seal is _RISK_DOMAIN_LEASE_CAPABILITY_SEAL
+        and capability._capability_sha256 == capability_sha256
+        and _is_sha256(capability.lease_id)
+        and _is_sha256(capability.service_identity_sha256)
+        and isinstance(capability.tenant_id, str)
+        and bool(capability.tenant_id)
+        and _is_sha256(capability.key_identity_sha256)
+        and capability.backend.durable_monotonic_binding is True
+        and capability.backend.lease_id == capability.lease_id
+    ):
+        raise MicroLiveExecutionError(
+            "risk-domain lease capability registration failed closed"
+        )
+    capability_id = id(capability)
+
+    def remove(reference: weakref.ReferenceType[VerifiedRiskDomainLeaseCapability]) -> None:
+        registered = _VERIFIED_RISK_DOMAIN_LEASE_CAPABILITIES.get(capability_id)
+        if registered is not None and registered[0] is reference:
+            _VERIFIED_RISK_DOMAIN_LEASE_CAPABILITIES.pop(capability_id, None)
+
+    _VERIFIED_RISK_DOMAIN_LEASE_CAPABILITIES[capability_id] = (
+        weakref.ref(capability, remove),
+        capability_sha256,
+    )
+
+
+def risk_domain_lease_capability_is_verified(value: Any) -> bool:
+    """Return whether the deployment closure minted this exact lease object."""
+
+    if not (
+        isinstance(value, VerifiedRiskDomainLeaseCapability)
+        and value._seal is _RISK_DOMAIN_LEASE_CAPABILITY_SEAL
+    ):
+        return False
+    registered = _VERIFIED_RISK_DOMAIN_LEASE_CAPABILITIES.get(id(value))
+    if registered is None or registered[0]() is not value:
+        return False
+    try:
+        actual_sha256 = _risk_domain_lease_capability_sha256(value)
+    except Exception:
+        return False
+    return value._capability_sha256 == registered[1] == actual_sha256
+
+
 class DurableJournalTransaction(Protocol):
     """Exclusive single-writer transaction held across a risk-bearing action."""
 
@@ -261,6 +352,10 @@ class MicroLiveStateJournal(Protocol):
     @property
     def risk_domain_lease_id(self) -> str:
         """Return the deployment-frozen external lease identity."""
+
+    @property
+    def verified_risk_domain_lease_capability(self) -> bool:
+        """Return whether this journal still owns its exact verified capability."""
 
     def bind_risk_domain(
         self,
@@ -338,22 +433,22 @@ class AtomicFileMicroLiveStateJournal:
         self,
         directory: Path | str,
         *,
-        risk_domain_lease: DurableRiskDomainLease,
+        risk_domain_lease: VerifiedRiskDomainLeaseCapability,
     ) -> None:
         root = Path(directory).resolve()
         root.mkdir(parents=True, exist_ok=True)
         if not root.is_dir():
             raise MicroLiveExecutionError("micro-live journal root is not a directory")
         if not (
-            risk_domain_lease is not None
-            and risk_domain_lease.durable_monotonic_binding is True
+            risk_domain_lease_capability_is_verified(risk_domain_lease)
             and _is_sha256(risk_domain_lease.lease_id)
         ):
             raise MicroLiveExecutionError(
                 "trusted durable risk-domain lease capability is missing"
             )
         self.root = root
-        self.risk_domain_lease = risk_domain_lease
+        self.risk_domain_lease_capability = risk_domain_lease
+        self.risk_domain_lease = risk_domain_lease.backend
         self.state_path = root / "micro_live_state.wal"
         self.lock_path = root / "micro_live_state.lock"
         self.emergency_kill_path = root / "micro_live_emergency_kill.json"
@@ -371,6 +466,12 @@ class AtomicFileMicroLiveStateJournal:
     @property
     def risk_domain_lease_id(self) -> str:
         return self.risk_domain_lease.lease_id
+
+    @property
+    def verified_risk_domain_lease_capability(self) -> bool:
+        return risk_domain_lease_capability_is_verified(
+            self.risk_domain_lease_capability
+        )
 
     def bind_risk_domain(
         self,
@@ -764,6 +865,14 @@ class MicroLiveOrderTransport(Protocol):
     def maximum_call_duration_ms(self) -> int:
         """Return the deployment-enforced upper bound for every call."""
 
+    @property
+    def authoritative_cumulative_fill_delivery(self) -> bool:
+        """Prove fills expose cumulative quantity/count plus a final watermark."""
+
+    @property
+    def maximum_fill_delivery_events_per_order(self) -> int:
+        """Return the bounded delivery count; transport may aggregate real fills."""
+
     def submit_order(self, request: Mapping[str, Any]) -> bytes:
         """Submit one idempotent order request and return raw JSON bytes."""
 
@@ -777,8 +886,8 @@ class MicroLiveOrderTransport(Protocol):
         """Prove a timed-out submit can no longer create a later side effect.
 
         Returning ``side_effects_fenced=true`` is an adapter-level durable
-        guarantee, not a point-in-time lookup.  Until that proof is returned,
-        the executor keeps the submission UNKNOWN even if lookup says REJECTED.
+        guarantee, not a point-in-time lookup.  The executor obtains it before
+        the only authoritative post-timeout lookup.
         """
 
 
@@ -972,11 +1081,28 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "micro-live transport deadline capability is missing or unsafe"
             )
+        if not (
+            getattr(transport, "authoritative_cumulative_fill_delivery", None)
+            is True
+            and getattr(
+                transport,
+                "maximum_fill_delivery_events_per_order",
+                None,
+            )
+            == MAXIMUM_FILL_DELIVERY_EVENTS_PER_ORDER
+        ):
+            raise MicroLiveExecutionError(
+                "micro-live transport authoritative fill lifecycle capability "
+                "is missing"
+            )
         if journal is None or journal.durable_single_writer is not True:
             raise MicroLiveExecutionError(
                 "micro-live durable single-writer journal capability is missing"
             )
-        if journal.risk_domain_lease_id != authorization.risk_domain_lease_id:
+        if not (
+            journal.verified_risk_domain_lease_capability is True
+            and journal.risk_domain_lease_id == authorization.risk_domain_lease_id
+        ):
             raise MicroLiveExecutionError(
                 "micro-live journal lease is not bound to the authorization capability"
             )
@@ -1158,6 +1284,7 @@ class MicroLiveExecutor:
             try:
                 if (
                     self._authorization.matches_verified(self.authorization)
+                    and self._journal.verified_risk_domain_lease_capability is True
                     and self._journal.risk_domain_lease_id
                     == self._authorization.risk_domain_lease_id
                 ):
@@ -1221,19 +1348,29 @@ class MicroLiveExecutor:
             return int(now_ts_ms)
         fallback_ts_ms = self._safe_persistence_timestamp()
         failure = "clock_regression" if regressed else "clock_invalid"
+        kill_reason = f"{operation}_{failure}"
+        self._persist_emergency_kill(
+            reason=kill_reason,
+            event_ts_ms=fallback_ts_ms,
+        )
         if signal_rejection:
-            self._append_event(
-                "SIGNAL_REJECTED",
-                {
-                    "authorization_id": self._authorization.authorization_id,
-                    "candidate_bundle_sha256": self._authorization.candidate_bundle_sha256,
-                    "reason": "signal_validation_or_clock_failed",
-                    "error_type": "InvalidTrustedClock",
-                },
-                event_ts_ms=fallback_ts_ms,
-            )
+            with suppress(MicroLiveExecutionError):
+                self._append_event(
+                    "SIGNAL_REJECTED",
+                    {
+                        "authorization_id": self._authorization.authorization_id,
+                        "candidate_bundle_sha256": (
+                            self._authorization.candidate_bundle_sha256
+                        ),
+                        "reason": "signal_validation_or_clock_failed",
+                        "error_type": "InvalidTrustedClock",
+                    },
+                    event_ts_ms=fallback_ts_ms,
+                )
+            # The independent kill record is authoritative.  Rejection audit
+            # is best effort when only lifecycle recovery capacity remains.
         self.engage_kill_switch(
-            reason=f"{operation}_{failure}",
+            reason=kill_reason,
             now_ts_ms=fallback_ts_ms,
         )
         label = operation.replace("_", " ")
@@ -1415,18 +1552,23 @@ class MicroLiveExecutor:
                 if self._events
                 else now_ts_ms,
             )
-            self._append_event(
-                "SIGNAL_REJECTED",
-                {
-                    "authorization_id": self._authorization.authorization_id,
-                    "candidate_bundle_sha256": (
-                        self._authorization.candidate_bundle_sha256
-                    ),
-                    "reason": "signal_validation_or_clock_failed",
-                    "error_type": exc.__class__.__name__,
-                },
+            self._persist_emergency_kill(
+                reason="signal_validation_or_clock_failed",
                 event_ts_ms=rejection_ts_ms,
             )
+            with suppress(MicroLiveExecutionError):
+                self._append_event(
+                    "SIGNAL_REJECTED",
+                    {
+                        "authorization_id": self._authorization.authorization_id,
+                        "candidate_bundle_sha256": (
+                            self._authorization.candidate_bundle_sha256
+                        ),
+                        "reason": "signal_validation_or_clock_failed",
+                        "error_type": exc.__class__.__name__,
+                    },
+                    event_ts_ms=rejection_ts_ms,
+                )
             self.engage_kill_switch(
                 reason="signal_validation_or_clock_failed",
                 now_ts_ms=now_ts_ms,
@@ -1719,7 +1861,18 @@ class MicroLiveExecutor:
             )
             return _blocked("maximum_loss_reservation_exceeded")
 
-        self._audit_signal_decision(
+        prepared = {
+            **intent_core,
+            "intent_id": intent_id,
+            "client_order_id": client_order_id,
+            "transport_invocation_id": transport_invocation_id,
+            "submitted_at_ts_ms": now_ts_ms,
+            "operator_heartbeat_ts_ms": operator_heartbeat_ts_ms,
+            "authorization_payload_sha256": (
+                self._authorization.authorization_payload_sha256
+            ),
+        }
+        audit_payload = self._signal_decision_audit_payload(
             signal=signal,
             features=features,
             raw_signal_json=raw_signal_json,
@@ -1729,18 +1882,25 @@ class MicroLiveExecutor:
             provider_feature_evidence=verified_feature_evidence,
             disposition="EXECUTION_INTENT",
             reason=None,
-            now_ts_ms=now_ts_ms,
             operator_heartbeat_ts_ms=operator_heartbeat_ts_ms,
         )
-        prepared = {
-            **intent_core,
-            "intent_id": intent_id,
-            "client_order_id": client_order_id,
-            "transport_invocation_id": transport_invocation_id,
-            "submitted_at_ts_ms": now_ts_ms,
-            "operator_heartbeat_ts_ms": operator_heartbeat_ts_ms,
-            "authorization_payload_sha256": self._authorization.authorization_payload_sha256,
-        }
+        try:
+            self._require_execution_intent_preparation_capacity(
+                audit_payload=audit_payload,
+                prepared_payload=prepared,
+                event_ts_ms=now_ts_ms,
+            )
+        except MicroLiveExecutionError:
+            self.engage_kill_switch(
+                reason="journal_byte_capacity_exhausted",
+                now_ts_ms=now_ts_ms,
+            )
+            return _blocked("journal_byte_capacity_exhausted")
+        self._append_event(
+            "SIGNAL_EVALUATED",
+            audit_payload,
+            event_ts_ms=now_ts_ms,
+        )
         self._append_event("ORDER_PREPARED", prepared, event_ts_ms=now_ts_ms)
         transport_request = {
             key: prepared[key]
@@ -1781,6 +1941,7 @@ class MicroLiveExecutor:
                     request=transport_request,
                 ),
                 "order submission response",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
             disposition = self._validate_submission_response(transport_request, response)
             if (
@@ -1805,9 +1966,14 @@ class MicroLiveExecutor:
                 now_ts_ms=now_ts_ms,
             )
             raise MicroLiveExecutionError("order submission became unknown; kill switch engaged") from exc
-        if disposition["status"] == "REJECTED":
+        try:
+            disposition_event_type = (
+                "ORDER_REJECTED"
+                if disposition["status"] == "REJECTED"
+                else "ORDER_ACKNOWLEDGED"
+            )
             self._append_event(
-                "ORDER_REJECTED",
+                disposition_event_type,
                 {
                     **disposition,
                     "transport_event_sha256": response_sha256,
@@ -1815,20 +1981,29 @@ class MicroLiveExecutor:
                 },
                 event_ts_ms=now_ts_ms,
             )
+        except Exception as exc:
+            self._append_event(
+                "ORDER_SUBMISSION_UNKNOWN",
+                {
+                    "client_order_id": client_order_id,
+                    "error_type": exc.__class__.__name__,
+                },
+                event_ts_ms=now_ts_ms,
+            )
+            self.engage_kill_switch(
+                reason="order_submission_disposition_persistence_failed",
+                now_ts_ms=now_ts_ms,
+            )
+            raise MicroLiveExecutionError(
+                "order submission disposition could not be persisted; "
+                "submission remains unknown"
+            ) from exc
+        if disposition["status"] == "REJECTED":
             return {
                 "status": "ORDER_REJECTED",
                 "client_order_id": client_order_id,
                 "transport_called": True,
             }
-        self._append_event(
-            "ORDER_ACKNOWLEDGED",
-            {
-                **disposition,
-                "transport_event_sha256": response_sha256,
-                "raw_transport_event_json": raw_response_json,
-            },
-            event_ts_ms=now_ts_ms,
-        )
         self._reconcile_view()
         return {
             "status": "ORDER_ACKNOWLEDGED",
@@ -1844,11 +2019,11 @@ class MicroLiveExecutor:
         client_order_id: str,
         now_ts_ms: int,
     ) -> dict[str, Any]:
-        """Resolve one unknown submission through lookup plus a durable fence.
+        """Resolve one unknown submission through a durable fence then lookup.
 
         Reconciliation never clears the persistent kill switch and never
-        resubmits an order.  A lookup result is nonterminal until the transport
-        proves that the original invocation cannot create a later side effect.
+        resubmits an order.  The only authoritative lookup occurs after the
+        original invocation is durably fenced against later side effects.
         """
 
         self._require_authorization_integrity(
@@ -1887,14 +2062,36 @@ class MicroLiveExecutor:
         response_sha256: str | None = None
         raw_fence_response_json: str | None = None
         fence_response_sha256: str | None = None
-        fence_request: dict[str, Any] | None = None
+        fence_request = {
+            "authorization_id": self._authorization.authorization_id,
+            "client_order_id": client_order_id,
+            "business_key": prepared["business_key"],
+            "market_id": prepared["market_id"],
+            "token_id": prepared["token_id"],
+            "transport_invocation_id": prepared["transport_invocation_id"],
+        }
         try:
+            fence_response, raw_fence_response_json, fence_response_sha256 = (
+                _raw_json_object(
+                    self._bounded_transport_call(
+                        operation="fence_order_invocation",
+                        request=fence_request,
+                    ),
+                    "submission invocation fence response",
+                    maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+                )
+            )
+            self._validate_submission_fence_response(
+                prepared=prepared,
+                response=fence_response,
+            )
             response, raw_response_json, response_sha256 = _raw_json_object(
                 self._bounded_transport_call(
                     operation="lookup_order",
                     request=lookup_request,
                 ),
                 "submission lookup response",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
             disposition = self._validate_submission_response(prepared, response)
             exchange_order_id = disposition["exchange_order_id"]
@@ -1905,30 +2102,6 @@ class MicroLiveExecutor:
                 raise MicroLiveExecutionError(
                     "reconciled exchange order identity was reused"
                 )
-            fence_request = {
-                "authorization_id": self._authorization.authorization_id,
-                "client_order_id": client_order_id,
-                "business_key": prepared["business_key"],
-                "market_id": prepared["market_id"],
-                "token_id": prepared["token_id"],
-                "transport_invocation_id": prepared["transport_invocation_id"],
-                "observed_status": disposition["status"],
-                "lookup_response_sha256": response_sha256,
-            }
-            fence_response, raw_fence_response_json, fence_response_sha256 = (
-                _raw_json_object(
-                    self._bounded_transport_call(
-                        operation="fence_order_invocation",
-                        request=fence_request,
-                    ),
-                    "submission invocation fence response",
-                )
-            )
-            self._validate_submission_fence_response(
-                prepared=prepared,
-                disposition=disposition,
-                response=fence_response,
-            )
         except Exception as exc:
             self._append_event(
                 "ORDER_SUBMISSION_RECONCILIATION_FAILED",
@@ -1937,11 +2110,7 @@ class MicroLiveExecutor:
                     "lookup_request_sha256": canonical_json_sha256(lookup_request),
                     "lookup_response_sha256": response_sha256,
                     "raw_lookup_response_json": raw_response_json,
-                    "fence_request_sha256": (
-                        canonical_json_sha256(fence_request)
-                        if fence_request is not None
-                        else None
-                    ),
+                    "fence_request_sha256": canonical_json_sha256(fence_request),
                     "fence_response_sha256": fence_response_sha256,
                     "raw_fence_response_json": raw_fence_response_json,
                     "error_type": exc.__class__.__name__,
@@ -2033,6 +2202,7 @@ class MicroLiveExecutor:
             "market_id": prepared["market_id"],
             "token_id": prepared["token_id"],
             "lookup_purpose": "cancel_reconciliation",
+            **_current_fill_cursor_fields(order),
         }
         response: dict[str, Any] | None = None
         try:
@@ -2042,6 +2212,7 @@ class MicroLiveExecutor:
                     request=lookup_request,
                 ),
                 "cancel lookup response",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
             disposition = self._validate_cancel_lookup_response(
                 order=order,
@@ -2121,6 +2292,38 @@ class MicroLiveExecutor:
     ) -> None:
         """Append the complete causal signal/input/decision audit row."""
 
+        payload = self._signal_decision_audit_payload(
+            signal=signal,
+            features=features,
+            raw_signal_json=raw_signal_json,
+            raw_signal_sha256=raw_signal_sha256,
+            raw_feature_json=raw_feature_json,
+            raw_feature_sha256=raw_feature_sha256,
+            provider_feature_evidence=provider_feature_evidence,
+            disposition=disposition,
+            reason=reason,
+            operator_heartbeat_ts_ms=operator_heartbeat_ts_ms,
+        )
+        self._append_event(
+            "SIGNAL_EVALUATED",
+            payload,
+            event_ts_ms=now_ts_ms,
+        )
+
+    def _signal_decision_audit_payload(
+        self,
+        *,
+        signal: Mapping[str, Any],
+        features: Mapping[str, Any],
+        raw_signal_json: str,
+        raw_signal_sha256: str,
+        raw_feature_json: str,
+        raw_feature_sha256: str,
+        provider_feature_evidence: VerifiedProviderFeatureEvidence,
+        disposition: str,
+        reason: str | None,
+        operator_heartbeat_ts_ms: int,
+    ) -> dict[str, Any]:
         signal_copy = copy.deepcopy(dict(signal))
         feature_copy = copy.deepcopy(dict(features))
         core = {
@@ -2154,11 +2357,7 @@ class MicroLiveExecutor:
             "disposition": disposition,
             "reason": reason,
         }
-        self._append_event(
-            "SIGNAL_EVALUATED",
-            {**core, "decision_audit_sha256": canonical_json_sha256(core)},
-            event_ts_ms=now_ts_ms,
-        )
+        return {**core, "decision_audit_sha256": canonical_json_sha256(core)}
 
     @_durable_entry
     def record_fill(
@@ -2170,6 +2369,9 @@ class MicroLiveExecutor:
         quantity: str,
         price: str,
         fee_usd: str,
+        fill_event_sequence: int,
+        cumulative_filled_quantity: str,
+        cumulative_fill_count: int,
         raw_transport_event: bytes,
     ) -> dict[str, Any]:
         """Record one fill; every trusted-time reconciliation error kills."""
@@ -2190,6 +2392,9 @@ class MicroLiveExecutor:
                 quantity=quantity,
                 price=price,
                 fee_usd=fee_usd,
+                fill_event_sequence=fill_event_sequence,
+                cumulative_filled_quantity=cumulative_filled_quantity,
+                cumulative_fill_count=cumulative_fill_count,
                 raw_transport_event=raw_transport_event,
             )
         except MicroLiveExecutionError:
@@ -2208,6 +2413,9 @@ class MicroLiveExecutor:
         quantity: str,
         price: str,
         fee_usd: str,
+        fill_event_sequence: int,
+        cumulative_filled_quantity: str,
+        cumulative_fill_count: int,
         raw_transport_event: bytes,
     ) -> dict[str, Any]:
         """Apply one externally observed fill to the append-only ledger."""
@@ -2226,6 +2434,7 @@ class MicroLiveExecutor:
         transport_event, raw_json, transport_event_sha256 = _raw_json_object(
             raw_transport_event,
             "fill transport event",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
         )
         expected_transport_keys = {
             "event_type",
@@ -2238,6 +2447,9 @@ class MicroLiveExecutor:
             "price",
             "fee_usd",
             "executed_at_ts_ms",
+            "fill_event_sequence",
+            "cumulative_filled_quantity",
+            "cumulative_fill_count",
         }
         executed_at_ts_ms = transport_event.get("executed_at_ts_ms")
         if not (
@@ -2252,17 +2464,29 @@ class MicroLiveExecutor:
             and transport_event.get("quantity") == quantity
             and transport_event.get("price") == price
             and transport_event.get("fee_usd") == fee_usd
+            and transport_event.get("fill_event_sequence") == fill_event_sequence
+            and transport_event.get("cumulative_filled_quantity")
+            == cumulative_filled_quantity
+            and transport_event.get("cumulative_fill_count")
+            == cumulative_fill_count
             and isinstance(executed_at_ts_ms, int)
             and not isinstance(executed_at_ts_ms, bool)
             and prepared["submitted_at_ts_ms"] <= executed_at_ts_ms <= now_ts_ms
         ):
             raise MicroLiveExecutionError("fill transport identity is mismatched")
-        close_event = order.get("close_event")
-        if close_event is not None and executed_at_ts_ms > int(
-            close_event["effective_at_ts_ms"]
-        ):
+        if order.get("close_event") is not None:
             self.engage_kill_switch(reason="fill_after_terminal_state", now_ts_ms=now_ts_ms)
-            raise MicroLiveExecutionError("fill executed after order close")
+            raise MicroLiveExecutionError("fill arrived after authoritative order close")
+        expected_fill_event_sequence = len(order["fills"]) + 1
+        previous_cumulative_fill_count = (
+            int(order["fills"][-1]["cumulative_fill_count"])
+            if order["fills"]
+            else 0
+        )
+        existing_filled_quantity = sum(
+            (Decimal(fill["quantity"]) for fill in order["fills"]),
+            Decimal("0"),
+        )
         existing_fill = view["fills"].get(fill_id)
         payload = {
             "client_order_id": client_order_id,
@@ -2274,6 +2498,14 @@ class MicroLiveExecutor:
             "price": str(_positive_decimal(price, "fill price")),
             "fee_usd": str(_nonnegative_decimal(fee_usd, "fill fee")),
             "executed_at_ts_ms": executed_at_ts_ms,
+            "fill_event_sequence": fill_event_sequence,
+            "cumulative_filled_quantity": str(
+                _positive_decimal(
+                    cumulative_filled_quantity,
+                    "cumulative filled quantity",
+                )
+            ),
+            "cumulative_fill_count": cumulative_fill_count,
             "transport_event_sha256": transport_event_sha256,
             "raw_transport_event_json": raw_json,
         }
@@ -2285,7 +2517,19 @@ class MicroLiveExecutor:
                 )
                 raise MicroLiveExecutionError("conflicting duplicate fill failed closed")
             return {"status": "IDEMPOTENT_FILL_REPLAY", "fill_id": fill_id}
-        if len(order["fills"]) >= MAXIMUM_FILL_EVENTS_PER_ORDER:
+        if not (
+            isinstance(fill_event_sequence, int)
+            and not isinstance(fill_event_sequence, bool)
+            and fill_event_sequence == expected_fill_event_sequence
+            and isinstance(cumulative_fill_count, int)
+            and not isinstance(cumulative_fill_count, bool)
+            and cumulative_fill_count > previous_cumulative_fill_count
+            and cumulative_fill_count >= fill_event_sequence
+        ):
+            raise MicroLiveExecutionError(
+                "authoritative cumulative fill sequence is invalid"
+            )
+        if len(order["fills"]) >= MAXIMUM_FILL_DELIVERY_EVENTS_PER_ORDER:
             self.engage_kill_switch(
                 reason="maximum_fill_events_per_order_exceeded",
                 now_ts_ms=now_ts_ms,
@@ -2296,6 +2540,12 @@ class MicroLiveExecutor:
         fill_qty = Decimal(payload["quantity"])
         fill_price = Decimal(payload["price"])
         fee = Decimal(payload["fee_usd"])
+        if Decimal(payload["cumulative_filled_quantity"]) != (
+            existing_filled_quantity + fill_qty
+        ):
+            raise MicroLiveExecutionError(
+                "authoritative cumulative filled quantity is mismatched"
+            )
         if fee > fill_qty * FROZEN_EXECUTION_FEE_PER_UNIT_USD:
             self.engage_kill_switch(
                 reason="fill_fee_above_frozen_contract",
@@ -2370,6 +2620,7 @@ class MicroLiveExecutor:
         transport_event, raw_json, transport_event_sha256 = _raw_json_object(
             raw_transport_event,
             "order close transport event",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
         )
         expected_transport_keys = {
             "event_type",
@@ -2379,8 +2630,33 @@ class MicroLiveExecutor:
             "token_id",
             "status",
             "effective_at_ts_ms",
+            "cumulative_filled_quantity",
+            "final_fill_event_sequence",
+            "final_fill_count",
+            "final_fill_watermark",
+            "fill_delivery_complete",
         }
         effective_at_ts_ms = transport_event.get("effective_at_ts_ms")
+        cumulative_filled_quantity = str(
+            sum(
+                (Decimal(fill["quantity"]) for fill in order["fills"]),
+                Decimal("0"),
+            )
+        )
+        final_fill_event_sequence = len(order["fills"])
+        final_fill_count = (
+            int(order["fills"][-1]["cumulative_fill_count"])
+            if order["fills"]
+            else 0
+        )
+        final_fill_watermark = _authoritative_final_fill_watermark(
+            client_order_id=client_order_id,
+            exchange_order_id=acknowledgement["exchange_order_id"],
+            cumulative_filled_quantity=cumulative_filled_quantity,
+            final_fill_event_sequence=final_fill_event_sequence,
+            final_fill_count=final_fill_count,
+            effective_at_ts_ms=effective_at_ts_ms,
+        )
         if not (
             set(transport_event) == expected_transport_keys
             and transport_event.get("event_type") == "ORDER_CLOSED"
@@ -2390,6 +2666,14 @@ class MicroLiveExecutor:
             and transport_event.get("market_id") == prepared["market_id"]
             and transport_event.get("token_id") == prepared["token_id"]
             and transport_event.get("status") == status
+            and transport_event.get("cumulative_filled_quantity")
+            == cumulative_filled_quantity
+            and transport_event.get("final_fill_event_sequence")
+            == final_fill_event_sequence
+            and transport_event.get("final_fill_count") == final_fill_count
+            and transport_event.get("final_fill_watermark")
+            == final_fill_watermark
+            and transport_event.get("fill_delivery_complete") is True
             and isinstance(effective_at_ts_ms, int)
             and not isinstance(effective_at_ts_ms, bool)
             and prepared["submitted_at_ts_ms"] <= effective_at_ts_ms <= now_ts_ms
@@ -2401,6 +2685,11 @@ class MicroLiveExecutor:
             "market_id": prepared["market_id"],
             "token_id": prepared["token_id"],
             "effective_at_ts_ms": effective_at_ts_ms,
+            "cumulative_filled_quantity": cumulative_filled_quantity,
+            "final_fill_event_sequence": final_fill_event_sequence,
+            "final_fill_count": final_fill_count,
+            "final_fill_watermark": final_fill_watermark,
+            "fill_delivery_complete": True,
             "transport_event_sha256": transport_event_sha256,
             "raw_transport_event_json": raw_json,
         }
@@ -2474,11 +2763,36 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError("settlement payout must be official binary")
         if not isinstance(settlement_id, str) or not settlement_id:
             raise MicroLiveExecutionError("settlement identity is invalid")
+        if order["filled_quantity"] <= 0:
+            raise MicroLiveExecutionError("unfilled order cannot settle")
+        close_event = order.get("close_event")
+        filled_quantity = sum(
+            (Decimal(fill["quantity"]) for fill in order["fills"]),
+            Decimal("0"),
+        )
+        final_fill_count = (
+            int(order["fills"][-1]["cumulative_fill_count"])
+            if order["fills"]
+            else 0
+        )
+        if not (
+            isinstance(close_event, Mapping)
+            and close_event.get("fill_delivery_complete") is True
+            and close_event.get("cumulative_filled_quantity")
+            == str(filled_quantity)
+            and close_event.get("final_fill_event_sequence")
+            == len(order["fills"])
+            and close_event.get("final_fill_count") == final_fill_count
+        ):
+            raise MicroLiveExecutionError(
+                "settlement requires authoritative final fill delivery watermark"
+            )
         prepared = dict(order["prepared"])
         signal = dict(prepared["signal_payload"])
         official, raw_json, official_settlement_sha256 = _raw_json_object(
             raw_official_settlement_event,
             "official settlement event",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
         )
         expected_official_keys = {
             "event_type",
@@ -2544,8 +2858,6 @@ class MicroLiveExecutor:
                 )
                 raise MicroLiveExecutionError("conflicting duplicate settlement")
             return {"status": "IDEMPOTENT_SETTLEMENT_REPLAY", "settlement_id": settlement_id}
-        if order["filled_quantity"] <= 0:
-            raise MicroLiveExecutionError("unfilled order cannot settle")
         if order["is_open"]:
             self.engage_kill_switch(
                 reason="settlement_while_order_open",
@@ -2663,6 +2975,7 @@ class MicroLiveExecutor:
             request = {
                 **cancel_core,
                 "cancel_intent_id": cancel_intent_id,
+                **_final_fill_delivery_fields(order, event_ts_ms),
             }
             try:
                 response, raw_response_json, response_sha256 = _raw_json_object(
@@ -2671,11 +2984,29 @@ class MicroLiveExecutor:
                         request=request,
                     ),
                     "order cancellation response",
+                    maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
                 )
-                if set(response) != {"client_order_id", "exchange_order_id", "status"} or not (
+                response_keys = {
+                    "client_order_id",
+                    "exchange_order_id",
+                    "status",
+                    "effective_at_ts_ms",
+                    "cumulative_filled_quantity",
+                    "final_fill_event_sequence",
+                    "final_fill_count",
+                    "final_fill_watermark",
+                    "fill_delivery_complete",
+                }
+                final_fill_keys = response_keys - {
+                    "client_order_id",
+                    "exchange_order_id",
+                    "status",
+                }
+                if set(response) != response_keys or not (
                     response.get("client_order_id") == request["client_order_id"]
                     and response.get("exchange_order_id") == request["exchange_order_id"]
                     and response.get("status") == "CANCELED"
+                    and all(response.get(key) == request.get(key) for key in final_fill_keys)
                 ):
                     raise MicroLiveExecutionError("cancel response contract mismatch")
                 self._append_event(
@@ -2685,7 +3016,10 @@ class MicroLiveExecutor:
                         "exchange_order_id": request["exchange_order_id"],
                         "market_id": order["prepared"]["market_id"],
                         "token_id": order["prepared"]["token_id"],
-                        "effective_at_ts_ms": event_ts_ms,
+                        **{
+                            key: response[key]
+                            for key in final_fill_keys
+                        },
                         "transport_event_sha256": response_sha256,
                         "raw_transport_event_json": raw_response_json,
                     },
@@ -2782,7 +3116,10 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "micro-live restore authorization capability is unverified"
             )
-        if journal.risk_domain_lease_id != authorization.risk_domain_lease_id:
+        if not (
+            journal.verified_risk_domain_lease_capability is True
+            and journal.risk_domain_lease_id == authorization.risk_domain_lease_id
+        ):
             raise MicroLiveExecutionError(
                 "micro-live restore journal lease is authorization-mismatched"
             )
@@ -3034,14 +3371,12 @@ class MicroLiveExecutor:
         self,
         *,
         prepared: Mapping[str, Any],
-        disposition: Mapping[str, Any],
         response: Mapping[str, Any],
     ) -> None:
         expected_keys = {
             "authorization_id",
             "client_order_id",
             "transport_invocation_id",
-            "observed_status",
             "side_effects_fenced",
         }
         if not (
@@ -3051,7 +3386,6 @@ class MicroLiveExecutor:
             and response.get("client_order_id") == prepared["client_order_id"]
             and response.get("transport_invocation_id")
             == prepared["transport_invocation_id"]
-            and response.get("observed_status") == disposition["status"]
             and response.get("side_effects_fenced") is True
         ):
             raise MicroLiveExecutionError(
@@ -3075,6 +3409,11 @@ class MicroLiveExecutor:
             "limit_price",
             "observed_at_ts_ms",
             "effective_at_ts_ms",
+            "cumulative_filled_quantity",
+            "final_fill_event_sequence",
+            "final_fill_count",
+            "final_fill_watermark",
+            "fill_delivery_complete",
         }
         if set(response) != expected_keys:
             raise MicroLiveExecutionError("cancel lookup response schema mismatch")
@@ -3083,6 +3422,12 @@ class MicroLiveExecutor:
         status = response.get("status")
         observed_at_ts_ms = response.get("observed_at_ts_ms")
         effective_at_ts_ms = response.get("effective_at_ts_ms")
+        terminal_fill_fields = (
+            _final_fill_delivery_fields(order, effective_at_ts_ms)
+            if isinstance(effective_at_ts_ms, int)
+            and not isinstance(effective_at_ts_ms, bool)
+            else None
+        )
         if not (
             response.get("client_order_id") == prepared["client_order_id"]
             and response.get("exchange_order_id")
@@ -3103,10 +3448,20 @@ class MicroLiveExecutor:
                     and prepared["submitted_at_ts_ms"]
                     <= effective_at_ts_ms
                     <= observed_at_ts_ms
+                    and terminal_fill_fields is not None
+                    and all(
+                        response.get(key) == value
+                        for key, value in terminal_fill_fields.items()
+                    )
                 )
                 or (
                     status in {"OPEN", "FILLED"}
                     and effective_at_ts_ms is None
+                    and response.get("cumulative_filled_quantity") is None
+                    and response.get("final_fill_event_sequence") is None
+                    and response.get("final_fill_count") is None
+                    and response.get("final_fill_watermark") is None
+                    and response.get("fill_delivery_complete") is False
                 )
             )
         ):
@@ -3136,8 +3491,21 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "micro-live routine event capacity is exhausted"
             )
-        if event_type in _RECOVERY_EVENT_TYPES:
+        if (
+            event_type == "ORDER_PREPARED"
+            and self._events
+            and self._events[-1]["event_type"] == "SIGNAL_EVALUATED"
+            and self._events[-1]["payload"].get("disposition")
+            == "EXECUTION_INTENT"
+        ):
+            pending_audit = self._events.pop()
+            try:
+                view_before = self._reconcile_view()
+            finally:
+                self._events.append(pending_audit)
+        else:
             view_before = self._reconcile_view()
+        if event_type in _RECOVERY_EVENT_TYPES:
             required_before = _required_lifecycle_event_capacity(view_before)
             progress = event_type not in {
                 "SIGNAL_REJECTED",
@@ -3170,6 +3538,20 @@ class MicroLiveExecutor:
         self._generation = previous_generation + 1
         try:
             raw_state = self.export_state_bytes()
+            required_recovery_events = (
+                _required_lifecycle_event_capacity(view_before)
+                if event_type == "SIGNAL_EVALUATED"
+                and payload.get("disposition") == "EXECUTION_INTENT"
+                else _required_lifecycle_event_capacity(self._reconcile_view())
+            )
+            required_recovery_bytes = (
+                required_recovery_events * MAX_SERIALIZED_RECOVERY_EVENT_BYTES
+            )
+            if len(raw_state) + required_recovery_bytes > MAX_RESTORED_STATE_BYTES:
+                raise MicroLiveExecutionError(
+                    "micro-live WAL byte reserve cannot cover all remaining "
+                    "side-effect recovery events"
+                )
             committed_generation = transaction.commit(
                 expected_generation=previous_generation,
                 raw_state=raw_state,
@@ -3182,6 +3564,57 @@ class MicroLiveExecutor:
             self._generation = previous_generation
             self._events.pop()
             raise
+
+    def _require_execution_intent_preparation_capacity(
+        self,
+        *,
+        audit_payload: Mapping[str, Any],
+        prepared_payload: Mapping[str, Any],
+        event_ts_ms: int,
+    ) -> None:
+        """Prove WAL count and worst-case byte reserve before committing audit."""
+
+        if len(self._events) + 2 > _routine_event_limit():
+            raise MicroLiveExecutionError(
+                "micro-live routine event capacity cannot prepare an order"
+            )
+        prospective_events = copy.deepcopy(self._events)
+        for event_type, payload in (
+            ("SIGNAL_EVALUATED", audit_payload),
+            ("ORDER_PREPARED", prepared_payload),
+        ):
+            core = {
+                "sequence": len(prospective_events) + 1,
+                "event_ts_ms": event_ts_ms,
+                "previous_event_sha256": (
+                    prospective_events[-1]["event_sha256"]
+                    if prospective_events
+                    else GENESIS
+                ),
+                "event_type": event_type,
+                "payload": copy.deepcopy(dict(payload)),
+            }
+            prospective_events.append(
+                {**core, "event_sha256": canonical_json_sha256(core)}
+            )
+        original_events = self._events
+        original_generation = self._generation
+        self._events = prospective_events
+        self._generation = original_generation + 2
+        try:
+            prospective_view = self._reconcile_view()
+            raw_state = self.export_state_bytes()
+        finally:
+            self._events = original_events
+            self._generation = original_generation
+        required_recovery_bytes = (
+            _required_lifecycle_event_capacity(prospective_view)
+            * MAX_SERIALIZED_RECOVERY_EVENT_BYTES
+        )
+        if len(raw_state) + required_recovery_bytes > MAX_RESTORED_STATE_BYTES:
+            raise MicroLiveExecutionError(
+                "micro-live WAL byte reserve cannot prepare a side effect"
+            )
 
     def _verify_event_chain(self) -> None:
         previous = GENESIS
@@ -3525,6 +3958,7 @@ class MicroLiveExecutor:
                 payload.get("raw_transport_event_json"),
                 payload.get("transport_event_sha256"),
                 "stored order disposition transport response",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
             accepted_quantity = _positive_decimal(
                 payload.get("accepted_quantity"), "stored accepted quantity"
@@ -3574,11 +4008,13 @@ class MicroLiveExecutor:
                 payload.get("raw_lookup_response_json"),
                 payload.get("lookup_response_sha256"),
                 "stored submission lookup response",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
             fence_response = _stored_raw_json_object(
                 payload.get("raw_fence_response_json"),
                 payload.get("fence_response_sha256"),
                 "stored submission invocation fence response",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
             accepted_quantity = _positive_decimal(
                 response.get("accepted_quantity"),
@@ -3615,7 +4051,6 @@ class MicroLiveExecutor:
                     "authorization_id",
                     "client_order_id",
                     "transport_invocation_id",
-                    "observed_status",
                     "side_effects_fenced",
                 }
                 and fence_response.get("authorization_id")
@@ -3624,7 +4059,6 @@ class MicroLiveExecutor:
                 == response["client_order_id"]
                 and fence_response.get("transport_invocation_id")
                 == payload.get("transport_invocation_id")
-                and fence_response.get("observed_status") == response["status"]
                 and fence_response.get("side_effects_fenced") is True
             ):
                 raise MicroLiveExecutionError(
@@ -3689,6 +4123,7 @@ class MicroLiveExecutor:
                     lookup_pair[1],
                     lookup_pair[0],
                     "stored failed submission lookup response",
+                    maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
                 )
             if fence_pair[0] is not None:
                 if payload.get("fence_request_sha256") is None:
@@ -3699,6 +4134,7 @@ class MicroLiveExecutor:
                     fence_pair[1],
                     fence_pair[0],
                     "stored failed submission fence response",
+                    maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
                 )
             return
         if event_type == "ORDER_CANCEL_RECONCILED":
@@ -3712,6 +4148,11 @@ class MicroLiveExecutor:
                 "limit_price",
                 "observed_at_ts_ms",
                 "effective_at_ts_ms",
+                "cumulative_filled_quantity",
+                "final_fill_event_sequence",
+                "final_fill_count",
+                "final_fill_watermark",
+                "fill_delivery_complete",
             }
             if set(payload) != {
                 *response_keys,
@@ -3725,6 +4166,7 @@ class MicroLiveExecutor:
                 payload.get("raw_lookup_response_json"),
                 payload.get("lookup_response_sha256"),
                 "stored cancel lookup response",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
             if not (
                 set(response) == response_keys
@@ -3781,6 +4223,7 @@ class MicroLiveExecutor:
                 payload.get("raw_lookup_response_json"),
                 payload.get("lookup_response_sha256"),
                 "stored unresolved cancel lookup response",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
             if not (
                 response.get("status") == observed_status
@@ -3811,6 +4254,9 @@ class MicroLiveExecutor:
                 "price",
                 "fee_usd",
                 "executed_at_ts_ms",
+                "fill_event_sequence",
+                "cumulative_filled_quantity",
+                "cumulative_fill_count",
                 "transport_event_sha256",
                 "raw_transport_event_json",
             }:
@@ -3820,10 +4266,15 @@ class MicroLiveExecutor:
             )
             fill_price = _positive_decimal(payload.get("price"), "stored fill price")
             fill_fee = _nonnegative_decimal(payload.get("fee_usd"), "stored fill fee")
+            cumulative_filled_quantity = _positive_decimal(
+                payload.get("cumulative_filled_quantity"),
+                "stored cumulative filled quantity",
+            )
             transport_event = _stored_raw_json_object(
                 payload.get("raw_transport_event_json"),
                 payload.get("transport_event_sha256"),
                 "stored fill transport event",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
             if (
                 fill_price >= 1
@@ -3840,6 +4291,9 @@ class MicroLiveExecutor:
                     "price",
                     "fee_usd",
                     "executed_at_ts_ms",
+                    "fill_event_sequence",
+                    "cumulative_filled_quantity",
+                    "cumulative_fill_count",
                 }
                 or transport_event.get("event_type") != "FILL"
                 or any(
@@ -3854,8 +4308,19 @@ class MicroLiveExecutor:
                         "price",
                         "fee_usd",
                         "executed_at_ts_ms",
+                        "fill_event_sequence",
+                        "cumulative_filled_quantity",
+                        "cumulative_fill_count",
                     )
                 )
+                or cumulative_filled_quantity < fill_quantity
+                or not isinstance(payload.get("fill_event_sequence"), int)
+                or isinstance(payload.get("fill_event_sequence"), bool)
+                or payload["fill_event_sequence"] <= 0
+                or not isinstance(payload.get("cumulative_fill_count"), int)
+                or isinstance(payload.get("cumulative_fill_count"), bool)
+                or payload["cumulative_fill_count"]
+                < payload["fill_event_sequence"]
                 or not isinstance(payload.get("executed_at_ts_ms"), int)
                 or isinstance(payload.get("executed_at_ts_ms"), bool)
                 or payload["executed_at_ts_ms"] > event_ts_ms
@@ -3869,6 +4334,11 @@ class MicroLiveExecutor:
                 "market_id",
                 "token_id",
                 "effective_at_ts_ms",
+                "cumulative_filled_quantity",
+                "final_fill_event_sequence",
+                "final_fill_count",
+                "final_fill_watermark",
+                "fill_delivery_complete",
                 "transport_event_sha256",
                 "raw_transport_event_json",
             } or not (
@@ -3883,6 +4353,16 @@ class MicroLiveExecutor:
                 and isinstance(payload.get("effective_at_ts_ms"), int)
                 and not isinstance(payload.get("effective_at_ts_ms"), bool)
                 and 0 < payload["effective_at_ts_ms"] <= event_ts_ms
+                and isinstance(payload.get("cumulative_filled_quantity"), str)
+                and isinstance(payload.get("final_fill_event_sequence"), int)
+                and not isinstance(payload.get("final_fill_event_sequence"), bool)
+                and payload["final_fill_event_sequence"] >= 0
+                and isinstance(payload.get("final_fill_count"), int)
+                and not isinstance(payload.get("final_fill_count"), bool)
+                and payload["final_fill_count"]
+                >= payload["final_fill_event_sequence"]
+                and _is_sha256(payload.get("final_fill_watermark"))
+                and payload.get("fill_delivery_complete") is True
                 and _is_sha256(payload.get("transport_event_sha256"))
             ):
                 raise MicroLiveExecutionError("order close payload is invalid")
@@ -3890,6 +4370,7 @@ class MicroLiveExecutor:
                 payload.get("raw_transport_event_json"),
                 payload.get("transport_event_sha256"),
                 "stored order close transport event",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
             external_keys = {
                 "event_type",
@@ -3899,13 +4380,36 @@ class MicroLiveExecutor:
                 "token_id",
                 "status",
                 "effective_at_ts_ms",
+                "cumulative_filled_quantity",
+                "final_fill_event_sequence",
+                "final_fill_count",
+                "final_fill_watermark",
+                "fill_delivery_complete",
             }
             direct_cancel_keys = {
                 "client_order_id",
                 "exchange_order_id",
                 "status",
+                "effective_at_ts_ms",
+                "cumulative_filled_quantity",
+                "final_fill_event_sequence",
+                "final_fill_count",
+                "final_fill_watermark",
+                "fill_delivery_complete",
             }
             expected_status = "CANCELED" if event_type == "ORDER_CANCELED" else "EXPIRED"
+            expected_final_fill_watermark = _authoritative_final_fill_watermark(
+                client_order_id=payload["client_order_id"],
+                exchange_order_id=payload["exchange_order_id"],
+                cumulative_filled_quantity=payload["cumulative_filled_quantity"],
+                final_fill_event_sequence=payload["final_fill_event_sequence"],
+                final_fill_count=payload["final_fill_count"],
+                effective_at_ts_ms=payload["effective_at_ts_ms"],
+            )
+            if payload["final_fill_watermark"] != expected_final_fill_watermark:
+                raise MicroLiveExecutionError(
+                    "order close final fill watermark is invalid"
+                )
             if set(transport_event) == external_keys:
                 valid_transport = (
                     transport_event.get("event_type") == "ORDER_CLOSED"
@@ -3918,6 +4422,11 @@ class MicroLiveExecutor:
                             "market_id",
                             "token_id",
                             "effective_at_ts_ms",
+                            "cumulative_filled_quantity",
+                            "final_fill_event_sequence",
+                            "final_fill_count",
+                            "final_fill_watermark",
+                            "fill_delivery_complete",
                         )
                     )
                 )
@@ -3930,6 +4439,17 @@ class MicroLiveExecutor:
                     == payload.get("client_order_id")
                     and transport_event.get("exchange_order_id")
                     == payload.get("exchange_order_id")
+                    and all(
+                        transport_event.get(key) == payload.get(key)
+                        for key in (
+                            "effective_at_ts_ms",
+                            "cumulative_filled_quantity",
+                            "final_fill_event_sequence",
+                            "final_fill_count",
+                            "final_fill_watermark",
+                            "fill_delivery_complete",
+                        )
+                    )
                 )
             if not valid_transport:
                 raise MicroLiveExecutionError("order close transport identity is invalid")
@@ -3971,6 +4491,7 @@ class MicroLiveExecutor:
                 payload.get("raw_official_settlement_json"),
                 payload.get("official_settlement_sha256"),
                 "stored official settlement event",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
             if set(official) != {
                 "event_type",
@@ -4225,6 +4746,7 @@ class MicroLiveExecutor:
                         or payload.get("accepted_quantity") != prepared["quantity"]
                         or payload.get("limit_price") != prepared["limit_price"]
                         or payload.get("status") not in {"CANCELED", "EXPIRED"}
+                        or not _close_event_matches_fill_ledger(order, payload)
                         or int(payload["effective_at_ts_ms"])
                         < int(prepared["submitted_at_ts_ms"])
                     ):
@@ -4249,6 +4771,7 @@ class MicroLiveExecutor:
                         "market_id": prepared["market_id"],
                         "token_id": prepared["token_id"],
                         "lookup_purpose": "cancel_reconciliation",
+                        **_current_fill_cursor_fields(order),
                     }
                     if (
                         order["cancel_unknown"] is not True
@@ -4264,6 +4787,7 @@ class MicroLiveExecutor:
                             payload["raw_lookup_response_json"],
                             payload["lookup_response_sha256"],
                             "stored unresolved cancel lookup response",
+                            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
                         )
                         self._validate_cancel_lookup_response(
                             order=order,
@@ -4284,6 +4808,7 @@ class MicroLiveExecutor:
                         != order["prepared"]["token_id"]
                         or int(payload["effective_at_ts_ms"])
                         < int(order["prepared"]["submitted_at_ts_ms"])
+                        or not _close_event_matches_fill_ledger(order, payload)
                     ):
                         raise MicroLiveExecutionError("order cancellation lifecycle is invalid")
                     order["cancel_unknown"] = False
@@ -4303,6 +4828,7 @@ class MicroLiveExecutor:
                         != order["prepared"]["token_id"]
                         or int(payload["effective_at_ts_ms"])
                         < int(order["prepared"]["submitted_at_ts_ms"])
+                        or not _close_event_matches_fill_ledger(order, payload)
                     ):
                         raise MicroLiveExecutionError("order expiration lifecycle is invalid")
                     order["cancel_unknown"] = False
@@ -4323,6 +4849,22 @@ class MicroLiveExecutor:
                 order = orders.get(str(client_order_id))
                 fill_id = payload.get("fill_id")
                 close_event = None if order is None else order.get("close_event")
+                existing_filled_quantity = (
+                    Decimal("0")
+                    if order is None
+                    else sum(
+                        (
+                            Decimal(fill["quantity"])
+                            for fill in order["fills"]
+                        ),
+                        Decimal("0"),
+                    )
+                )
+                previous_cumulative_fill_count = (
+                    0
+                    if order is None or not order["fills"]
+                    else int(order["fills"][-1]["cumulative_fill_count"])
+                )
                 if (
                     order is None
                     or order["acknowledgement"] is None
@@ -4335,11 +4877,13 @@ class MicroLiveExecutor:
                     or payload.get("token_id") != order["prepared"]["token_id"]
                     or int(payload["executed_at_ts_ms"])
                     < int(order["prepared"]["submitted_at_ts_ms"])
-                    or (
-                        close_event is not None
-                        and int(payload["executed_at_ts_ms"])
-                        > int(close_event["effective_at_ts_ms"])
-                    )
+                    or close_event is not None
+                    or payload.get("fill_event_sequence")
+                    != len(order["fills"]) + 1
+                    or int(payload["cumulative_fill_count"])
+                    <= previous_cumulative_fill_count
+                    or Decimal(payload["cumulative_filled_quantity"])
+                    != existing_filled_quantity + Decimal(payload["quantity"])
                 ):
                     raise MicroLiveExecutionError("fill event identity is invalid")
                 fills[fill_id] = payload
@@ -4357,6 +4901,11 @@ class MicroLiveExecutor:
                     or order["acknowledgement"] is None
                     or order["settlement"] is not None
                     or not order["fills"]
+                    or order["close_event"] is None
+                    or not _close_event_matches_fill_ledger(
+                        order,
+                        order["close_event"],
+                    )
                     or payload.get("market_id") != prepared["market_id"]
                     or payload.get("slug") != prepared["slug"]
                     or payload.get("token_id") != prepared["token_id"]
@@ -4480,6 +5029,115 @@ class MicroLiveExecutor:
         }
 
 
+def _authoritative_final_fill_watermark(
+    *,
+    client_order_id: str,
+    exchange_order_id: str,
+    cumulative_filled_quantity: str,
+    final_fill_event_sequence: int,
+    final_fill_count: int,
+    effective_at_ts_ms: int,
+) -> str:
+    return canonical_json_sha256(
+        {
+            "schema_version": "authoritative-final-fill-watermark-v1",
+            "client_order_id": client_order_id,
+            "exchange_order_id": exchange_order_id,
+            "cumulative_filled_quantity": cumulative_filled_quantity,
+            "final_fill_event_sequence": final_fill_event_sequence,
+            "final_fill_count": final_fill_count,
+            "effective_at_ts_ms": effective_at_ts_ms,
+        }
+    )
+
+
+def _close_event_matches_fill_ledger(
+    order: Mapping[str, Any],
+    close_event: Mapping[str, Any],
+) -> bool:
+    fills = order.get("fills")
+    if not isinstance(fills, list):
+        return False
+    cumulative_filled_quantity = str(
+        sum(
+            (Decimal(fill["quantity"]) for fill in fills),
+            Decimal("0"),
+        )
+    )
+    final_fill_count = (
+        int(fills[-1]["cumulative_fill_count"]) if fills else 0
+    )
+    try:
+        expected_watermark = _authoritative_final_fill_watermark(
+            client_order_id=str(close_event["client_order_id"]),
+            exchange_order_id=str(close_event["exchange_order_id"]),
+            cumulative_filled_quantity=cumulative_filled_quantity,
+            final_fill_event_sequence=len(fills),
+            final_fill_count=final_fill_count,
+            effective_at_ts_ms=int(close_event["effective_at_ts_ms"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bool(
+        close_event.get("fill_delivery_complete") is True
+        and close_event.get("cumulative_filled_quantity")
+        == cumulative_filled_quantity
+        and close_event.get("final_fill_event_sequence") == len(fills)
+        and close_event.get("final_fill_count") == final_fill_count
+        and close_event.get("final_fill_watermark") == expected_watermark
+    )
+
+
+def _final_fill_delivery_fields(
+    order: Mapping[str, Any],
+    effective_at_ts_ms: int,
+) -> dict[str, Any]:
+    fills = order["fills"]
+    cumulative_filled_quantity = str(
+        sum(
+            (Decimal(fill["quantity"]) for fill in fills),
+            Decimal("0"),
+        )
+    )
+    final_fill_event_sequence = len(fills)
+    final_fill_count = (
+        int(fills[-1]["cumulative_fill_count"]) if fills else 0
+    )
+    client_order_id = str(order["prepared"]["client_order_id"])
+    exchange_order_id = str(order["acknowledgement"]["exchange_order_id"])
+    return {
+        "effective_at_ts_ms": effective_at_ts_ms,
+        "cumulative_filled_quantity": cumulative_filled_quantity,
+        "final_fill_event_sequence": final_fill_event_sequence,
+        "final_fill_count": final_fill_count,
+        "final_fill_watermark": _authoritative_final_fill_watermark(
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            cumulative_filled_quantity=cumulative_filled_quantity,
+            final_fill_event_sequence=final_fill_event_sequence,
+            final_fill_count=final_fill_count,
+            effective_at_ts_ms=effective_at_ts_ms,
+        ),
+        "fill_delivery_complete": True,
+    }
+
+
+def _current_fill_cursor_fields(order: Mapping[str, Any]) -> dict[str, Any]:
+    fills = order["fills"]
+    return {
+        "expected_cumulative_filled_quantity": str(
+            sum(
+                (Decimal(fill["quantity"]) for fill in fills),
+                Decimal("0"),
+            )
+        ),
+        "expected_final_fill_event_sequence": len(fills),
+        "expected_final_fill_count": (
+            int(fills[-1]["cumulative_fill_count"]) if fills else 0
+        ),
+    }
+
+
 def _blocked(reason: str, client_order_id: str | None = None) -> dict[str, Any]:
     return {
         "status": "BLOCKED_NO_TRADE",
@@ -4507,7 +5165,7 @@ def _new_order_lifecycle_capacity() -> int:
     conservative so a boundary order can always complete its lifecycle.
     """
 
-    return MAXIMUM_FILL_EVENTS_PER_ORDER + 8
+    return MAXIMUM_FILL_DELIVERY_EVENTS_PER_ORDER + 8
 
 
 def _required_lifecycle_event_capacity(view: Mapping[str, Any]) -> int:
@@ -4523,7 +5181,10 @@ def _required_lifecycle_event_capacity(view: Mapping[str, Any]) -> int:
             raise MicroLiveExecutionError("lifecycle reserve order is invalid")
         order = raw_order
         fills = order.get("fills")
-        if not isinstance(fills, list) or len(fills) > MAXIMUM_FILL_EVENTS_PER_ORDER:
+        if (
+            not isinstance(fills, list)
+            or len(fills) > MAXIMUM_FILL_DELIVERY_EVENTS_PER_ORDER
+        ):
             raise MicroLiveExecutionError("bounded fill lifecycle is invalid")
         if order.get("settlement") is not None or order.get("closed_status") == "REJECTED":
             continue
@@ -4538,9 +5199,13 @@ def _required_lifecycle_event_capacity(view: Mapping[str, Any]) -> int:
             if fills:
                 required += 1  # official settlement
             continue
-        remaining_fill_events = MAXIMUM_FILL_EVENTS_PER_ORDER - len(fills)
+        remaining_fill_events = (
+            MAXIMUM_FILL_DELIVERY_EVENTS_PER_ORDER - len(fills)
+        )
         required += remaining_fill_events
-        required += 3  # cancel/close intent, terminal close, settlement
+        if order.get("cancel_prepared") is None:
+            required += 1  # cancel/close intent
+        required += 2  # terminal close and settlement
         if order.get("cancel_unknown") is True:
             required += 1  # conservative cancel reconciliation
     if unresolved_exists and view.get("kill_switch_active") is not True:
@@ -4841,13 +5506,19 @@ def _raw_json_object(
     return dict(value), raw.decode("utf-8"), hashlib.sha256(raw).hexdigest()
 
 
-def _stored_raw_json_object(raw_json: Any, expected_sha256: Any, label: str) -> dict[str, Any]:
+def _stored_raw_json_object(
+    raw_json: Any,
+    expected_sha256: Any,
+    label: str,
+    *,
+    maximum_bytes: int = MAX_RAW_JSON_BYTES,
+) -> dict[str, Any]:
     if not isinstance(raw_json, str) or not raw_json:
         raise MicroLiveExecutionError(f"{label} raw JSON is invalid")
     raw = raw_json.encode("utf-8")
     if not _is_sha256(expected_sha256) or hashlib.sha256(raw).hexdigest() != expected_sha256:
         raise MicroLiveExecutionError(f"{label} SHA-256 mismatch")
-    value = _decode_provider_json(raw, label)
+    value = _decode_provider_json(raw, label, maximum_bytes=maximum_bytes)
     if not isinstance(value, Mapping):
         raise MicroLiveExecutionError(f"{label} is not a JSON object")
     return dict(value)
