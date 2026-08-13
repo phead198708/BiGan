@@ -85,11 +85,9 @@ jobs:
 
   exact-deployment-runtime:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     container:
       image: python:3.12.4-slim-bookworm@sha256:a074fac67aa01841fee592d00bae14d25dcaf98ef6e12a683ecceb7e0147e2d1
-    env:
-      BIGAN_DEPLOYMENT_IMAGE_MANIFEST_DIGEST: sha256:a074fac67aa01841fee592d00bae14d25dcaf98ef6e12a683ecceb7e0147e2d1
 
     steps:
       - name: Check out repository without deployment mutation
@@ -103,3 +101,11 @@ jobs:
 
       - name: Verify exact deployment image, ABI, and distribution graph
         run: python examples/v8/verify_residual_promotion_runtime_matrix.py
+
+      - name: Exercise frozen model and execution behavior in exact image
+        run: |
+          python -m pytest \
+            tests/v8/test_residual_promotion_runtime_matrix.py \
+            tests/v8/test_residual_promotion_micro_live_executor.py \
+            tests/v8/test_residual_promotion_v1.py::test_repository_local_bundle_loads_and_matches_frozen_parity \
+            -q

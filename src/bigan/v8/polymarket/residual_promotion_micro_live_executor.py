@@ -19,7 +19,7 @@ import queue
 import re
 import stat
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -69,13 +69,16 @@ EXECUTION_INVOCATION_FENCE_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-invocation-fence-v1"
 )
 EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-invocation-acceptance-v2"
+    "bigan-btc-15m-residual-promotion-execution-outbox-acceptance-v3"
+)
+EXECUTION_OUTBOX_COMMAND_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-execution-outbox-command-v1"
 )
 EXECUTION_BINDING_ATTESTATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-binding-attestation-v4"
+    "bigan-btc-15m-residual-promotion-execution-binding-attestation-v5"
 )
 EXECUTION_OPERATION_RECEIPT_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-operation-receipt-v2"
+    "bigan-btc-15m-residual-promotion-execution-operation-receipt-v3"
 )
 EXECUTION_CURSOR_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-signed-fill-cursor-v1"
@@ -335,7 +338,7 @@ class DurableRiskDomainLeaseBackend(Protocol):
     ) -> bytes:
         """Register one risk-increasing invocation unless already killed."""
 
-    def commit_execution_acceptance(
+    def commit_execution_outbox_command(
         self,
         *,
         lease_id: str,
@@ -349,9 +352,9 @@ class DurableRiskDomainLeaseBackend(Protocol):
         transport_invocation_id: str,
         operation: str,
         fence_receipt_sha256: str,
-        raw_acceptance: bytes,
+        raw_outbox_command: bytes,
     ) -> bytes:
-        """Atomically persist acceptance and terminal state; replay exact bytes."""
+        """Atomically accept one exact command for dispatch; replay exact bytes."""
 
 
 RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM = "RSASSA-PKCS1-v1_5-SHA256"
@@ -417,12 +420,12 @@ class MicroLiveStateJournal(Protocol):
     ) -> bytes:
         """Return a signed authority fence for one risk-increasing invocation."""
 
-    def commit_execution_acceptance(
+    def commit_execution_outbox_command(
         self,
         raw_fence_receipt: bytes,
-        raw_acceptance: bytes,
+        raw_outbox_command: bytes,
     ) -> bytes:
-        """Atomically accept, replay an exact prior acceptance, or return FENCED."""
+        """Atomically make one exact outbox command dispatchable or return FENCED."""
 
     def initialize(self, raw_state: bytes) -> DurableJournalSnapshot:
         """Create the generation-zero state, rejecting an existing journal."""
@@ -807,7 +810,7 @@ class AtomicFileMicroLiveStateJournal:
             operation=operation,
             status="ACTIVE",
             fence_receipt_sha256=None,
-            acceptance_sha256=None,
+            outbox_command_sha256=None,
         )
         if not _verify_signed_risk_domain_receipt(
             receipt,
@@ -820,16 +823,28 @@ class AtomicFileMicroLiveStateJournal:
             )
         return receipt_json.encode("utf-8")
 
-    def commit_execution_acceptance(
+    def commit_execution_outbox_command(
         self,
         raw_fence_receipt: bytes,
-        raw_acceptance: bytes,
+        raw_outbox_command: bytes,
     ) -> bytes:
         self._require_bound()
         identity = self._required_lease_identity()
-        _, acceptance_json, acceptance_sha256 = _raw_json_object(
-            raw_acceptance,
-            "execution durable acceptance",
+        outbox_command, outbox_command_json, outbox_command_sha256 = (
+            _raw_json_object(
+                raw_outbox_command,
+                "execution durable outbox command",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+            )
+        )
+        raw_command_json = outbox_command.get("raw_command_json")
+        if not isinstance(raw_command_json, str) or not raw_command_json:
+            raise MicroLiveExecutionError(
+                "execution durable outbox command payload is absent"
+            )
+        command, canonical_command_json, command_sha256 = _raw_json_object(
+            raw_command_json.encode("utf-8"),
+            "execution durable outbox command payload",
             maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
         )
         fence, _, fence_receipt_sha256 = _raw_json_object(
@@ -844,11 +859,21 @@ class AtomicFileMicroLiveStateJournal:
             operation=operation,
             status="ACTIVE",
             fence_receipt_sha256=None,
-            acceptance_sha256=None,
+            outbox_command_sha256=None,
         )
         if not (
             _is_sha256(transport_invocation_id)
             and operation == "submit_order"
+            and outbox_command
+            == {
+                "schema_version": EXECUTION_OUTBOX_COMMAND_SCHEMA_VERSION,
+                "transport_invocation_id": transport_invocation_id,
+                "operation": operation,
+                "command_sha256": command_sha256,
+                "raw_command_json": canonical_command_json,
+            }
+            and command.get("transport_invocation_id")
+            == transport_invocation_id
             and _verify_signed_risk_domain_receipt(
                 fence,
                 expected_core=expected_fence_core,
@@ -857,11 +882,11 @@ class AtomicFileMicroLiveStateJournal:
             )
         ):
             raise MicroLiveExecutionError(
-                "execution invocation fence is invalid at acceptance"
+                "execution invocation fence or outbox command is invalid"
             )
         try:
             raw_commit = self._bounded_authority_call(
-                "commit_execution_acceptance",
+                "commit_execution_outbox_command",
                 lease_id=str(identity["lease_id"]),
                 service_identity_sha256=str(identity["service_identity_sha256"]),
                 tenant_id=str(identity["tenant_id"]),
@@ -873,15 +898,15 @@ class AtomicFileMicroLiveStateJournal:
                 transport_invocation_id=str(transport_invocation_id),
                 operation=str(operation),
                 fence_receipt_sha256=fence_receipt_sha256,
-                raw_acceptance=acceptance_json.encode("utf-8"),
+                raw_outbox_command=outbox_command_json.encode("utf-8"),
             )
         except Exception as exc:
             raise MicroLiveExecutionError(
-                "execution durable acceptance failed closed"
+                "execution durable outbox acceptance failed closed"
             ) from exc
         commit, commit_json, _ = _raw_json_object(
             raw_commit,
-            "execution invocation acceptance receipt",
+            "execution outbox acceptance receipt",
         )
         status = commit.get("status")
         expected_commit_core = self._execution_invocation_receipt_core(
@@ -890,12 +915,12 @@ class AtomicFileMicroLiveStateJournal:
             operation=operation,
             status=status,
             fence_receipt_sha256=fence_receipt_sha256,
-            acceptance_sha256=(
-                acceptance_sha256 if status == "ACCEPTED" else None
+            outbox_command_sha256=(
+                outbox_command_sha256 if status == "DISPATCHABLE" else None
             ),
         )
         if not (
-            status in {"ACCEPTED", "FENCED"}
+            status in {"DISPATCHABLE", "FENCED"}
             and _verify_signed_risk_domain_receipt(
                 commit,
                 expected_core=expected_commit_core,
@@ -904,7 +929,7 @@ class AtomicFileMicroLiveStateJournal:
             )
         ):
             raise MicroLiveExecutionError(
-                "execution invocation acceptance receipt is invalid"
+                "execution outbox acceptance receipt is invalid"
             )
         return commit_json.encode("utf-8")
 
@@ -1260,7 +1285,7 @@ class AtomicFileMicroLiveStateJournal:
         operation: Any,
         status: Any,
         fence_receipt_sha256: Any,
-        acceptance_sha256: Any,
+        outbox_command_sha256: Any,
     ) -> dict[str, Any]:
         identity = self._required_lease_identity()
         core = {
@@ -1279,7 +1304,7 @@ class AtomicFileMicroLiveStateJournal:
         }
         if schema_version == EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION:
             core["fence_receipt_sha256"] = fence_receipt_sha256
-            core["acceptance_sha256"] = acceptance_sha256
+            core["outbox_command_sha256"] = outbox_command_sha256
         return core
 
     def _recover_pending_kill_locked(self) -> None:
@@ -1633,20 +1658,17 @@ class MicroLiveOrderTransport(Protocol):
     def attest_execution_binding(self, request: Mapping[str, Any]) -> bytes:
         """Return signed deployment identity bytes pinned by authorization."""
 
-    def bind_risk_domain_execution_fence(
-        self,
-        consumer: Callable[[bytes, bytes], bytes],
-        *,
-        risk_domain_id: str,
-        authority_binding_sha256: str,
-    ) -> None:
-        """Bind acceptance and its terminal fence state to one authority commit."""
-
     def read_trusted_time(self, request: Mapping[str, Any]) -> bytes:
         """Return a signed completion timestamp from the pinned clock."""
 
     def submit_order(self, request: Mapping[str, Any]) -> bytes:
-        """Submit one idempotent order request and return raw JSON bytes."""
+        """Dispatch only after ``verify_dispatchable_outbox_request`` passes.
+
+        The signed DISPATCHABLE receipt is the venue-write linearization point.
+        A gateway must verify it against the exact request bytes before any
+        network, signer, wallet, or exchange side effect.  Venue responses are
+        evidence of the result; they never authorize the dispatch itself.
+        """
 
     def cancel_order(self, request: Mapping[str, Any]) -> bytes:
         """Cancel one acknowledged order and return raw JSON bytes."""
@@ -1664,6 +1686,155 @@ class MicroLiveOrderTransport(Protocol):
         guarantee, not a point-in-time lookup.  The executor obtains it before
         the only authoritative post-timeout lookup.
         """
+
+
+def verify_dispatchable_outbox_request(
+    request: Mapping[str, Any],
+    *,
+    authorization_id: str,
+    risk_domain_id: str,
+    risk_domain_authority_binding_sha256: str,
+    lease_id: str,
+    service_identity_sha256: str,
+    tenant_id: str,
+    key_identity_sha256: str,
+    public_key_modulus_hex: str,
+    public_key_exponent: int,
+) -> dict[str, str]:
+    """Verify the exact pre-venue durable outbox proof, or fail closed.
+
+    This function is the reviewed execution-gateway boundary.  Concrete venue
+    adapters must call it immediately before their first external side effect.
+    It strips only the proof envelope, reconstructs the authority-accepted
+    command byte for byte, and rejects identity drift or post-acceptance edits.
+    """
+
+    outbound_request = copy.deepcopy(dict(request))
+    authentication = dict(outbound_request.get("execution_authentication") or {})
+    raw_fence_json = authentication.get(
+        "execution_invocation_fence_receipt_json"
+    )
+    raw_outbox_command_json = authentication.get("execution_outbox_command_json")
+    raw_acceptance_json = authentication.get(
+        "raw_execution_outbox_acceptance_receipt_json"
+    )
+    if not all(
+        isinstance(value, str) and value
+        for value in (
+            raw_fence_json,
+            raw_outbox_command_json,
+            raw_acceptance_json,
+        )
+    ):
+        raise MicroLiveExecutionError(
+            "venue dispatch lacks a complete durable outbox proof"
+        )
+    if not (
+        authentication.get("authorization_id") == authorization_id
+        and authentication.get("risk_domain_id") == risk_domain_id
+        and authentication.get("risk_domain_authority_binding_sha256")
+        == risk_domain_authority_binding_sha256
+        and outbound_request.get("transport_invocation_id") is not None
+    ):
+        raise MicroLiveExecutionError("venue dispatch outbox identity is invalid")
+
+    fence, canonical_fence_json, fence_sha256 = _raw_json_object(
+        raw_fence_json.encode("utf-8"),
+        "venue dispatch invocation fence",
+        maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+    )
+    expected_fence = {
+        "schema_version": EXECUTION_INVOCATION_FENCE_SCHEMA_VERSION,
+        "lease_id": lease_id,
+        "service_identity_sha256": service_identity_sha256,
+        "tenant_id": tenant_id,
+        "key_identity_sha256": key_identity_sha256,
+        "authorization_id": authorization_id,
+        "risk_domain_id": risk_domain_id,
+        "journal_namespace_id": fence.get("journal_namespace_id"),
+        "journal_epoch": fence.get("journal_epoch"),
+        "transport_invocation_id": outbound_request["transport_invocation_id"],
+        "operation": "submit_order",
+        "status": "ACTIVE",
+    }
+    if not (
+        _is_sha256(expected_fence["journal_namespace_id"])
+        and _is_sha256(expected_fence["journal_epoch"])
+        and canonical_fence_json == raw_fence_json
+        and fence_sha256
+        == authentication.get("execution_invocation_fence_receipt_sha256")
+        and _verify_signed_risk_domain_receipt(
+            fence,
+            expected_core=expected_fence,
+            public_key_modulus_hex=public_key_modulus_hex,
+            public_key_exponent=public_key_exponent,
+        )
+    ):
+        raise MicroLiveExecutionError("venue dispatch invocation fence is invalid")
+
+    outbox_command, canonical_outbox_json, outbox_command_sha256 = (
+        _raw_json_object(
+            raw_outbox_command_json.encode("utf-8"),
+            "venue dispatch outbox command",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+    )
+    command_authentication = dict(outbound_request["execution_authentication"])
+    for key in (
+        "execution_outbox_command_json",
+        "execution_outbox_command_sha256",
+        "raw_execution_outbox_acceptance_receipt_json",
+        "execution_outbox_acceptance_receipt_sha256",
+    ):
+        command_authentication.pop(key, None)
+    outbound_request["execution_authentication"] = command_authentication
+    raw_command = _canonical_json_bytes(outbound_request)
+    expected_outbox_command = {
+        "schema_version": EXECUTION_OUTBOX_COMMAND_SCHEMA_VERSION,
+        "transport_invocation_id": request["transport_invocation_id"],
+        "operation": "submit_order",
+        "command_sha256": hashlib.sha256(raw_command).hexdigest(),
+        "raw_command_json": raw_command.decode("utf-8"),
+    }
+    if not (
+        outbox_command == expected_outbox_command
+        and canonical_outbox_json == raw_outbox_command_json
+        and outbox_command_sha256
+        == authentication.get("execution_outbox_command_sha256")
+    ):
+        raise MicroLiveExecutionError("venue dispatch outbox command is invalid")
+
+    acceptance, canonical_acceptance_json, acceptance_sha256 = _raw_json_object(
+        raw_acceptance_json.encode("utf-8"),
+        "venue dispatch outbox acceptance",
+        maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+    )
+    expected_acceptance = {
+        **expected_fence,
+        "schema_version": EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION,
+        "status": "DISPATCHABLE",
+        "fence_receipt_sha256": fence_sha256,
+        "outbox_command_sha256": outbox_command_sha256,
+    }
+    if not (
+        canonical_acceptance_json == raw_acceptance_json
+        and acceptance_sha256
+        == authentication.get("execution_outbox_acceptance_receipt_sha256")
+        and _verify_signed_risk_domain_receipt(
+            acceptance,
+            expected_core=expected_acceptance,
+            public_key_modulus_hex=public_key_modulus_hex,
+            public_key_exponent=public_key_exponent,
+        )
+    ):
+        raise MicroLiveExecutionError("venue dispatch outbox acceptance is invalid")
+    return {
+        "fence_receipt_sha256": fence_sha256,
+        "outbox_command_sha256": outbox_command_sha256,
+        "outbox_acceptance_receipt_json": canonical_acceptance_json,
+        "outbox_acceptance_receipt_sha256": acceptance_sha256,
+        "status": "DISPATCHABLE",
+    }
 
 
 def _risk_domain_authority_binding_sha256(
@@ -2245,7 +2416,6 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "micro-live journal authority binding is authorization-mismatched"
             )
-        self._bind_transport_execution_fence()
         self._verify_execution_binding_attestation()
         self._generation = generation
         self._transaction_depth = 0
@@ -2411,6 +2581,62 @@ class MicroLiveExecutor:
                     invocation_fence_sha256
                 ),
             }
+        if operation == "submit_order":
+            raw_command = _canonical_json_bytes(outbound_request)
+            raw_outbox_command = _canonical_json_bytes(
+                {
+                    "schema_version": EXECUTION_OUTBOX_COMMAND_SCHEMA_VERSION,
+                    "transport_invocation_id": outbound_request.get(
+                        "transport_invocation_id"
+                    ),
+                    "operation": operation,
+                    "command_sha256": hashlib.sha256(raw_command).hexdigest(),
+                    "raw_command_json": raw_command.decode("utf-8"),
+                }
+            )
+            if raw_invocation_fence is None:
+                raise MicroLiveExecutionError(
+                    "submit_order outbox command lacks an invocation fence"
+                )
+            try:
+                raw_outbox_acceptance = (
+                    self._journal.commit_execution_outbox_command(
+                        raw_invocation_fence,
+                        raw_outbox_command,
+                    )
+                )
+            except MicroLiveExecutionError:
+                # The first response can be lost after the authority has made
+                # the command durable.  Exact replay is the only safe recovery:
+                # the authority returns the same DISPATCHABLE receipt or keeps
+                # the command fenced, and rejects any byte drift.
+                raw_outbox_acceptance = (
+                    self._journal.commit_execution_outbox_command(
+                        raw_invocation_fence,
+                        raw_outbox_command,
+                    )
+                )
+            outbox_acceptance = json.loads(raw_outbox_acceptance)
+            if outbox_acceptance.get("status") != "DISPATCHABLE":
+                raise MicroLiveExecutionError(
+                    "submit_order outbox command was fenced before dispatch"
+                )
+            outbound_request["execution_authentication"].update(
+                {
+                    "execution_outbox_command_json": (
+                        raw_outbox_command.decode("utf-8")
+                    ),
+                    "execution_outbox_command_sha256": hashlib.sha256(
+                        raw_outbox_command
+                    ).hexdigest(),
+                    "raw_execution_outbox_acceptance_receipt_json": (
+                        raw_outbox_acceptance.decode("utf-8")
+                    ),
+                    "execution_outbox_acceptance_receipt_sha256": (
+                        hashlib.sha256(raw_outbox_acceptance).hexdigest()
+                    ),
+                }
+            )
         method = getattr(self._transport, operation, None)
         if not callable(method):
             raise MicroLiveExecutionError(
@@ -2452,53 +2678,6 @@ class MicroLiveExecutor:
             raw_receipt=value,
         )
 
-    def _bind_transport_execution_fence(self) -> None:
-        method = getattr(
-            self._transport,
-            "bind_risk_domain_execution_fence",
-            None,
-        )
-        if not callable(method):
-            raise MicroLiveExecutionError(
-                "authenticated execution service lacks risk-domain fencing"
-            )
-        completed = threading.Event()
-        results: queue.SimpleQueue[tuple[bool, Any]] = queue.SimpleQueue()
-
-        def invoke() -> None:
-            try:
-                value = method(
-                    self._journal.commit_execution_acceptance,
-                    risk_domain_id=self._risk_domain_id,
-                    authority_binding_sha256=(
-                        self._authorization.risk_domain_authority_binding_sha256
-                    ),
-                )
-                results.put((True, value))
-            except BaseException as exc:
-                results.put((False, exc))
-            finally:
-                completed.set()
-
-        threading.Thread(
-            target=invoke,
-            name="micro-live-bind-execution-fence",
-            daemon=True,
-        ).start()
-        if not completed.wait(self._maximum_transport_call_duration_ms / 1_000):
-            raise MicroLiveExecutionError(
-                "execution risk-domain fence binding exceeded its deadline"
-            )
-        succeeded, value = results.get_nowait()
-        if not succeeded:
-            raise MicroLiveExecutionError(
-                "execution risk-domain fence binding failed closed"
-            ) from value
-        if value is not None:
-            raise MicroLiveExecutionError(
-                "execution risk-domain fence binding returned an invalid value"
-            )
-
     def _verify_execution_operation_receipt(
         self,
         *,
@@ -2522,24 +2701,30 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 f"{operation} authenticated response payload is oversized"
             )
-        acceptance_receipt_json: str | None = None
-        acceptance_receipt_sha256: str | None = None
+        outbox_acceptance_receipt_json: str | None = None
+        outbox_acceptance_receipt_sha256: str | None = None
+        outbox_command_sha256: str | None = None
         fence_status = "NOT_APPLICABLE"
         if operation == "submit_order":
             raw_fence_json = authentication.get(
                 "execution_invocation_fence_receipt_json"
             )
+            raw_outbox_command_json = authentication.get(
+                "execution_outbox_command_json"
+            )
             raw_acceptance_json = receipt.get(
-                "raw_execution_acceptance_receipt_json"
+                "raw_execution_outbox_acceptance_receipt_json"
             )
             if not (
                 isinstance(raw_fence_json, str)
                 and raw_fence_json
+                and isinstance(raw_outbox_command_json, str)
+                and raw_outbox_command_json
                 and isinstance(raw_acceptance_json, str)
                 and raw_acceptance_json
             ):
                 raise MicroLiveExecutionError(
-                    "submit_order durable acceptance evidence is absent"
+                    "submit_order durable outbox evidence is absent"
                 )
             fence, canonical_fence_json, fence_sha256 = _raw_json_object(
                 raw_fence_json.encode("utf-8"),
@@ -2588,34 +2773,86 @@ class MicroLiveExecutor:
                 raise MicroLiveExecutionError(
                     "submit_order execution invocation fence is invalid"
                 )
-            acceptance, acceptance_receipt_json, acceptance_receipt_sha256 = (
+            outbox_command, canonical_outbox_command_json, outbox_command_sha256 = (
                 _raw_json_object(
-                    raw_acceptance_json.encode("utf-8"),
-                    "submit_order durable acceptance receipt",
+                    raw_outbox_command_json.encode("utf-8"),
+                    "submit_order durable outbox command",
                     maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
                 )
+            )
+            command_without_outbox_proof = copy.deepcopy(dict(outbound_request))
+            command_authentication = dict(
+                command_without_outbox_proof["execution_authentication"]
+            )
+            for key in (
+                "execution_outbox_command_json",
+                "execution_outbox_command_sha256",
+                "raw_execution_outbox_acceptance_receipt_json",
+                "execution_outbox_acceptance_receipt_sha256",
+            ):
+                command_authentication.pop(key, None)
+            command_without_outbox_proof["execution_authentication"] = (
+                command_authentication
+            )
+            raw_command = _canonical_json_bytes(command_without_outbox_proof)
+            expected_outbox_command = {
+                "schema_version": EXECUTION_OUTBOX_COMMAND_SCHEMA_VERSION,
+                "transport_invocation_id": outbound_request.get(
+                    "transport_invocation_id"
+                ),
+                "operation": "submit_order",
+                "command_sha256": hashlib.sha256(raw_command).hexdigest(),
+                "raw_command_json": raw_command.decode("utf-8"),
+            }
+            if not (
+                outbox_command == expected_outbox_command
+                and canonical_outbox_command_json == raw_outbox_command_json
+                and outbox_command_sha256
+                == authentication.get("execution_outbox_command_sha256")
+            ):
+                raise MicroLiveExecutionError(
+                    "submit_order durable outbox command is invalid"
+                )
+            (
+                acceptance,
+                outbox_acceptance_receipt_json,
+                outbox_acceptance_receipt_sha256,
+            ) = _raw_json_object(
+                raw_acceptance_json.encode("utf-8"),
+                "submit_order durable outbox acceptance receipt",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
             expected_acceptance_core = {
                 **expected_fence_core,
                 "schema_version": EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION,
-                "status": "ACCEPTED",
+                "status": "DISPATCHABLE",
                 "fence_receipt_sha256": fence_sha256,
-                "acceptance_sha256": hashlib.sha256(raw_response).hexdigest(),
+                "outbox_command_sha256": outbox_command_sha256,
             }
-            if not _verify_signed_risk_domain_receipt(
-                acceptance,
-                expected_core=expected_acceptance_core,
-                public_key_modulus_hex=(
-                    self._authorization.risk_domain_lease_public_key_modulus_hex
-                ),
-                public_key_exponent=(
-                    self._authorization.risk_domain_lease_public_key_exponent
-                ),
+            if not (
+                outbox_acceptance_receipt_sha256
+                == authentication.get(
+                    "execution_outbox_acceptance_receipt_sha256"
+                )
+                and outbox_acceptance_receipt_json
+                == authentication.get(
+                    "raw_execution_outbox_acceptance_receipt_json"
+                )
+                and _verify_signed_risk_domain_receipt(
+                    acceptance,
+                    expected_core=expected_acceptance_core,
+                    public_key_modulus_hex=(
+                        self._authorization.risk_domain_lease_public_key_modulus_hex
+                    ),
+                    public_key_exponent=(
+                        self._authorization.risk_domain_lease_public_key_exponent
+                    ),
+                )
             ):
                 raise MicroLiveExecutionError(
-                    "submit_order durable acceptance receipt is invalid"
+                    "submit_order durable outbox acceptance receipt is invalid"
                 )
-            fence_status = "ACCEPTED"
+            fence_status = "DISPATCHABLE"
         expected_core = {
             "schema_version": EXECUTION_OPERATION_RECEIPT_SCHEMA_VERSION,
             "authorization_id": self._authorization.authorization_id,
@@ -2644,8 +2881,13 @@ class MicroLiveExecutor:
             "execution_invocation_fence_status": (
                 fence_status
             ),
-            "raw_execution_acceptance_receipt_json": acceptance_receipt_json,
-            "execution_acceptance_receipt_sha256": acceptance_receipt_sha256,
+            "execution_outbox_command_sha256": outbox_command_sha256,
+            "raw_execution_outbox_acceptance_receipt_json": (
+                outbox_acceptance_receipt_json
+            ),
+            "execution_outbox_acceptance_receipt_sha256": (
+                outbox_acceptance_receipt_sha256
+            ),
         }
         if not _verify_signed_risk_domain_receipt(
             receipt,
@@ -8648,5 +8890,6 @@ __all__ = [
     "VerifiedProviderFeatureEvidence",
     "build_provider_bound_feature_rows",
     "create_micro_live_executor",
+    "verify_dispatchable_outbox_request",
     "verify_provider_feature_evidence",
 ]

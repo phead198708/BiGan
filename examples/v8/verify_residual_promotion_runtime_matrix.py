@@ -6,7 +6,6 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
-import os
 import platform
 import re
 import sys
@@ -212,6 +211,13 @@ def verify_static_contract() -> tuple[dict[str, Any], dict[str, Any]]:
         and locked["xgboost"][0] == matrix["xgboost_version"]
         and model_versions == {matrix["xgboost_version"]}
         and pinned_image in workflow
+        and "BIGAN_DEPLOYMENT_IMAGE_MANIFEST_DIGEST" not in workflow
+        and "tests/v8/test_residual_promotion_micro_live_executor.py" in workflow
+        and (
+            "tests/v8/test_residual_promotion_v1.py::"
+            "test_repository_local_bundle_loads_and_matches_frozen_parity"
+        )
+        in workflow
         and "pip install --require-hashes --only-binary=:all:" in workflow
         and "pip install --no-deps --no-build-isolation -e ." in workflow
         and 'pip install -e ".[dev]"' not in workflow
@@ -252,9 +258,7 @@ def verify_deployment_runtime() -> None:
     unexpected = sorted(set(installed) - set(expected_installed))
     _verify_model_runtime_versions(matrix)
     if not (
-        os.environ.get("BIGAN_DEPLOYMENT_IMAGE_MANIFEST_DIGEST")
-        == EXPECTED_DEPLOYMENT_IMAGE_MANIFEST_DIGEST
-        and platform.system().lower() == target["operating_system"]
+        platform.system().lower() == target["operating_system"]
         and platform.machine().lower() == target["architecture"]
         and libc_name.lower() == target["libc"]
         and libc_version == target["libc_version"]
