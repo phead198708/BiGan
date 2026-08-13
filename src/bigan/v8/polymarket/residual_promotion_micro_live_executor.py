@@ -74,6 +74,9 @@ EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION = (
 EXECUTION_OUTBOX_COMMAND_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-outbox-command-v1"
 )
+EXECUTION_OUTBOX_RECOVERY_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-execution-outbox-recovery-v1"
+)
 EXECUTION_DISPATCH_RECEIPT_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-dispatch-receipt-v1"
 )
@@ -256,6 +259,10 @@ class MicroLiveExecutionError(RuntimeError):
     """Raised whenever execution or reconciliation cannot remain deterministic."""
 
 
+class SubmissionRecoveryOutcomeNotFoundError(MicroLiveExecutionError):
+    """Raised only when a lookup-only recovery proves no venue outcome exists."""
+
+
 class ProviderFeatureEvidenceError(ValueError):
     """Raised when exact provider inputs cannot prove one causal feature row."""
 
@@ -368,6 +375,21 @@ class DurableRiskDomainLeaseBackend(Protocol):
         raw_outbox_command: bytes,
     ) -> bytes:
         """Atomically accept one exact command for dispatch; replay exact bytes."""
+
+    def recover_execution_outbox_command(
+        self,
+        *,
+        lease_id: str,
+        service_identity_sha256: str,
+        tenant_id: str,
+        key_identity_sha256: str,
+        authorization_id: str,
+        risk_domain_id: str,
+        journal_namespace_id: str,
+        journal_epoch: str,
+        transport_invocation_id: str,
+    ) -> bytes:
+        """Return a signed exact outbox/acceptance recovery record."""
 
     def begin_execution_dispatch(
         self,
@@ -510,6 +532,13 @@ class MicroLiveStateJournal(Protocol):
         raw_outbox_command: bytes,
     ) -> bytes:
         """Atomically make one exact outbox command dispatchable or return FENCED."""
+
+    def recover_execution_outbox_request(
+        self,
+        *,
+        transport_invocation_id: str,
+    ) -> bytes:
+        """Recover and verify the exact accepted submit request without a grant."""
 
     def begin_execution_dispatch(
         self,
@@ -1051,6 +1080,146 @@ class AtomicFileMicroLiveStateJournal:
                 "execution outbox acceptance receipt is invalid"
             )
         return commit_json.encode("utf-8")
+
+    def recover_execution_outbox_request(
+        self,
+        *,
+        transport_invocation_id: str,
+    ) -> bytes:
+        """Recover one signed exact submit request without a dispatch grant."""
+
+        self._require_bound()
+        _require_sha256(transport_invocation_id, "execution outbox recovery")
+        identity = self._required_lease_identity()
+        try:
+            raw_recovery = self._bounded_authority_call(
+                "recover_execution_outbox_command",
+                lease_id=str(identity["lease_id"]),
+                service_identity_sha256=str(identity["service_identity_sha256"]),
+                tenant_id=str(identity["tenant_id"]),
+                key_identity_sha256=str(identity["key_identity_sha256"]),
+                authorization_id=str(self._authorization_id),
+                risk_domain_id=str(self._risk_domain_id),
+                journal_namespace_id=str(self._journal_namespace_id),
+                journal_epoch=str(self._journal_epoch),
+                transport_invocation_id=transport_invocation_id,
+            )
+        except Exception as exc:
+            raise MicroLiveExecutionError(
+                "execution outbox recovery failed closed"
+            ) from exc
+        recovery, _, _ = _raw_json_object(
+            raw_recovery,
+            "execution outbox recovery record",
+            maximum_bytes=MAX_SERIALIZED_RECOVERY_EVENT_BYTES,
+        )
+        raw_outbox_json = recovery.get("raw_outbox_command_json")
+        raw_acceptance_json = recovery.get(
+            "raw_outbox_acceptance_receipt_json"
+        )
+        if not (
+            isinstance(raw_outbox_json, str)
+            and raw_outbox_json
+            and isinstance(raw_acceptance_json, str)
+            and raw_acceptance_json
+        ):
+            raise MicroLiveExecutionError(
+                "execution outbox recovery material is absent"
+            )
+        outbox, canonical_outbox_json, outbox_sha256 = _raw_json_object(
+            raw_outbox_json.encode("utf-8"),
+            "recovered execution outbox command",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        acceptance, canonical_acceptance_json, acceptance_sha256 = (
+            _raw_json_object(
+                raw_acceptance_json.encode("utf-8"),
+                "recovered execution outbox acceptance",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+            )
+        )
+        expected_recovery_core = {
+            **self._authority_receipt_identity_core(),
+            "schema_version": EXECUTION_OUTBOX_RECOVERY_SCHEMA_VERSION,
+            "transport_invocation_id": transport_invocation_id,
+            "operation": "submit_order",
+            "outbox_command_sha256": outbox_sha256,
+            "raw_outbox_command_json": canonical_outbox_json,
+            "outbox_acceptance_receipt_sha256": acceptance_sha256,
+            "raw_outbox_acceptance_receipt_json": canonical_acceptance_json,
+        }
+        expected_acceptance_core = self._execution_invocation_receipt_core(
+            schema_version=EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION,
+            transport_invocation_id=transport_invocation_id,
+            operation="submit_order",
+            status="DISPATCHABLE",
+            fence_receipt_sha256=acceptance.get("fence_receipt_sha256"),
+            outbox_command_sha256=outbox_sha256,
+        )
+        raw_command_json = outbox.get("raw_command_json")
+        if not (
+            _verify_signed_risk_domain_receipt(
+                recovery,
+                expected_core=expected_recovery_core,
+                public_key_modulus_hex=str(identity["public_key_modulus_hex"]),
+                public_key_exponent=int(identity["public_key_exponent"]),
+            )
+            and outbox.get("schema_version")
+            == EXECUTION_OUTBOX_COMMAND_SCHEMA_VERSION
+            and outbox.get("transport_invocation_id")
+            == transport_invocation_id
+            and outbox.get("operation") == "submit_order"
+            and isinstance(raw_command_json, str)
+            and raw_command_json
+            and hashlib.sha256(raw_command_json.encode("utf-8")).hexdigest()
+            == outbox.get("command_sha256")
+            and acceptance_sha256
+            == recovery.get("outbox_acceptance_receipt_sha256")
+            and acceptance.get("outbox_command_sha256") == outbox_sha256
+            and _verify_signed_risk_domain_receipt(
+                acceptance,
+                expected_core=expected_acceptance_core,
+                public_key_modulus_hex=str(identity["public_key_modulus_hex"]),
+                public_key_exponent=int(identity["public_key_exponent"]),
+            )
+        ):
+            raise MicroLiveExecutionError(
+                "execution outbox recovery record is invalid"
+            )
+        command, _, _ = _raw_json_object(
+            raw_command_json.encode("utf-8"),
+            "recovered execution submit command",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        authentication = dict(command.get("execution_authentication") or {})
+        authentication.update(
+            {
+                "execution_outbox_command_json": canonical_outbox_json,
+                "execution_outbox_command_sha256": outbox_sha256,
+                "raw_execution_outbox_acceptance_receipt_json": (
+                    canonical_acceptance_json
+                ),
+                "execution_outbox_acceptance_receipt_sha256": (
+                    acceptance_sha256
+                ),
+            }
+        )
+        command["execution_authentication"] = authentication
+        verify_dispatchable_outbox_request(
+            command,
+            authorization_id=str(self._authorization_id),
+            risk_domain_id=str(self._risk_domain_id),
+            risk_domain_authority_binding_sha256=str(
+                self._authenticated_authority_binding_sha256
+            ),
+            lease_id=str(identity["lease_id"]),
+            service_identity_sha256=str(identity["service_identity_sha256"]),
+            tenant_id=str(identity["tenant_id"]),
+            key_identity_sha256=str(identity["key_identity_sha256"]),
+            public_key_modulus_hex=str(identity["public_key_modulus_hex"]),
+            public_key_exponent=int(identity["public_key_exponent"]),
+        )
+        return _canonical_json_bytes(command)
 
     def begin_execution_dispatch(
         self,
@@ -2216,6 +2385,15 @@ class MicroLiveOrderTransport(Protocol):
         alone cannot prove the holder is fenced.
         """
 
+    def recover_order_submission(self, request: Mapping[str, Any]) -> bytes:
+        """Lookup only by venue idempotency key and complete durable dispatch.
+
+        This operation must never submit, sign, or otherwise create a venue
+        side effect.  It receives the exact authority-recovered original
+        request, validates the venue lookup result against that request, and
+        invokes the bound recovery callback with the exact outcome bytes.
+        """
+
     def cancel_order(self, request: Mapping[str, Any]) -> bytes:
         """Cancel one acknowledged order and return raw JSON bytes."""
 
@@ -2403,6 +2581,47 @@ def verify_dispatchable_outbox_request(
         "outbox_acceptance_receipt_sha256": acceptance_sha256,
         "status": "DISPATCHABLE",
     }
+
+
+def verify_recovered_submission_outcome(
+    request: Mapping[str, Any],
+    raw_outcome: bytes,
+) -> bytes:
+    """Validate a lookup-only venue result against the exact submit command.
+
+    Concrete gateways must invoke this before the authority recovery callback.
+    The helper performs no network, signing, wallet, or exchange operation.
+    """
+
+    outcome, outcome_json, _ = _raw_json_object(
+        raw_outcome,
+        "lookup-only recovered submission outcome",
+        maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+    )
+    expected_keys = {
+        "client_order_id",
+        "exchange_order_id",
+        "status",
+        "market_id",
+        "token_id",
+        "accepted_quantity",
+        "limit_price",
+    }
+    if not (
+        set(outcome) == expected_keys
+        and outcome.get("client_order_id") == request.get("client_order_id")
+        and outcome.get("market_id") == request.get("market_id")
+        and outcome.get("token_id") == request.get("token_id")
+        and outcome.get("accepted_quantity") == request.get("quantity")
+        and outcome.get("limit_price") == request.get("limit_price")
+        and outcome.get("status") in {"ACCEPTED", "REJECTED"}
+        and isinstance(outcome.get("exchange_order_id"), str)
+        and bool(outcome.get("exchange_order_id"))
+    ):
+        raise MicroLiveExecutionError(
+            "lookup-only recovered submission outcome is mismatched"
+        )
+    return outcome_json.encode("utf-8")
 
 
 def _risk_domain_authority_binding_sha256(
@@ -3262,6 +3481,114 @@ class MicroLiveExecutor:
         return self._verify_execution_operation_receipt(
             operation=operation,
             outbound_request=outbound_request,
+            raw_receipt=value,
+        )
+
+    def _bounded_submission_recovery_call(
+        self,
+        *,
+        prepared: Mapping[str, Any],
+    ) -> bytes:
+        """Run the public gateway's lookup-only recovery on durable bytes."""
+
+        if id(self._transport) != self._transport_object_id:
+            raise MicroLiveExecutionError(
+                "authenticated execution transport changed after construction"
+            )
+        raw_request = self._journal.recover_execution_outbox_request(
+            transport_invocation_id=str(prepared["transport_invocation_id"]),
+        )
+        recovered_request, _, _ = _raw_json_object(
+            raw_request,
+            "recovered execution outbox request",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        expected_request = {
+            key: prepared[key]
+            for key in (
+                "authorization_id",
+                "authorization_payload_sha256",
+                "candidate_bundle_sha256",
+                "business_key",
+                "market_id",
+                "slug",
+                "market_family",
+                "decision_ts_ms",
+                "selected_action",
+                "token_id",
+                "token_side",
+                "limit_price",
+                "quantity",
+                "notional_usd",
+                "maximum_fee_usd",
+                "maximum_loss_usd",
+                "signal_payload_sha256",
+                "raw_signal_payload_sha256",
+                "market_identity_sha256",
+                "market_identity",
+                "raw_feature_row_sha256",
+                "provider_feature_evidence_graph_sha256",
+                "provider_feature_file_sha256",
+                "intent_id",
+                "client_order_id",
+                "transport_invocation_id",
+                "submitted_at_ts_ms",
+            )
+        }
+        request_without_authentication = copy.deepcopy(recovered_request)
+        authentication = request_without_authentication.pop(
+            "execution_authentication",
+            None,
+        )
+        if not (
+            request_without_authentication == expected_request
+            and isinstance(authentication, Mapping)
+            and authentication.get("operation") == "submit_order"
+            and authentication.get("authorization_id")
+            == self._authorization.authorization_id
+            and authentication.get("risk_domain_id") == self._risk_domain_id
+        ):
+            raise MicroLiveExecutionError(
+                "recovered execution outbox request is preparation-mismatched"
+            )
+        method = getattr(self._transport, "recover_order_submission", None)
+        if not callable(method):
+            raise MicroLiveExecutionError(
+                "authenticated execution gateway lacks lookup-only recovery"
+            )
+        completed = threading.Event()
+        result_queue: queue.SimpleQueue[tuple[bool, Any]] = queue.SimpleQueue()
+
+        def invoke() -> None:
+            try:
+                result_queue.put(
+                    (True, method(copy.deepcopy(recovered_request)))
+                )
+            except BaseException as exc:
+                result_queue.put((False, exc))
+            finally:
+                completed.set()
+
+        worker = threading.Thread(
+            target=invoke,
+            name="micro-live-recover-order-submission",
+            daemon=True,
+        )
+        worker.start()
+        if not completed.wait(self._maximum_transport_call_duration_ms / 1_000):
+            raise MicroLiveExecutionError(
+                "recover_order_submission exceeded the mandatory transport deadline"
+            )
+        succeeded, value = result_queue.get_nowait()
+        if not succeeded:
+            raise value
+        if not isinstance(value, bytes):
+            raise MicroLiveExecutionError(
+                "recover_order_submission did not return exact raw bytes"
+            )
+        return self._verify_execution_operation_receipt(
+            operation="submit_order",
+            outbound_request=recovered_request,
             raw_receipt=value,
         )
 
@@ -4524,11 +4851,13 @@ class MicroLiveExecutor:
         client_order_id: str,
         now_ts_ms: int,
     ) -> dict[str, Any]:
-        """Resolve one unknown submission through a durable fence then lookup.
+        """Resolve one unknown submission through lookup-only durable recovery.
 
         Reconciliation never clears the persistent kill switch and never
-        resubmits an order.  The only authoritative lookup occurs after the
-        original invocation is durably fenced against later side effects.
+        resubmits an order.  It first asks the gateway to recover the exact
+        durable outbox request and perform a venue-idempotency lookup only.  A
+        successful recovery terminalizes dispatch before the signed fence
+        check; otherwise the legacy fence-then-lookup path remains fail-closed.
         """
 
         self._require_authorization_integrity(
@@ -4576,6 +4905,16 @@ class MicroLiveExecutor:
             "transport_invocation_id": prepared["transport_invocation_id"],
         }
         try:
+            recovered_response: bytes | None = None
+            try:
+                recovered_response = self._bounded_submission_recovery_call(
+                    prepared=prepared,
+                )
+            except SubmissionRecoveryOutcomeNotFoundError:
+                # No outcome is normal for a command that never reached the
+                # venue.  The following durable fence decides whether an
+                # ordinary lookup is safe; IN_PROGRESS remains unresolved.
+                recovered_response = None
             fence_response, raw_fence_response_json, fence_response_sha256 = (
                 _raw_json_object(
                     self._bounded_transport_call(
@@ -4590,11 +4929,16 @@ class MicroLiveExecutor:
                 prepared=prepared,
                 response=fence_response,
             )
-            response, raw_response_json, response_sha256 = _raw_json_object(
-                self._bounded_transport_call(
+            raw_lookup_response = (
+                recovered_response
+                if recovered_response is not None
+                else self._bounded_transport_call(
                     operation="lookup_order",
                     request=lookup_request,
-                ),
+                )
+            )
+            response, raw_response_json, response_sha256 = _raw_json_object(
+                raw_lookup_response,
                 "submission lookup response",
                 maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
