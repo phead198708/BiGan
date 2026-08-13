@@ -388,7 +388,7 @@ class DurableRiskDomainLeaseBackend(Protocol):
         dispatch_deadline_ts_ms: int,
         authorization_expires_at_ts_ms: int,
     ) -> bytes:
-        """Atomically consume one dispatch grant using authority-owned time."""
+        """Consume one grant before its deadline; issued grants do not auto-fence."""
 
     def complete_execution_dispatch(
         self,
@@ -406,6 +406,23 @@ class DurableRiskDomainLeaseBackend(Protocol):
         raw_outcome: bytes,
     ) -> bytes:
         """Persist one exact venue outcome for the consumed dispatch."""
+
+    def recover_execution_dispatch(
+        self,
+        *,
+        lease_id: str,
+        service_identity_sha256: str,
+        tenant_id: str,
+        key_identity_sha256: str,
+        authorization_id: str,
+        risk_domain_id: str,
+        journal_namespace_id: str,
+        journal_epoch: str,
+        transport_invocation_id: str,
+        outbox_command_sha256: str,
+        raw_outcome: bytes,
+    ) -> bytes:
+        """Complete from the durable grant after an idempotent venue lookup."""
 
     def fence_execution_dispatch(
         self,
@@ -503,7 +520,7 @@ class MicroLiveStateJournal(Protocol):
         dispatch_deadline_ts_ms: int,
         authorization_expires_at_ts_ms: int,
     ) -> bytes:
-        """Consume one exact command for a bounded, one-shot venue dispatch."""
+        """Consume one command before its deadline without timing out its holder."""
 
     def complete_execution_dispatch(
         self,
@@ -511,6 +528,15 @@ class MicroLiveStateJournal(Protocol):
         raw_outcome: bytes,
     ) -> bytes:
         """Persist the exact result of one consumed venue dispatch."""
+
+    def recover_execution_dispatch(
+        self,
+        *,
+        transport_invocation_id: str,
+        outbox_command_sha256: str,
+        raw_outcome: bytes,
+    ) -> bytes:
+        """Complete an in-progress dispatch after lookup-only recovery."""
 
     def fence_execution_dispatch(
         self,
@@ -1244,6 +1270,97 @@ class AtomicFileMicroLiveStateJournal:
                 "execution dispatch completion receipt is invalid"
             )
         return completion_json.encode("utf-8")
+
+    def recover_execution_dispatch(
+        self,
+        *,
+        transport_invocation_id: str,
+        outbox_command_sha256: str,
+        raw_outcome: bytes,
+    ) -> bytes:
+        """Complete from authority state after a lookup-only venue recovery.
+
+        The raw DISPATCHING receipt remains inside the durable authority.  A
+        replacement gateway supplies only the exact result returned by the
+        venue's idempotency lookup, so this recovery capability cannot become
+        a second bearer grant for submission.
+        """
+
+        self._require_bound()
+        _require_sha256(transport_invocation_id, "execution dispatch")
+        _require_sha256(outbox_command_sha256, "execution outbox command")
+        _, outcome_json, outcome_sha256 = _raw_json_object(
+            raw_outcome,
+            "recovered execution dispatch outcome",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        identity = self._required_lease_identity()
+        try:
+            raw_receipt = self._bounded_authority_call(
+                "recover_execution_dispatch",
+                lease_id=str(identity["lease_id"]),
+                service_identity_sha256=str(identity["service_identity_sha256"]),
+                tenant_id=str(identity["tenant_id"]),
+                key_identity_sha256=str(identity["key_identity_sha256"]),
+                authorization_id=str(self._authorization_id),
+                risk_domain_id=str(self._risk_domain_id),
+                journal_namespace_id=str(self._journal_namespace_id),
+                journal_epoch=str(self._journal_epoch),
+                transport_invocation_id=transport_invocation_id,
+                outbox_command_sha256=outbox_command_sha256,
+                raw_outcome=outcome_json.encode("utf-8"),
+            )
+        except Exception as exc:
+            raise MicroLiveExecutionError(
+                "execution dispatch recovery failed closed"
+            ) from exc
+        receipt, receipt_json, _ = _raw_json_object(
+            raw_receipt,
+            "recovered execution dispatch receipt",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        expected_core = self._execution_dispatch_receipt_core(
+            schema_version=EXECUTION_DISPATCH_COMPLETION_SCHEMA_VERSION,
+            transport_invocation_id=transport_invocation_id,
+            status="DISPATCHED",
+            outbox_command_sha256=outbox_command_sha256,
+            outbox_acceptance_receipt_sha256=receipt.get(
+                "outbox_acceptance_receipt_sha256"
+            ),
+            venue_idempotency_key=receipt.get("venue_idempotency_key"),
+            venue_idempotency_scope=receipt.get("venue_idempotency_scope"),
+            dispatch_deadline_ts_ms=receipt.get("dispatch_deadline_ts_ms"),
+            authorization_expires_at_ts_ms=receipt.get(
+                "authorization_expires_at_ts_ms"
+            ),
+            dispatch_receipt_sha256=receipt.get("dispatch_receipt_sha256"),
+            raw_outcome_json=outcome_json,
+            outcome_sha256=outcome_sha256,
+        )
+        if not (
+            receipt.get("status") == "DISPATCHED"
+            and _is_sha256(receipt.get("outbox_acceptance_receipt_sha256"))
+            and _is_sha256(receipt.get("dispatch_receipt_sha256"))
+            and receipt.get("venue_idempotency_scope") == VENUE_IDEMPOTENCY_SCOPE
+            and isinstance(receipt.get("venue_idempotency_key"), str)
+            and bool(receipt.get("venue_idempotency_key"))
+            and isinstance(receipt.get("dispatch_deadline_ts_ms"), int)
+            and not isinstance(receipt.get("dispatch_deadline_ts_ms"), bool)
+            and isinstance(receipt.get("authorization_expires_at_ts_ms"), int)
+            and not isinstance(
+                receipt.get("authorization_expires_at_ts_ms"), bool
+            )
+            and _verify_signed_risk_domain_receipt(
+                receipt,
+                expected_core=expected_core,
+                public_key_modulus_hex=str(identity["public_key_modulus_hex"]),
+                public_key_exponent=int(identity["public_key_exponent"]),
+            )
+        ):
+            raise MicroLiveExecutionError(
+                "recovered execution dispatch completion is invalid"
+            )
+        return receipt_json.encode("utf-8")
 
     def fence_execution_dispatch(
         self,
@@ -2073,6 +2190,7 @@ class MicroLiveOrderTransport(Protocol):
     def bind_execution_dispatch_authority(
         self,
         begin: Callable[..., bytes],
+        recover: Callable[..., bytes],
         complete: Callable[[bytes, bytes], bytes],
         fence: Callable[..., bytes],
         *,
@@ -2081,7 +2199,7 @@ class MicroLiveOrderTransport(Protocol):
         risk_domain_authority_binding_sha256: str,
         authorization_expires_at_ts_ms: int,
     ) -> None:
-        """Bind the one-shot authority used at the actual venue boundary."""
+        """Bind one-shot dispatch and lookup-only crash recovery authority."""
 
     def read_trusted_time(self, request: Mapping[str, Any]) -> bytes:
         """Return a signed completion timestamp from the pinned clock."""
@@ -2093,7 +2211,9 @@ class MicroLiveOrderTransport(Protocol):
         must verify it and atomically consume it through the bound authority,
         yielding one DISPATCHING receipt, before its first network, signer,
         wallet, or exchange side effect.  Duplicate workers must return the
-        stored outcome without another venue call.
+        stored outcome without another venue call.  The dispatch deadline
+        limits initial consumption only: once DISPATCHING is issued, timeout
+        alone cannot prove the holder is fenced.
         """
 
     def cancel_order(self, request: Mapping[str, Any]) -> bytes:
@@ -3153,6 +3273,7 @@ class MicroLiveExecutor:
             )
         method(
             self._journal.begin_execution_dispatch,
+            self._journal.recover_execution_dispatch,
             self._journal.complete_execution_dispatch,
             self._journal.fence_execution_dispatch,
             authorization_id=self._authorization.authorization_id,

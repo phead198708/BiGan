@@ -1220,17 +1220,6 @@ class _TestDurableRiskDomainLease:
             if dispatch is not None:
                 if dispatch["outbox_command_sha256"] != outbox_command_sha256:
                     raise RuntimeError("execution dispatch identity conflict")
-                if (
-                    dispatch["status"] == "DISPATCHING"
-                    and self.authority_now_ts_ms
-                    > min(
-                        dispatch["dispatch_deadline_ts_ms"],
-                        dispatch["authorization_expires_at_ts_ms"],
-                    )
-                ):
-                    dispatch["status"] = "EXPIRED"
-                    invocation["status"] = "FENCED"
-                    self._write_authority_state(binding_path, authority_state)
                 status = {
                     "DISPATCHING": "IN_PROGRESS",
                     "DISPATCHED": "DISPATCHED",
@@ -1306,6 +1295,7 @@ class _TestDurableRiskDomainLease:
                     "dispatch_receipt_sha256": hashlib.sha256(
                         raw_receipt
                     ).hexdigest(),
+                    "raw_dispatch_receipt_json": raw_receipt.decode("utf-8"),
                     "raw_outcome_json": None,
                     "outcome_sha256": None,
                 }
@@ -1435,6 +1425,102 @@ class _TestDurableRiskDomainLease:
             raise RuntimeError("synthetic dispatch completion response loss")
         return raw_receipt
 
+    def recover_execution_dispatch(
+        self,
+        *,
+        lease_id: str,
+        service_identity_sha256: str,
+        tenant_id: str,
+        key_identity_sha256: str,
+        authorization_id: str,
+        risk_domain_id: str,
+        journal_namespace_id: str,
+        journal_epoch: str,
+        transport_invocation_id: str,
+        outbox_command_sha256: str,
+        raw_outcome: bytes,
+    ) -> bytes:
+        raw_outcome_json = raw_outcome.decode("utf-8")
+        outcome_sha256 = hashlib.sha256(raw_outcome).hexdigest()
+        binding_path = self._binding_path(risk_domain_id)
+        identity = {
+            "lease_id": lease_id,
+            "service_identity_sha256": service_identity_sha256,
+            "tenant_id": tenant_id,
+            "key_identity_sha256": key_identity_sha256,
+            "authorization_id": authorization_id,
+            "risk_domain_id": risk_domain_id,
+            "journal_namespace_id": journal_namespace_id,
+            "journal_epoch": journal_epoch,
+        }
+        with self._lock:
+            authority_state = json.loads(binding_path.read_bytes())
+            dispatch = authority_state["execution_dispatches"].get(
+                transport_invocation_id
+            )
+            if not (
+                lease_id == self.lease_id
+                and service_identity_sha256
+                == TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256
+                and tenant_id == TEST_RISK_DOMAIN_TENANT_ID
+                and key_identity_sha256
+                == TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256
+                and authority_state["authorization_id"] == authorization_id
+                and authority_state["journal_namespace_id"]
+                == journal_namespace_id
+                and authority_state["journal_epoch"] == journal_epoch
+                and isinstance(dispatch, dict)
+                and dispatch["status"] in {"DISPATCHING", "DISPATCHED"}
+                and dispatch["outbox_command_sha256"]
+                == outbox_command_sha256
+                and isinstance(dispatch.get("raw_dispatch_receipt_json"), str)
+            ):
+                raise RuntimeError("execution dispatch recovery mismatch")
+            raw_receipt = dispatch["raw_dispatch_receipt_json"].encode("utf-8")
+            if hashlib.sha256(raw_receipt).hexdigest() != dispatch[
+                "dispatch_receipt_sha256"
+            ]:
+                raise RuntimeError("durable dispatch receipt hash mismatch")
+            if dispatch["status"] == "DISPATCHED" and not (
+                dispatch["raw_outcome_json"] == raw_outcome_json
+                and dispatch["outcome_sha256"] == outcome_sha256
+            ):
+                raise RuntimeError("execution dispatch recovery outcome conflict")
+            dispatch.update(
+                {
+                    "status": "DISPATCHED",
+                    "raw_outcome_json": raw_outcome_json,
+                    "outcome_sha256": outcome_sha256,
+                }
+            )
+            authority_state["execution_invocations"][
+                transport_invocation_id
+            ]["status"] = "DISPATCHED"
+            self._write_authority_state(binding_path, authority_state)
+        return self._signed_receipt(
+            self._dispatch_core(
+                schema_version=(
+                    executor_module.EXECUTION_DISPATCH_COMPLETION_SCHEMA_VERSION
+                ),
+                identity=identity,
+                transport_invocation_id=transport_invocation_id,
+                status="DISPATCHED",
+                outbox_command_sha256=dispatch["outbox_command_sha256"],
+                outbox_acceptance_receipt_sha256=dispatch[
+                    "outbox_acceptance_receipt_sha256"
+                ],
+                venue_idempotency_key=dispatch["venue_idempotency_key"],
+                venue_idempotency_scope=dispatch["venue_idempotency_scope"],
+                dispatch_deadline_ts_ms=dispatch["dispatch_deadline_ts_ms"],
+                authorization_expires_at_ts_ms=dispatch[
+                    "authorization_expires_at_ts_ms"
+                ],
+                dispatch_receipt_sha256=dispatch["dispatch_receipt_sha256"],
+                raw_outcome_json=raw_outcome_json,
+                outcome_sha256=outcome_sha256,
+            )
+        )
+
     def fence_execution_dispatch(
         self,
         *,
@@ -1485,17 +1571,6 @@ class _TestDurableRiskDomainLease:
                 invocation["status"] = "FENCED"
                 self._write_authority_state(binding_path, authority_state)
             else:
-                if (
-                    dispatch["status"] == "DISPATCHING"
-                    and self.authority_now_ts_ms
-                    > min(
-                        dispatch["dispatch_deadline_ts_ms"],
-                        dispatch["authorization_expires_at_ts_ms"],
-                    )
-                ):
-                    dispatch["status"] = "EXPIRED"
-                    invocation["status"] = "FENCED"
-                    self._write_authority_state(binding_path, authority_state)
                 status = {
                     "DISPATCHING": "IN_PROGRESS",
                     "DISPATCHED": "DISPATCHED",
@@ -1536,6 +1611,19 @@ def _durable_execution_outbox_commands(
         raise AssertionError("test authority has an unexpected state population")
     state = json.loads(state_paths[0].read_bytes())
     return copy.deepcopy(dict(state["execution_outbox_commands"]))
+
+
+def _durable_execution_dispatches(
+    journal: AtomicFileMicroLiveStateJournal,
+) -> dict[str, dict[str, Any]]:
+    lease = journal.risk_domain_lease
+    if not isinstance(lease, _TestDurableRiskDomainLease):
+        raise AssertionError("test journal lacks inspectable authority")
+    state_paths = list(lease.authority_root.glob("*.json"))
+    if len(state_paths) != 1:
+        raise AssertionError("test authority has an unexpected state population")
+    state = json.loads(state_paths[0].read_bytes())
+    return copy.deepcopy(dict(state["execution_dispatches"]))
 
 
 def _journal_factory_args() -> dict[str, Any]:
@@ -1858,6 +1946,26 @@ class _TestVenueIdempotencyAuthority:
             self.external_effect_count += 1
             return proposed_outcome, True
 
+    def lookup(
+        self,
+        *,
+        client_order_id: str,
+        exact_request: dict[str, Any],
+    ) -> bytes | None:
+        """Read the venue idempotency record without creating a side effect."""
+
+        request_sha256 = canonical_json_sha256(exact_request)
+        with self._lock:
+            existing = self.outcomes_by_client_order_id.get(client_order_id)
+            if existing is None:
+                return None
+            if (
+                self.request_sha256_by_client_order_id[client_order_id]
+                != request_sha256
+            ):
+                raise RuntimeError("venue idempotency key payload conflict")
+            return existing
+
 
 class FakeTransport:
     def __init__(
@@ -1913,6 +2021,7 @@ class FakeTransport:
         self._attested_authority_binding_sha256: str | None = None
         self._authorization_expires_at_ts_ms: int | None = None
         self._dispatch_begin: Any = None
+        self._dispatch_recover: Any = None
         self._dispatch_complete: Any = None
         self._dispatch_fence: Any = None
         self._venue_lock = threading.RLock()
@@ -1930,6 +2039,7 @@ class FakeTransport:
     def bind_execution_dispatch_authority(
         self,
         begin: Any,
+        recover: Any,
         complete: Any,
         fence: Any,
         *,
@@ -1953,6 +2063,7 @@ class FakeTransport:
         if any(value is not None for value in existing) and existing != identity:
             raise RuntimeError("execution dispatch authority was rebound")
         self._dispatch_begin = begin
+        self._dispatch_recover = recover
         self._dispatch_complete = complete
         self._dispatch_fence = fence
         (
@@ -1995,10 +2106,11 @@ class FakeTransport:
         raw_response: bytes,
     ) -> bytes:
         authentication = dict(request["execution_authentication"])
-        with self._venue_lock:
-            self._outbox_requests_by_key[request["client_order_id"]] = (
-                copy.deepcopy(request)
-            )
+        if authentication["operation"] == "submit_order":
+            with self._venue_lock:
+                self._outbox_requests_by_key[request["client_order_id"]] = (
+                    copy.deepcopy(request)
+                )
         fence_status = "NOT_APPLICABLE"
         raw_outbox_acceptance_receipt_json: str | None = None
         outbox_acceptance_receipt_sha256: str | None = None
@@ -2118,6 +2230,9 @@ class FakeTransport:
                     self._dispatch_receipts_by_key[
                         request["client_order_id"]
                     ] = raw_dispatch
+                    self._outbox_requests_by_key[
+                        request["client_order_id"]
+                    ] = copy.deepcopy(request)
                 return True, raw_dispatch, None
             if status == "DISPATCHED":
                 with self._venue_lock:
@@ -2130,11 +2245,42 @@ class FakeTransport:
                     dispatch["raw_outcome_json"].encode("utf-8"),
                 )
             if status == "IN_PROGRESS":
+                recovered = self._recover_dispatch_after_unknown(request)
+                if recovered is not None:
+                    return False, raw_dispatch, recovered
                 with self._dispatch_condition:
                     self._dispatch_condition.wait(timeout=2)
                 continue
             raise RuntimeError(f"execution dispatch is not permitted: {status}")
         raise RuntimeError("execution dispatch remains in progress")
+
+    def _recover_dispatch_after_unknown(
+        self,
+        request: dict[str, Any],
+    ) -> bytes | None:
+        """Lookup a prior venue effect, then complete from durable receipt bytes."""
+
+        if not callable(self._dispatch_recover):
+            raise RuntimeError("execution gateway lacks dispatch recovery")
+        authentication = dict(request["execution_authentication"])
+        raw_response = self.venue_idempotency_authority.lookup(
+            client_order_id=request["client_order_id"],
+            exact_request=request,
+        )
+        if raw_response is None:
+            return None
+        completion = self._dispatch_recover(
+            transport_invocation_id=request["transport_invocation_id"],
+            outbox_command_sha256=authentication[
+                "execution_outbox_command_sha256"
+            ],
+            raw_outcome=raw_response,
+        )
+        with self._venue_lock:
+            self._dispatch_terminal_receipts_by_key[
+                request["client_order_id"]
+            ] = completion
+        return raw_response
 
     def _complete_dispatch_once(
         self,
@@ -2455,11 +2601,7 @@ class FakeTransport:
 
     def fence_order_invocation(self, request: dict[str, Any]) -> bytes:
         self.fence_calls.append(copy.deepcopy(request))
-        submitted = next(
-            row
-            for row in reversed(self.submit_calls)
-            if row["client_order_id"] == request["client_order_id"]
-        )
+        submitted = self._outbox_requests_by_key[request["client_order_id"]]
         if not callable(self._dispatch_fence):
             raise RuntimeError("execution gateway lacks dispatch fencing")
         raw_fence = self._dispatch_fence(
@@ -2595,6 +2737,39 @@ class CrashAfterOutboxBeforeVenueTransport(FakeTransport):
         raise SimulatedProcessCrash
 
 
+class CrashAfterVenueAcceptedBeforeDispatchCompletionTransport(FakeTransport):
+    """Crash after the venue stores an outcome but before authority completion."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pending_request: dict[str, Any] | None = None
+
+    def submit_order(self, request: dict[str, Any]) -> bytes:
+        first, _, existing = self._consume_dispatch_before_venue(request)
+        if not first:
+            assert existing is not None
+            return self._authenticated_operation_response(request, existing)
+        self.pending_request = copy.deepcopy(request)
+        key = request["client_order_id"]
+        proposed_response = _json_bytes({
+            "client_order_id": key,
+            "exchange_order_id": f"exchange-{key[:12]}",
+            "status": self.submit_status,
+            "market_id": request["market_id"],
+            "token_id": request["token_id"],
+            "accepted_quantity": request["quantity"],
+            "limit_price": request["limit_price"],
+        })
+        _, created = self.venue_idempotency_authority.submit(
+            client_order_id=key,
+            exact_request=request,
+            proposed_outcome=proposed_response,
+        )
+        assert created is True
+        self.submit_calls.append(copy.deepcopy(request))
+        raise SimulatedProcessCrash
+
+
 class CrashBeforeDispatchConsumptionTransport(FakeTransport):
     """Capture the signed outbox request without consuming its authority."""
 
@@ -2664,6 +2839,7 @@ class OutboxCommittedBeforeVenueTransport(FakeTransport):
         super().__init__()
         self.outbox_committed = threading.Event()
         self.release = threading.Event()
+        self.finished = threading.Event()
         self.pending_request: dict[str, Any] | None = None
 
     def submit_order(self, request: dict[str, Any]) -> bytes:
@@ -2680,6 +2856,7 @@ class OutboxCommittedBeforeVenueTransport(FakeTransport):
             request,
             dispatch_receipt=dispatch_receipt,
         )
+        self.finished.set()
         return self._authenticated_operation_response(request, response)
 
 
@@ -6715,7 +6892,7 @@ def test_reconciliation_fence_cancels_unconsumed_dispatch_capability(
     assert transport._venue_outcomes_by_key == {}
 
 
-def test_abandoned_dispatching_state_expires_and_reconciliation_fences_it(
+def test_abandoned_dispatching_state_remains_in_progress_after_deadline(
     authorized_fixture: dict[str, Any],
 ) -> None:
     verified = _verified(authorized_fixture)
@@ -6742,9 +6919,130 @@ def test_abandoned_dispatching_state_expires_and_reconciliation_fences_it(
         outbox_command_sha256=descriptor["outbox_command_sha256"],
     )
 
-    assert json.loads(raw_fence)["status"] == "FENCED"
+    assert json.loads(raw_fence)["status"] == "IN_PROGRESS"
     assert transport.submit_calls == []
     assert transport._venue_outcomes_by_key == {}
+
+
+def test_issued_dispatch_is_never_falsely_fenced_before_worker_release(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    lease = journal.risk_domain_lease
+    assert isinstance(lease, _TestDurableRiskDomainLease)
+    transport = OutboxCommittedBeforeVenueTransport()
+    executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
+
+    with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    assert transport.outbox_committed.is_set()
+    assert transport.pending_request is not None
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+    request = transport.pending_request
+    authentication = request["execution_authentication"]
+    lease.authority_now_ts_ms = int(authentication["dispatch_deadline_ts_ms"]) + 1
+
+    raw_fence = journal.fence_execution_dispatch(
+        transport_invocation_id=request["transport_invocation_id"],
+        outbox_command_sha256=authentication[
+            "execution_outbox_command_sha256"
+        ],
+    )
+
+    assert json.loads(raw_fence)["status"] == "IN_PROGRESS"
+    assert transport.venue_idempotency_authority.external_effect_count == 0
+    transport.release.set()
+    assert transport.finished.wait(timeout=5)
+    assert transport.venue_idempotency_authority.external_effect_count == 1
+    terminal_fence = journal.fence_execution_dispatch(
+        transport_invocation_id=request["transport_invocation_id"],
+        outbox_command_sha256=authentication[
+            "execution_outbox_command_sha256"
+        ],
+    )
+    assert json.loads(terminal_fence)["status"] == "DISPATCHED"
+
+
+def test_venue_accept_then_crash_recovers_across_gateway_restart(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    crashed_transport = CrashAfterVenueAcceptedBeforeDispatchCompletionTransport()
+    executor = MicroLiveExecutor(
+        verified,
+        transport=crashed_transport,
+        journal=journal,
+    )
+
+    with pytest.raises(SimulatedProcessCrash):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    assert crashed_transport.pending_request is not None
+    assert crashed_transport.venue_idempotency_authority.external_effect_count == 1
+    outbox = next(iter(_durable_execution_outbox_commands(journal).values()))
+    raw_outbox = outbox["raw_outbox_command_json"].encode("utf-8")
+    durable_request = json.loads(
+        json.loads(raw_outbox)["raw_command_json"]
+    )
+    raw_fence = durable_request["execution_authentication"][
+        "execution_invocation_fence_receipt_json"
+    ].encode("utf-8")
+    raw_acceptance = journal.commit_execution_outbox_command(
+        raw_fence,
+        raw_outbox,
+    )
+    durable_request["execution_authentication"].update(
+        {
+            "execution_outbox_command_json": raw_outbox.decode("utf-8"),
+            "execution_outbox_command_sha256": hashlib.sha256(
+                raw_outbox
+            ).hexdigest(),
+            "raw_execution_outbox_acceptance_receipt_json": (
+                raw_acceptance.decode("utf-8")
+            ),
+            "execution_outbox_acceptance_receipt_sha256": hashlib.sha256(
+                raw_acceptance
+            ).hexdigest(),
+        }
+    )
+    assert durable_request == crashed_transport.pending_request
+    dispatch = next(iter(_durable_execution_dispatches(journal).values()))
+    assert dispatch["status"] == "DISPATCHING"
+    assert isinstance(dispatch["raw_dispatch_receipt_json"], str)
+    assert hashlib.sha256(
+        dispatch["raw_dispatch_receipt_json"].encode("utf-8")
+    ).hexdigest() == dispatch["dispatch_receipt_sha256"]
+
+    fresh_transport = FakeTransport(
+        venue_idempotency_authority=(
+            crashed_transport.venue_idempotency_authority
+        )
+    )
+    MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=fresh_transport,
+        journal=journal,
+        raw_state=executor.export_state_bytes(),
+    )
+    assert fresh_transport._dispatch_receipts_by_key == {}
+    recovered_receipt = fresh_transport.submit_order(durable_request)
+    recovered = json.loads(recovered_receipt)
+
+    assert recovered["raw_response_json"] == (
+        crashed_transport.venue_idempotency_authority.outcomes_by_client_order_id[
+            durable_request["client_order_id"]
+        ].decode("utf-8")
+    )
+    assert fresh_transport.submit_calls == []
+    assert crashed_transport.venue_idempotency_authority.external_effect_count == 1
+    terminal_dispatch = next(iter(_durable_execution_dispatches(journal).values()))
+    assert terminal_dispatch["status"] == "DISPATCHED"
+    assert terminal_dispatch["raw_outcome_json"] == recovered["raw_response_json"]
 
 
 def test_lost_outbox_ack_replays_exactly_once_across_restart(
