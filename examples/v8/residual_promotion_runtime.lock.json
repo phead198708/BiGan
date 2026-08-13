@@ -1,0 +1,12 @@
+{
+  "packages": {
+    "numpy": "2.4.6",
+    "scipy": "1.17.1",
+    "xgboost": "3.2.0"
+  },
+  "python": {
+    "implementation": "CPython",
+    "version": "3.12.4"
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-runtime-lock-v1"
+}
