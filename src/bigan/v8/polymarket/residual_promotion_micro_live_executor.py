@@ -19,7 +19,7 @@ import queue
 import re
 import stat
 import threading
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -74,11 +74,20 @@ EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION = (
 EXECUTION_OUTBOX_COMMAND_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-outbox-command-v1"
 )
+EXECUTION_DISPATCH_RECEIPT_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-execution-dispatch-receipt-v1"
+)
+EXECUTION_DISPATCH_COMPLETION_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-execution-dispatch-completion-v1"
+)
+EXECUTION_DISPATCH_FENCE_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-execution-dispatch-fence-v1"
+)
 EXECUTION_BINDING_ATTESTATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-binding-attestation-v5"
+    "bigan-btc-15m-residual-promotion-execution-binding-attestation-v6"
 )
 EXECUTION_OPERATION_RECEIPT_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-operation-receipt-v3"
+    "bigan-btc-15m-residual-promotion-execution-operation-receipt-v4"
 )
 EXECUTION_CURSOR_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-signed-fill-cursor-v1"
@@ -121,6 +130,10 @@ MAXIMUM_FILL_DELIVERY_EVENTS_PER_ORDER = 64
 MAX_RESTORED_STATE_BYTES = 67_108_864
 MAX_TRANSPORT_CALL_DURATION_MS = 1_000
 MAX_AUTHORITY_CALL_DURATION_MS = 1_000
+MAX_EXECUTION_DISPATCH_DURATION_MS = 1_000
+VENUE_IDEMPOTENCY_KEY_FIELD = "client_order_id"
+VENUE_IDEMPOTENCY_SCOPE = "exchange_account"
+VENUE_IDEMPOTENCY_SEMANTICS = "venue_enforced_exactly_once_v1"
 _JOURNAL_HEADER_MAX_BYTES = 4_096
 _JOURNAL_BINDING_MAX_BYTES = 4_096
 _EMERGENCY_KILL_MAX_BYTES = 16_384
@@ -356,6 +369,60 @@ class DurableRiskDomainLeaseBackend(Protocol):
     ) -> bytes:
         """Atomically accept one exact command for dispatch; replay exact bytes."""
 
+    def begin_execution_dispatch(
+        self,
+        *,
+        lease_id: str,
+        service_identity_sha256: str,
+        tenant_id: str,
+        key_identity_sha256: str,
+        authorization_id: str,
+        risk_domain_id: str,
+        journal_namespace_id: str,
+        journal_epoch: str,
+        transport_invocation_id: str,
+        outbox_command_sha256: str,
+        outbox_acceptance_receipt_sha256: str,
+        venue_idempotency_key: str,
+        venue_idempotency_scope: str,
+        dispatch_deadline_ts_ms: int,
+        authorization_expires_at_ts_ms: int,
+    ) -> bytes:
+        """Atomically consume one dispatch grant using authority-owned time."""
+
+    def complete_execution_dispatch(
+        self,
+        *,
+        lease_id: str,
+        service_identity_sha256: str,
+        tenant_id: str,
+        key_identity_sha256: str,
+        authorization_id: str,
+        risk_domain_id: str,
+        journal_namespace_id: str,
+        journal_epoch: str,
+        transport_invocation_id: str,
+        dispatch_receipt_sha256: str,
+        raw_outcome: bytes,
+    ) -> bytes:
+        """Persist one exact venue outcome for the consumed dispatch."""
+
+    def fence_execution_dispatch(
+        self,
+        *,
+        lease_id: str,
+        service_identity_sha256: str,
+        tenant_id: str,
+        key_identity_sha256: str,
+        authorization_id: str,
+        risk_domain_id: str,
+        journal_namespace_id: str,
+        journal_epoch: str,
+        transport_invocation_id: str,
+        outbox_command_sha256: str,
+    ) -> bytes:
+        """Fence a not-started dispatch or report its terminal/current state."""
+
 
 RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM = "RSASSA-PKCS1-v1_5-SHA256"
 _RSA_SHA256_DIGEST_INFO_PREFIX = bytes.fromhex(
@@ -426,6 +493,32 @@ class MicroLiveStateJournal(Protocol):
         raw_outbox_command: bytes,
     ) -> bytes:
         """Atomically make one exact outbox command dispatchable or return FENCED."""
+
+    def begin_execution_dispatch(
+        self,
+        raw_outbox_acceptance_receipt: bytes,
+        *,
+        venue_idempotency_key: str,
+        venue_idempotency_scope: str,
+        dispatch_deadline_ts_ms: int,
+        authorization_expires_at_ts_ms: int,
+    ) -> bytes:
+        """Consume one exact command for a bounded, one-shot venue dispatch."""
+
+    def complete_execution_dispatch(
+        self,
+        raw_dispatch_receipt: bytes,
+        raw_outcome: bytes,
+    ) -> bytes:
+        """Persist the exact result of one consumed venue dispatch."""
+
+    def fence_execution_dispatch(
+        self,
+        *,
+        transport_invocation_id: str,
+        outbox_command_sha256: str,
+    ) -> bytes:
+        """Fence a command that has not started dispatching."""
 
     def initialize(self, raw_state: bytes) -> DurableJournalSnapshot:
         """Create the generation-zero state, rejecting an existing journal."""
@@ -933,6 +1026,277 @@ class AtomicFileMicroLiveStateJournal:
             )
         return commit_json.encode("utf-8")
 
+    def begin_execution_dispatch(
+        self,
+        raw_outbox_acceptance_receipt: bytes,
+        *,
+        venue_idempotency_key: str,
+        venue_idempotency_scope: str,
+        dispatch_deadline_ts_ms: int,
+        authorization_expires_at_ts_ms: int,
+    ) -> bytes:
+        self._require_bound()
+        identity = self._required_lease_identity()
+        acceptance, _, acceptance_receipt_sha256 = _raw_json_object(
+            raw_outbox_acceptance_receipt,
+            "execution outbox acceptance receipt",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        transport_invocation_id = acceptance.get("transport_invocation_id")
+        outbox_command_sha256 = acceptance.get("outbox_command_sha256")
+        expected_acceptance = self._execution_invocation_receipt_core(
+            schema_version=EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION,
+            transport_invocation_id=transport_invocation_id,
+            operation="submit_order",
+            status="DISPATCHABLE",
+            fence_receipt_sha256=acceptance.get("fence_receipt_sha256"),
+            outbox_command_sha256=outbox_command_sha256,
+        )
+        if not (
+            _is_sha256(transport_invocation_id)
+            and _is_sha256(outbox_command_sha256)
+            and venue_idempotency_scope == VENUE_IDEMPOTENCY_SCOPE
+            and isinstance(venue_idempotency_key, str)
+            and bool(venue_idempotency_key)
+            and isinstance(dispatch_deadline_ts_ms, int)
+            and not isinstance(dispatch_deadline_ts_ms, bool)
+            and isinstance(authorization_expires_at_ts_ms, int)
+            and not isinstance(authorization_expires_at_ts_ms, bool)
+            and _verify_signed_risk_domain_receipt(
+                acceptance,
+                expected_core=expected_acceptance,
+                public_key_modulus_hex=str(identity["public_key_modulus_hex"]),
+                public_key_exponent=int(identity["public_key_exponent"]),
+            )
+        ):
+            raise MicroLiveExecutionError(
+                "execution dispatch outbox acceptance is invalid"
+            )
+        try:
+            raw_receipt = self._bounded_authority_call(
+                "begin_execution_dispatch",
+                lease_id=str(identity["lease_id"]),
+                service_identity_sha256=str(identity["service_identity_sha256"]),
+                tenant_id=str(identity["tenant_id"]),
+                key_identity_sha256=str(identity["key_identity_sha256"]),
+                authorization_id=str(self._authorization_id),
+                risk_domain_id=str(self._risk_domain_id),
+                journal_namespace_id=str(self._journal_namespace_id),
+                journal_epoch=str(self._journal_epoch),
+                transport_invocation_id=str(transport_invocation_id),
+                outbox_command_sha256=str(outbox_command_sha256),
+                outbox_acceptance_receipt_sha256=acceptance_receipt_sha256,
+                venue_idempotency_key=venue_idempotency_key,
+                venue_idempotency_scope=venue_idempotency_scope,
+                dispatch_deadline_ts_ms=dispatch_deadline_ts_ms,
+                authorization_expires_at_ts_ms=authorization_expires_at_ts_ms,
+            )
+        except Exception as exc:
+            raise MicroLiveExecutionError(
+                "execution dispatch consumption failed closed"
+            ) from exc
+        receipt, receipt_json, _ = _raw_json_object(
+            raw_receipt,
+            "execution dispatch receipt",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        status = receipt.get("status")
+        raw_outcome_json = receipt.get("raw_outcome_json")
+        outcome_sha256 = receipt.get("outcome_sha256")
+        expected_core = self._execution_dispatch_receipt_core(
+            schema_version=EXECUTION_DISPATCH_RECEIPT_SCHEMA_VERSION,
+            transport_invocation_id=transport_invocation_id,
+            status=status,
+            outbox_command_sha256=outbox_command_sha256,
+            outbox_acceptance_receipt_sha256=acceptance_receipt_sha256,
+            venue_idempotency_key=venue_idempotency_key,
+            venue_idempotency_scope=venue_idempotency_scope,
+            dispatch_deadline_ts_ms=dispatch_deadline_ts_ms,
+            authorization_expires_at_ts_ms=authorization_expires_at_ts_ms,
+            dispatch_receipt_sha256=None,
+            raw_outcome_json=raw_outcome_json,
+            outcome_sha256=outcome_sha256,
+        )
+        if not (
+            status
+            in {
+                "DISPATCHING",
+                "IN_PROGRESS",
+                "DISPATCHED",
+                "FENCED",
+                "EXPIRED",
+            }
+            and (status == "DISPATCHED")
+            == (
+                isinstance(raw_outcome_json, str)
+                and bool(raw_outcome_json)
+                and _is_sha256(outcome_sha256)
+                and hashlib.sha256(raw_outcome_json.encode("utf-8")).hexdigest()
+                == outcome_sha256
+            )
+            and _verify_signed_risk_domain_receipt(
+                receipt,
+                expected_core=expected_core,
+                public_key_modulus_hex=str(identity["public_key_modulus_hex"]),
+                public_key_exponent=int(identity["public_key_exponent"]),
+            )
+        ):
+            raise MicroLiveExecutionError("execution dispatch receipt is invalid")
+        return receipt_json.encode("utf-8")
+
+    def complete_execution_dispatch(
+        self,
+        raw_dispatch_receipt: bytes,
+        raw_outcome: bytes,
+    ) -> bytes:
+        self._require_bound()
+        identity = self._required_lease_identity()
+        dispatch, dispatch_json, dispatch_receipt_sha256 = _raw_json_object(
+            raw_dispatch_receipt,
+            "execution dispatch receipt",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        _, outcome_json, outcome_sha256 = _raw_json_object(
+            raw_outcome,
+            "execution dispatch outcome",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        if dispatch.get("status") != "DISPATCHING":
+            raise MicroLiveExecutionError(
+                "only a newly consumed dispatch can record an outcome"
+            )
+        expected_dispatch = self._execution_dispatch_receipt_core(
+            schema_version=EXECUTION_DISPATCH_RECEIPT_SCHEMA_VERSION,
+            transport_invocation_id=dispatch.get("transport_invocation_id"),
+            status="DISPATCHING",
+            outbox_command_sha256=dispatch.get("outbox_command_sha256"),
+            outbox_acceptance_receipt_sha256=dispatch.get(
+                "outbox_acceptance_receipt_sha256"
+            ),
+            venue_idempotency_key=dispatch.get("venue_idempotency_key"),
+            venue_idempotency_scope=dispatch.get("venue_idempotency_scope"),
+            dispatch_deadline_ts_ms=dispatch.get("dispatch_deadline_ts_ms"),
+            authorization_expires_at_ts_ms=dispatch.get(
+                "authorization_expires_at_ts_ms"
+            ),
+            dispatch_receipt_sha256=None,
+            raw_outcome_json=None,
+            outcome_sha256=None,
+        )
+        if not _verify_signed_risk_domain_receipt(
+            dispatch,
+            expected_core=expected_dispatch,
+            public_key_modulus_hex=str(identity["public_key_modulus_hex"]),
+            public_key_exponent=int(identity["public_key_exponent"]),
+        ):
+            raise MicroLiveExecutionError("execution dispatch receipt is invalid")
+        try:
+            raw_completion = self._bounded_authority_call(
+                "complete_execution_dispatch",
+                lease_id=str(identity["lease_id"]),
+                service_identity_sha256=str(identity["service_identity_sha256"]),
+                tenant_id=str(identity["tenant_id"]),
+                key_identity_sha256=str(identity["key_identity_sha256"]),
+                authorization_id=str(self._authorization_id),
+                risk_domain_id=str(self._risk_domain_id),
+                journal_namespace_id=str(self._journal_namespace_id),
+                journal_epoch=str(self._journal_epoch),
+                transport_invocation_id=str(
+                    dispatch["transport_invocation_id"]
+                ),
+                dispatch_receipt_sha256=dispatch_receipt_sha256,
+                raw_outcome=outcome_json.encode("utf-8"),
+            )
+        except Exception as exc:
+            raise MicroLiveExecutionError(
+                "execution dispatch completion failed closed"
+            ) from exc
+        completion, completion_json, _ = _raw_json_object(
+            raw_completion,
+            "execution dispatch completion receipt",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        expected_completion = self._execution_dispatch_receipt_core(
+            schema_version=EXECUTION_DISPATCH_COMPLETION_SCHEMA_VERSION,
+            transport_invocation_id=dispatch["transport_invocation_id"],
+            status="DISPATCHED",
+            outbox_command_sha256=dispatch["outbox_command_sha256"],
+            outbox_acceptance_receipt_sha256=dispatch[
+                "outbox_acceptance_receipt_sha256"
+            ],
+            venue_idempotency_key=dispatch["venue_idempotency_key"],
+            venue_idempotency_scope=dispatch["venue_idempotency_scope"],
+            dispatch_deadline_ts_ms=dispatch["dispatch_deadline_ts_ms"],
+            authorization_expires_at_ts_ms=dispatch[
+                "authorization_expires_at_ts_ms"
+            ],
+            dispatch_receipt_sha256=dispatch_receipt_sha256,
+            raw_outcome_json=outcome_json,
+            outcome_sha256=outcome_sha256,
+        )
+        if not _verify_signed_risk_domain_receipt(
+            completion,
+            expected_core=expected_completion,
+            public_key_modulus_hex=str(identity["public_key_modulus_hex"]),
+            public_key_exponent=int(identity["public_key_exponent"]),
+        ):
+            raise MicroLiveExecutionError(
+                "execution dispatch completion receipt is invalid"
+            )
+        return completion_json.encode("utf-8")
+
+    def fence_execution_dispatch(
+        self,
+        *,
+        transport_invocation_id: str,
+        outbox_command_sha256: str,
+    ) -> bytes:
+        self._require_bound()
+        _require_sha256(transport_invocation_id, "execution dispatch")
+        _require_sha256(outbox_command_sha256, "execution outbox command")
+        identity = self._required_lease_identity()
+        try:
+            raw_receipt = self._bounded_authority_call(
+                "fence_execution_dispatch",
+                lease_id=str(identity["lease_id"]),
+                service_identity_sha256=str(identity["service_identity_sha256"]),
+                tenant_id=str(identity["tenant_id"]),
+                key_identity_sha256=str(identity["key_identity_sha256"]),
+                authorization_id=str(self._authorization_id),
+                risk_domain_id=str(self._risk_domain_id),
+                journal_namespace_id=str(self._journal_namespace_id),
+                journal_epoch=str(self._journal_epoch),
+                transport_invocation_id=transport_invocation_id,
+                outbox_command_sha256=outbox_command_sha256,
+            )
+        except Exception as exc:
+            raise MicroLiveExecutionError(
+                "execution dispatch fence failed closed"
+            ) from exc
+        receipt, receipt_json, _ = _raw_json_object(
+            raw_receipt,
+            "execution dispatch fence receipt",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        expected_core = {
+            **self._authority_receipt_identity_core(),
+            "schema_version": EXECUTION_DISPATCH_FENCE_SCHEMA_VERSION,
+            "transport_invocation_id": transport_invocation_id,
+            "outbox_command_sha256": outbox_command_sha256,
+            "status": receipt.get("status"),
+        }
+        if not (
+            receipt.get("status") in {"FENCED", "IN_PROGRESS", "DISPATCHED"}
+            and _verify_signed_risk_domain_receipt(
+                receipt,
+                expected_core=expected_core,
+                public_key_modulus_hex=str(identity["public_key_modulus_hex"]),
+                public_key_exponent=int(identity["public_key_exponent"]),
+            )
+        ):
+            raise MicroLiveExecutionError("execution dispatch fence is invalid")
+        return receipt_json.encode("utf-8")
+
     def emergency_kill_snapshot(self) -> EmergencyKillSnapshot | None:
         with self._emergency_lock():
             self._recover_pending_kill_locked()
@@ -1307,6 +1671,54 @@ class AtomicFileMicroLiveStateJournal:
             core["outbox_command_sha256"] = outbox_command_sha256
         return core
 
+    def _authority_receipt_identity_core(self) -> dict[str, Any]:
+        identity = self._required_lease_identity()
+        return {
+            "lease_id": identity["lease_id"],
+            "service_identity_sha256": identity["service_identity_sha256"],
+            "tenant_id": identity["tenant_id"],
+            "key_identity_sha256": identity["key_identity_sha256"],
+            "authorization_id": self._authorization_id,
+            "risk_domain_id": self._risk_domain_id,
+            "journal_namespace_id": self._journal_namespace_id,
+            "journal_epoch": self._journal_epoch,
+        }
+
+    def _execution_dispatch_receipt_core(
+        self,
+        *,
+        schema_version: str,
+        transport_invocation_id: Any,
+        status: Any,
+        outbox_command_sha256: Any,
+        outbox_acceptance_receipt_sha256: Any,
+        venue_idempotency_key: Any,
+        venue_idempotency_scope: Any,
+        dispatch_deadline_ts_ms: Any,
+        authorization_expires_at_ts_ms: Any,
+        dispatch_receipt_sha256: Any,
+        raw_outcome_json: Any,
+        outcome_sha256: Any,
+    ) -> dict[str, Any]:
+        return {
+            **self._authority_receipt_identity_core(),
+            "schema_version": schema_version,
+            "transport_invocation_id": transport_invocation_id,
+            "operation": "submit_order",
+            "status": status,
+            "outbox_command_sha256": outbox_command_sha256,
+            "outbox_acceptance_receipt_sha256": (
+                outbox_acceptance_receipt_sha256
+            ),
+            "venue_idempotency_key": venue_idempotency_key,
+            "venue_idempotency_scope": venue_idempotency_scope,
+            "dispatch_deadline_ts_ms": dispatch_deadline_ts_ms,
+            "authorization_expires_at_ts_ms": authorization_expires_at_ts_ms,
+            "dispatch_receipt_sha256": dispatch_receipt_sha256,
+            "raw_outcome_json": raw_outcome_json,
+            "outcome_sha256": outcome_sha256,
+        }
+
     def _recover_pending_kill_locked(self) -> None:
         if self.emergency_kill_pending_path.exists():
             pending = self._read_emergency_kill_path_locked(
@@ -1658,16 +2070,30 @@ class MicroLiveOrderTransport(Protocol):
     def attest_execution_binding(self, request: Mapping[str, Any]) -> bytes:
         """Return signed deployment identity bytes pinned by authorization."""
 
+    def bind_execution_dispatch_authority(
+        self,
+        begin: Callable[..., bytes],
+        complete: Callable[[bytes, bytes], bytes],
+        fence: Callable[..., bytes],
+        *,
+        authorization_id: str,
+        risk_domain_id: str,
+        risk_domain_authority_binding_sha256: str,
+        authorization_expires_at_ts_ms: int,
+    ) -> None:
+        """Bind the one-shot authority used at the actual venue boundary."""
+
     def read_trusted_time(self, request: Mapping[str, Any]) -> bytes:
         """Return a signed completion timestamp from the pinned clock."""
 
     def submit_order(self, request: Mapping[str, Any]) -> bytes:
-        """Dispatch only after ``verify_dispatchable_outbox_request`` passes.
+        """Atomically consume the outbox grant before any venue side effect.
 
-        The signed DISPATCHABLE receipt is the venue-write linearization point.
-        A gateway must verify it against the exact request bytes before any
-        network, signer, wallet, or exchange side effect.  Venue responses are
-        evidence of the result; they never authorize the dispatch itself.
+        The signed DISPATCHABLE proof is not itself a bearer grant.  A gateway
+        must verify it and atomically consume it through the bound authority,
+        yielding one DISPATCHING receipt, before its first network, signer,
+        wallet, or exchange side effect.  Duplicate workers must return the
+        stored outcome without another venue call.
         """
 
     def cancel_order(self, request: Mapping[str, Any]) -> bytes:
@@ -1735,6 +2161,28 @@ def verify_dispatchable_outbox_request(
         and authentication.get("risk_domain_authority_binding_sha256")
         == risk_domain_authority_binding_sha256
         and outbound_request.get("transport_invocation_id") is not None
+        and authentication.get("venue_idempotency_key_field")
+        == VENUE_IDEMPOTENCY_KEY_FIELD
+        and authentication.get("venue_idempotency_key")
+        == outbound_request.get(VENUE_IDEMPOTENCY_KEY_FIELD)
+        and authentication.get("venue_idempotency_scope")
+        == VENUE_IDEMPOTENCY_SCOPE
+        and authentication.get("venue_idempotency_semantics")
+        == VENUE_IDEMPOTENCY_SEMANTICS
+        and isinstance(authentication.get("dispatch_deadline_ts_ms"), int)
+        and not isinstance(authentication.get("dispatch_deadline_ts_ms"), bool)
+        and isinstance(authentication.get("authorization_expires_at_ts_ms"), int)
+        and not isinstance(
+            authentication.get("authorization_expires_at_ts_ms"), bool
+        )
+        and authentication["dispatch_deadline_ts_ms"]
+        <= authentication["authorization_expires_at_ts_ms"]
+        and authentication["dispatch_deadline_ts_ms"]
+        == min(
+            int(outbound_request.get("submitted_at_ts_ms", 0))
+            + MAX_EXECUTION_DISPATCH_DURATION_MS,
+            authentication["authorization_expires_at_ts_ms"],
+        )
     ):
         raise MicroLiveExecutionError("venue dispatch outbox identity is invalid")
 
@@ -2416,6 +2864,7 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "micro-live journal authority binding is authorization-mismatched"
             )
+        self._bind_transport_dispatch_authority()
         self._verify_execution_binding_attestation()
         self._generation = generation
         self._transaction_depth = 0
@@ -2582,6 +3031,24 @@ class MicroLiveExecutor:
                 ),
             }
         if operation == "submit_order":
+            outbound_request["execution_authentication"].update(
+                {
+                    "dispatch_deadline_ts_ms": min(
+                        int(outbound_request["submitted_at_ts_ms"])
+                        + MAX_EXECUTION_DISPATCH_DURATION_MS,
+                        self._authorization.expires_at_ts_ms,
+                    ),
+                    "authorization_expires_at_ts_ms": (
+                        self._authorization.expires_at_ts_ms
+                    ),
+                    "venue_idempotency_key_field": VENUE_IDEMPOTENCY_KEY_FIELD,
+                    "venue_idempotency_key": outbound_request[
+                        VENUE_IDEMPOTENCY_KEY_FIELD
+                    ],
+                    "venue_idempotency_scope": VENUE_IDEMPOTENCY_SCOPE,
+                    "venue_idempotency_semantics": VENUE_IDEMPOTENCY_SEMANTICS,
+                }
+            )
             raw_command = _canonical_json_bytes(outbound_request)
             raw_outbox_command = _canonical_json_bytes(
                 {
@@ -2678,6 +3145,24 @@ class MicroLiveExecutor:
             raw_receipt=value,
         )
 
+    def _bind_transport_dispatch_authority(self) -> None:
+        method = getattr(self._transport, "bind_execution_dispatch_authority", None)
+        if not callable(method):
+            raise MicroLiveExecutionError(
+                "authenticated execution gateway lacks one-shot dispatch authority"
+            )
+        method(
+            self._journal.begin_execution_dispatch,
+            self._journal.complete_execution_dispatch,
+            self._journal.fence_execution_dispatch,
+            authorization_id=self._authorization.authorization_id,
+            risk_domain_id=self._risk_domain_id,
+            risk_domain_authority_binding_sha256=(
+                self._authorization.risk_domain_authority_binding_sha256
+            ),
+            authorization_expires_at_ts_ms=self._authorization.expires_at_ts_ms,
+        )
+
     def _verify_execution_operation_receipt(
         self,
         *,
@@ -2704,6 +3189,8 @@ class MicroLiveExecutor:
         outbox_acceptance_receipt_json: str | None = None
         outbox_acceptance_receipt_sha256: str | None = None
         outbox_command_sha256: str | None = None
+        dispatch_terminal_receipt_json: str | None = None
+        dispatch_terminal_receipt_sha256: str | None = None
         fence_status = "NOT_APPLICABLE"
         if operation == "submit_order":
             raw_fence_json = authentication.get(
@@ -2852,7 +3339,103 @@ class MicroLiveExecutor:
                 raise MicroLiveExecutionError(
                     "submit_order durable outbox acceptance receipt is invalid"
                 )
-            fence_status = "DISPATCHABLE"
+            raw_dispatch_terminal_json = receipt.get(
+                "raw_execution_dispatch_terminal_receipt_json"
+            )
+            if not (
+                isinstance(raw_dispatch_terminal_json, str)
+                and raw_dispatch_terminal_json
+            ):
+                raise MicroLiveExecutionError(
+                    "submit_order dispatch terminal evidence is absent"
+                )
+            (
+                dispatch_terminal,
+                dispatch_terminal_receipt_json,
+                dispatch_terminal_receipt_sha256,
+            ) = _raw_json_object(
+                raw_dispatch_terminal_json.encode("utf-8"),
+                "submit_order dispatch terminal receipt",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+            )
+            dispatch_schema_version = dispatch_terminal.get("schema_version")
+            original_dispatch_receipt_sha256 = dispatch_terminal.get(
+                "dispatch_receipt_sha256"
+            )
+            if not (
+                dispatch_terminal_receipt_sha256
+                == receipt.get("execution_dispatch_terminal_receipt_sha256")
+                and dispatch_schema_version
+                in {
+                    EXECUTION_DISPATCH_RECEIPT_SCHEMA_VERSION,
+                    EXECUTION_DISPATCH_COMPLETION_SCHEMA_VERSION,
+                }
+                and (
+                    (
+                        dispatch_schema_version
+                        == EXECUTION_DISPATCH_RECEIPT_SCHEMA_VERSION
+                        and original_dispatch_receipt_sha256 is None
+                    )
+                    or (
+                        dispatch_schema_version
+                        == EXECUTION_DISPATCH_COMPLETION_SCHEMA_VERSION
+                        and _is_sha256(original_dispatch_receipt_sha256)
+                    )
+                )
+                and _verify_signed_risk_domain_receipt(
+                    dispatch_terminal,
+                    expected_core={
+                        **{
+                            key: expected_fence_core[key]
+                            for key in (
+                                "lease_id",
+                                "service_identity_sha256",
+                                "tenant_id",
+                                "key_identity_sha256",
+                                "authorization_id",
+                                "risk_domain_id",
+                                "journal_namespace_id",
+                                "journal_epoch",
+                            )
+                        },
+                        "schema_version": dispatch_schema_version,
+                        "transport_invocation_id": outbound_request.get(
+                            "transport_invocation_id"
+                        ),
+                        "operation": "submit_order",
+                        "status": "DISPATCHED",
+                        "outbox_command_sha256": outbox_command_sha256,
+                        "outbox_acceptance_receipt_sha256": (
+                            outbox_acceptance_receipt_sha256
+                        ),
+                        "venue_idempotency_key": outbound_request.get(
+                            VENUE_IDEMPOTENCY_KEY_FIELD
+                        ),
+                        "venue_idempotency_scope": VENUE_IDEMPOTENCY_SCOPE,
+                        "dispatch_deadline_ts_ms": authentication.get(
+                            "dispatch_deadline_ts_ms"
+                        ),
+                        "authorization_expires_at_ts_ms": authentication.get(
+                            "authorization_expires_at_ts_ms"
+                        ),
+                        "dispatch_receipt_sha256": (
+                            original_dispatch_receipt_sha256
+                        ),
+                        "raw_outcome_json": raw_response_json,
+                        "outcome_sha256": hashlib.sha256(raw_response).hexdigest(),
+                    },
+                    public_key_modulus_hex=(
+                        self._authorization.risk_domain_lease_public_key_modulus_hex
+                    ),
+                    public_key_exponent=(
+                        self._authorization.risk_domain_lease_public_key_exponent
+                    ),
+                )
+            ):
+                raise MicroLiveExecutionError(
+                    "submit_order dispatch terminal receipt is invalid"
+                )
+            fence_status = "DISPATCHED"
         expected_core = {
             "schema_version": EXECUTION_OPERATION_RECEIPT_SCHEMA_VERSION,
             "authorization_id": self._authorization.authorization_id,
@@ -2887,6 +3470,12 @@ class MicroLiveExecutor:
             ),
             "execution_outbox_acceptance_receipt_sha256": (
                 outbox_acceptance_receipt_sha256
+            ),
+            "raw_execution_dispatch_terminal_receipt_json": (
+                dispatch_terminal_receipt_json
+            ),
+            "execution_dispatch_terminal_receipt_sha256": (
+                dispatch_terminal_receipt_sha256
             ),
         }
         if not _verify_signed_risk_domain_receipt(
@@ -2928,6 +3517,13 @@ class MicroLiveExecutor:
             "execution_acceptance_protocol_schema_version": (
                 EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION
             ),
+            "execution_dispatch_protocol_schema_version": (
+                EXECUTION_DISPATCH_RECEIPT_SCHEMA_VERSION
+            ),
+            "venue_idempotency_key_field": VENUE_IDEMPOTENCY_KEY_FIELD,
+            "venue_idempotency_scope": VENUE_IDEMPOTENCY_SCOPE,
+            "venue_idempotency_semantics": VENUE_IDEMPOTENCY_SEMANTICS,
+            "venue_idempotency_enforced": True,
             "deployment_runtime_lock_sha256": (
                 self._authorization.deployment_runtime_lock_sha256
             ),
@@ -2991,6 +3587,13 @@ class MicroLiveExecutor:
             "execution_acceptance_protocol_schema_version": (
                 EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION
             ),
+            "execution_dispatch_protocol_schema_version": (
+                EXECUTION_DISPATCH_RECEIPT_SCHEMA_VERSION
+            ),
+            "venue_idempotency_key_field": VENUE_IDEMPOTENCY_KEY_FIELD,
+            "venue_idempotency_scope": VENUE_IDEMPOTENCY_SCOPE,
+            "venue_idempotency_semantics": VENUE_IDEMPOTENCY_SEMANTICS,
+            "venue_idempotency_enforced": True,
             "deployment_runtime_lock_sha256": (
                 self._authorization.deployment_runtime_lock_sha256
             ),
