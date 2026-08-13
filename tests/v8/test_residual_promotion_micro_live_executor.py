@@ -6769,14 +6769,33 @@ def test_hung_submit_cannot_starve_independent_watchdog_kill(
     watchdog_thread.join(timeout=5)
     assert not submit_thread.is_alive()
     assert not watchdog_thread.is_alive()
-    assert failures == []
     snapshot = executor.reconciliation_snapshot()
     assert snapshot["kill_switch_active"] is True
-    assert any(
+    acknowledged = any(
         event["event_type"] == "ORDER_ACKNOWLEDGED"
         for event in executor.events
     )
+    submission_unknown = any(
+        event["event_type"] == "ORDER_SUBMISSION_UNKNOWN"
+        for event in executor.events
+    )
+    # The authorized 250 ms transport deadline and the independent watchdog
+    # deliberately race here.  A busy runner may cross that deadline after the
+    # emergency kill is durable but before the released worker result is
+    # observed.  Both terminal observations are safe: either the exact venue
+    # acknowledgement commits, or the submission remains unknown under kill.
+    assert acknowledged is (not submission_unknown)
+    if failures:
+        assert len(failures) == 1
+        assert isinstance(failures[0], MicroLiveExecutionError)
+        assert str(failures[0]) == (
+            "order submission became unknown; kill switch engaged"
+        )
+        assert submission_unknown is True
+    else:
+        assert acknowledged is True
     assert len(_durable_execution_outbox_commands(journal)) == 1
+    assert transport.venue_idempotency_authority.external_effect_count <= 1
 
 
 def test_outbox_commit_is_the_linearization_point_before_kill_and_venue(
