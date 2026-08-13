@@ -96,26 +96,52 @@ TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256 = canonical_json_sha256(
     {"service": "test-external-risk-domain-authority-v1"}
 )
 TEST_RISK_DOMAIN_TENANT_ID = "bigan-test-tenant"
-TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX = (
-    "ca9d287a88d1a855f350f1d3e9bab8bfb19f742b07d419eeb7821cc3f8169cd7"
-    "1655f05f57a500b5a27f5c2f62d7ba764bca2485a39015f5655c9d5c3c1c70d1"
-    "a4d06378ede71fe16a4d04e3fabba7b884b7f25dc7d9cb663326422d25155a647"
-    "894a1bd7460fbc160b75f99efd3d3adbef7bd7c332d048b10be74927e0b6b80ad"
-    "fdeec010511f0304305fd62bbe89f7375a184699f37bc661fa7c995b0a2f8ef32"
-    "a47c5f5f6ce38ac06e7588c5a535d70d7c621d05652982a2ada40351874d41a3b"
-    "8b6a4da6d9a3bcb0ea859b55ae93da9be7ce40011985b4e4ec482272ac939264f"
-    "3ba2ad7f5665553ef6810632384012b2564cf9c12489cef52fe65bb3ccb"
+_TEST_RSA_PRIME_P = int(
+    "ffe9a45eb2c0d77802e88eb47b6d4b6b233cc1c30a00c6be7aee34f463b85d2c"
+    "b2b5c41575d165ec1983437427aa40c110821f0490a0eef041d87752ccaf2b0c3"
+    "dd40546dd26ad042e661e9f1bd039138943b9bddcfeefa403da5105c3c427487b4"
+    "e61164487879521954958b77e09939720e165553111ef09258e8fe398f96b",
+    16,
 )
-TEST_RISK_DOMAIN_PRIVATE_EXPONENT_HEX = (
-    "2d6bf5fb2258fe07e6b82abe7b1364ff746e6eb886d4c1cb865020eabddf33e1f"
-    "41be7fb37c6c1d5f64bdefab089f43f38d66441a15d57cedf9e5798a9d126699"
-    "92d2e5f99d5ca8bda2cd1ffd9e1dfc3b9dd12f47b2d1430211f5e8e8855b521"
-    "f8f6391c23ceea217bf11ff97e8e5a520511bce4ef041494a87849e1dd67e9fd"
-    "5445d9323c19bfa3d8724e974fb365327f067e4208fae292362d4e8089b1152b1"
-    "e64cb2a7b4d958e31547503c90897717281b1d7468e0f02589bd26454cae13413"
-    "d7c1fc910c8ff69367f4d51452debdef3bf1d17c6e2ec61d95291d2f14c5e0c9"
-    "419c9a5bf5c4b8ad0c84ccb4a2f7d1bc92a9820aca61f2e6bea006c612ab21"
+_TEST_RSA_PRIME_Q = int(
+    "b8c880373e55826d54ce635c30e8173716fb127408960b6d3216453bae5894da"
+    "3878ccceac40c1a85c1f171bf5eaa8a10bf0f7d415a48420c27dea527fe05dd7"
+    "ee04f292087f5ded227954f4acca2d6321763049c340cb78bcdce9a716ae0dced"
+    "f29f74286bd5d228530fa80402ca849a92b09757e6b5b74cf089ec69d08c413",
+    16,
 )
+_TEST_RSA_MODULUS = _TEST_RSA_PRIME_P * _TEST_RSA_PRIME_Q
+_TEST_RSA_PHI = (_TEST_RSA_PRIME_P - 1) * (_TEST_RSA_PRIME_Q - 1)
+_TEST_RSA_PRIVATE_EXPONENT = pow(65_537, -1, _TEST_RSA_PHI)
+_TEST_RSA_DP = _TEST_RSA_PRIVATE_EXPONENT % (_TEST_RSA_PRIME_P - 1)
+_TEST_RSA_DQ = _TEST_RSA_PRIVATE_EXPONENT % (_TEST_RSA_PRIME_Q - 1)
+_TEST_RSA_Q_INVERSE_MOD_P = pow(_TEST_RSA_PRIME_Q, -1, _TEST_RSA_PRIME_P)
+TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX = f"{_TEST_RSA_MODULUS:0512x}"
+TEST_RISK_DOMAIN_PRIVATE_EXPONENT_HEX = f"{_TEST_RSA_PRIVATE_EXPONENT:x}"
+
+
+def _test_rsa_private_operation(
+    encoded: bytes,
+    *,
+    private_exponent_hex: str,
+    public_modulus_hex: str,
+) -> int:
+    encoded_integer = int.from_bytes(encoded, "big")
+    if (
+        private_exponent_hex == TEST_RISK_DOMAIN_PRIVATE_EXPONENT_HEX
+        and public_modulus_hex == TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX
+    ):
+        residue_p = pow(encoded_integer, _TEST_RSA_DP, _TEST_RSA_PRIME_P)
+        residue_q = pow(encoded_integer, _TEST_RSA_DQ, _TEST_RSA_PRIME_Q)
+        coefficient = (
+            _TEST_RSA_Q_INVERSE_MOD_P * (residue_p - residue_q)
+        ) % _TEST_RSA_PRIME_P
+        return residue_q + _TEST_RSA_PRIME_Q * coefficient
+    return pow(
+        encoded_integer,
+        int(private_exponent_hex, 16),
+        int(public_modulus_hex, 16),
+    )
 TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256 = canonical_json_sha256(
     {
         "signature_algorithm": "RSASSA-PKCS1-v1_5-SHA256",
@@ -606,10 +632,10 @@ class _TestDurableRiskDomainLease:
             + b"\x00"
             + digest_info
         )
-        signature_hex = pow(
-            int.from_bytes(encoded, "big"),
-            int(self.private_exponent_hex, 16),
-            int(TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX, 16),
+        signature_hex = _test_rsa_private_operation(
+            encoded,
+            private_exponent_hex=self.private_exponent_hex,
+            public_modulus_hex=TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
         ).to_bytes(encoded_size, "big").hex()
         return _json_bytes(
             {
@@ -1932,10 +1958,10 @@ class FakeTransport:
             + b"\x00"
             + digest_info
         )
-        signature_hex = pow(
-            int.from_bytes(encoded, "big"),
-            int(self.execution_private_exponent_hex, 16),
-            int(TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX, 16),
+        signature_hex = _test_rsa_private_operation(
+            encoded,
+            private_exponent_hex=self.execution_private_exponent_hex,
+            public_modulus_hex=TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
         ).to_bytes(encoded_size, "big").hex()
         return _json_bytes(
             {
