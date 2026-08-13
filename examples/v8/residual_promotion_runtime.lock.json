@@ -1,12 +1,37 @@
 {
-  "packages": {
-    "numpy": "2.4.6",
-    "scipy": "1.17.1",
-    "xgboost": "3.2.0"
+  "base_image_distributions": {
+    "pip": "24.0"
+  },
+  "deployment_image": {
+    "config_digest": "sha256:c127439b2798d6872c53642bd6577046a30e818576250c329e55b124948dadf2",
+    "index_digest": "sha256:a3e58f9399353be051735f09be0316bfdeab571a5c6a24fd78b92df85bcb2d85",
+    "platform_manifest_digest": "sha256:a074fac67aa01841fee592d00bae14d25dcaf98ef6e12a683ecceb7e0147e2d1",
+    "repository": "docker.io/library/python",
+    "tag": "3.12.4-slim-bookworm"
+  },
+  "platform": {
+    "architecture": "x86_64",
+    "libc": "glibc",
+    "libc_version": "2.36",
+    "operating_system": "linux",
+    "python_abi": "cp312",
+    "userspace_distribution": "debian",
+    "userspace_version": "12"
   },
   "python": {
     "implementation": "CPython",
     "version": "3.12.4"
   },
-  "schema_version": "bigan-btc-15m-residual-promotion-runtime-lock-v1"
+  "repository_distribution": {
+    "name": "bigan",
+    "version": "0.1.0"
+  },
+  "requirements": {
+    "all_direct_and_transitive_artifacts_hash_locked": true,
+    "dependency_graph_sha256": "a72fcfa94ec5162a70a56e9fd7a6c8da2dc4773c8864fec20e3a4a359ced1bd2",
+    "package_count": 53,
+    "repository_path": "examples/v8/residual_promotion_runtime-linux-x86_64.lock.txt",
+    "sha256": "aca8c2e21202f25d9132cf2ef14132bbc12db05c9f775635869f7c501320d335"
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-runtime-lock-v2"
 }

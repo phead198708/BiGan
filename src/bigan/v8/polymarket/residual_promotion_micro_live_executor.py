@@ -68,14 +68,14 @@ JOURNAL_KILL_RECEIPT_SCHEMA_VERSION = (
 EXECUTION_INVOCATION_FENCE_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-invocation-fence-v1"
 )
-EXECUTION_INVOCATION_CONSUME_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-invocation-consume-v1"
+EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-execution-invocation-acceptance-v2"
 )
 EXECUTION_BINDING_ATTESTATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-binding-attestation-v3"
+    "bigan-btc-15m-residual-promotion-execution-binding-attestation-v4"
 )
 EXECUTION_OPERATION_RECEIPT_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-operation-receipt-v1"
+    "bigan-btc-15m-residual-promotion-execution-operation-receipt-v2"
 )
 EXECUTION_CURSOR_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-signed-fill-cursor-v1"
@@ -335,7 +335,7 @@ class DurableRiskDomainLeaseBackend(Protocol):
     ) -> bytes:
         """Register one risk-increasing invocation unless already killed."""
 
-    def consume_execution_invocation(
+    def commit_execution_acceptance(
         self,
         *,
         lease_id: str,
@@ -349,8 +349,9 @@ class DurableRiskDomainLeaseBackend(Protocol):
         transport_invocation_id: str,
         operation: str,
         fence_receipt_sha256: str,
+        raw_acceptance: bytes,
     ) -> bytes:
-        """Linearize acceptance; never consume after the domain is killed."""
+        """Atomically persist acceptance and terminal state; replay exact bytes."""
 
 
 RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM = "RSASSA-PKCS1-v1_5-SHA256"
@@ -416,8 +417,12 @@ class MicroLiveStateJournal(Protocol):
     ) -> bytes:
         """Return a signed authority fence for one risk-increasing invocation."""
 
-    def consume_execution_invocation(self, raw_fence_receipt: bytes) -> bytes:
-        """Linearize the execution-service write or return a FENCED receipt."""
+    def commit_execution_acceptance(
+        self,
+        raw_fence_receipt: bytes,
+        raw_acceptance: bytes,
+    ) -> bytes:
+        """Atomically accept, replay an exact prior acceptance, or return FENCED."""
 
     def initialize(self, raw_state: bytes) -> DurableJournalSnapshot:
         """Create the generation-zero state, rejecting an existing journal."""
@@ -802,6 +807,7 @@ class AtomicFileMicroLiveStateJournal:
             operation=operation,
             status="ACTIVE",
             fence_receipt_sha256=None,
+            acceptance_sha256=None,
         )
         if not _verify_signed_risk_domain_receipt(
             receipt,
@@ -814,9 +820,18 @@ class AtomicFileMicroLiveStateJournal:
             )
         return receipt_json.encode("utf-8")
 
-    def consume_execution_invocation(self, raw_fence_receipt: bytes) -> bytes:
+    def commit_execution_acceptance(
+        self,
+        raw_fence_receipt: bytes,
+        raw_acceptance: bytes,
+    ) -> bytes:
         self._require_bound()
         identity = self._required_lease_identity()
+        _, acceptance_json, acceptance_sha256 = _raw_json_object(
+            raw_acceptance,
+            "execution durable acceptance",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
         fence, _, fence_receipt_sha256 = _raw_json_object(
             raw_fence_receipt,
             "execution invocation fence receipt",
@@ -829,6 +844,7 @@ class AtomicFileMicroLiveStateJournal:
             operation=operation,
             status="ACTIVE",
             fence_receipt_sha256=None,
+            acceptance_sha256=None,
         )
         if not (
             _is_sha256(transport_invocation_id)
@@ -841,11 +857,11 @@ class AtomicFileMicroLiveStateJournal:
             )
         ):
             raise MicroLiveExecutionError(
-                "execution invocation fence is invalid at consumption"
+                "execution invocation fence is invalid at acceptance"
             )
         try:
-            raw_consumption = self._bounded_authority_call(
-                "consume_execution_invocation",
+            raw_commit = self._bounded_authority_call(
+                "commit_execution_acceptance",
                 lease_id=str(identity["lease_id"]),
                 service_identity_sha256=str(identity["service_identity_sha256"]),
                 tenant_id=str(identity["tenant_id"]),
@@ -857,36 +873,40 @@ class AtomicFileMicroLiveStateJournal:
                 transport_invocation_id=str(transport_invocation_id),
                 operation=str(operation),
                 fence_receipt_sha256=fence_receipt_sha256,
+                raw_acceptance=acceptance_json.encode("utf-8"),
             )
         except Exception as exc:
             raise MicroLiveExecutionError(
-                "execution invocation consumption failed closed"
+                "execution durable acceptance failed closed"
             ) from exc
-        consumption, consumption_json, _ = _raw_json_object(
-            raw_consumption,
-            "execution invocation consumption receipt",
+        commit, commit_json, _ = _raw_json_object(
+            raw_commit,
+            "execution invocation acceptance receipt",
         )
-        status = consumption.get("status")
-        expected_consumption_core = self._execution_invocation_receipt_core(
-            schema_version=EXECUTION_INVOCATION_CONSUME_SCHEMA_VERSION,
+        status = commit.get("status")
+        expected_commit_core = self._execution_invocation_receipt_core(
+            schema_version=EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION,
             transport_invocation_id=transport_invocation_id,
             operation=operation,
             status=status,
             fence_receipt_sha256=fence_receipt_sha256,
+            acceptance_sha256=(
+                acceptance_sha256 if status == "ACCEPTED" else None
+            ),
         )
         if not (
-            status in {"CONSUMED", "FENCED"}
+            status in {"ACCEPTED", "FENCED"}
             and _verify_signed_risk_domain_receipt(
-                consumption,
-                expected_core=expected_consumption_core,
+                commit,
+                expected_core=expected_commit_core,
                 public_key_modulus_hex=str(identity["public_key_modulus_hex"]),
                 public_key_exponent=int(identity["public_key_exponent"]),
             )
         ):
             raise MicroLiveExecutionError(
-                "execution invocation consumption receipt is invalid"
+                "execution invocation acceptance receipt is invalid"
             )
-        return consumption_json.encode("utf-8")
+        return commit_json.encode("utf-8")
 
     def emergency_kill_snapshot(self) -> EmergencyKillSnapshot | None:
         with self._emergency_lock():
@@ -1240,6 +1260,7 @@ class AtomicFileMicroLiveStateJournal:
         operation: Any,
         status: Any,
         fence_receipt_sha256: Any,
+        acceptance_sha256: Any,
     ) -> dict[str, Any]:
         identity = self._required_lease_identity()
         core = {
@@ -1256,8 +1277,9 @@ class AtomicFileMicroLiveStateJournal:
             "operation": operation,
             "status": status,
         }
-        if schema_version == EXECUTION_INVOCATION_CONSUME_SCHEMA_VERSION:
+        if schema_version == EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION:
             core["fence_receipt_sha256"] = fence_receipt_sha256
+            core["acceptance_sha256"] = acceptance_sha256
         return core
 
     def _recover_pending_kill_locked(self) -> None:
@@ -1613,12 +1635,12 @@ class MicroLiveOrderTransport(Protocol):
 
     def bind_risk_domain_execution_fence(
         self,
-        consumer: Callable[[bytes], bytes],
+        consumer: Callable[[bytes, bytes], bytes],
         *,
         risk_domain_id: str,
         authority_binding_sha256: str,
     ) -> None:
-        """Bind the final side-effect boundary to the monotonic kill authority."""
+        """Bind acceptance and its terminal fence state to one authority commit."""
 
     def read_trusted_time(self, request: Mapping[str, Any]) -> bytes:
         """Return a signed completion timestamp from the pinned clock."""
@@ -1702,6 +1724,15 @@ def _execution_service_binding_sha256(
             ),
             "maximum_call_duration_ms": (
                 authorization.execution_maximum_call_duration_ms
+            ),
+            "deployment_runtime_lock_sha256": (
+                authorization.deployment_runtime_lock_sha256
+            ),
+            "deployment_requirements_lock_sha256": (
+                authorization.deployment_requirements_lock_sha256
+            ),
+            "deployment_image_manifest_digest": (
+                authorization.deployment_image_manifest_digest
             ),
         }
     )
@@ -1921,6 +1952,9 @@ class _BoundAuthorization:
     execution_public_key_exponent: int
     execution_maximum_clock_skew_ms: int
     execution_maximum_call_duration_ms: int
+    deployment_runtime_lock_sha256: str
+    deployment_requirements_lock_sha256: str
+    deployment_image_manifest_digest: str
     execution_service_binding_sha256: str
     capital_base_usd: Decimal
     maximum_notional_usd: Decimal
@@ -1999,6 +2033,15 @@ class _BoundAuthorization:
             execution_maximum_call_duration_ms=(
                 authorization.execution_maximum_call_duration_ms
             ),
+            deployment_runtime_lock_sha256=(
+                authorization.deployment_runtime_lock_sha256
+            ),
+            deployment_requirements_lock_sha256=(
+                authorization.deployment_requirements_lock_sha256
+            ),
+            deployment_image_manifest_digest=(
+                authorization.deployment_image_manifest_digest
+            ),
             execution_service_binding_sha256=(
                 _execution_service_binding_sha256(authorization)
             ),
@@ -2029,6 +2072,12 @@ class _BoundAuthorization:
             == _risk_domain_authority_binding_sha256(authorization)
             and self.execution_service_binding_sha256
             == _execution_service_binding_sha256(authorization)
+            and self.deployment_runtime_lock_sha256
+            == authorization.deployment_runtime_lock_sha256
+            and self.deployment_requirements_lock_sha256
+            == authorization.deployment_requirements_lock_sha256
+            and self.deployment_image_manifest_digest
+            == authorization.deployment_image_manifest_digest
             and self.capital_base_usd == authorization.capital_base_usd
             and self.maximum_notional_usd == authorization.maximum_notional_usd
             and self.maximum_realized_loss_usd
@@ -2419,7 +2468,7 @@ class MicroLiveExecutor:
         def invoke() -> None:
             try:
                 value = method(
-                    self._journal.consume_execution_invocation,
+                    self._journal.commit_execution_acceptance,
                     risk_domain_id=self._risk_domain_id,
                     authority_binding_sha256=(
                         self._authorization.risk_domain_authority_binding_sha256
@@ -2473,6 +2522,100 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 f"{operation} authenticated response payload is oversized"
             )
+        acceptance_receipt_json: str | None = None
+        acceptance_receipt_sha256: str | None = None
+        fence_status = "NOT_APPLICABLE"
+        if operation == "submit_order":
+            raw_fence_json = authentication.get(
+                "execution_invocation_fence_receipt_json"
+            )
+            raw_acceptance_json = receipt.get(
+                "raw_execution_acceptance_receipt_json"
+            )
+            if not (
+                isinstance(raw_fence_json, str)
+                and raw_fence_json
+                and isinstance(raw_acceptance_json, str)
+                and raw_acceptance_json
+            ):
+                raise MicroLiveExecutionError(
+                    "submit_order durable acceptance evidence is absent"
+                )
+            fence, canonical_fence_json, fence_sha256 = _raw_json_object(
+                raw_fence_json.encode("utf-8"),
+                "submit_order execution invocation fence",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+            )
+            expected_fence_core = {
+                "schema_version": EXECUTION_INVOCATION_FENCE_SCHEMA_VERSION,
+                "lease_id": self._authorization.risk_domain_lease_id,
+                "service_identity_sha256": (
+                    self._authorization.risk_domain_lease_service_identity_sha256
+                ),
+                "tenant_id": self._authorization.risk_domain_lease_tenant_id,
+                "key_identity_sha256": (
+                    self._authorization.risk_domain_lease_key_identity_sha256
+                ),
+                "authorization_id": self._authorization.authorization_id,
+                "risk_domain_id": self._risk_domain_id,
+                "journal_namespace_id": fence.get("journal_namespace_id"),
+                "journal_epoch": fence.get("journal_epoch"),
+                "transport_invocation_id": (
+                    outbound_request.get("transport_invocation_id")
+                ),
+                "operation": "submit_order",
+                "status": "ACTIVE",
+            }
+            if not (
+                _is_sha256(expected_fence_core["journal_namespace_id"])
+                and _is_sha256(expected_fence_core["journal_epoch"])
+                and canonical_fence_json == raw_fence_json
+                and fence_sha256
+                == authentication.get(
+                    "execution_invocation_fence_receipt_sha256"
+                )
+                and _verify_signed_risk_domain_receipt(
+                    fence,
+                    expected_core=expected_fence_core,
+                    public_key_modulus_hex=(
+                        self._authorization.risk_domain_lease_public_key_modulus_hex
+                    ),
+                    public_key_exponent=(
+                        self._authorization.risk_domain_lease_public_key_exponent
+                    ),
+                )
+            ):
+                raise MicroLiveExecutionError(
+                    "submit_order execution invocation fence is invalid"
+                )
+            acceptance, acceptance_receipt_json, acceptance_receipt_sha256 = (
+                _raw_json_object(
+                    raw_acceptance_json.encode("utf-8"),
+                    "submit_order durable acceptance receipt",
+                    maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+                )
+            )
+            expected_acceptance_core = {
+                **expected_fence_core,
+                "schema_version": EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION,
+                "status": "ACCEPTED",
+                "fence_receipt_sha256": fence_sha256,
+                "acceptance_sha256": hashlib.sha256(raw_response).hexdigest(),
+            }
+            if not _verify_signed_risk_domain_receipt(
+                acceptance,
+                expected_core=expected_acceptance_core,
+                public_key_modulus_hex=(
+                    self._authorization.risk_domain_lease_public_key_modulus_hex
+                ),
+                public_key_exponent=(
+                    self._authorization.risk_domain_lease_public_key_exponent
+                ),
+            ):
+                raise MicroLiveExecutionError(
+                    "submit_order durable acceptance receipt is invalid"
+                )
+            fence_status = "ACCEPTED"
         expected_core = {
             "schema_version": EXECUTION_OPERATION_RECEIPT_SCHEMA_VERSION,
             "authorization_id": self._authorization.authorization_id,
@@ -2499,8 +2642,10 @@ class MicroLiveExecutor:
                 )
             ),
             "execution_invocation_fence_status": (
-                "CONSUMED" if operation == "submit_order" else "NOT_APPLICABLE"
+                fence_status
             ),
+            "raw_execution_acceptance_receipt_json": acceptance_receipt_json,
+            "execution_acceptance_receipt_sha256": acceptance_receipt_sha256,
         }
         if not _verify_signed_risk_domain_receipt(
             receipt,
@@ -2537,6 +2682,18 @@ class MicroLiveExecutor:
             ),
             "execution_fence_protocol_schema_version": (
                 EXECUTION_INVOCATION_FENCE_SCHEMA_VERSION
+            ),
+            "execution_acceptance_protocol_schema_version": (
+                EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION
+            ),
+            "deployment_runtime_lock_sha256": (
+                self._authorization.deployment_runtime_lock_sha256
+            ),
+            "deployment_requirements_lock_sha256": (
+                self._authorization.deployment_requirements_lock_sha256
+            ),
+            "deployment_image_manifest_digest": (
+                self._authorization.deployment_image_manifest_digest
             ),
         }
         raw_attestation = self._bounded_transport_call(
@@ -2588,6 +2745,18 @@ class MicroLiveExecutor:
             ),
             "execution_fence_protocol_schema_version": (
                 EXECUTION_INVOCATION_FENCE_SCHEMA_VERSION
+            ),
+            "execution_acceptance_protocol_schema_version": (
+                EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION
+            ),
+            "deployment_runtime_lock_sha256": (
+                self._authorization.deployment_runtime_lock_sha256
+            ),
+            "deployment_requirements_lock_sha256": (
+                self._authorization.deployment_requirements_lock_sha256
+            ),
+            "deployment_image_manifest_digest": (
+                self._authorization.deployment_image_manifest_digest
             ),
         }
         if not _verify_signed_risk_domain_receipt(

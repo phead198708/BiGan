@@ -35,7 +35,7 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
 )
 
 AUTHORIZATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v5"
+    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v6"
 )
 HUMAN_ATTESTATION_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-human-micro-live-attestation-v2"
@@ -82,6 +82,15 @@ REQUIRED_SUCCESSOR_DEPLOYMENT_COMPONENTS = (
 MAX_AUTHORIZATION_JSON_BYTES = 1_048_576
 TRUSTED_RISK_DOMAIN_LEASE_ID = (
     "8f8095ecb36c141825baa4791f640c013dc581cc7042ea4747edf164c24fe7a8"
+)
+DEPLOYMENT_RUNTIME_LOCK_SHA256 = (
+    "74036bc0c40ca2552e44074310f85ecf807bb51557ffad99eb815f97e6158bcb"
+)
+DEPLOYMENT_REQUIREMENTS_LOCK_SHA256 = (
+    "aca8c2e21202f25d9132cf2ef14132bbc12db05c9f775635869f7c501320d335"
+)
+DEPLOYMENT_IMAGE_MANIFEST_DIGEST = (
+    "sha256:a074fac67aa01841fee592d00bae14d25dcaf98ef6e12a683ecceb7e0147e2d1"
 )
 MAX_EVIDENCE_JSON_BYTES = 16_777_216
 MAX_JSON_DEPTH = 32
@@ -130,6 +139,9 @@ class VerifiedMicroLiveAuthorization:
     execution_public_key_exponent: int
     execution_maximum_clock_skew_ms: int
     execution_maximum_call_duration_ms: int
+    deployment_runtime_lock_sha256: str
+    deployment_requirements_lock_sha256: str
+    deployment_image_manifest_digest: str
     capital_base_usd: Decimal
     maximum_notional_usd: Decimal
     maximum_realized_loss_usd: Decimal
@@ -432,6 +444,15 @@ def verify_micro_live_authorization(
         execution_maximum_call_duration_ms=int(
             execution_service_authority["maximum_call_duration_ms"]
         ),
+        deployment_runtime_lock_sha256=str(
+            execution_service_authority["deployment_runtime_lock_sha256"]
+        ),
+        deployment_requirements_lock_sha256=str(
+            execution_service_authority["deployment_requirements_lock_sha256"]
+        ),
+        deployment_image_manifest_digest=str(
+            execution_service_authority["deployment_image_manifest_digest"]
+        ),
         capital_base_usd=capital_base,
         maximum_notional_usd=maximum_notional,
         maximum_realized_loss_usd=maximum_realized_loss,
@@ -502,7 +523,7 @@ def _capability_integrity_sha256(
     ):
         raise ValueError("loaded micro-live model bytes do not match the frozen runtime")
     payload = {
-        "schema_version": "verified-micro-live-authorization-capability-v4",
+        "schema_version": "verified-micro-live-authorization-capability-v5",
         "authorization_id": capability.authorization_id,
         "authorization_payload_sha256": capability.authorization_payload_sha256,
         "candidate_bundle_sha256": capability.candidate_bundle_sha256,
@@ -558,6 +579,15 @@ def _capability_integrity_sha256(
         ),
         "execution_maximum_call_duration_ms": (
             capability.execution_maximum_call_duration_ms
+        ),
+        "deployment_runtime_lock_sha256": (
+            capability.deployment_runtime_lock_sha256
+        ),
+        "deployment_requirements_lock_sha256": (
+            capability.deployment_requirements_lock_sha256
+        ),
+        "deployment_image_manifest_digest": (
+            capability.deployment_image_manifest_digest
         ),
         "capital_base_usd": str(capability.capital_base_usd),
         "maximum_notional_usd": str(capability.maximum_notional_usd),
@@ -941,6 +971,9 @@ def _validated_execution_service_authority(value: Any) -> dict[str, Any]:
         "public_key_exponent",
         "maximum_clock_skew_ms",
         "maximum_call_duration_ms",
+        "deployment_runtime_lock_sha256",
+        "deployment_requirements_lock_sha256",
+        "deployment_image_manifest_digest",
     }
     if set(authority) != expected_keys:
         raise MicroLiveAuthorizationError(
@@ -983,6 +1016,12 @@ def _validated_execution_service_authority(value: Any) -> dict[str, Any]:
         and isinstance(maximum_call_duration_ms, int)
         and not isinstance(maximum_call_duration_ms, bool)
         and 1 <= maximum_call_duration_ms <= 1_000
+        and authority.get("deployment_runtime_lock_sha256")
+        == DEPLOYMENT_RUNTIME_LOCK_SHA256
+        and authority.get("deployment_requirements_lock_sha256")
+        == DEPLOYMENT_REQUIREMENTS_LOCK_SHA256
+        and authority.get("deployment_image_manifest_digest")
+        == DEPLOYMENT_IMAGE_MANIFEST_DIGEST
     ):
         raise MicroLiveAuthorizationError(
             "execution service authority binding is invalid"

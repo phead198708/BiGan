@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import multiprocessing
+import os
 import shutil
 import tempfile
 import threading
@@ -163,6 +164,15 @@ TEST_EXECUTION_AUTHORITY = {
     "public_key_exponent": 65_537,
     "maximum_clock_skew_ms": 250,
     "maximum_call_duration_ms": 250,
+    "deployment_runtime_lock_sha256": (
+        auth_module.DEPLOYMENT_RUNTIME_LOCK_SHA256
+    ),
+    "deployment_requirements_lock_sha256": (
+        auth_module.DEPLOYMENT_REQUIREMENTS_LOCK_SHA256
+    ),
+    "deployment_image_manifest_digest": (
+        auth_module.DEPLOYMENT_IMAGE_MANIFEST_DIGEST
+    ),
 }
 TEST_EXECUTION_SERVICE_BINDING_SHA256 = canonical_json_sha256(
     TEST_EXECUTION_AUTHORITY
@@ -575,6 +585,8 @@ class _TestDurableRiskDomainLease:
         self.lose_next_advance_response = False
         self.fail_next_kill_before_commit = False
         self.lose_next_kill_response = False
+        self.fail_next_acceptance_before_commit = False
+        self.lose_next_acceptance_response = False
 
     def _signed_receipt(self, receipt_core: dict[str, Any]) -> bytes:
         signed_bytes = _json_bytes(receipt_core)
@@ -605,6 +617,17 @@ class _TestDurableRiskDomainLease:
 
     def _binding_path(self, risk_domain_id: str) -> Path:
         return self.authority_root / f"{risk_domain_id}.json"
+
+    def _write_authority_state(self, path: Path, state: dict[str, Any]) -> None:
+        raw_state = _json_bytes(state)
+        temporary = path.with_name(
+            f".{path.name}.{threading.get_ident()}.{time.time_ns()}.tmp"
+        )
+        with temporary.open("xb") as handle:
+            handle.write(raw_state)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
 
     def claim_risk_domain(
         self,
@@ -655,8 +678,9 @@ class _TestDurableRiskDomainLease:
                     "kill_event_ts_ms": None,
                     "kill_payload_sha256": None,
                     "execution_invocations": {},
+                    "execution_acceptances": {},
                 }
-                binding_path.write_bytes(_json_bytes(authority_state))
+                self._write_authority_state(binding_path, authority_state)
                 claim_status = (
                     "FIRST_CLAIM"
                     if self.initial_high_water_generation == -1
@@ -732,7 +756,7 @@ class _TestDurableRiskDomainLease:
                 raise RuntimeError("risk-domain high-water CAS failed")
             authority_state["high_water_generation"] = next_generation
             authority_state["high_water_state_sha256"] = next_state_sha256
-            binding_path.write_bytes(_json_bytes(authority_state))
+            self._write_authority_state(binding_path, authority_state)
         if self.lose_next_advance_response:
             self.lose_next_advance_response = False
             raise RuntimeError("synthetic authority response loss after commit")
@@ -806,7 +830,7 @@ class _TestDurableRiskDomainLease:
                 for invocation in authority_state["execution_invocations"].values():
                     if invocation["status"] == "ACTIVE":
                         invocation["status"] = "FENCED"
-                binding_path.write_bytes(_json_bytes(authority_state))
+                self._write_authority_state(binding_path, authority_state)
         if self.lose_next_kill_response:
             self.lose_next_kill_response = False
             raise RuntimeError("synthetic kill response loss after commit")
@@ -884,16 +908,17 @@ class _TestDurableRiskDomainLease:
                 "operation": operation,
                 "status": status,
                 "fence_receipt_sha256": hashlib.sha256(raw_receipt).hexdigest(),
+                "acceptance_sha256": None,
             }
             if invocation is not None and invocation != descriptor:
                 raise RuntimeError("execution invocation identity conflict")
             authority_state["execution_invocations"][
                 transport_invocation_id
             ] = descriptor
-            binding_path.write_bytes(_json_bytes(authority_state))
+            self._write_authority_state(binding_path, authority_state)
         return raw_receipt
 
-    def consume_execution_invocation(
+    def commit_execution_acceptance(
         self,
         *,
         lease_id: str,
@@ -907,7 +932,19 @@ class _TestDurableRiskDomainLease:
         transport_invocation_id: str,
         operation: str,
         fence_receipt_sha256: str,
+        raw_acceptance: bytes,
     ) -> bytes:
+        if self.fail_next_acceptance_before_commit:
+            self.fail_next_acceptance_before_commit = False
+            raise RuntimeError("synthetic acceptance failure before commit")
+        acceptance = json.loads(raw_acceptance)
+        if not (
+            isinstance(acceptance, dict)
+            and _json_bytes(acceptance) == raw_acceptance
+            and acceptance.get("status") in {"ACCEPTED", "REJECTED"}
+        ):
+            raise RuntimeError("execution acceptance payload is invalid")
+        acceptance_sha256 = hashlib.sha256(raw_acceptance).hexdigest()
         binding_path = self._binding_path(risk_domain_id)
         with self._lock:
             authority_state = json.loads(binding_path.read_bytes())
@@ -928,18 +965,38 @@ class _TestDurableRiskDomainLease:
                 and invocation["fence_receipt_sha256"]
                 == fence_receipt_sha256
             ):
-                raise RuntimeError("execution invocation consumption mismatch")
-            status = (
-                "FENCED"
-                if authority_state["killed"] or invocation["status"] == "FENCED"
-                else "CONSUMED"
+                raise RuntimeError("execution invocation acceptance mismatch")
+            existing = authority_state["execution_acceptances"].get(
+                transport_invocation_id
             )
+            status = (
+                "ACCEPTED"
+                if existing is not None
+                else (
+                    "FENCED"
+                    if authority_state["killed"]
+                    or invocation["status"] == "FENCED"
+                    else "ACCEPTED"
+                )
+            )
+            if status == "ACCEPTED":
+                descriptor = {
+                    "operation": operation,
+                    "acceptance_sha256": acceptance_sha256,
+                    "raw_acceptance_json": raw_acceptance.decode("utf-8"),
+                }
+                if existing is not None and existing != descriptor:
+                    raise RuntimeError("execution acceptance identity conflict")
+                authority_state["execution_acceptances"][
+                    transport_invocation_id
+                ] = descriptor
+                invocation["acceptance_sha256"] = acceptance_sha256
             invocation["status"] = status
-            binding_path.write_bytes(_json_bytes(authority_state))
-        return self._signed_receipt(
+            self._write_authority_state(binding_path, authority_state)
+        raw_receipt = self._signed_receipt(
             {
                 "schema_version": (
-                    executor_module.EXECUTION_INVOCATION_CONSUME_SCHEMA_VERSION
+                    executor_module.EXECUTION_INVOCATION_ACCEPTANCE_SCHEMA_VERSION
                 ),
                 "lease_id": lease_id,
                 "service_identity_sha256": service_identity_sha256,
@@ -953,8 +1010,15 @@ class _TestDurableRiskDomainLease:
                 "operation": operation,
                 "status": status,
                 "fence_receipt_sha256": fence_receipt_sha256,
+                "acceptance_sha256": (
+                    acceptance_sha256 if status == "ACCEPTED" else None
+                ),
             }
         )
+        if self.lose_next_acceptance_response:
+            self.lose_next_acceptance_response = False
+            raise RuntimeError("synthetic acceptance response loss after commit")
+        return raw_receipt
 
 
 def _new_journal() -> AtomicFileMicroLiveStateJournal:
@@ -965,6 +1029,19 @@ def _new_journal() -> AtomicFileMicroLiveStateJournal:
             base / "external-risk-domain-lease"
         ),
     )
+
+
+def _durable_execution_acceptances(
+    journal: AtomicFileMicroLiveStateJournal,
+) -> dict[str, dict[str, Any]]:
+    lease = journal.risk_domain_lease
+    if not isinstance(lease, _TestDurableRiskDomainLease):
+        raise AssertionError("test journal lacks inspectable authority")
+    state_paths = list(lease.authority_root.glob("*.json"))
+    if len(state_paths) != 1:
+        raise AssertionError("test authority has an unexpected state population")
+    state = json.loads(state_paths[0].read_bytes())
+    return copy.deepcopy(dict(state["execution_acceptances"]))
 
 
 def _journal_factory_args() -> dict[str, Any]:
@@ -1302,7 +1379,6 @@ class FakeTransport:
         self.fill_cursor_calls: list[dict[str, Any]] = []
         self.authoritative_fills: dict[str, list[dict[str, Any]]] = {}
         self.authoritative_status: dict[str, str] = {}
-        self.external_acceptances: list[dict[str, Any]] = []
         self._execution_fence_consumer: Any = None
         self._bound_risk_domain_id: str | None = None
         self._bound_authority_binding_sha256: str | None = None
@@ -1358,6 +1434,8 @@ class FakeTransport:
     ) -> bytes:
         authentication = dict(request["execution_authentication"])
         fence_status = "NOT_APPLICABLE"
+        raw_acceptance_receipt_json: str | None = None
+        acceptance_receipt_sha256: str | None = None
         if authentication["operation"] == "submit_order":
             raw_fence_json = authentication[
                 "execution_invocation_fence_receipt_json"
@@ -1371,16 +1449,18 @@ class FakeTransport:
                 == authentication["risk_domain_authority_binding_sha256"]
             ):
                 raise RuntimeError("execution invocation fence is not bound")
-            raw_consumption = self._execution_fence_consumer(
-                raw_fence_json.encode("utf-8")
+            raw_acceptance_receipt = self._execution_fence_consumer(
+                raw_fence_json.encode("utf-8"),
+                raw_response,
             )
-            consumption = json.loads(raw_consumption)
-            fence_status = str(consumption["status"])
-            if fence_status != "CONSUMED":
+            acceptance_receipt = json.loads(raw_acceptance_receipt)
+            fence_status = str(acceptance_receipt["status"])
+            if fence_status != "ACCEPTED":
                 raise RuntimeError("execution invocation was fenced before acceptance")
-            response_value = json.loads(raw_response)
-            if response_value.get("status") == "ACCEPTED":
-                self.external_acceptances.append(copy.deepcopy(response_value))
+            raw_acceptance_receipt_json = raw_acceptance_receipt.decode("utf-8")
+            acceptance_receipt_sha256 = hashlib.sha256(
+                raw_acceptance_receipt
+            ).hexdigest()
         raw_response_json = raw_response.decode("utf-8")
         return self._signed_execution_receipt(
             {
@@ -1409,6 +1489,12 @@ class FakeTransport:
                     "execution_invocation_fence_receipt_sha256"
                 ],
                 "execution_invocation_fence_status": fence_status,
+                "raw_execution_acceptance_receipt_json": (
+                    raw_acceptance_receipt_json
+                ),
+                "execution_acceptance_receipt_sha256": (
+                    acceptance_receipt_sha256
+                ),
             }
         )
 
@@ -1441,6 +1527,18 @@ class FakeTransport:
             ],
             "execution_fence_protocol_schema_version": request[
                 "execution_fence_protocol_schema_version"
+            ],
+            "execution_acceptance_protocol_schema_version": request[
+                "execution_acceptance_protocol_schema_version"
+            ],
+            "deployment_runtime_lock_sha256": request[
+                "deployment_runtime_lock_sha256"
+            ],
+            "deployment_requirements_lock_sha256": request[
+                "deployment_requirements_lock_sha256"
+            ],
+            "deployment_image_manifest_digest": request[
+                "deployment_image_manifest_digest"
             ],
         }
         core.update(self.execution_binding_overrides)
@@ -1792,6 +1890,23 @@ class HungTransport(FakeTransport):
             self.lookup_calls.append(copy.deepcopy(request))
             self._hang()
         return super().lookup_order(request)
+
+
+class AcceptanceCommittedBeforeReturnTransport(FakeTransport):
+    """Pause after the authority commit but before returning its signed receipt."""
+
+    maximum_call_duration_ms = 250
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.acceptance_committed = threading.Event()
+        self.release = threading.Event()
+
+    def submit_order(self, request: dict[str, Any]) -> bytes:
+        raw_receipt = super().submit_order(request)
+        self.acceptance_committed.set()
+        self.release.wait(timeout=10)
+        return raw_receipt
 
 
 def _multiprocess_hold_journal_lock(
@@ -2428,6 +2543,15 @@ def _verified(
             authorization["execution_service_authority"][
                 "maximum_call_duration_ms"
             ]
+        ),
+        deployment_runtime_lock_sha256=(
+            auth_module.DEPLOYMENT_RUNTIME_LOCK_SHA256
+        ),
+        deployment_requirements_lock_sha256=(
+            auth_module.DEPLOYMENT_REQUIREMENTS_LOCK_SHA256
+        ),
+        deployment_image_manifest_digest=(
+            auth_module.DEPLOYMENT_IMAGE_MANIFEST_DIGEST
         ),
         capital_base_usd=Decimal(authorization["capital_base_usd"]),
         maximum_notional_usd=Decimal(authorization["maximum_notional_usd"]),
@@ -5506,7 +5630,124 @@ def test_hung_submit_cannot_starve_independent_watchdog_kill(
         event["event_type"] == "ORDER_SUBMISSION_UNKNOWN"
         for event in executor.events
     )
-    assert transport.external_acceptances == []
+    assert _durable_execution_acceptances(journal) == {}
+
+
+def test_acceptance_commit_is_the_linearization_point_before_kill_and_return(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    transport = AcceptanceCommittedBeforeReturnTransport()
+    executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
+    failures: list[BaseException] = []
+
+    def submit() -> None:
+        try:
+            executor.submit_signal(
+                **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    submit_thread = threading.Thread(target=submit)
+    submit_thread.start()
+    assert transport.acceptance_committed.wait(timeout=5)
+    acceptances_before_kill = _durable_execution_acceptances(journal)
+    assert len(acceptances_before_kill) == 1
+
+    watchdog_thread = threading.Thread(
+        target=lambda: executor.enforce_runtime_safety(
+            now_ts_ms=NOW_TS_MS + 7_000,
+            operator_heartbeat_ts_ms=NOW_TS_MS,
+        )
+    )
+    watchdog_thread.start()
+    deadline = time.monotonic() + 1
+    emergency = journal.emergency_kill_snapshot()
+    while emergency is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+        emergency = journal.emergency_kill_snapshot()
+    assert emergency is not None
+    assert _durable_execution_acceptances(journal) == acceptances_before_kill
+
+    transport.release.set()
+    submit_thread.join(timeout=5)
+    watchdog_thread.join(timeout=5)
+    assert not submit_thread.is_alive()
+    assert not watchdog_thread.is_alive()
+    assert len(_durable_execution_acceptances(journal)) == 1
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+    assert failures == []
+
+
+def test_lost_acceptance_ack_is_durable_once_across_restart(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    lease = journal.risk_domain_lease
+    assert isinstance(lease, _TestDurableRiskDomainLease)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
+    lease.lose_next_acceptance_response = True
+
+    with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    committed_acceptances = _durable_execution_acceptances(journal)
+    assert len(committed_acceptances) == 1
+    assert len(transport.submit_calls) == 1
+    submitted = transport.submit_calls[0]
+    raw_fence = submitted["execution_authentication"][
+        "execution_invocation_fence_receipt_json"
+    ].encode("utf-8")
+    descriptor = next(iter(committed_acceptances.values()))
+    replayed_receipt = journal.commit_execution_acceptance(
+        raw_fence,
+        descriptor["raw_acceptance_json"].encode("utf-8"),
+    )
+    assert json.loads(replayed_receipt)["status"] == "ACCEPTED"
+    assert _durable_execution_acceptances(journal) == committed_acceptances
+
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=transport,
+        journal=journal,
+        raw_state=executor.export_state_bytes(),
+    )
+    assert restored.reconciliation_snapshot()["kill_switch_active"] is True
+    assert _durable_execution_acceptances(journal) == committed_acceptances
+    assert len(transport.submit_calls) == 1
+
+
+def test_post_commit_transport_timeout_cannot_create_late_acceptance(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    transport = AcceptanceCommittedBeforeReturnTransport()
+    executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
+
+    with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    assert transport.acceptance_committed.is_set()
+    committed_acceptances = _durable_execution_acceptances(journal)
+    assert len(committed_acceptances) == 1
+    transport.release.set()
+
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=transport,
+        journal=journal,
+        raw_state=executor.export_state_bytes(),
+    )
+    assert restored.reconciliation_snapshot()["kill_switch_active"] is True
+    assert _durable_execution_acceptances(journal) == committed_acceptances
+    assert len(transport.submit_calls) == 1
 
 
 def test_hung_lookup_times_out_and_remains_conservatively_killed(
@@ -6382,6 +6623,40 @@ def test_execution_adapter_binding_is_authorization_pinned(
         MicroLiveExecutor(verified, transport=transport)
 
 
+def test_execution_deployment_image_binding_is_authorization_pinned(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport(
+        execution_binding_overrides={
+            "deployment_image_manifest_digest": f"sha256:{'a' * 64}",
+        }
+    )
+    with pytest.raises(MicroLiveExecutionError, match="binding attestation"):
+        MicroLiveExecutor(verified, transport=transport)
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "deployment_runtime_lock_sha256",
+        "deployment_requirements_lock_sha256",
+        "deployment_image_manifest_digest",
+    ),
+)
+def test_execution_authority_rejects_deployment_runtime_binding_drift(
+    field: str,
+) -> None:
+    authority = copy.deepcopy(TEST_EXECUTION_AUTHORITY)
+    assert auth_module._validated_execution_service_authority(authority) == authority
+    authority[field] = "0" * 64
+    with pytest.raises(
+        MicroLiveAuthorizationError,
+        match="execution service authority binding is invalid",
+    ):
+        auth_module._validated_execution_service_authority(authority)
+
+
 def test_sha_shaped_unsigned_fill_watermark_fails_closed(
     authorized_fixture: dict[str, Any],
 ) -> None:
@@ -6817,7 +7092,12 @@ def test_external_kill_revokes_every_registered_execution_invocation(
         event_ts_ms=NOW_TS_MS,
     )
     assert [
-        json.loads(journal.consume_execution_invocation(fence))["status"]
+        json.loads(
+            journal.commit_execution_acceptance(
+                fence,
+                _json_bytes({"status": "ACCEPTED"}),
+            )
+        )["status"]
         for fence in fences
     ] == ["FENCED", "FENCED"]
 

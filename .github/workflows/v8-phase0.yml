@@ -14,7 +14,7 @@ on:
 jobs:
   v8-hard-gates:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
@@ -22,19 +22,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Python
+      - name: Set up exact test interpreter
         uses: actions/setup-python@v5
         with:
           python-version-file: ".python-version"
 
-      - name: Install package
+      - name: Install exact hash-locked deployment graph
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+          python -m pip install --require-hashes --only-binary=:all: \
+            -r examples/v8/residual_promotion_runtime-linux-x86_64.lock.txt
+          python -m pip install --no-deps --no-build-isolation -e .
 
       - name: Verify frozen deployment runtime matrix
         run: |
-          python examples/v8/verify_residual_promotion_runtime_matrix.py
+          python examples/v8/verify_residual_promotion_runtime_matrix.py --static-only
 
       - name: Lint v8
         run: python -m ruff check src/bigan/v8 tests/v8 examples/v8
@@ -81,3 +82,24 @@ jobs:
             tests/v8/test_residual_promotion_service_root_migration.py \
             tests/v8/test_polymarket_async_settlement.py \
             -q
+
+  exact-deployment-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container:
+      image: python:3.12.4-slim-bookworm@sha256:a074fac67aa01841fee592d00bae14d25dcaf98ef6e12a683ecceb7e0147e2d1
+    env:
+      BIGAN_DEPLOYMENT_IMAGE_MANIFEST_DIGEST: sha256:a074fac67aa01841fee592d00bae14d25dcaf98ef6e12a683ecceb7e0147e2d1
+
+    steps:
+      - name: Check out repository without deployment mutation
+        uses: actions/checkout@v4
+
+      - name: Install exact hash-locked deployment graph
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: \
+            -r examples/v8/residual_promotion_runtime-linux-x86_64.lock.txt
+          python -m pip install --no-deps --no-build-isolation -e .
+
+      - name: Verify exact deployment image, ABI, and distribution graph
+        run: python examples/v8/verify_residual_promotion_runtime_matrix.py
