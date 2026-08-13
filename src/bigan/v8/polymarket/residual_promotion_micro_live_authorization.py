@@ -35,7 +35,7 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
 )
 
 AUTHORIZATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v2"
+    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v3"
 )
 HUMAN_ATTESTATION_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-human-micro-live-attestation-v2"
@@ -111,6 +111,11 @@ class VerifiedMicroLiveAuthorization:
     authorization_payload_sha256: str
     candidate_bundle_sha256: str
     risk_domain_lease_id: str
+    risk_domain_lease_service_identity_sha256: str
+    risk_domain_lease_tenant_id: str
+    risk_domain_lease_key_identity_sha256: str
+    risk_domain_lease_public_key_modulus_hex: str
+    risk_domain_lease_public_key_exponent: int
     capital_base_usd: Decimal
     maximum_notional_usd: Decimal
     maximum_realized_loss_usd: Decimal
@@ -158,6 +163,7 @@ def verify_micro_live_authorization(
         "authorization_id",
         "supersedes_template",
         "candidate_bundle",
+        "risk_domain_lease_authority",
         "preapproval_contract",
         "required_evidence",
         "evidence_payload_sha256",
@@ -218,6 +224,9 @@ def verify_micro_live_authorization(
         expected_path=CONTRACT_REPOSITORY_PATH,
     )
     candidate_sha = dict(authorization["candidate_bundle"])["sha256"]
+    risk_domain_lease_authority = _validated_risk_domain_lease_authority(
+        authorization.get("risk_domain_lease_authority")
+    )
     if not (
         dict(contract.get("candidate_bundle") or {})
         == dict(authorization["candidate_bundle"])
@@ -315,6 +324,7 @@ def verify_micro_live_authorization(
         "maximum_signal_age_ms": MAXIMUM_SIGNAL_AGE_MS,
         "maximum_operator_heartbeat_age_ms": MAXIMUM_OPERATOR_HEARTBEAT_AGE_MS,
         "approval_issue_number": ISSUE_NUMBER,
+        "risk_domain_lease_authority": risk_domain_lease_authority,
     }
     authorization_id = canonical_json_sha256(identity)
     if authorization.get("authorization_id") != authorization_id:
@@ -348,7 +358,22 @@ def verify_micro_live_authorization(
         authorization_id=authorization_id,
         authorization_payload_sha256=hashlib.sha256(raw_authorization).hexdigest(),
         candidate_bundle_sha256=str(candidate_sha),
-        risk_domain_lease_id=TRUSTED_RISK_DOMAIN_LEASE_ID,
+        risk_domain_lease_id=str(risk_domain_lease_authority["lease_id"]),
+        risk_domain_lease_service_identity_sha256=str(
+            risk_domain_lease_authority["service_identity_sha256"]
+        ),
+        risk_domain_lease_tenant_id=str(
+            risk_domain_lease_authority["tenant_id"]
+        ),
+        risk_domain_lease_key_identity_sha256=str(
+            risk_domain_lease_authority["key_identity_sha256"]
+        ),
+        risk_domain_lease_public_key_modulus_hex=str(
+            risk_domain_lease_authority["public_key_modulus_hex"]
+        ),
+        risk_domain_lease_public_key_exponent=int(
+            risk_domain_lease_authority["public_key_exponent"]
+        ),
         capital_base_usd=capital_base,
         maximum_notional_usd=maximum_notional,
         maximum_realized_loss_usd=maximum_realized_loss,
@@ -424,6 +449,19 @@ def _capability_integrity_sha256(
         "authorization_payload_sha256": capability.authorization_payload_sha256,
         "candidate_bundle_sha256": capability.candidate_bundle_sha256,
         "risk_domain_lease_id": capability.risk_domain_lease_id,
+        "risk_domain_lease_service_identity_sha256": (
+            capability.risk_domain_lease_service_identity_sha256
+        ),
+        "risk_domain_lease_tenant_id": capability.risk_domain_lease_tenant_id,
+        "risk_domain_lease_key_identity_sha256": (
+            capability.risk_domain_lease_key_identity_sha256
+        ),
+        "risk_domain_lease_public_key_modulus_hex": (
+            capability.risk_domain_lease_public_key_modulus_hex
+        ),
+        "risk_domain_lease_public_key_exponent": (
+            capability.risk_domain_lease_public_key_exponent
+        ),
         "capital_base_usd": str(capability.capital_base_usd),
         "maximum_notional_usd": str(capability.maximum_notional_usd),
         "maximum_realized_loss_usd": str(capability.maximum_realized_loss_usd),
@@ -733,6 +771,54 @@ def _validate_finite_json_tree(value: Any, *, depth: int = 0) -> None:
     elif isinstance(value, list):
         for item in value:
             _validate_finite_json_tree(item, depth=depth + 1)
+
+
+def _validated_risk_domain_lease_authority(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise MicroLiveAuthorizationError(
+            "risk-domain lease authority binding is absent"
+        )
+    authority = dict(value)
+    if set(authority) != {
+        "lease_id",
+        "service_identity_sha256",
+        "tenant_id",
+        "key_identity_sha256",
+        "signature_algorithm",
+        "public_key_modulus_hex",
+        "public_key_exponent",
+    }:
+        raise MicroLiveAuthorizationError(
+            "risk-domain lease authority binding schema is invalid"
+        )
+    modulus = authority.get("public_key_modulus_hex")
+    exponent = authority.get("public_key_exponent")
+    expected_key_identity = canonical_json_sha256(
+        {
+            "signature_algorithm": "RSASSA-PKCS1-v1_5-SHA256",
+            "public_key_modulus_hex": modulus,
+            "public_key_exponent": exponent,
+        }
+    )
+    if not (
+        _is_sha256(authority.get("lease_id"))
+        and authority["lease_id"] == TRUSTED_RISK_DOMAIN_LEASE_ID
+        and _is_sha256(authority.get("service_identity_sha256"))
+        and isinstance(authority.get("tenant_id"), str)
+        and bool(authority["tenant_id"])
+        and authority.get("signature_algorithm")
+        == "RSASSA-PKCS1-v1_5-SHA256"
+        and isinstance(modulus, str)
+        and re.fullmatch(r"[0-9a-f]{512}", modulus) is not None
+        and int(modulus, 16).bit_length() == 2_048
+        and int(modulus, 16) % 2 == 1
+        and exponent == 65_537
+        and authority.get("key_identity_sha256") == expected_key_identity
+    ):
+        raise MicroLiveAuthorizationError(
+            "risk-domain lease authority binding is invalid"
+        )
+    return authority
 
 
 def _positive_decimal(value: Any, label: str) -> Decimal:
