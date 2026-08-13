@@ -48,11 +48,23 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
     ResidualPromotionRuntime,
 )
 
-STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v13"
+STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v14"
 SIGNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-execution-signal-v2"
 JOURNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-durable-journal-v1"
 JOURNAL_NAMESPACE_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-journal-namespace-lease-receipt-v3"
+    "bigan-btc-15m-residual-promotion-journal-namespace-lease-receipt-v4"
+)
+JOURNAL_HIGH_WATER_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-journal-authority-high-water-v1"
+)
+EXECUTION_BINDING_ATTESTATION_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-execution-binding-attestation-v1"
+)
+EXECUTION_CURSOR_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-signed-fill-cursor-v1"
+)
+TRUSTED_TIME_RECEIPT_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-trusted-time-receipt-v1"
 )
 EMERGENCY_KILL_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-emergency-kill-v1"
@@ -244,6 +256,23 @@ class DurableRiskDomainLeaseBackend(Protocol):
     ) -> bytes:
         """Atomically bind one risk domain and return exact receipt bytes."""
 
+    def advance_risk_domain_high_water(
+        self,
+        *,
+        lease_id: str,
+        service_identity_sha256: str,
+        tenant_id: str,
+        key_identity_sha256: str,
+        authorization_id: str,
+        risk_domain_id: str,
+        journal_namespace_id: str,
+        journal_epoch: str,
+        expected_generation: int,
+        next_generation: int,
+        next_state_sha256: str,
+    ) -> bytes:
+        """CAS one server-maintained generation/state high-water mark."""
+
 
 RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM = "RSASSA-PKCS1-v1_5-SHA256"
 _RSA_SHA256_DIGEST_INFO_PREFIX = bytes.fromhex(
@@ -377,6 +406,11 @@ class AtomicFileMicroLiveStateJournal:
         self._authorization_id: str | None = None
         self._risk_domain_id: str | None = None
         self._authenticated_authority_binding_sha256: str | None = None
+        self._journal_namespace_id: str | None = None
+        self._journal_epoch: str | None = None
+        self._authority_high_water_generation: int | None = None
+        self._authority_high_water_state_sha256: str | None = None
+        self._lease_identity: dict[str, Any] | None = None
 
     @property
     def durable_single_writer(self) -> bool:
@@ -428,6 +462,10 @@ class AtomicFileMicroLiveStateJournal:
             "risk-domain lease receipt",
         )
         canonical_receipt = receipt_json.encode("utf-8")
+        claim_status = receipt.get("claim_status")
+        journal_epoch = receipt.get("journal_epoch")
+        high_water_generation = receipt.get("high_water_generation")
+        high_water_state_sha256 = receipt.get("high_water_state_sha256")
         expected_receipt_core = {
             "schema_version": JOURNAL_NAMESPACE_SCHEMA_VERSION,
             "lease_id": lease_id,
@@ -437,33 +475,110 @@ class AtomicFileMicroLiveStateJournal:
             "authorization_id": authorization_id,
             "risk_domain_id": risk_domain_id,
             "journal_namespace_id": journal_namespace_id,
+            "claim_status": claim_status,
+            "journal_epoch": journal_epoch,
+            "high_water_generation": high_water_generation,
+            "high_water_state_sha256": high_water_state_sha256,
         }
-        if not _verify_signed_risk_domain_receipt(
-            receipt,
-            expected_core=expected_receipt_core,
-            public_key_modulus_hex=public_key_modulus_hex,
-            public_key_exponent=public_key_exponent,
+        if not (
+            claim_status in {"FIRST_CLAIM", "EXISTING_CLAIM"}
+            and _is_sha256(journal_epoch)
+            and isinstance(high_water_generation, int)
+            and not isinstance(high_water_generation, bool)
+            and high_water_generation >= -1
+            and (
+                (
+                    high_water_generation == -1
+                    and high_water_state_sha256 is None
+                )
+                or (
+                    high_water_generation >= 0
+                    and _is_sha256(high_water_state_sha256)
+                )
+            )
+            and _verify_signed_risk_domain_receipt(
+                receipt,
+                expected_core=expected_receipt_core,
+                public_key_modulus_hex=public_key_modulus_hex,
+                public_key_exponent=public_key_exponent,
+            )
         ):
             raise MicroLiveExecutionError(
                 "external risk-domain lease signed receipt is invalid"
             )
         if self.risk_domain_receipt_path.exists():
-            existing = _read_bounded_stable_regular_file(
-                self.risk_domain_receipt_path,
-                maximum_bytes=_JOURNAL_BINDING_MAX_BYTES,
-                label="journal risk-domain receipt",
+            existing, _, _ = _raw_json_object(
+                _read_bounded_stable_regular_file(
+                    self.risk_domain_receipt_path,
+                    maximum_bytes=_JOURNAL_BINDING_MAX_BYTES,
+                    label="journal risk-domain receipt",
+                ),
+                "stored journal risk-domain receipt",
             )
-            if existing != canonical_receipt:
+            if not (
+                claim_status == "EXISTING_CLAIM"
+                and existing.get("authorization_id") == authorization_id
+                and existing.get("risk_domain_id") == risk_domain_id
+                and existing.get("journal_namespace_id") == journal_namespace_id
+                and existing.get("journal_epoch") == journal_epoch
+            ):
                 raise MicroLiveExecutionError(
                     "journal risk-domain receipt is mismatched"
                 )
+            if not self.state_path.exists():
+                raise MicroLiveExecutionError(
+                    "existing authority claim has no local WAL"
+                )
+            existing_snapshot = self._read_locked()
+            if not (
+                existing_snapshot.generation == high_water_generation
+                and existing_snapshot.state_sha256 == high_water_state_sha256
+            ):
+                raise MicroLiveExecutionError(
+                    "existing local WAL is below the authority high-water"
+                )
         else:
+            if claim_status == "EXISTING_CLAIM":
+                if not self.state_path.exists():
+                    raise MicroLiveExecutionError(
+                        "existing authority claim has no local WAL"
+                    )
+                existing_snapshot = self._read_locked()
+                if not (
+                    existing_snapshot.generation == high_water_generation
+                    and existing_snapshot.state_sha256
+                    == high_water_state_sha256
+                ):
+                    raise MicroLiveExecutionError(
+                        "existing local WAL is below the authority high-water"
+                    )
+            elif self.state_path.exists():
+                raise MicroLiveExecutionError(
+                    "server-attested first claim has a pre-existing local WAL"
+                )
             self._atomic_write(
                 path=self.risk_domain_receipt_path,
                 raw_payload=canonical_receipt,
             )
         self._authorization_id = authorization_id
         self._risk_domain_id = risk_domain_id
+        self._journal_namespace_id = journal_namespace_id
+        self._journal_epoch = str(journal_epoch)
+        self._authority_high_water_generation = int(high_water_generation)
+        self._authority_high_water_state_sha256 = (
+            str(high_water_state_sha256)
+            if high_water_state_sha256 is not None
+            else None
+        )
+        self._lease_identity = {
+            "lease_id": lease_id,
+            "service_identity_sha256": service_identity_sha256,
+            "tenant_id": tenant_id,
+            "key_identity_sha256": key_identity_sha256,
+            "public_key_modulus_hex": public_key_modulus_hex,
+            "public_key_exponent": public_key_exponent,
+            "claim_status": claim_status,
+        }
         self._authenticated_authority_binding_sha256 = canonical_json_sha256(
             {
                 "lease_id": lease_id,
@@ -526,10 +641,21 @@ class AtomicFileMicroLiveStateJournal:
                     "micro-live journal already exists; strict restore is required"
                 )
             generation = _state_generation(raw_state)
-            if generation != 0:
+            if not (
+                generation == 0
+                and self._lease_identity is not None
+                and self._lease_identity.get("claim_status") == "FIRST_CLAIM"
+                and self._authority_high_water_generation == -1
+                and self._authority_high_water_state_sha256 is None
+            ):
                 raise MicroLiveExecutionError(
-                    "new micro-live journal must start at generation zero"
+                    "generation zero requires a server-attested first claim"
                 )
+            self._advance_authority_high_water(
+                expected_generation=-1,
+                next_generation=0,
+                next_state_sha256=hashlib.sha256(raw_state).hexdigest(),
+            )
             self._write_locked(generation=generation, raw_state=raw_state)
             return self._read_locked()
 
@@ -542,6 +668,7 @@ class AtomicFileMicroLiveStateJournal:
         self._require_bound()
         with self._exclusive_lock():
             snapshot = self._read_locked()
+            self._require_authority_high_water_matches(snapshot)
             if snapshot.generation != expected_generation:
                 raise MicroLiveExecutionError(
                     "micro-live journal high-water generation is stale"
@@ -552,7 +679,9 @@ class AtomicFileMicroLiveStateJournal:
     def snapshot(self) -> DurableJournalSnapshot:
         self._require_bound()
         with self._exclusive_lock():
-            return self._read_locked()
+            snapshot = self._read_locked()
+            self._require_authority_high_water_matches(snapshot)
+            return snapshot
 
     def _require_bound(self) -> None:
         if self._authorization_id is None or self._risk_domain_id is None:
@@ -614,7 +743,97 @@ class AtomicFileMicroLiveStateJournal:
             and _state_generation(raw_state) == next_generation
         ):
             raise MicroLiveExecutionError("micro-live journal CAS failed closed")
+        self._require_authority_high_water_matches(current)
+        self._advance_authority_high_water(
+            expected_generation=expected_generation,
+            next_generation=next_generation,
+            next_state_sha256=hashlib.sha256(raw_state).hexdigest(),
+        )
         self._write_locked(generation=next_generation, raw_state=raw_state)
+
+    def _require_authority_high_water_matches(
+        self,
+        snapshot: DurableJournalSnapshot,
+    ) -> None:
+        if not (
+            snapshot.generation == self._authority_high_water_generation
+            and snapshot.state_sha256 == self._authority_high_water_state_sha256
+        ):
+            raise MicroLiveExecutionError(
+                "local WAL does not match the external authority high-water"
+            )
+
+    def _advance_authority_high_water(
+        self,
+        *,
+        expected_generation: int,
+        next_generation: int,
+        next_state_sha256: str,
+    ) -> None:
+        self._require_bound()
+        identity = self._lease_identity
+        if not (
+            identity is not None
+            and self._journal_namespace_id is not None
+            and self._journal_epoch is not None
+            and self._authorization_id is not None
+            and self._risk_domain_id is not None
+            and expected_generation == self._authority_high_water_generation
+            and next_generation == expected_generation + 1
+            and _is_sha256(next_state_sha256)
+        ):
+            raise MicroLiveExecutionError(
+                "authority high-water transition precondition failed"
+            )
+        try:
+            raw_receipt = self.risk_domain_lease.advance_risk_domain_high_water(
+                lease_id=str(identity["lease_id"]),
+                service_identity_sha256=str(
+                    identity["service_identity_sha256"]
+                ),
+                tenant_id=str(identity["tenant_id"]),
+                key_identity_sha256=str(identity["key_identity_sha256"]),
+                authorization_id=self._authorization_id,
+                risk_domain_id=self._risk_domain_id,
+                journal_namespace_id=self._journal_namespace_id,
+                journal_epoch=self._journal_epoch,
+                expected_generation=expected_generation,
+                next_generation=next_generation,
+                next_state_sha256=next_state_sha256,
+            )
+        except Exception as exc:
+            raise MicroLiveExecutionError(
+                "external authority high-water advance failed closed"
+            ) from exc
+        receipt, _, _ = _raw_json_object(
+            raw_receipt,
+            "risk-domain authority high-water receipt",
+        )
+        expected_core = {
+            "schema_version": JOURNAL_HIGH_WATER_SCHEMA_VERSION,
+            "lease_id": identity["lease_id"],
+            "service_identity_sha256": identity["service_identity_sha256"],
+            "tenant_id": identity["tenant_id"],
+            "key_identity_sha256": identity["key_identity_sha256"],
+            "authorization_id": self._authorization_id,
+            "risk_domain_id": self._risk_domain_id,
+            "journal_namespace_id": self._journal_namespace_id,
+            "journal_epoch": self._journal_epoch,
+            "previous_generation": expected_generation,
+            "high_water_generation": next_generation,
+            "high_water_state_sha256": next_state_sha256,
+        }
+        if not _verify_signed_risk_domain_receipt(
+            receipt,
+            expected_core=expected_core,
+            public_key_modulus_hex=str(identity["public_key_modulus_hex"]),
+            public_key_exponent=int(identity["public_key_exponent"]),
+        ):
+            raise MicroLiveExecutionError(
+                "external authority high-water receipt is invalid"
+            )
+        self._authority_high_water_generation = next_generation
+        self._authority_high_water_state_sha256 = next_state_sha256
 
     def _write_locked(self, *, generation: int, raw_state: bytes) -> None:
         _require_bounded_state_bytes(raw_state)
@@ -803,9 +1022,11 @@ class MicroLiveOrderTransport(Protocol):
     evidence checks inside the fail-closed trust boundary.
     """
 
-    @property
-    def maximum_call_duration_ms(self) -> int:
-        """Return the deployment-enforced upper bound for every call."""
+    def attest_execution_binding(self, request: Mapping[str, Any]) -> bytes:
+        """Return signed deployment identity bytes pinned by authorization."""
+
+    def read_trusted_time(self, request: Mapping[str, Any]) -> bytes:
+        """Return a signed completion timestamp from the pinned clock."""
 
     def submit_order(self, request: Mapping[str, Any]) -> bytes:
         """Submit one idempotent order request and return raw JSON bytes."""
@@ -849,6 +1070,131 @@ def _risk_domain_authority_binding_sha256(
                 authorization.risk_domain_lease_public_key_exponent
             ),
         }
+    )
+
+
+def _execution_service_binding_sha256(
+    authorization: VerifiedMicroLiveAuthorization,
+) -> str:
+    return canonical_json_sha256(
+        {
+            "service_identity_sha256": authorization.execution_service_identity_sha256,
+            "adapter_implementation_sha256": (
+                authorization.execution_adapter_implementation_sha256
+            ),
+            "configuration_sha256": authorization.execution_configuration_sha256,
+            "exchange_endpoint_sha256": (
+                authorization.execution_exchange_endpoint_sha256
+            ),
+            "exchange_account_sha256": (
+                authorization.execution_exchange_account_sha256
+            ),
+            "signer_identity_sha256": (
+                authorization.execution_signer_identity_sha256
+            ),
+            "cursor_key_identity_sha256": (
+                authorization.execution_cursor_key_identity_sha256
+            ),
+            "clock_identity_sha256": authorization.execution_clock_identity_sha256,
+            "signature_algorithm": RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM,
+            "public_key_modulus_hex": authorization.execution_public_key_modulus_hex,
+            "public_key_exponent": authorization.execution_public_key_exponent,
+            "maximum_clock_skew_ms": (
+                authorization.execution_maximum_clock_skew_ms
+            ),
+            "maximum_call_duration_ms": (
+                authorization.execution_maximum_call_duration_ms
+            ),
+        }
+    )
+
+
+def _expected_final_fill_watermark(cursor: Mapping[str, Any]) -> str:
+    """Bind terminal finality to the full signed cursor content except signatures."""
+
+    return canonical_json_sha256(
+        {
+            key: copy.deepcopy(value)
+            for key, value in cursor.items()
+            if key
+            not in {
+                "final_fill_watermark",
+                "cursor_payload_sha256",
+                "signature_algorithm",
+                "signature_hex",
+            }
+        }
+    )
+
+
+def _trusted_time_receipt_core(
+    authorization: Any,
+    *,
+    request_started_at_ts_ms: int,
+    operation: str,
+    response_sha256: str,
+    request_completed_at_ts_ms: Any,
+) -> dict[str, Any]:
+    nonce_sha256 = canonical_json_sha256(
+        {
+            "authorization_id": authorization.authorization_id,
+            "execution_service_binding_sha256": (
+                authorization.execution_service_binding_sha256
+            ),
+            "operation": operation,
+            "request_started_at_ts_ms": request_started_at_ts_ms,
+            "response_sha256": response_sha256,
+        }
+    )
+    return {
+        "schema_version": TRUSTED_TIME_RECEIPT_SCHEMA_VERSION,
+        "authorization_id": authorization.authorization_id,
+        "execution_service_binding_sha256": (
+            authorization.execution_service_binding_sha256
+        ),
+        "clock_identity_sha256": authorization.execution_clock_identity_sha256,
+        "operation": operation,
+        "request_started_at_ts_ms": request_started_at_ts_ms,
+        "response_sha256": response_sha256,
+        "nonce_sha256": nonce_sha256,
+        "request_completed_at_ts_ms": request_completed_at_ts_ms,
+    }
+
+
+def _trusted_time_receipt_is_valid(
+    receipt: Mapping[str, Any],
+    authorization: Any,
+    *,
+    request_started_at_ts_ms: int,
+    operation: str,
+    response_sha256: str,
+    request_completed_at_ts_ms: Any,
+) -> bool:
+    maximum_elapsed_ms = (
+        authorization.execution_maximum_call_duration_ms
+        + authorization.execution_maximum_clock_skew_ms
+    )
+    expected_core = _trusted_time_receipt_core(
+        authorization,
+        request_started_at_ts_ms=request_started_at_ts_ms,
+        operation=operation,
+        response_sha256=response_sha256,
+        request_completed_at_ts_ms=request_completed_at_ts_ms,
+    )
+    return bool(
+        isinstance(request_completed_at_ts_ms, int)
+        and not isinstance(request_completed_at_ts_ms, bool)
+        and request_started_at_ts_ms
+        <= request_completed_at_ts_ms
+        <= request_started_at_ts_ms + maximum_elapsed_ms
+        and _verify_signed_risk_domain_receipt(
+            receipt,
+            expected_core=expected_core,
+            public_key_modulus_hex=(
+                authorization.execution_public_key_modulus_hex
+            ),
+            public_key_exponent=authorization.execution_public_key_exponent,
+        )
     )
 
 
@@ -949,6 +1295,19 @@ class _BoundAuthorization:
     risk_domain_lease_public_key_modulus_hex: str
     risk_domain_lease_public_key_exponent: int
     risk_domain_authority_binding_sha256: str
+    execution_service_identity_sha256: str
+    execution_adapter_implementation_sha256: str
+    execution_configuration_sha256: str
+    execution_exchange_endpoint_sha256: str
+    execution_exchange_account_sha256: str
+    execution_signer_identity_sha256: str
+    execution_cursor_key_identity_sha256: str
+    execution_clock_identity_sha256: str
+    execution_public_key_modulus_hex: str
+    execution_public_key_exponent: int
+    execution_maximum_clock_skew_ms: int
+    execution_maximum_call_duration_ms: int
+    execution_service_binding_sha256: str
     capital_base_usd: Decimal
     maximum_notional_usd: Decimal
     maximum_realized_loss_usd: Decimal
@@ -989,6 +1348,43 @@ class _BoundAuthorization:
             risk_domain_authority_binding_sha256=(
                 _risk_domain_authority_binding_sha256(authorization)
             ),
+            execution_service_identity_sha256=(
+                authorization.execution_service_identity_sha256
+            ),
+            execution_adapter_implementation_sha256=(
+                authorization.execution_adapter_implementation_sha256
+            ),
+            execution_configuration_sha256=(
+                authorization.execution_configuration_sha256
+            ),
+            execution_exchange_endpoint_sha256=(
+                authorization.execution_exchange_endpoint_sha256
+            ),
+            execution_exchange_account_sha256=(
+                authorization.execution_exchange_account_sha256
+            ),
+            execution_signer_identity_sha256=(
+                authorization.execution_signer_identity_sha256
+            ),
+            execution_cursor_key_identity_sha256=(
+                authorization.execution_cursor_key_identity_sha256
+            ),
+            execution_clock_identity_sha256=(
+                authorization.execution_clock_identity_sha256
+            ),
+            execution_public_key_modulus_hex=(
+                authorization.execution_public_key_modulus_hex
+            ),
+            execution_public_key_exponent=authorization.execution_public_key_exponent,
+            execution_maximum_clock_skew_ms=(
+                authorization.execution_maximum_clock_skew_ms
+            ),
+            execution_maximum_call_duration_ms=(
+                authorization.execution_maximum_call_duration_ms
+            ),
+            execution_service_binding_sha256=(
+                _execution_service_binding_sha256(authorization)
+            ),
             capital_base_usd=authorization.capital_base_usd,
             maximum_notional_usd=authorization.maximum_notional_usd,
             maximum_realized_loss_usd=authorization.maximum_realized_loss_usd,
@@ -1014,6 +1410,8 @@ class _BoundAuthorization:
             and self.risk_domain_lease_id == authorization.risk_domain_lease_id
             and self.risk_domain_authority_binding_sha256
             == _risk_domain_authority_binding_sha256(authorization)
+            and self.execution_service_binding_sha256
+            == _execution_service_binding_sha256(authorization)
             and self.capital_base_usd == authorization.capital_base_usd
             and self.maximum_notional_usd == authorization.maximum_notional_usd
             and self.maximum_realized_loss_usd
@@ -1039,9 +1437,10 @@ def create_micro_live_executor(
     evidence_root: Path | str,
     now_ts_ms: int,
     transport: MicroLiveOrderTransport,
-    journal: MicroLiveStateJournal,
+    journal_root: Path | str,
+    risk_domain_lease: DurableRiskDomainLeaseBackend,
 ) -> MicroLiveExecutor:
-    """Create an executor only after the complete future graph verifies."""
+    """Create an executor with the deployment-owned concrete WAL implementation."""
 
     verified = verify_micro_live_authorization(
         raw_authorization,
@@ -1052,7 +1451,10 @@ def create_micro_live_executor(
     return MicroLiveExecutor._from_verified_authorization(
         verified,
         transport=transport,
-        journal=journal,
+        journal=AtomicFileMicroLiveStateJournal(
+            journal_root,
+            risk_domain_lease=risk_domain_lease,
+        ),
     )
 
 
@@ -1107,22 +1509,9 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError("micro-live authorization capability is unverified")
         if transport is None:
             raise MicroLiveExecutionError("micro-live transport capability is missing")
-        maximum_call_duration_ms = getattr(
-            transport,
-            "maximum_call_duration_ms",
-            None,
-        )
-        if not (
-            isinstance(maximum_call_duration_ms, int)
-            and not isinstance(maximum_call_duration_ms, bool)
-            and 1 <= maximum_call_duration_ms <= MAX_TRANSPORT_CALL_DURATION_MS
-        ):
+        if journal.__class__ is not AtomicFileMicroLiveStateJournal:
             raise MicroLiveExecutionError(
-                "micro-live transport deadline capability is missing or unsafe"
-            )
-        if journal is None or journal.durable_single_writer is not True:
-            raise MicroLiveExecutionError(
-                "micro-live durable single-writer journal capability is missing"
+                "micro-live journal must be the deployment-owned concrete implementation"
             )
         if not (
             authorization.runtime.lineage_id == LINEAGE_ID
@@ -1137,6 +1526,16 @@ class MicroLiveExecutor:
             )
         self.authorization = authorization
         self._authorization = _BoundAuthorization.from_verified(authorization)
+        maximum_call_duration_ms = (
+            self._authorization.execution_maximum_call_duration_ms
+        )
+        if not (1 <= maximum_call_duration_ms <= MAX_TRANSPORT_CALL_DURATION_MS):
+            raise MicroLiveExecutionError(
+                "authorized execution service deadline is unsafe"
+            )
+        self.transport = transport
+        self._maximum_transport_call_duration_ms = maximum_call_duration_ms
+        self._verify_execution_binding_attestation()
         self._risk_domain_id = canonical_json_sha256(
             {
                 "authorization_id": self._authorization.authorization_id,
@@ -1147,11 +1546,12 @@ class MicroLiveExecutor:
                 "risk_domain_authority_binding_sha256": (
                     self._authorization.risk_domain_authority_binding_sha256
                 ),
+                "execution_service_binding_sha256": (
+                    self._authorization.execution_service_binding_sha256
+                ),
                 "lineage_id": LINEAGE_ID,
             }
         )
-        self.transport = transport
-        self._maximum_transport_call_duration_ms = maximum_call_duration_ms
         self._journal = journal
         self._journal.bind_risk_domain(
             authorization_id=self._authorization.authorization_id,
@@ -1285,7 +1685,11 @@ class MicroLiveExecutor:
         operation: str,
         request: Mapping[str, Any],
     ) -> bytes:
-        method = getattr(self.transport, operation)
+        method = getattr(self.transport, operation, None)
+        if not callable(method):
+            raise MicroLiveExecutionError(
+                f"{operation} is absent from the authenticated execution service"
+            )
         completed = threading.Event()
         result_queue: queue.SimpleQueue[tuple[bool, Any]] = queue.SimpleQueue()
 
@@ -1315,6 +1719,117 @@ class MicroLiveExecutor:
                 f"{operation} did not return exact raw bytes"
             )
         return value
+
+    def _verify_execution_binding_attestation(self) -> None:
+        challenge_sha256 = canonical_json_sha256(
+            {
+                "authorization_id": self._authorization.authorization_id,
+                "authorization_payload_sha256": (
+                    self._authorization.authorization_payload_sha256
+                ),
+                "execution_service_binding_sha256": (
+                    self._authorization.execution_service_binding_sha256
+                ),
+            }
+        )
+        request = {
+            "authorization_id": self._authorization.authorization_id,
+            "challenge_sha256": challenge_sha256,
+        }
+        raw_attestation = self._bounded_transport_call(
+            operation="attest_execution_binding",
+            request=request,
+        )
+        attestation, _, _ = _raw_json_object(
+            raw_attestation,
+            "execution service binding attestation",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        expected_core = {
+            "schema_version": EXECUTION_BINDING_ATTESTATION_SCHEMA_VERSION,
+            "authorization_id": self._authorization.authorization_id,
+            "challenge_sha256": challenge_sha256,
+            "execution_service_binding_sha256": (
+                self._authorization.execution_service_binding_sha256
+            ),
+            "service_identity_sha256": (
+                self._authorization.execution_service_identity_sha256
+            ),
+            "adapter_implementation_sha256": (
+                self._authorization.execution_adapter_implementation_sha256
+            ),
+            "configuration_sha256": (
+                self._authorization.execution_configuration_sha256
+            ),
+            "exchange_endpoint_sha256": (
+                self._authorization.execution_exchange_endpoint_sha256
+            ),
+            "exchange_account_sha256": (
+                self._authorization.execution_exchange_account_sha256
+            ),
+            "signer_identity_sha256": (
+                self._authorization.execution_signer_identity_sha256
+            ),
+            "cursor_key_identity_sha256": (
+                self._authorization.execution_cursor_key_identity_sha256
+            ),
+            "clock_identity_sha256": (
+                self._authorization.execution_clock_identity_sha256
+            ),
+        }
+        if not _verify_signed_risk_domain_receipt(
+            attestation,
+            expected_core=expected_core,
+            public_key_modulus_hex=(
+                self._authorization.execution_public_key_modulus_hex
+            ),
+            public_key_exponent=self._authorization.execution_public_key_exponent,
+        ):
+            raise MicroLiveExecutionError(
+                "execution service binding attestation is invalid"
+            )
+
+    def _verified_trusted_completion(
+        self,
+        *,
+        request_started_at_ts_ms: int,
+        operation: str,
+        response_sha256: str,
+    ) -> tuple[int, str, str]:
+        expected_without_completion = _trusted_time_receipt_core(
+            self._authorization,
+            request_started_at_ts_ms=request_started_at_ts_ms,
+            operation=operation,
+            response_sha256=response_sha256,
+            request_completed_at_ts_ms=None,
+        )
+        request = {
+            key: value
+            for key, value in expected_without_completion.items()
+            if key not in {"schema_version", "request_completed_at_ts_ms"}
+        }
+        raw_receipt = self._bounded_transport_call(
+            operation="read_trusted_time",
+            request=request,
+        )
+        receipt, raw_receipt_json, receipt_sha256 = _raw_json_object(
+            raw_receipt,
+            "trusted execution completion time",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        completed_at_ts_ms = receipt.get("request_completed_at_ts_ms")
+        if not _trusted_time_receipt_is_valid(
+            receipt,
+            self._authorization,
+            request_started_at_ts_ms=request_started_at_ts_ms,
+            operation=operation,
+            response_sha256=response_sha256,
+            request_completed_at_ts_ms=completed_at_ts_ms,
+        ):
+            raise MicroLiveExecutionError(
+                "trusted execution completion time receipt is invalid"
+            )
+        return int(completed_at_ts_ms), raw_receipt_json, receipt_sha256
 
     def _require_authorization_integrity(
         self,
@@ -2255,6 +2770,26 @@ class MicroLiveExecutor:
                             "token_id": order["prepared"]["token_id"],
                         }
                     ),
+                    "authenticated_cursor_request_sha256": canonical_json_sha256(
+                        {
+                            "authorization_id": self._authorization.authorization_id,
+                            "execution_service_binding_sha256": (
+                                self._authorization.execution_service_binding_sha256
+                            ),
+                            "client_order_id": client_order_id,
+                            "business_key": order["prepared"]["business_key"],
+                            "exchange_order_id": order["acknowledgement"][
+                                "exchange_order_id"
+                            ],
+                            "market_id": order["prepared"]["market_id"],
+                            "token_id": order["prepared"]["token_id"],
+                            "request_started_at_ts_ms": now_ts_ms,
+                        }
+                    ),
+                    "request_started_at_ts_ms": now_ts_ms,
+                    "request_completed_at_ts_ms": None,
+                    "trusted_time_receipt_sha256": None,
+                    "raw_trusted_time_receipt_json": None,
                     "error_type": exc.__class__.__name__,
                     "observed_status": None,
                     "lookup_response_sha256": None,
@@ -2271,6 +2806,21 @@ class MicroLiveExecutor:
                 {
                     "client_order_id": client_order_id,
                     "lookup_request_sha256": result["cursor_request_sha256"],
+                    "authenticated_cursor_request_sha256": result[
+                        "authenticated_cursor_request_sha256"
+                    ],
+                    "request_started_at_ts_ms": result[
+                        "request_started_at_ts_ms"
+                    ],
+                    "request_completed_at_ts_ms": result[
+                        "request_completed_at_ts_ms"
+                    ],
+                    "trusted_time_receipt_sha256": result[
+                        "trusted_time_receipt_sha256"
+                    ],
+                    "raw_trusted_time_receipt_json": result[
+                        "raw_trusted_time_receipt_json"
+                    ],
                     "error_type": None,
                     "observed_status": "OPEN",
                     "lookup_response_sha256": result[
@@ -2280,7 +2830,7 @@ class MicroLiveExecutor:
                         "raw_cursor_response_json"
                     ],
                 },
-                event_ts_ms=now_ts_ms,
+                event_ts_ms=result["request_completed_at_ts_ms"],
             )
         self._reconcile_view()
         reconciled_status = {
@@ -2537,7 +3087,24 @@ class MicroLiveExecutor:
             "raw_transport_event_json": raw_json,
         }
         if existing_fill is not None:
-            if existing_fill != payload:
+            semantic_keys = {
+                "client_order_id",
+                "exchange_order_id",
+                "fill_id",
+                "market_id",
+                "token_id",
+                "quantity",
+                "price",
+                "fee_usd",
+                "executed_at_ts_ms",
+                "fill_event_sequence",
+                "cumulative_filled_quantity",
+                "cumulative_fill_count",
+            }
+            if any(
+                existing_fill.get(key) != payload.get(key)
+                for key in semantic_keys
+            ):
                 self.engage_kill_switch(
                     reason="conflicting_duplicate_fill",
                     now_ts_ms=now_ts_ms,
@@ -2641,11 +3208,24 @@ class MicroLiveExecutor:
         acknowledgement = dict(order["acknowledgement"])
         request = {
             "authorization_id": self._authorization.authorization_id,
+            "execution_service_binding_sha256": (
+                self._authorization.execution_service_binding_sha256
+            ),
             "client_order_id": client_order_id,
             "business_key": prepared["business_key"],
             "exchange_order_id": acknowledgement["exchange_order_id"],
             "market_id": prepared["market_id"],
             "token_id": prepared["token_id"],
+            "request_started_at_ts_ms": now_ts_ms,
+        }
+        request_identity = {
+            key: value
+            for key, value in request.items()
+            if key
+            not in {
+                "execution_service_binding_sha256",
+                "request_started_at_ts_ms",
+            }
         }
         raw_cursor = self._bounded_transport_call(
             operation="read_order_fill_cursor",
@@ -2657,6 +3237,10 @@ class MicroLiveExecutor:
             maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
         )
         expected_keys = {
+            "schema_version",
+            "authorization_id",
+            "execution_service_binding_sha256",
+            "request_started_at_ts_ms",
             "event_type",
             "client_order_id",
             "exchange_order_id",
@@ -2671,13 +3255,48 @@ class MicroLiveExecutor:
             "final_fill_watermark",
             "fill_delivery_complete",
             "fill_events",
+            "cursor_payload_sha256",
+            "signature_algorithm",
+            "signature_hex",
         }
         status = cursor.get("status")
         observed_at_ts_ms = cursor.get("observed_at_ts_ms")
         effective_at_ts_ms = cursor.get("effective_at_ts_ms")
         fill_events = cursor.get("fill_events")
+        unsigned_cursor = {
+            key: value
+            for key, value in cursor.items()
+            if key
+            not in {
+                "cursor_payload_sha256",
+                "signature_algorithm",
+                "signature_hex",
+            }
+        }
+        cursor_payload_sha256 = canonical_json_sha256(unsigned_cursor)
+        signed_cursor_core = {
+            **unsigned_cursor,
+            "cursor_payload_sha256": cursor_payload_sha256,
+        }
         if not (
             set(cursor) == expected_keys
+            and cursor.get("schema_version") == EXECUTION_CURSOR_SCHEMA_VERSION
+            and cursor.get("authorization_id")
+            == self._authorization.authorization_id
+            and cursor.get("execution_service_binding_sha256")
+            == self._authorization.execution_service_binding_sha256
+            and cursor.get("request_started_at_ts_ms") == now_ts_ms
+            and cursor.get("cursor_payload_sha256") == cursor_payload_sha256
+            and _verify_signed_risk_domain_receipt(
+                cursor,
+                expected_core=signed_cursor_core,
+                public_key_modulus_hex=(
+                    self._authorization.execution_public_key_modulus_hex
+                ),
+                public_key_exponent=(
+                    self._authorization.execution_public_key_exponent
+                ),
+            )
             and cursor.get("event_type") == "ORDER_FILL_CURSOR"
             and cursor.get("client_order_id") == client_order_id
             and cursor.get("exchange_order_id")
@@ -2687,12 +3306,30 @@ class MicroLiveExecutor:
             and status in {"OPEN", "FILLED", "CANCELED", "EXPIRED"}
             and isinstance(observed_at_ts_ms, int)
             and not isinstance(observed_at_ts_ms, bool)
-            and prepared["submitted_at_ts_ms"] <= observed_at_ts_ms <= now_ts_ms
             and isinstance(fill_events, list)
             and len(fill_events) <= MAXIMUM_FILL_DELIVERY_EVENTS_PER_ORDER
         ):
             raise MicroLiveExecutionError(
                 "authoritative order fill cursor identity is invalid"
+            )
+        (
+            request_completed_at_ts_ms,
+            raw_trusted_time_receipt_json,
+            trusted_time_receipt_sha256,
+        ) = self._verified_trusted_completion(
+            request_started_at_ts_ms=now_ts_ms,
+            operation="read_order_fill_cursor",
+            response_sha256=cursor_sha256,
+        )
+        maximum_clock_skew_ms = self._authorization.execution_maximum_clock_skew_ms
+        if not (
+            prepared["submitted_at_ts_ms"] <= observed_at_ts_ms
+            and now_ts_ms - maximum_clock_skew_ms
+            <= observed_at_ts_ms
+            <= request_completed_at_ts_ms + maximum_clock_skew_ms
+        ):
+            raise MicroLiveExecutionError(
+                "authoritative fill cursor timestamp is outside trusted completion bounds"
             )
         for fill_event in fill_events:
             if not isinstance(fill_event, Mapping):
@@ -2703,7 +3340,7 @@ class MicroLiveExecutor:
             self._record_fill(
                 client_order_id=client_order_id,
                 fill_id=str(fill.get("fill_id") or ""),
-                now_ts_ms=now_ts_ms,
+                now_ts_ms=request_completed_at_ts_ms,
                 quantity=str(fill.get("quantity") or ""),
                 price=str(fill.get("price") or ""),
                 fee_usd=str(fill.get("fee_usd") or ""),
@@ -2745,9 +3382,16 @@ class MicroLiveExecutor:
                 "status": "ORDER_FILL_CURSOR_OPEN",
                 "client_order_id": client_order_id,
                 "order_closed": False,
-                "cursor_request_sha256": canonical_json_sha256(request),
+                "cursor_request_sha256": canonical_json_sha256(request_identity),
+                "authenticated_cursor_request_sha256": canonical_json_sha256(
+                    request
+                ),
                 "cursor_response_sha256": cursor_sha256,
                 "raw_cursor_response_json": raw_cursor_json,
+                "request_started_at_ts_ms": now_ts_ms,
+                "request_completed_at_ts_ms": request_completed_at_ts_ms,
+                "trusted_time_receipt_sha256": trusted_time_receipt_sha256,
+                "raw_trusted_time_receipt_json": raw_trusted_time_receipt_json,
             }
         if not (
             isinstance(effective_at_ts_ms, int)
@@ -2757,6 +3401,8 @@ class MicroLiveExecutor:
             <= observed_at_ts_ms
             and cursor.get("fill_delivery_complete") is True
             and _is_sha256(cursor.get("final_fill_watermark"))
+            and cursor.get("final_fill_watermark")
+            == _expected_final_fill_watermark(cursor)
             and (
                 status != "FILLED"
                 or Decimal(cumulative_filled_quantity)
@@ -2769,7 +3415,11 @@ class MicroLiveExecutor:
         return self._record_order_closed(
             client_order_id=client_order_id,
             status=str(status),
-            now_ts_ms=now_ts_ms,
+            now_ts_ms=request_completed_at_ts_ms,
+            request_started_at_ts_ms=now_ts_ms,
+            request_completed_at_ts_ms=request_completed_at_ts_ms,
+            trusted_time_receipt_sha256=trusted_time_receipt_sha256,
+            raw_trusted_time_receipt_json=raw_trusted_time_receipt_json,
             raw_transport_event=raw_cursor,
         )
 
@@ -2779,6 +3429,10 @@ class MicroLiveExecutor:
         client_order_id: str,
         status: str,
         now_ts_ms: int,
+        request_started_at_ts_ms: int,
+        request_completed_at_ts_ms: int,
+        trusted_time_receipt_sha256: str,
+        raw_trusted_time_receipt_json: str,
         raw_transport_event: bytes,
     ) -> dict[str, Any]:
         if status not in {"FILLED", "CANCELED", "EXPIRED"}:
@@ -2798,6 +3452,10 @@ class MicroLiveExecutor:
             maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
         )
         expected_transport_keys = {
+            "schema_version",
+            "authorization_id",
+            "execution_service_binding_sha256",
+            "request_started_at_ts_ms",
             "event_type",
             "client_order_id",
             "exchange_order_id",
@@ -2812,6 +3470,9 @@ class MicroLiveExecutor:
             "final_fill_watermark",
             "fill_delivery_complete",
             "fill_events",
+            "cursor_payload_sha256",
+            "signature_algorithm",
+            "signature_hex",
         }
         effective_at_ts_ms = transport_event.get("effective_at_ts_ms")
         observed_at_ts_ms = transport_event.get("observed_at_ts_ms")
@@ -2828,8 +3489,22 @@ class MicroLiveExecutor:
             else 0
         )
         final_fill_watermark = transport_event.get("final_fill_watermark")
+        trusted_time_receipt = _stored_raw_json_object(
+            raw_trusted_time_receipt_json,
+            trusted_time_receipt_sha256,
+            "stored trusted completion time receipt",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
         if not (
             set(transport_event) == expected_transport_keys
+            and transport_event.get("schema_version")
+            == EXECUTION_CURSOR_SCHEMA_VERSION
+            and transport_event.get("authorization_id")
+            == self._authorization.authorization_id
+            and transport_event.get("execution_service_binding_sha256")
+            == self._authorization.execution_service_binding_sha256
+            and transport_event.get("request_started_at_ts_ms")
+            == request_started_at_ts_ms
             and transport_event.get("event_type") == "ORDER_FILL_CURSOR"
             and transport_event.get("client_order_id") == client_order_id
             and transport_event.get("exchange_order_id")
@@ -2843,6 +3518,8 @@ class MicroLiveExecutor:
             == final_fill_event_sequence
             and transport_event.get("final_fill_count") == final_fill_count
             and _is_sha256(final_fill_watermark)
+            and final_fill_watermark
+            == _expected_final_fill_watermark(transport_event)
             and transport_event.get("fill_delivery_complete") is True
             and isinstance(transport_event.get("fill_events"), list)
             and len(transport_event["fill_events"])
@@ -2859,7 +3536,17 @@ class MicroLiveExecutor:
             and prepared["submitted_at_ts_ms"]
             <= effective_at_ts_ms
             <= observed_at_ts_ms
-            <= now_ts_ms
+            <= request_completed_at_ts_ms
+            + self._authorization.execution_maximum_clock_skew_ms
+            and request_started_at_ts_ms <= request_completed_at_ts_ms <= now_ts_ms
+            and _trusted_time_receipt_is_valid(
+                trusted_time_receipt,
+                self._authorization,
+                request_started_at_ts_ms=request_started_at_ts_ms,
+                operation="read_order_fill_cursor",
+                response_sha256=transport_event_sha256,
+                request_completed_at_ts_ms=request_completed_at_ts_ms,
+            )
             and (
                 status != "FILLED"
                 or Decimal(cumulative_filled_quantity)
@@ -2878,6 +3565,10 @@ class MicroLiveExecutor:
             "final_fill_count": final_fill_count,
             "final_fill_watermark": final_fill_watermark,
             "fill_delivery_complete": True,
+            "request_started_at_ts_ms": request_started_at_ts_ms,
+            "request_completed_at_ts_ms": request_completed_at_ts_ms,
+            "trusted_time_receipt_sha256": trusted_time_receipt_sha256,
+            "raw_trusted_time_receipt_json": raw_trusted_time_receipt_json,
             "transport_event_sha256": transport_event_sha256,
             "raw_transport_event_json": raw_json,
         }
@@ -3264,6 +3955,9 @@ class MicroLiveExecutor:
             "risk_domain_authority_binding_sha256": (
                 self._authorization.risk_domain_authority_binding_sha256
             ),
+            "execution_service_binding_sha256": (
+                self._authorization.execution_service_binding_sha256
+            ),
             "events": copy.deepcopy(self._events),
         }
         return (
@@ -3296,12 +3990,16 @@ class MicroLiveExecutor:
                 "micro-live restore authorization capability is unverified"
             )
         authority_binding_sha256 = _risk_domain_authority_binding_sha256(authorization)
+        execution_service_binding_sha256 = _execution_service_binding_sha256(
+            authorization
+        )
         restore_risk_domain_id = canonical_json_sha256(
             {
                 "authorization_id": authorization.authorization_id,
                 "candidate_bundle_sha256": authorization.candidate_bundle_sha256,
                 "risk_domain_lease_id": authorization.risk_domain_lease_id,
                 "risk_domain_authority_binding_sha256": authority_binding_sha256,
+                "execution_service_binding_sha256": execution_service_binding_sha256,
                 "lineage_id": LINEAGE_ID,
             }
         )
@@ -3340,6 +4038,7 @@ class MicroLiveExecutor:
             "candidate_bundle_sha256",
             "risk_domain_lease_id",
             "risk_domain_authority_binding_sha256",
+            "execution_service_binding_sha256",
             "events",
             "state_sha256",
         }:
@@ -3361,6 +4060,8 @@ class MicroLiveExecutor:
             == authorization.risk_domain_lease_id
             and payload.get("risk_domain_authority_binding_sha256")
             == authority_binding_sha256
+            and payload.get("execution_service_binding_sha256")
+            == execution_service_binding_sha256
             and isinstance(events, list)
             and len(events) <= MAX_EVENT_COUNT
             and state.get("state_sha256") == canonical_json_sha256(payload)
@@ -4307,6 +5008,11 @@ class MicroLiveExecutor:
             if set(payload) != {
                 "client_order_id",
                 "lookup_request_sha256",
+                "authenticated_cursor_request_sha256",
+                "request_started_at_ts_ms",
+                "request_completed_at_ts_ms",
+                "trusted_time_receipt_sha256",
+                "raw_trusted_time_receipt_json",
                 "error_type",
                 "observed_status",
                 "lookup_response_sha256",
@@ -4314,6 +5020,12 @@ class MicroLiveExecutor:
             } or not (
                 _is_sha256(payload.get("client_order_id"))
                 and _is_sha256(payload.get("lookup_request_sha256"))
+                and _is_sha256(
+                    payload.get("authenticated_cursor_request_sha256")
+                )
+                and isinstance(payload.get("request_started_at_ts_ms"), int)
+                and not isinstance(payload.get("request_started_at_ts_ms"), bool)
+                and 0 < payload["request_started_at_ts_ms"] <= event_ts_ms
             ):
                 raise MicroLiveExecutionError(
                     "failed cancel reconciliation audit is invalid"
@@ -4327,6 +5039,9 @@ class MicroLiveExecutor:
                         "observed_status",
                         "lookup_response_sha256",
                         "raw_lookup_response_json",
+                        "request_completed_at_ts_ms",
+                        "trusted_time_receipt_sha256",
+                        "raw_trusted_time_receipt_json",
                     )
                 ):
                     raise MicroLiveExecutionError(
@@ -4343,10 +5058,66 @@ class MicroLiveExecutor:
                 "stored unresolved cancel lookup response",
                 maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
+            trusted_time_receipt = _stored_raw_json_object(
+                payload.get("raw_trusted_time_receipt_json"),
+                payload.get("trusted_time_receipt_sha256"),
+                "stored trusted completion time receipt",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+            )
+            request_completed_at_ts_ms = payload.get("request_completed_at_ts_ms")
+            unsigned_cursor = {
+                key: value
+                for key, value in response.items()
+                if key
+                not in {
+                    "cursor_payload_sha256",
+                    "signature_algorithm",
+                    "signature_hex",
+                }
+            }
+            cursor_payload_sha256 = canonical_json_sha256(unsigned_cursor)
             if not (
-                response.get("status") == observed_status
+                isinstance(request_completed_at_ts_ms, int)
+                and not isinstance(request_completed_at_ts_ms, bool)
+                and payload["request_started_at_ts_ms"]
+                <= request_completed_at_ts_ms
+                == event_ts_ms
+                and response.get("schema_version")
+                == EXECUTION_CURSOR_SCHEMA_VERSION
+                and response.get("authorization_id")
+                == self._authorization.authorization_id
+                and response.get("execution_service_binding_sha256")
+                == self._authorization.execution_service_binding_sha256
+                and response.get("request_started_at_ts_ms")
+                == payload["request_started_at_ts_ms"]
+                and response.get("cursor_payload_sha256")
+                == cursor_payload_sha256
+                and _verify_signed_risk_domain_receipt(
+                    response,
+                    expected_core={
+                        **unsigned_cursor,
+                        "cursor_payload_sha256": cursor_payload_sha256,
+                    },
+                    public_key_modulus_hex=(
+                        self._authorization.execution_public_key_modulus_hex
+                    ),
+                    public_key_exponent=(
+                        self._authorization.execution_public_key_exponent
+                    ),
+                )
+                and _trusted_time_receipt_is_valid(
+                    trusted_time_receipt,
+                    self._authorization,
+                    request_started_at_ts_ms=payload["request_started_at_ts_ms"],
+                    operation="read_order_fill_cursor",
+                    response_sha256=payload["lookup_response_sha256"],
+                    request_completed_at_ts_ms=request_completed_at_ts_ms,
+                )
+                and response.get("status") == observed_status
                 and response.get("effective_at_ts_ms") is None
-                and response.get("observed_at_ts_ms") <= event_ts_ms
+                and response.get("observed_at_ts_ms")
+                <= event_ts_ms
+                + self._authorization.execution_maximum_clock_skew_ms
             ):
                 raise MicroLiveExecutionError(
                     "failed cancel reconciliation audit is invalid"
@@ -4457,6 +5228,10 @@ class MicroLiveExecutor:
                 "final_fill_count",
                 "final_fill_watermark",
                 "fill_delivery_complete",
+                "request_started_at_ts_ms",
+                "request_completed_at_ts_ms",
+                "trusted_time_receipt_sha256",
+                "raw_trusted_time_receipt_json",
                 "transport_event_sha256",
                 "raw_transport_event_json",
             } or not (
@@ -4481,7 +5256,16 @@ class MicroLiveExecutor:
                 >= payload["final_fill_event_sequence"]
                 and _is_sha256(payload.get("final_fill_watermark"))
                 and payload.get("fill_delivery_complete") is True
+                and isinstance(payload.get("request_started_at_ts_ms"), int)
+                and not isinstance(payload.get("request_started_at_ts_ms"), bool)
+                and isinstance(payload.get("request_completed_at_ts_ms"), int)
+                and not isinstance(payload.get("request_completed_at_ts_ms"), bool)
+                and 0
+                < payload["request_started_at_ts_ms"]
+                <= payload["request_completed_at_ts_ms"]
+                == event_ts_ms
                 and _is_sha256(payload.get("transport_event_sha256"))
+                and _is_sha256(payload.get("trusted_time_receipt_sha256"))
             ):
                 raise MicroLiveExecutionError("order close payload is invalid")
             transport_event = _stored_raw_json_object(
@@ -4490,7 +5274,17 @@ class MicroLiveExecutor:
                 "stored order close transport event",
                 maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
+            trusted_time_receipt = _stored_raw_json_object(
+                payload.get("raw_trusted_time_receipt_json"),
+                payload.get("trusted_time_receipt_sha256"),
+                "stored trusted completion time receipt",
+                maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+            )
             external_keys = {
+                "schema_version",
+                "authorization_id",
+                "execution_service_binding_sha256",
+                "request_started_at_ts_ms",
                 "event_type",
                 "client_order_id",
                 "exchange_order_id",
@@ -4505,18 +5299,69 @@ class MicroLiveExecutor:
                 "final_fill_watermark",
                 "fill_delivery_complete",
                 "fill_events",
+                "cursor_payload_sha256",
+                "signature_algorithm",
+                "signature_hex",
             }
             expected_status = {
                 "ORDER_FILLED": "FILLED",
                 "ORDER_CANCELED": "CANCELED",
                 "ORDER_EXPIRED": "EXPIRED",
             }[event_type]
+            unsigned_cursor = {
+                key: value
+                for key, value in transport_event.items()
+                if key
+                not in {
+                    "cursor_payload_sha256",
+                    "signature_algorithm",
+                    "signature_hex",
+                }
+            }
+            cursor_payload_sha256 = canonical_json_sha256(unsigned_cursor)
             valid_transport = (
                 set(transport_event) == external_keys
+                and transport_event.get("schema_version")
+                == EXECUTION_CURSOR_SCHEMA_VERSION
+                and transport_event.get("authorization_id")
+                == self._authorization.authorization_id
+                and transport_event.get("execution_service_binding_sha256")
+                == self._authorization.execution_service_binding_sha256
+                and transport_event.get("request_started_at_ts_ms")
+                == payload.get("request_started_at_ts_ms")
+                and transport_event.get("cursor_payload_sha256")
+                == cursor_payload_sha256
+                and transport_event.get("final_fill_watermark")
+                == _expected_final_fill_watermark(transport_event)
+                and _verify_signed_risk_domain_receipt(
+                    transport_event,
+                    expected_core={
+                        **unsigned_cursor,
+                        "cursor_payload_sha256": cursor_payload_sha256,
+                    },
+                    public_key_modulus_hex=(
+                        self._authorization.execution_public_key_modulus_hex
+                    ),
+                    public_key_exponent=(
+                        self._authorization.execution_public_key_exponent
+                    ),
+                )
                 and transport_event.get("event_type") == "ORDER_FILL_CURSOR"
                 and transport_event.get("status") == expected_status
                 and isinstance(transport_event.get("observed_at_ts_ms"), int)
-                and transport_event["observed_at_ts_ms"] <= event_ts_ms
+                and transport_event["observed_at_ts_ms"]
+                <= event_ts_ms
+                + self._authorization.execution_maximum_clock_skew_ms
+                and _trusted_time_receipt_is_valid(
+                    trusted_time_receipt,
+                    self._authorization,
+                    request_started_at_ts_ms=payload["request_started_at_ts_ms"],
+                    operation="read_order_fill_cursor",
+                    response_sha256=payload["transport_event_sha256"],
+                    request_completed_at_ts_ms=payload[
+                        "request_completed_at_ts_ms"
+                    ],
+                )
                 and isinstance(transport_event.get("fill_events"), list)
                 and len(transport_event["fill_events"])
                 <= MAXIMUM_FILL_DELIVERY_EVENTS_PER_ORDER
@@ -4857,11 +5702,28 @@ class MicroLiveExecutor:
                         "market_id": prepared["market_id"],
                         "token_id": prepared["token_id"],
                     }
+                    request_started_at_ts_ms = payload.get(
+                        "request_started_at_ts_ms"
+                    )
+                    expected_authenticated_request = {
+                        "authorization_id": self._authorization.authorization_id,
+                        "execution_service_binding_sha256": (
+                            self._authorization.execution_service_binding_sha256
+                        ),
+                        "client_order_id": client_order_id,
+                        "business_key": prepared["business_key"],
+                        "exchange_order_id": acknowledgement["exchange_order_id"],
+                        "market_id": prepared["market_id"],
+                        "token_id": prepared["token_id"],
+                        "request_started_at_ts_ms": request_started_at_ts_ms,
+                    }
                     if (
                         order["cancel_unknown"] is not True
                         or order["closed_status"] is not None
                         or payload.get("lookup_request_sha256")
                         != canonical_json_sha256(expected_lookup_request)
+                        or payload.get("authenticated_cursor_request_sha256")
+                        != canonical_json_sha256(expected_authenticated_request)
                     ):
                         raise MicroLiveExecutionError(
                             "failed cancel reconciliation lifecycle is invalid"

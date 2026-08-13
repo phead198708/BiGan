@@ -122,6 +122,45 @@ TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256 = canonical_json_sha256(
         "public_key_exponent": 65_537,
     }
 )
+TEST_EXECUTION_SERVICE_IDENTITY_SHA256 = canonical_json_sha256(
+    {"service": "test-authenticated-execution-service-v1"}
+)
+TEST_EXECUTION_ADAPTER_IMPLEMENTATION_SHA256 = canonical_json_sha256(
+    {"adapter": "test-exchange-adapter-v1"}
+)
+TEST_EXECUTION_CONFIGURATION_SHA256 = canonical_json_sha256(
+    {"configuration": "test-deployment-config-v1"}
+)
+TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256 = canonical_json_sha256(
+    {"endpoint": "test-polymarket-endpoint-v1"}
+)
+TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256 = canonical_json_sha256(
+    {"account": "test-exchange-account-v1"}
+)
+TEST_EXECUTION_SIGNER_IDENTITY_SHA256 = canonical_json_sha256(
+    {"signer": "test-wallet-boundary-v1"}
+)
+TEST_EXECUTION_CLOCK_IDENTITY_SHA256 = canonical_json_sha256(
+    {"clock": "test-trusted-clock-v1"}
+)
+TEST_EXECUTION_AUTHORITY = {
+    "service_identity_sha256": TEST_EXECUTION_SERVICE_IDENTITY_SHA256,
+    "adapter_implementation_sha256": TEST_EXECUTION_ADAPTER_IMPLEMENTATION_SHA256,
+    "configuration_sha256": TEST_EXECUTION_CONFIGURATION_SHA256,
+    "exchange_endpoint_sha256": TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256,
+    "exchange_account_sha256": TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256,
+    "signer_identity_sha256": TEST_EXECUTION_SIGNER_IDENTITY_SHA256,
+    "cursor_key_identity_sha256": TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+    "clock_identity_sha256": TEST_EXECUTION_CLOCK_IDENTITY_SHA256,
+    "signature_algorithm": executor_module.RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM,
+    "public_key_modulus_hex": TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
+    "public_key_exponent": 65_537,
+    "maximum_clock_skew_ms": 250,
+    "maximum_call_duration_ms": 250,
+}
+TEST_EXECUTION_SERVICE_BINDING_SHA256 = canonical_json_sha256(
+    TEST_EXECUTION_AUTHORITY
+)
 
 
 def _market_identity_evidence(
@@ -513,12 +552,46 @@ class _TestDurableRiskDomainLease:
         *,
         lease_id: str | None = None,
         private_exponent_hex: str = TEST_RISK_DOMAIN_PRIVATE_EXPONENT_HEX,
+        initial_high_water_generation: int = -1,
+        initial_high_water_state_sha256: str | None = None,
     ) -> None:
         self.authority_root = Path(authority_root).resolve()
         self.authority_root.mkdir(parents=True, exist_ok=True)
         self.lease_id = lease_id or auth_module.TRUSTED_RISK_DOMAIN_LEASE_ID
         self.private_exponent_hex = private_exponent_hex
+        self.initial_high_water_generation = initial_high_water_generation
+        self.initial_high_water_state_sha256 = initial_high_water_state_sha256
         self._lock = threading.RLock()
+
+    def _signed_receipt(self, receipt_core: dict[str, Any]) -> bytes:
+        signed_bytes = _json_bytes(receipt_core)
+        digest_info = executor_module._RSA_SHA256_DIGEST_INFO_PREFIX + hashlib.sha256(
+            signed_bytes
+        ).digest()
+        encoded_size = len(TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX) // 2
+        encoded = (
+            b"\x00\x01"
+            + b"\xff" * (encoded_size - len(digest_info) - 3)
+            + b"\x00"
+            + digest_info
+        )
+        signature_hex = pow(
+            int.from_bytes(encoded, "big"),
+            int(self.private_exponent_hex, 16),
+            int(TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX, 16),
+        ).to_bytes(encoded_size, "big").hex()
+        return _json_bytes(
+            {
+                **receipt_core,
+                "signature_algorithm": (
+                    executor_module.RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM
+                ),
+                "signature_hex": signature_hex,
+            }
+        )
+
+    def _binding_path(self, risk_domain_id: str) -> Path:
+        return self.authority_root / f"{risk_domain_id}.json"
 
     def claim_risk_domain(
         self,
@@ -539,7 +612,36 @@ class _TestDurableRiskDomainLease:
             and key_identity_sha256 == TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256
         ):
             raise RuntimeError("risk-domain authority identity mismatch")
-        binding_path = self.authority_root / f"{risk_domain_id}.json"
+        binding_path = self._binding_path(risk_domain_id)
+        with self._lock:
+            if binding_path.exists():
+                authority_state = json.loads(binding_path.read_bytes())
+                if authority_state["journal_namespace_id"] != journal_namespace_id:
+                    raise RuntimeError("risk domain already claimed")
+                claim_status = "EXISTING_CLAIM"
+            else:
+                journal_epoch = canonical_json_sha256(
+                    {
+                        "risk_domain_id": risk_domain_id,
+                        "journal_namespace_id": journal_namespace_id,
+                    }
+                )
+                authority_state = {
+                    "authorization_id": authorization_id,
+                    "risk_domain_id": risk_domain_id,
+                    "journal_namespace_id": journal_namespace_id,
+                    "journal_epoch": journal_epoch,
+                    "high_water_generation": self.initial_high_water_generation,
+                    "high_water_state_sha256": (
+                        self.initial_high_water_state_sha256
+                    ),
+                }
+                binding_path.write_bytes(_json_bytes(authority_state))
+                claim_status = (
+                    "FIRST_CLAIM"
+                    if self.initial_high_water_generation == -1
+                    else "EXISTING_CLAIM"
+                )
         receipt_core = {
             "schema_version": executor_module.JOURNAL_NAMESPACE_SCHEMA_VERSION,
             "lease_id": lease_id,
@@ -549,36 +651,74 @@ class _TestDurableRiskDomainLease:
             "authorization_id": authorization_id,
             "risk_domain_id": risk_domain_id,
             "journal_namespace_id": journal_namespace_id,
+            "claim_status": claim_status,
+            "journal_epoch": authority_state["journal_epoch"],
+            "high_water_generation": authority_state[
+                "high_water_generation"
+            ],
+            "high_water_state_sha256": authority_state[
+                "high_water_state_sha256"
+            ],
         }
-        signed_bytes = _json_bytes(receipt_core)
-        digest_info = executor_module._RSA_SHA256_DIGEST_INFO_PREFIX + hashlib.sha256(
-            signed_bytes
-        ).digest()
-        encoded_size = len(TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX) // 2
-        encoded = (
-            b"\x00\x01"
-            + b"\xff" * (encoded_size - len(digest_info) - 3)
-            + b"\x00"
-            + digest_info
-        )
-        signature_hex = pow(
-            int.from_bytes(encoded, "big"),
-            int(self.private_exponent_hex, 16),
-            int(TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX, 16),
-        ).to_bytes(encoded_size, "big").hex()
-        receipt = {
-            **receipt_core,
-            "signature_algorithm": executor_module.RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM,
-            "signature_hex": signature_hex,
-        }
-        raw = _json_bytes(receipt)
+        return self._signed_receipt(receipt_core)
+
+    def advance_risk_domain_high_water(
+        self,
+        *,
+        lease_id: str,
+        service_identity_sha256: str,
+        tenant_id: str,
+        key_identity_sha256: str,
+        authorization_id: str,
+        risk_domain_id: str,
+        journal_namespace_id: str,
+        journal_epoch: str,
+        expected_generation: int,
+        next_generation: int,
+        next_state_sha256: str,
+    ) -> bytes:
+        if not (
+            lease_id == self.lease_id
+            and service_identity_sha256
+            == TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256
+            and tenant_id == TEST_RISK_DOMAIN_TENANT_ID
+            and key_identity_sha256 == TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256
+        ):
+            raise RuntimeError("risk-domain authority identity mismatch")
+        binding_path = self._binding_path(risk_domain_id)
         with self._lock:
-            if binding_path.exists():
-                if binding_path.read_bytes() != raw:
-                    raise RuntimeError("risk domain already claimed")
-            else:
-                binding_path.write_bytes(raw)
-        return raw
+            authority_state = json.loads(binding_path.read_bytes())
+            if not (
+                authority_state["authorization_id"] == authorization_id
+                and authority_state["journal_namespace_id"]
+                == journal_namespace_id
+                and authority_state["journal_epoch"] == journal_epoch
+                and authority_state["high_water_generation"]
+                == expected_generation
+                and next_generation == expected_generation + 1
+            ):
+                raise RuntimeError("risk-domain high-water CAS failed")
+            authority_state["high_water_generation"] = next_generation
+            authority_state["high_water_state_sha256"] = next_state_sha256
+            binding_path.write_bytes(_json_bytes(authority_state))
+        return self._signed_receipt(
+            {
+                "schema_version": (
+                    executor_module.JOURNAL_HIGH_WATER_SCHEMA_VERSION
+                ),
+                "lease_id": lease_id,
+                "service_identity_sha256": service_identity_sha256,
+                "tenant_id": tenant_id,
+                "key_identity_sha256": key_identity_sha256,
+                "authorization_id": authorization_id,
+                "risk_domain_id": risk_domain_id,
+                "journal_namespace_id": journal_namespace_id,
+                "journal_epoch": journal_epoch,
+                "previous_generation": expected_generation,
+                "high_water_generation": next_generation,
+                "high_water_state_sha256": next_state_sha256,
+            }
+        )
 
 
 def _new_journal() -> AtomicFileMicroLiveStateJournal:
@@ -591,9 +731,27 @@ def _new_journal() -> AtomicFileMicroLiveStateJournal:
     )
 
 
+def _journal_factory_args() -> dict[str, Any]:
+    base = Path(tempfile.mkdtemp(prefix="bigan-wal-factory-test-"))
+    return {
+        "journal_root": base / "journal",
+        "risk_domain_lease": _TestDurableRiskDomainLease(
+            base / "external-risk-domain-lease"
+        ),
+    }
+
+
 def _journal_with_state(raw_state: bytes) -> AtomicFileMicroLiveStateJournal:
-    journal = _new_journal()
     generation = int(json.loads(raw_state)["journal_generation"])
+    base = Path(tempfile.mkdtemp(prefix="bigan-seeded-wal-test-"))
+    journal = AtomicFileMicroLiveStateJournal(
+        base / "journal",
+        risk_domain_lease=_TestDurableRiskDomainLease(
+            base / "external-risk-domain-lease",
+            initial_high_water_generation=generation,
+            initial_high_water_state_sha256=hashlib.sha256(raw_state).hexdigest(),
+        ),
+    )
     with journal._exclusive_lock():
         journal._write_locked(generation=generation, raw_state=raw_state)
     return journal
@@ -657,6 +815,7 @@ def _record_fill(
     fee_usd: str,
     transport_event_sha256: str,
     event_overrides: dict[str, Any] | None = None,
+    raw_event_bytes_override: bytes | None = None,
 ) -> dict[str, Any]:
     del transport_event_sha256  # Opaque caller-provided hashes are no longer trusted.
     prepared, acknowledgement = _order_identity(executor, client_order_id)
@@ -710,7 +869,7 @@ def _record_fill(
         fill_event_sequence=fill_event_sequence,
         cumulative_filled_quantity=cumulative_filled_quantity,
         cumulative_fill_count=cumulative_fill_count,
-        raw_transport_event=_json_bytes(event),
+        raw_transport_event=raw_event_bytes_override or _json_bytes(event),
     )
     register = getattr(executor.transport, "register_authoritative_fill", None)
     if callable(register) and not overrides:
@@ -788,8 +947,6 @@ def _record_settlement(
 
 
 class FakeTransport:
-    maximum_call_duration_ms = 100
-
     def __init__(
         self,
         *,
@@ -801,6 +958,11 @@ class FakeTransport:
         lookup_status: str = "ACCEPTED",
         cancel_lookup_status: str = "CANCELED",
         cancel_lookup_overrides: dict[str, Any] | None = None,
+        execution_binding_overrides: dict[str, Any] | None = None,
+        execution_private_exponent_hex: str = TEST_RISK_DOMAIN_PRIVATE_EXPONENT_HEX,
+        trusted_time_advance_ms: int = 0,
+        cursor_observed_advance_ms: int = 0,
+        cursor_response_post_signature_overrides: dict[str, Any] | None = None,
     ) -> None:
         self.fail_submit = fail_submit
         self.fail_cancel = fail_cancel
@@ -810,6 +972,13 @@ class FakeTransport:
         self.lookup_status = lookup_status
         self.cancel_lookup_status = cancel_lookup_status
         self.cancel_lookup_overrides = dict(cancel_lookup_overrides or {})
+        self.execution_binding_overrides = dict(execution_binding_overrides or {})
+        self.execution_private_exponent_hex = execution_private_exponent_hex
+        self.trusted_time_advance_ms = trusted_time_advance_ms
+        self.cursor_observed_advance_ms = cursor_observed_advance_ms
+        self.cursor_response_post_signature_overrides = dict(
+            cursor_response_post_signature_overrides or {}
+        )
         self.submit_calls: list[dict[str, Any]] = []
         self.cancel_calls: list[dict[str, Any]] = []
         self.lookup_calls: list[dict[str, Any]] = []
@@ -817,6 +986,70 @@ class FakeTransport:
         self.fill_cursor_calls: list[dict[str, Any]] = []
         self.authoritative_fills: dict[str, list[dict[str, Any]]] = {}
         self.authoritative_status: dict[str, str] = {}
+
+    def _signed_execution_receipt(self, receipt_core: dict[str, Any]) -> bytes:
+        signed_bytes = _json_bytes(receipt_core)
+        digest_info = executor_module._RSA_SHA256_DIGEST_INFO_PREFIX + hashlib.sha256(
+            signed_bytes
+        ).digest()
+        encoded_size = len(TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX) // 2
+        encoded = (
+            b"\x00\x01"
+            + b"\xff" * (encoded_size - len(digest_info) - 3)
+            + b"\x00"
+            + digest_info
+        )
+        signature_hex = pow(
+            int.from_bytes(encoded, "big"),
+            int(self.execution_private_exponent_hex, 16),
+            int(TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX, 16),
+        ).to_bytes(encoded_size, "big").hex()
+        return _json_bytes(
+            {
+                **receipt_core,
+                "signature_algorithm": (
+                    executor_module.RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM
+                ),
+                "signature_hex": signature_hex,
+            }
+        )
+
+    def attest_execution_binding(self, request: dict[str, Any]) -> bytes:
+        core = {
+            "schema_version": (
+                executor_module.EXECUTION_BINDING_ATTESTATION_SCHEMA_VERSION
+            ),
+            "authorization_id": request["authorization_id"],
+            "challenge_sha256": request["challenge_sha256"],
+            "execution_service_binding_sha256": (
+                TEST_EXECUTION_SERVICE_BINDING_SHA256
+            ),
+            "service_identity_sha256": TEST_EXECUTION_SERVICE_IDENTITY_SHA256,
+            "adapter_implementation_sha256": (
+                TEST_EXECUTION_ADAPTER_IMPLEMENTATION_SHA256
+            ),
+            "configuration_sha256": TEST_EXECUTION_CONFIGURATION_SHA256,
+            "exchange_endpoint_sha256": TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256,
+            "exchange_account_sha256": TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256,
+            "signer_identity_sha256": TEST_EXECUTION_SIGNER_IDENTITY_SHA256,
+            "cursor_key_identity_sha256": TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+            "clock_identity_sha256": TEST_EXECUTION_CLOCK_IDENTITY_SHA256,
+        }
+        core.update(self.execution_binding_overrides)
+        return self._signed_execution_receipt(core)
+
+    def read_trusted_time(self, request: dict[str, Any]) -> bytes:
+        completed_at_ts_ms = (
+            int(request["request_started_at_ts_ms"])
+            + self.trusted_time_advance_ms
+        )
+        return self._signed_execution_receipt(
+            {
+                "schema_version": executor_module.TRUSTED_TIME_RECEIPT_SCHEMA_VERSION,
+                **copy.deepcopy(request),
+                "request_completed_at_ts_ms": completed_at_ts_ms,
+            }
+        )
 
     def submit_order(self, request: dict[str, Any]) -> bytes:
         self.submit_calls.append(copy.deepcopy(request))
@@ -876,41 +1109,46 @@ class FakeTransport:
         cumulative = fills[-1]["cumulative_filled_quantity"] if fills else "0"
         final_count = fills[-1]["cumulative_fill_count"] if fills else 0
         terminal = status in {"FILLED", "CANCELED", "EXPIRED"}
-        effective_at_ts_ms = NOW_TS_MS if terminal else None
-        watermark = (
-            canonical_json_sha256(
-                {
-                    "authority": "test-fill-cursor",
-                    "client_order_id": request["client_order_id"],
-                    "exchange_order_id": request["exchange_order_id"],
-                    "status": status,
-                    "cumulative_filled_quantity": cumulative,
-                    "final_fill_event_sequence": len(fills),
-                    "final_fill_count": final_count,
-                    "effective_at_ts_ms": effective_at_ts_ms,
-                }
-            )
-            if terminal
-            else None
+        observed_at_ts_ms = (
+            int(request["request_started_at_ts_ms"])
+            + self.cursor_observed_advance_ms
         )
+        effective_at_ts_ms = observed_at_ts_ms if terminal else None
         response = {
+                "schema_version": executor_module.EXECUTION_CURSOR_SCHEMA_VERSION,
+                "authorization_id": request["authorization_id"],
+                "execution_service_binding_sha256": request[
+                    "execution_service_binding_sha256"
+                ],
+                "request_started_at_ts_ms": request["request_started_at_ts_ms"],
                 "event_type": "ORDER_FILL_CURSOR",
                 "client_order_id": request["client_order_id"],
                 "exchange_order_id": request["exchange_order_id"],
                 "market_id": submitted["market_id"],
                 "token_id": submitted["token_id"],
                 "status": status,
-                "observed_at_ts_ms": NOW_TS_MS,
+                "observed_at_ts_ms": observed_at_ts_ms,
                 "effective_at_ts_ms": effective_at_ts_ms,
                 "cumulative_filled_quantity": cumulative,
                 "final_fill_event_sequence": len(fills),
                 "final_fill_count": final_count,
-                "final_fill_watermark": watermark,
+                "final_fill_watermark": None,
                 "fill_delivery_complete": terminal,
                 "fill_events": fills,
             }
         response.update(self.cancel_lookup_overrides)
-        return _json_bytes(response)
+        if terminal and "final_fill_watermark" not in self.cancel_lookup_overrides:
+            response["final_fill_watermark"] = (
+                executor_module._expected_final_fill_watermark(response)
+            )
+        cursor_payload_sha256 = canonical_json_sha256(response)
+        signed = json.loads(
+            self._signed_execution_receipt(
+                {**response, "cursor_payload_sha256": cursor_payload_sha256}
+            )
+        )
+        signed.update(self.cursor_response_post_signature_overrides)
+        return _json_bytes(signed)
 
     def lookup_order(self, request: dict[str, Any]) -> bytes:
         self.lookup_calls.append(copy.deepcopy(request))
@@ -1057,27 +1295,33 @@ class SimulatedProcessCrash(BaseException):
     """Crash injection deliberately bypassing ordinary Exception handlers."""
 
 
-class CrashAfterCommittedEventJournal(AtomicFileMicroLiveStateJournal):
-    def __init__(self, directory: Path | str) -> None:
-        base = Path(directory)
-        super().__init__(
-            base / "journal",
-            risk_domain_lease=_TestDurableRiskDomainLease(
-                base / "external-risk-domain-lease"
-            ),
-        )
-        self.target_event_type: str | None = None
+def _crash_after_committed_event_journal(
+    directory: Path | str,
+) -> AtomicFileMicroLiveStateJournal:
+    base = Path(directory)
+    journal = AtomicFileMicroLiveStateJournal(
+        base / "journal",
+        risk_domain_lease=_TestDurableRiskDomainLease(
+            base / "external-risk-domain-lease"
+        ),
+    )
+    journal.target_event_type = None
+    original_write_locked = journal._write_locked
 
-    def arm(self, event_type: str) -> None:
-        self.target_event_type = event_type
+    def arm(event_type: str) -> None:
+        journal.target_event_type = event_type
 
-    def _write_locked(self, *, generation: int, raw_state: bytes) -> None:
-        super()._write_locked(generation=generation, raw_state=raw_state)
+    def write_locked(*, generation: int, raw_state: bytes) -> None:
+        original_write_locked(generation=generation, raw_state=raw_state)
         state = json.loads(raw_state)
         events = state.get("events") or []
-        if events and events[-1]["event_type"] == self.target_event_type:
-            self.target_event_type = None
+        if events and events[-1]["event_type"] == journal.target_event_type:
+            journal.target_event_type = None
             raise SimulatedProcessCrash
+
+    journal.arm = arm
+    journal._write_locked = write_locked
+    return journal
 
 
 class CrashAfterAcceptedSubmitTransport(FakeTransport):
@@ -1592,6 +1836,7 @@ def _authorization(
         "public_key_modulus_hex": TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
         "public_key_exponent": 65_537,
     }
+    execution_service_authority = copy.deepcopy(TEST_EXECUTION_AUTHORITY)
     identity = {
         "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
         "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
@@ -1610,6 +1855,7 @@ def _authorization(
         "maximum_operator_heartbeat_age_ms": 5_000,
         "approval_issue_number": 264,
         "risk_domain_lease_authority": risk_domain_lease_authority,
+        "execution_service_authority": execution_service_authority,
     }
     authorization_id = canonical_json_sha256(identity)
     command = (
@@ -1654,6 +1900,7 @@ def _authorization(
         "supersedes_template": _repository_descriptor(root, AUTHORIZATION_TEMPLATE_PATH),
         "candidate_bundle": _repository_descriptor(root, CANDIDATE_BUNDLE_REPOSITORY_PATH),
         "risk_domain_lease_authority": risk_domain_lease_authority,
+        "execution_service_authority": execution_service_authority,
         "preapproval_contract": _repository_descriptor(root, CONTRACT_REPOSITORY_PATH),
         "required_evidence": required,
         "evidence_payload_sha256": evidence_payload_sha,
@@ -1725,6 +1972,28 @@ def _verified(
             TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX
         ),
         risk_domain_lease_public_key_exponent=65_537,
+        execution_service_identity_sha256=(
+            TEST_EXECUTION_SERVICE_IDENTITY_SHA256
+        ),
+        execution_adapter_implementation_sha256=(
+            TEST_EXECUTION_ADAPTER_IMPLEMENTATION_SHA256
+        ),
+        execution_configuration_sha256=TEST_EXECUTION_CONFIGURATION_SHA256,
+        execution_exchange_endpoint_sha256=(
+            TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256
+        ),
+        execution_exchange_account_sha256=(
+            TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256
+        ),
+        execution_signer_identity_sha256=TEST_EXECUTION_SIGNER_IDENTITY_SHA256,
+        execution_cursor_key_identity_sha256=(
+            TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256
+        ),
+        execution_clock_identity_sha256=TEST_EXECUTION_CLOCK_IDENTITY_SHA256,
+        execution_public_key_modulus_hex=TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
+        execution_public_key_exponent=65_537,
+        execution_maximum_clock_skew_ms=250,
+        execution_maximum_call_duration_ms=250,
         capital_base_usd=Decimal(authorization["capital_base_usd"]),
         maximum_notional_usd=Decimal(authorization["maximum_notional_usd"]),
         maximum_realized_loss_usd=Decimal(
@@ -1823,7 +2092,7 @@ def test_current_template_cannot_create_executor(
             evidence_root=authorized_fixture["evidence_root"],
             now_ts_ms=NOW_TS_MS,
             transport=transport,
-            journal=_new_journal(),
+            **_journal_factory_args(),
         )
     assert transport.submit_calls == []
     assert transport.cancel_calls == []
@@ -1876,12 +2145,12 @@ def test_legacy_local_graph_cannot_create_a_production_capability(
             evidence_root=authorized_fixture["evidence_root"],
             now_ts_ms=NOW_TS_MS,
             transport=transport,
-            journal=_new_journal(),
+            **_journal_factory_args(),
         )
     assert transport.submit_calls == []
 
 
-def test_executor_rejects_transport_without_mandatory_bounded_deadline(
+def test_executor_rejects_transport_without_authenticated_execution_binding(
     authorized_fixture: dict[str, Any],
 ) -> None:
     verified = _verified(authorized_fixture)
@@ -1896,7 +2165,7 @@ def test_executor_rejects_transport_without_mandatory_bounded_deadline(
         def lookup_order(self, request: dict[str, Any]) -> bytes:
             raise AssertionError(request)
 
-    with pytest.raises(MicroLiveExecutionError, match="deadline capability"):
+    with pytest.raises(MicroLiveExecutionError, match="attest_execution_binding"):
         MicroLiveExecutor(
             verified,
             transport=UnboundedTransport(),
@@ -4394,7 +4663,7 @@ def test_two_executor_instances_share_one_process_safe_budget_reservation(
         up_token_id="77700",
         down_token_id="77701",
     )
-    with pytest.raises(MicroLiveExecutionError, match="high-water generation is stale"):
+    with pytest.raises(MicroLiveExecutionError, match="authority high-water"):
         second.submit_signal(**stale_signal)
 
     assert len(first_transport.submit_calls) == 1
@@ -4533,7 +4802,7 @@ def test_submit_crash_after_fsync_boundary_recovers_without_resubmit(
     expected_unknown: bool,
 ) -> None:
     verified = _verified(authorized_fixture)
-    journal = CrashAfterCommittedEventJournal(
+    journal = _crash_after_committed_event_journal(
         Path(tempfile.mkdtemp(prefix="bigan-crash-wal-test-"))
     )
     transport = FakeTransport()
@@ -4592,7 +4861,7 @@ def test_restore_completes_unknown_to_kill_crash_prefix(
     authorized_fixture: dict[str, Any],
 ) -> None:
     verified = _verified(authorized_fixture)
-    journal = CrashAfterCommittedEventJournal(
+    journal = _crash_after_committed_event_journal(
         Path(tempfile.mkdtemp(prefix="bigan-unknown-kill-crash-test-"))
     )
     transport = FakeTransport(fail_submit=True)
@@ -4622,7 +4891,7 @@ def test_restore_completes_kill_to_cancel_unknown_without_duplicate_cancel(
     authorized_fixture: dict[str, Any],
 ) -> None:
     verified = _verified(authorized_fixture)
-    journal = CrashAfterCommittedEventJournal(
+    journal = _crash_after_committed_event_journal(
         Path(tempfile.mkdtemp(prefix="bigan-kill-cancel-crash-test-"))
     )
     transport = FakeTransport()
@@ -4674,7 +4943,7 @@ def test_cancel_crash_boundaries_are_wal_recoverable(
     expected_closed: bool,
 ) -> None:
     verified = _verified(authorized_fixture)
-    journal = CrashAfterCommittedEventJournal(
+    journal = _crash_after_committed_event_journal(
         Path(tempfile.mkdtemp(prefix="bigan-cancel-crash-wal-test-"))
     )
     transport: FakeTransport = (
@@ -5550,3 +5819,231 @@ def test_human_approval_owner_and_timestamp_are_exact(
             evidence_root=authorized_fixture["evidence_root"],
             now_ts_ms=NOW_TS_MS,
         )
+
+
+def test_self_asserted_journal_protocol_is_rejected_before_initialization(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+
+    class SelfAssertedJournal:
+        durable_single_writer = True
+        initialized = False
+
+        @property
+        def authenticated_risk_domain_authority_binding_sha256(self) -> str:
+            return executor_module._risk_domain_authority_binding_sha256(verified)
+
+        def initialize(self, raw_state: bytes) -> Any:
+            self.initialized = True
+            raise AssertionError(raw_state)
+
+    journal = SelfAssertedJournal()
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="deployment-owned concrete implementation",
+    ):
+        MicroLiveExecutor(
+            verified,
+            transport=FakeTransport(),
+            journal=journal,  # type: ignore[arg-type]
+        )
+    assert journal.initialized is False
+
+
+def test_existing_authority_high_water_rejects_deleted_wal_reset(
+    authorized_fixture: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    verified = _verified(authorized_fixture)
+    lease = _TestDurableRiskDomainLease(tmp_path / "external-risk-domain-lease")
+    journal_root = tmp_path / "journal"
+    journal = AtomicFileMicroLiveStateJournal(
+        journal_root,
+        risk_domain_lease=lease,
+    )
+    executor = MicroLiveExecutor(
+        verified,
+        transport=FakeTransport(),
+        journal=journal,
+    )
+    executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    assert journal.snapshot().generation > 0
+    journal.state_path.unlink()
+
+    replacement = AtomicFileMicroLiveStateJournal(
+        journal_root,
+        risk_domain_lease=lease,
+    )
+    with pytest.raises(MicroLiveExecutionError, match="no local WAL"):
+        MicroLiveExecutor(
+            verified,
+            transport=FakeTransport(),
+            journal=replacement,
+        )
+
+
+def test_execution_adapter_binding_is_authorization_pinned(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport(
+        execution_binding_overrides={
+            "adapter_implementation_sha256": "a" * 64,
+        }
+    )
+    with pytest.raises(MicroLiveExecutionError, match="binding attestation"):
+        MicroLiveExecutor(verified, transport=transport)
+
+
+def test_sha_shaped_unsigned_fill_watermark_fails_closed(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport(
+        cursor_response_post_signature_overrides={
+            "final_fill_watermark": "f" * 64,
+        }
+    )
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    transport.authoritative_status[order["client_order_id"]] = "CANCELED"
+    with pytest.raises(MicroLiveExecutionError, match="cursor identity"):
+        executor.reconcile_authoritative_fill_cursor(
+            client_order_id=order["client_order_id"],
+            now_ts_ms=NOW_TS_MS,
+        )
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+
+def test_post_call_trusted_completion_clock_accepts_advancing_transport(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport(
+        trusted_time_advance_ms=100,
+        cursor_observed_advance_ms=100,
+    )
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    transport.authoritative_status[order["client_order_id"]] = "CANCELED"
+    result = executor.reconcile_authoritative_fill_cursor(
+        client_order_id=order["client_order_id"],
+        now_ts_ms=NOW_TS_MS,
+    )
+    assert result["status"] == "ORDER_CANCELED"
+    close = next(
+        event for event in executor.events if event["event_type"] == "ORDER_CANCELED"
+    )
+    assert close["event_ts_ms"] == NOW_TS_MS + 100
+    assert close["payload"]["request_started_at_ts_ms"] == NOW_TS_MS
+    assert close["payload"]["request_completed_at_ts_ms"] == NOW_TS_MS + 100
+
+
+def test_rehashed_completion_timestamp_without_clock_signature_fails_closed(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport(
+        trusted_time_advance_ms=100,
+        cursor_observed_advance_ms=100,
+    )
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    transport.authoritative_status[order["client_order_id"]] = "CANCELED"
+    executor.reconcile_authoritative_fill_cursor(
+        client_order_id=order["client_order_id"],
+        now_ts_ms=NOW_TS_MS,
+    )
+    state = executor.export_state()
+    close = next(
+        event for event in state["events"] if event["event_type"] == "ORDER_CANCELED"
+    )
+    close["event_ts_ms"] += 1
+    close["payload"]["request_completed_at_ts_ms"] += 1
+    previous = "GENESIS"
+    for event in state["events"]:
+        event["previous_event_sha256"] = previous
+        core = {key: value for key, value in event.items() if key != "event_sha256"}
+        event["event_sha256"] = canonical_json_sha256(core)
+        previous = event["event_sha256"]
+    payload = {key: value for key, value in state.items() if key != "state_sha256"}
+    state["state_sha256"] = canonical_json_sha256(payload)
+    raw_state = _json_bytes(state)
+    with pytest.raises(MicroLiveExecutionError, match="order close transport"):
+        MicroLiveExecutor.restore(
+            authorization=verified,
+            transport=FakeTransport(),
+            journal=_journal_with_state(raw_state),
+            raw_state=raw_state,
+        )
+
+
+def test_semantically_equal_fill_bytes_reconcile_restart_and_settle(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    prepared, acknowledgement = _order_identity(executor, order["client_order_id"])
+    event = {
+        "quantity": "1",
+        "event_type": "FILL",
+        "token_id": prepared["token_id"],
+        "market_id": prepared["market_id"],
+        "client_order_id": order["client_order_id"],
+        "exchange_order_id": acknowledgement["exchange_order_id"],
+        "fill_id": "semantic-fill-001",
+        "price": "0.39",
+        "fee_usd": "0.0002",
+        "executed_at_ts_ms": NOW_TS_MS,
+        "fill_event_sequence": 1,
+        "cumulative_filled_quantity": "1",
+        "cumulative_fill_count": 1,
+    }
+    noncanonical_raw = json.dumps(event, indent=2, sort_keys=False).encode("utf-8")
+    recorded = _record_fill(
+        executor,
+        client_order_id=order["client_order_id"],
+        fill_id="semantic-fill-001",
+        now_ts_ms=NOW_TS_MS,
+        quantity="1",
+        price="0.39",
+        fee_usd="0.0002",
+        transport_event_sha256="0" * 64,
+        raw_event_bytes_override=noncanonical_raw,
+    )
+    assert recorded["status"] == "FILL_RECORDED"
+    closed = executor.reconcile_authoritative_fill_cursor(
+        client_order_id=order["client_order_id"],
+        now_ts_ms=NOW_TS_MS,
+    )
+    assert closed["status"] == "ORDER_FILLED"
+
+    raw_state = executor.export_state_bytes()
+    restarted = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=FakeTransport(),
+        journal=executor._journal,
+        raw_state=raw_state,
+    )
+    settled = _record_settlement(
+        restarted,
+        client_order_id=order["client_order_id"],
+        settlement_id="semantic-settlement-001",
+        now_ts_ms=SETTLEMENT_NOW_TS_MS,
+        payout_per_token="1",
+        official_settlement_sha256="0" * 64,
+    )
+    assert settled["status"] == "SETTLEMENT_RECORDED"

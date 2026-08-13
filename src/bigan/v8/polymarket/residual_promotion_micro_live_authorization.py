@@ -35,7 +35,7 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
 )
 
 AUTHORIZATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v3"
+    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v4"
 )
 HUMAN_ATTESTATION_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-human-micro-live-attestation-v2"
@@ -116,6 +116,18 @@ class VerifiedMicroLiveAuthorization:
     risk_domain_lease_key_identity_sha256: str
     risk_domain_lease_public_key_modulus_hex: str
     risk_domain_lease_public_key_exponent: int
+    execution_service_identity_sha256: str
+    execution_adapter_implementation_sha256: str
+    execution_configuration_sha256: str
+    execution_exchange_endpoint_sha256: str
+    execution_exchange_account_sha256: str
+    execution_signer_identity_sha256: str
+    execution_cursor_key_identity_sha256: str
+    execution_clock_identity_sha256: str
+    execution_public_key_modulus_hex: str
+    execution_public_key_exponent: int
+    execution_maximum_clock_skew_ms: int
+    execution_maximum_call_duration_ms: int
     capital_base_usd: Decimal
     maximum_notional_usd: Decimal
     maximum_realized_loss_usd: Decimal
@@ -164,6 +176,7 @@ def verify_micro_live_authorization(
         "supersedes_template",
         "candidate_bundle",
         "risk_domain_lease_authority",
+        "execution_service_authority",
         "preapproval_contract",
         "required_evidence",
         "evidence_payload_sha256",
@@ -226,6 +239,9 @@ def verify_micro_live_authorization(
     candidate_sha = dict(authorization["candidate_bundle"])["sha256"]
     risk_domain_lease_authority = _validated_risk_domain_lease_authority(
         authorization.get("risk_domain_lease_authority")
+    )
+    execution_service_authority = _validated_execution_service_authority(
+        authorization.get("execution_service_authority")
     )
     if not (
         dict(contract.get("candidate_bundle") or {})
@@ -325,6 +341,7 @@ def verify_micro_live_authorization(
         "maximum_operator_heartbeat_age_ms": MAXIMUM_OPERATOR_HEARTBEAT_AGE_MS,
         "approval_issue_number": ISSUE_NUMBER,
         "risk_domain_lease_authority": risk_domain_lease_authority,
+        "execution_service_authority": execution_service_authority,
     }
     authorization_id = canonical_json_sha256(identity)
     if authorization.get("authorization_id") != authorization_id:
@@ -373,6 +390,42 @@ def verify_micro_live_authorization(
         ),
         risk_domain_lease_public_key_exponent=int(
             risk_domain_lease_authority["public_key_exponent"]
+        ),
+        execution_service_identity_sha256=str(
+            execution_service_authority["service_identity_sha256"]
+        ),
+        execution_adapter_implementation_sha256=str(
+            execution_service_authority["adapter_implementation_sha256"]
+        ),
+        execution_configuration_sha256=str(
+            execution_service_authority["configuration_sha256"]
+        ),
+        execution_exchange_endpoint_sha256=str(
+            execution_service_authority["exchange_endpoint_sha256"]
+        ),
+        execution_exchange_account_sha256=str(
+            execution_service_authority["exchange_account_sha256"]
+        ),
+        execution_signer_identity_sha256=str(
+            execution_service_authority["signer_identity_sha256"]
+        ),
+        execution_cursor_key_identity_sha256=str(
+            execution_service_authority["cursor_key_identity_sha256"]
+        ),
+        execution_clock_identity_sha256=str(
+            execution_service_authority["clock_identity_sha256"]
+        ),
+        execution_public_key_modulus_hex=str(
+            execution_service_authority["public_key_modulus_hex"]
+        ),
+        execution_public_key_exponent=int(
+            execution_service_authority["public_key_exponent"]
+        ),
+        execution_maximum_clock_skew_ms=int(
+            execution_service_authority["maximum_clock_skew_ms"]
+        ),
+        execution_maximum_call_duration_ms=int(
+            execution_service_authority["maximum_call_duration_ms"]
         ),
         capital_base_usd=capital_base,
         maximum_notional_usd=maximum_notional,
@@ -444,7 +497,7 @@ def _capability_integrity_sha256(
     ):
         raise ValueError("loaded micro-live model bytes do not match the frozen runtime")
     payload = {
-        "schema_version": "verified-micro-live-authorization-capability-v2",
+        "schema_version": "verified-micro-live-authorization-capability-v3",
         "authorization_id": capability.authorization_id,
         "authorization_payload_sha256": capability.authorization_payload_sha256,
         "candidate_bundle_sha256": capability.candidate_bundle_sha256,
@@ -461,6 +514,42 @@ def _capability_integrity_sha256(
         ),
         "risk_domain_lease_public_key_exponent": (
             capability.risk_domain_lease_public_key_exponent
+        ),
+        "execution_service_identity_sha256": (
+            capability.execution_service_identity_sha256
+        ),
+        "execution_adapter_implementation_sha256": (
+            capability.execution_adapter_implementation_sha256
+        ),
+        "execution_configuration_sha256": (
+            capability.execution_configuration_sha256
+        ),
+        "execution_exchange_endpoint_sha256": (
+            capability.execution_exchange_endpoint_sha256
+        ),
+        "execution_exchange_account_sha256": (
+            capability.execution_exchange_account_sha256
+        ),
+        "execution_signer_identity_sha256": (
+            capability.execution_signer_identity_sha256
+        ),
+        "execution_cursor_key_identity_sha256": (
+            capability.execution_cursor_key_identity_sha256
+        ),
+        "execution_clock_identity_sha256": (
+            capability.execution_clock_identity_sha256
+        ),
+        "execution_public_key_modulus_hex": (
+            capability.execution_public_key_modulus_hex
+        ),
+        "execution_public_key_exponent": (
+            capability.execution_public_key_exponent
+        ),
+        "execution_maximum_clock_skew_ms": (
+            capability.execution_maximum_clock_skew_ms
+        ),
+        "execution_maximum_call_duration_ms": (
+            capability.execution_maximum_call_duration_ms
         ),
         "capital_base_usd": str(capability.capital_base_usd),
         "maximum_notional_usd": str(capability.maximum_notional_usd),
@@ -817,6 +906,76 @@ def _validated_risk_domain_lease_authority(value: Any) -> dict[str, Any]:
     ):
         raise MicroLiveAuthorizationError(
             "risk-domain lease authority binding is invalid"
+        )
+    return authority
+
+
+def _validated_execution_service_authority(value: Any) -> dict[str, Any]:
+    """Validate the pinned adapter, endpoint, signer, cursor, and clock authority."""
+
+    if not isinstance(value, Mapping):
+        raise MicroLiveAuthorizationError(
+            "execution service authority binding is absent"
+        )
+    authority = dict(value)
+    expected_keys = {
+        "service_identity_sha256",
+        "adapter_implementation_sha256",
+        "configuration_sha256",
+        "exchange_endpoint_sha256",
+        "exchange_account_sha256",
+        "signer_identity_sha256",
+        "cursor_key_identity_sha256",
+        "clock_identity_sha256",
+        "signature_algorithm",
+        "public_key_modulus_hex",
+        "public_key_exponent",
+        "maximum_clock_skew_ms",
+        "maximum_call_duration_ms",
+    }
+    if set(authority) != expected_keys:
+        raise MicroLiveAuthorizationError(
+            "execution service authority binding schema is invalid"
+        )
+    modulus = authority.get("public_key_modulus_hex")
+    exponent = authority.get("public_key_exponent")
+    expected_key_identity = canonical_json_sha256(
+        {
+            "signature_algorithm": "RSASSA-PKCS1-v1_5-SHA256",
+            "public_key_modulus_hex": modulus,
+            "public_key_exponent": exponent,
+        }
+    )
+    identity_fields = (
+        "service_identity_sha256",
+        "adapter_implementation_sha256",
+        "configuration_sha256",
+        "exchange_endpoint_sha256",
+        "exchange_account_sha256",
+        "signer_identity_sha256",
+        "clock_identity_sha256",
+    )
+    maximum_clock_skew_ms = authority.get("maximum_clock_skew_ms")
+    maximum_call_duration_ms = authority.get("maximum_call_duration_ms")
+    if not (
+        all(_is_sha256(authority.get(field)) for field in identity_fields)
+        and authority.get("cursor_key_identity_sha256") == expected_key_identity
+        and authority.get("signature_algorithm")
+        == "RSASSA-PKCS1-v1_5-SHA256"
+        and isinstance(modulus, str)
+        and re.fullmatch(r"[0-9a-f]{512}", modulus) is not None
+        and int(modulus, 16).bit_length() == 2_048
+        and int(modulus, 16) % 2 == 1
+        and exponent == 65_537
+        and isinstance(maximum_clock_skew_ms, int)
+        and not isinstance(maximum_clock_skew_ms, bool)
+        and 0 <= maximum_clock_skew_ms <= 1_000
+        and isinstance(maximum_call_duration_ms, int)
+        and not isinstance(maximum_call_duration_ms, bool)
+        and 1 <= maximum_call_duration_ms <= 1_000
+    ):
+        raise MicroLiveAuthorizationError(
+            "execution service authority binding is invalid"
         )
     return authority
 
