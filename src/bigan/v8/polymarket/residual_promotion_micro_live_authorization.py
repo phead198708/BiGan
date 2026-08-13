@@ -35,7 +35,7 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
 )
 
 AUTHORIZATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v4"
+    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v5"
 )
 HUMAN_ATTESTATION_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-human-micro-live-attestation-v2"
@@ -70,6 +70,7 @@ REQUIRED_SUCCESSOR_DEPLOYMENT_COMPONENTS = (
     "durable_single_writer_journal",
     "external_durable_monotonic_risk_domain_lease",
     "trusted_clock_source",
+    "official_settlement_authority",
     "independent_watchdog_scheduler",
     "independent_emergency_kill_channel",
     "bounded_transport_deadlines",
@@ -124,6 +125,7 @@ class VerifiedMicroLiveAuthorization:
     execution_signer_identity_sha256: str
     execution_cursor_key_identity_sha256: str
     execution_clock_identity_sha256: str
+    execution_settlement_authority_identity_sha256: str
     execution_public_key_modulus_hex: str
     execution_public_key_exponent: int
     execution_maximum_clock_skew_ms: int
@@ -415,6 +417,9 @@ def verify_micro_live_authorization(
         execution_clock_identity_sha256=str(
             execution_service_authority["clock_identity_sha256"]
         ),
+        execution_settlement_authority_identity_sha256=str(
+            execution_service_authority["settlement_authority_identity_sha256"]
+        ),
         execution_public_key_modulus_hex=str(
             execution_service_authority["public_key_modulus_hex"]
         ),
@@ -497,7 +502,7 @@ def _capability_integrity_sha256(
     ):
         raise ValueError("loaded micro-live model bytes do not match the frozen runtime")
     payload = {
-        "schema_version": "verified-micro-live-authorization-capability-v3",
+        "schema_version": "verified-micro-live-authorization-capability-v4",
         "authorization_id": capability.authorization_id,
         "authorization_payload_sha256": capability.authorization_payload_sha256,
         "candidate_bundle_sha256": capability.candidate_bundle_sha256,
@@ -538,6 +543,9 @@ def _capability_integrity_sha256(
         ),
         "execution_clock_identity_sha256": (
             capability.execution_clock_identity_sha256
+        ),
+        "execution_settlement_authority_identity_sha256": (
+            capability.execution_settlement_authority_identity_sha256
         ),
         "execution_public_key_modulus_hex": (
             capability.execution_public_key_modulus_hex
@@ -927,6 +935,7 @@ def _validated_execution_service_authority(value: Any) -> dict[str, Any]:
         "signer_identity_sha256",
         "cursor_key_identity_sha256",
         "clock_identity_sha256",
+        "settlement_authority_identity_sha256",
         "signature_algorithm",
         "public_key_modulus_hex",
         "public_key_exponent",
@@ -954,6 +963,7 @@ def _validated_execution_service_authority(value: Any) -> dict[str, Any]:
         "exchange_account_sha256",
         "signer_identity_sha256",
         "clock_identity_sha256",
+        "settlement_authority_identity_sha256",
     )
     maximum_clock_skew_ms = authority.get("maximum_clock_skew_ms")
     maximum_call_duration_ms = authority.get("maximum_call_duration_ms")

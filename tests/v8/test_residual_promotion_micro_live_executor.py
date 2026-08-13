@@ -143,6 +143,9 @@ TEST_EXECUTION_SIGNER_IDENTITY_SHA256 = canonical_json_sha256(
 TEST_EXECUTION_CLOCK_IDENTITY_SHA256 = canonical_json_sha256(
     {"clock": "test-trusted-clock-v1"}
 )
+TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256 = canonical_json_sha256(
+    {"settlement_authority": "test-official-settlement-provider-v1"}
+)
 TEST_EXECUTION_AUTHORITY = {
     "service_identity_sha256": TEST_EXECUTION_SERVICE_IDENTITY_SHA256,
     "adapter_implementation_sha256": TEST_EXECUTION_ADAPTER_IMPLEMENTATION_SHA256,
@@ -152,6 +155,9 @@ TEST_EXECUTION_AUTHORITY = {
     "signer_identity_sha256": TEST_EXECUTION_SIGNER_IDENTITY_SHA256,
     "cursor_key_identity_sha256": TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
     "clock_identity_sha256": TEST_EXECUTION_CLOCK_IDENTITY_SHA256,
+    "settlement_authority_identity_sha256": (
+        TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256
+    ),
     "signature_algorithm": executor_module.RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM,
     "public_key_modulus_hex": TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
     "public_key_exponent": 65_537,
@@ -562,6 +568,10 @@ class _TestDurableRiskDomainLease:
         self.initial_high_water_generation = initial_high_water_generation
         self.initial_high_water_state_sha256 = initial_high_water_state_sha256
         self._lock = threading.RLock()
+        self.hang_claim = False
+        self.hang_advance = False
+        self.fail_next_advance_before_commit = False
+        self.lose_next_advance_response = False
 
     def _signed_receipt(self, receipt_core: dict[str, Any]) -> bytes:
         signed_bytes = _json_bytes(receipt_core)
@@ -604,6 +614,8 @@ class _TestDurableRiskDomainLease:
         risk_domain_id: str,
         journal_namespace_id: str,
     ) -> bytes:
+        if self.hang_claim:
+            threading.Event().wait(10)
         if not (
             lease_id == self.lease_id
             and service_identity_sha256
@@ -635,6 +647,10 @@ class _TestDurableRiskDomainLease:
                     "high_water_state_sha256": (
                         self.initial_high_water_state_sha256
                     ),
+                    "killed": False,
+                    "kill_reason": None,
+                    "kill_event_ts_ms": None,
+                    "kill_payload_sha256": None,
                 }
                 binding_path.write_bytes(_json_bytes(authority_state))
                 claim_status = (
@@ -659,6 +675,10 @@ class _TestDurableRiskDomainLease:
             "high_water_state_sha256": authority_state[
                 "high_water_state_sha256"
             ],
+            "killed": authority_state["killed"],
+            "kill_reason": authority_state["kill_reason"],
+            "kill_event_ts_ms": authority_state["kill_event_ts_ms"],
+            "kill_payload_sha256": authority_state["kill_payload_sha256"],
         }
         return self._signed_receipt(receipt_core)
 
@@ -677,6 +697,11 @@ class _TestDurableRiskDomainLease:
         next_generation: int,
         next_state_sha256: str,
     ) -> bytes:
+        if self.hang_advance:
+            threading.Event().wait(10)
+        if self.fail_next_advance_before_commit:
+            self.fail_next_advance_before_commit = False
+            raise RuntimeError("synthetic authority failure before commit")
         if not (
             lease_id == self.lease_id
             and service_identity_sha256
@@ -701,6 +726,9 @@ class _TestDurableRiskDomainLease:
             authority_state["high_water_generation"] = next_generation
             authority_state["high_water_state_sha256"] = next_state_sha256
             binding_path.write_bytes(_json_bytes(authority_state))
+        if self.lose_next_advance_response:
+            self.lose_next_advance_response = False
+            raise RuntimeError("synthetic authority response loss after commit")
         return self._signed_receipt(
             {
                 "schema_version": (
@@ -717,6 +745,70 @@ class _TestDurableRiskDomainLease:
                 "previous_generation": expected_generation,
                 "high_water_generation": next_generation,
                 "high_water_state_sha256": next_state_sha256,
+            }
+        )
+
+    def persist_risk_domain_kill(
+        self,
+        *,
+        lease_id: str,
+        service_identity_sha256: str,
+        tenant_id: str,
+        key_identity_sha256: str,
+        authorization_id: str,
+        risk_domain_id: str,
+        journal_namespace_id: str,
+        journal_epoch: str,
+        reason: str,
+        event_ts_ms: int,
+        payload_sha256: str,
+    ) -> bytes:
+        if not (
+            lease_id == self.lease_id
+            and service_identity_sha256
+            == TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256
+            and tenant_id == TEST_RISK_DOMAIN_TENANT_ID
+            and key_identity_sha256 == TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256
+        ):
+            raise RuntimeError("risk-domain authority identity mismatch")
+        binding_path = self._binding_path(risk_domain_id)
+        with self._lock:
+            authority_state = json.loads(binding_path.read_bytes())
+            if not (
+                authority_state["authorization_id"] == authorization_id
+                and authority_state["journal_namespace_id"] == journal_namespace_id
+                and authority_state["journal_epoch"] == journal_epoch
+            ):
+                raise RuntimeError("risk-domain kill binding mismatch")
+            if authority_state["killed"]:
+                reason = authority_state["kill_reason"]
+                event_ts_ms = authority_state["kill_event_ts_ms"]
+                payload_sha256 = authority_state["kill_payload_sha256"]
+            else:
+                authority_state.update(
+                    {
+                        "killed": True,
+                        "kill_reason": reason,
+                        "kill_event_ts_ms": event_ts_ms,
+                        "kill_payload_sha256": payload_sha256,
+                    }
+                )
+                binding_path.write_bytes(_json_bytes(authority_state))
+        return self._signed_receipt(
+            {
+                "schema_version": executor_module.JOURNAL_KILL_RECEIPT_SCHEMA_VERSION,
+                "lease_id": lease_id,
+                "service_identity_sha256": service_identity_sha256,
+                "tenant_id": tenant_id,
+                "key_identity_sha256": key_identity_sha256,
+                "authorization_id": authorization_id,
+                "risk_domain_id": risk_domain_id,
+                "journal_namespace_id": journal_namespace_id,
+                "journal_epoch": journal_epoch,
+                "reason": reason,
+                "event_ts_ms": event_ts_ms,
+                "payload_sha256": payload_sha256,
+                "killed": True,
             }
         )
 
@@ -928,6 +1020,14 @@ def _record_settlement(
         )
     )
     event = {
+        "schema_version": executor_module.SETTLEMENT_RECEIPT_SCHEMA_VERSION,
+        "authorization_id": executor._authorization.authorization_id,
+        "execution_service_binding_sha256": (
+            executor._authorization.execution_service_binding_sha256
+        ),
+        "settlement_authority_identity_sha256": (
+            TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256
+        ),
         "event_type": "OFFICIAL_SETTLEMENT",
         "settlement_id": settlement_id,
         "market_id": prepared["market_id"],
@@ -935,14 +1035,23 @@ def _record_settlement(
         "winning_token_id": winning_token_id,
         "payout_per_token": payout_per_token,
         "finalized_at_ts_ms": now_ts_ms,
+        "observed_at_ts_ms": now_ts_ms,
+        "finality_status": "FINAL",
+        "confirmation_depth": 1,
+        "provider_request_sha256": canonical_json_sha256(
+            {"market_id": prepared["market_id"], "settlement_id": settlement_id}
+        ),
     }
     event.update(event_overrides or {})
+    transport = executor.transport
+    if not isinstance(transport, FakeTransport):
+        raise AssertionError("settlement helper requires signed fake transport")
     return executor.record_settlement(
         client_order_id=client_order_id,
         settlement_id=settlement_id,
         now_ts_ms=now_ts_ms,
         payout_per_token=payout_per_token,
-        raw_official_settlement_event=_json_bytes(event),
+        raw_official_settlement_event=transport._signed_execution_receipt(event),
     )
 
 
@@ -963,6 +1072,11 @@ class FakeTransport:
         trusted_time_advance_ms: int = 0,
         cursor_observed_advance_ms: int = 0,
         cursor_response_post_signature_overrides: dict[str, Any] | None = None,
+        execution_service_binding_sha256: str = (
+            TEST_EXECUTION_SERVICE_BINDING_SHA256
+        ),
+        cursor_delay_ms: int = 0,
+        trusted_time_delay_ms: int = 0,
     ) -> None:
         self.fail_submit = fail_submit
         self.fail_cancel = fail_cancel
@@ -979,6 +1093,9 @@ class FakeTransport:
         self.cursor_response_post_signature_overrides = dict(
             cursor_response_post_signature_overrides or {}
         )
+        self.execution_service_binding_sha256 = execution_service_binding_sha256
+        self.cursor_delay_ms = cursor_delay_ms
+        self.trusted_time_delay_ms = trusted_time_delay_ms
         self.submit_calls: list[dict[str, Any]] = []
         self.cancel_calls: list[dict[str, Any]] = []
         self.lookup_calls: list[dict[str, Any]] = []
@@ -1014,6 +1131,39 @@ class FakeTransport:
             }
         )
 
+    def _authenticated_operation_response(
+        self,
+        request: dict[str, Any],
+        raw_response: bytes,
+    ) -> bytes:
+        authentication = dict(request["execution_authentication"])
+        raw_response_json = raw_response.decode("utf-8")
+        return self._signed_execution_receipt(
+            {
+                "schema_version": (
+                    executor_module.EXECUTION_OPERATION_RECEIPT_SCHEMA_VERSION
+                ),
+                "authorization_id": authentication["authorization_id"],
+                "execution_service_binding_sha256": authentication[
+                    "execution_service_binding_sha256"
+                ],
+                "exchange_endpoint_sha256": authentication[
+                    "exchange_endpoint_sha256"
+                ],
+                "exchange_account_sha256": authentication[
+                    "exchange_account_sha256"
+                ],
+                "signer_identity_sha256": authentication[
+                    "signer_identity_sha256"
+                ],
+                "operation": authentication["operation"],
+                "request_nonce_sha256": authentication["request_nonce_sha256"],
+                "request_sha256": canonical_json_sha256(request),
+                "response_sha256": hashlib.sha256(raw_response).hexdigest(),
+                "raw_response_json": raw_response_json,
+            }
+        )
+
     def attest_execution_binding(self, request: dict[str, Any]) -> bytes:
         core = {
             "schema_version": (
@@ -1022,7 +1172,7 @@ class FakeTransport:
             "authorization_id": request["authorization_id"],
             "challenge_sha256": request["challenge_sha256"],
             "execution_service_binding_sha256": (
-                TEST_EXECUTION_SERVICE_BINDING_SHA256
+                self.execution_service_binding_sha256
             ),
             "service_identity_sha256": TEST_EXECUTION_SERVICE_IDENTITY_SHA256,
             "adapter_implementation_sha256": (
@@ -1034,11 +1184,16 @@ class FakeTransport:
             "signer_identity_sha256": TEST_EXECUTION_SIGNER_IDENTITY_SHA256,
             "cursor_key_identity_sha256": TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
             "clock_identity_sha256": TEST_EXECUTION_CLOCK_IDENTITY_SHA256,
+            "settlement_authority_identity_sha256": (
+                TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256
+            ),
         }
         core.update(self.execution_binding_overrides)
         return self._signed_execution_receipt(core)
 
     def read_trusted_time(self, request: dict[str, Any]) -> bytes:
+        if self.trusted_time_delay_ms:
+            time.sleep(self.trusted_time_delay_ms / 1_000)
         completed_at_ts_ms = (
             int(request["request_started_at_ts_ms"])
             + self.trusted_time_advance_ms
@@ -1055,7 +1210,7 @@ class FakeTransport:
         self.submit_calls.append(copy.deepcopy(request))
         if self.fail_submit:
             raise RuntimeError("synthetic transport timeout")
-        return _json_bytes({
+        response = _json_bytes({
             "client_order_id": request["client_order_id"],
             "exchange_order_id": self.fixed_exchange_order_id
             or f"exchange-{request['client_order_id'][:12]}",
@@ -1065,6 +1220,7 @@ class FakeTransport:
             "accepted_quantity": request["quantity"],
             "limit_price": request["limit_price"],
         })
+        return self._authenticated_operation_response(request, response)
 
     def cancel_order(self, request: dict[str, Any]) -> bytes:
         self.cancel_calls.append(copy.deepcopy(request))
@@ -1074,11 +1230,12 @@ class FakeTransport:
             )
             raise RuntimeError("synthetic cancel timeout")
         self.authoritative_status[request["client_order_id"]] = "CANCELED"
-        return _json_bytes({
+        response = _json_bytes({
             "client_order_id": request["client_order_id"],
             "exchange_order_id": request["exchange_order_id"],
             "status": "CANCEL_REQUESTED",
         })
+        return self._authenticated_operation_response(request, response)
 
     def register_authoritative_fill(self, event: dict[str, Any]) -> None:
         client_order_id = str(event["client_order_id"])
@@ -1096,6 +1253,8 @@ class FakeTransport:
             self.authoritative_status[client_order_id] = "FILLED"
 
     def read_order_fill_cursor(self, request: dict[str, Any]) -> bytes:
+        if self.cursor_delay_ms:
+            time.sleep(self.cursor_delay_ms / 1_000)
         self.fill_cursor_calls.append(copy.deepcopy(request))
         submitted = next(
             row
@@ -1207,8 +1366,11 @@ class FakeTransport:
                 **terminal_fields,
             }
             response.update(self.cancel_lookup_overrides)
-            return _json_bytes(response)
-        return _json_bytes({
+            return self._authenticated_operation_response(
+                request,
+                _json_bytes(response),
+            )
+        response = _json_bytes({
             "client_order_id": submitted["client_order_id"],
             "exchange_order_id": self.fixed_exchange_order_id
             or f"exchange-{submitted['client_order_id'][:12]}",
@@ -1218,10 +1380,11 @@ class FakeTransport:
             "accepted_quantity": submitted["quantity"],
             "limit_price": submitted["limit_price"],
         })
+        return self._authenticated_operation_response(request, response)
 
     def fence_order_invocation(self, request: dict[str, Any]) -> bytes:
         self.fence_calls.append(copy.deepcopy(request))
-        return _json_bytes(
+        response = _json_bytes(
             {
                 "authorization_id": request["authorization_id"],
                 "client_order_id": request["client_order_id"],
@@ -1229,6 +1392,7 @@ class FakeTransport:
                 "side_effects_fenced": True,
             }
         )
+        return self._authenticated_operation_response(request, response)
 
 
 class LateAcceptAfterRejectedLookupTransport(FakeTransport):
@@ -1248,7 +1412,7 @@ class LateAcceptAfterRejectedLookupTransport(FakeTransport):
         self.submit_started.set()
         self.release_submit.wait(timeout=10)
         self.submit_finished.set()
-        return _json_bytes(
+        response = _json_bytes(
             {
                 "client_order_id": request["client_order_id"],
                 "exchange_order_id": f"exchange-{request['client_order_id'][:12]}",
@@ -1259,11 +1423,12 @@ class LateAcceptAfterRejectedLookupTransport(FakeTransport):
                 "limit_price": request["limit_price"],
             }
         )
+        return self._authenticated_operation_response(request, response)
 
     def lookup_order(self, request: dict[str, Any]) -> bytes:
         self.lookup_calls.append(copy.deepcopy(request))
         submitted = self.submit_calls[-1]
-        return _json_bytes(
+        response = _json_bytes(
             {
                 "client_order_id": submitted["client_order_id"],
                 "exchange_order_id": f"exchange-{submitted['client_order_id'][:12]}",
@@ -1276,12 +1441,13 @@ class LateAcceptAfterRejectedLookupTransport(FakeTransport):
                 "limit_price": submitted["limit_price"],
             }
         )
+        return self._authenticated_operation_response(request, response)
 
     def fence_order_invocation(self, request: dict[str, Any]) -> bytes:
         self.fence_calls.append(copy.deepcopy(request))
         self.fence_started.set()
         self.submit_finished.wait(timeout=10)
-        return _json_bytes(
+        response = _json_bytes(
             {
                 "authorization_id": request["authorization_id"],
                 "client_order_id": request["client_order_id"],
@@ -1289,6 +1455,7 @@ class LateAcceptAfterRejectedLookupTransport(FakeTransport):
                 "side_effects_fenced": True,
             }
         )
+        return self._authenticated_operation_response(request, response)
 
 
 class SimulatedProcessCrash(BaseException):
@@ -1306,21 +1473,25 @@ def _crash_after_committed_event_journal(
         ),
     )
     journal.target_event_type = None
-    original_write_locked = journal._write_locked
+    original_promote_pending_locked = journal._promote_pending_locked
 
     def arm(event_type: str) -> None:
         journal.target_event_type = event_type
 
-    def write_locked(*, generation: int, raw_state: bytes) -> None:
-        original_write_locked(generation=generation, raw_state=raw_state)
-        state = json.loads(raw_state)
+    def promote_pending_locked() -> None:
+        pending = journal._read_snapshot_path(
+            journal.pending_state_path,
+            "pending crash-injection state",
+        )
+        state = json.loads(pending.raw_state)
+        original_promote_pending_locked()
         events = state.get("events") or []
         if events and events[-1]["event_type"] == journal.target_event_type:
             journal.target_event_type = None
             raise SimulatedProcessCrash
 
     journal.arm = arm
-    journal._write_locked = write_locked
+    journal._promote_pending_locked = promote_pending_locked
     return journal
 
 
@@ -1990,10 +2161,19 @@ def _verified(
             TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256
         ),
         execution_clock_identity_sha256=TEST_EXECUTION_CLOCK_IDENTITY_SHA256,
+        execution_settlement_authority_identity_sha256=(
+            TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256
+        ),
         execution_public_key_modulus_hex=TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
         execution_public_key_exponent=65_537,
-        execution_maximum_clock_skew_ms=250,
-        execution_maximum_call_duration_ms=250,
+        execution_maximum_clock_skew_ms=int(
+            authorization["execution_service_authority"]["maximum_clock_skew_ms"]
+        ),
+        execution_maximum_call_duration_ms=int(
+            authorization["execution_service_authority"][
+                "maximum_call_duration_ms"
+            ]
+        ),
         capital_base_usd=Decimal(authorization["capital_base_usd"]),
         maximum_notional_usd=Decimal(authorization["maximum_notional_usd"]),
         maximum_realized_loss_usd=Decimal(
@@ -2182,6 +2362,7 @@ def test_current_gate_declares_complete_successor_deployment_closure() -> None:
         "durable_single_writer_journal",
         "external_durable_monotonic_risk_domain_lease",
         "trusted_clock_source",
+        "official_settlement_authority",
         "independent_watchdog_scheduler",
         "independent_emergency_kill_channel",
         "bounded_transport_deadlines",
@@ -5160,7 +5341,11 @@ def test_hung_cancel_persists_emergency_kill_then_cancel_unknown(
         reason="hung_cancel_test",
         now_ts_ms=NOW_TS_MS + 1,
     )
-    assert time.monotonic() - started < 1.0
+    maximum_bounded_kill_seconds = (
+        4 * executor_module.MAX_AUTHORITY_CALL_DURATION_MS
+        + verified.execution_maximum_call_duration_ms
+    ) / 1_000 + 1.0
+    assert time.monotonic() - started < maximum_bounded_kill_seconds
     assert journal.emergency_kill_snapshot() is not None
     assert killed["unknown_cancel_client_order_ids"]
     assert any(
@@ -5877,7 +6062,7 @@ def test_existing_authority_high_water_rejects_deleted_wal_reset(
         journal_root,
         risk_domain_lease=lease,
     )
-    with pytest.raises(MicroLiveExecutionError, match="no local WAL"):
+    with pytest.raises(MicroLiveExecutionError, match="no recoverable local state"):
         MicroLiveExecutor(
             verified,
             transport=FakeTransport(),
@@ -6047,3 +6232,353 @@ def test_semantically_equal_fill_bytes_reconcile_restart_and_settle(
         official_settlement_sha256="0" * 64,
     )
     assert settled["status"] == "SETTLEMENT_RECORDED"
+
+
+def _bind_standalone_journal(journal: AtomicFileMicroLiveStateJournal) -> None:
+    journal.bind_risk_domain(
+        authorization_id="standalone-journal-test-authorization",
+        risk_domain_id="f" * 64,
+        lease_id=auth_module.TRUSTED_RISK_DOMAIN_LEASE_ID,
+        service_identity_sha256=TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256,
+        tenant_id=TEST_RISK_DOMAIN_TENANT_ID,
+        key_identity_sha256=TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+        public_key_modulus_hex=TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
+        public_key_exponent=65_537,
+    )
+
+
+def _standalone_journal_state(generation: int) -> bytes:
+    return _json_bytes(
+        {
+            "schema_version": executor_module.STATE_SCHEMA_VERSION,
+            "journal_generation": generation,
+        }
+    )
+
+
+@pytest.mark.parametrize("failure_mode", ("remote_old", "lost_ack"))
+def test_pending_journal_transition_recovers_both_authority_views(
+    tmp_path: Path,
+    failure_mode: str,
+) -> None:
+    lease = _TestDurableRiskDomainLease(tmp_path / "authority")
+    root = tmp_path / "journal"
+    journal = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    _bind_standalone_journal(journal)
+    journal.initialize(_standalone_journal_state(0))
+    if failure_mode == "remote_old":
+        lease.fail_next_advance_before_commit = True
+    else:
+        lease.lose_next_advance_response = True
+    with (
+        pytest.raises(MicroLiveExecutionError, match="advance failed closed"),
+        journal.transaction(expected_generation=0) as transaction,
+    ):
+        transaction.commit(
+            expected_generation=0,
+            raw_state=_standalone_journal_state(1),
+        )
+    assert journal.pending_state_path.exists()
+
+    replacement = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    _bind_standalone_journal(replacement)
+    snapshot = replacement.snapshot()
+    assert snapshot.generation == 1
+    assert snapshot.raw_state == _standalone_journal_state(1)
+    assert not replacement.pending_state_path.exists()
+
+
+def test_crash_after_authority_commit_before_local_promote_recovers(
+    tmp_path: Path,
+) -> None:
+    lease = _TestDurableRiskDomainLease(tmp_path / "authority")
+    root = tmp_path / "journal"
+    journal = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    _bind_standalone_journal(journal)
+    journal.initialize(_standalone_journal_state(0))
+
+    def crash_before_promote() -> None:
+        raise SimulatedProcessCrash
+
+    journal._promote_pending_locked = crash_before_promote
+    with (
+        pytest.raises(SimulatedProcessCrash),
+        journal.transaction(expected_generation=0) as transaction,
+    ):
+        transaction.commit(
+            expected_generation=0,
+            raw_state=_standalone_journal_state(1),
+        )
+    assert journal.pending_state_path.exists()
+    assert journal._read_locked().generation == 0
+
+    replacement = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    _bind_standalone_journal(replacement)
+    assert replacement.snapshot().generation == 1
+    assert not replacement.pending_state_path.exists()
+
+
+@pytest.mark.parametrize("operation", ("claim", "advance"))
+def test_all_external_authority_calls_have_a_hard_deadline(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    lease = _TestDurableRiskDomainLease(tmp_path / "authority")
+    journal = AtomicFileMicroLiveStateJournal(
+        tmp_path / "journal",
+        risk_domain_lease=lease,
+    )
+    if operation == "claim":
+        lease.hang_claim = True
+        started = time.monotonic()
+        with pytest.raises(MicroLiveExecutionError, match="claim failed closed"):
+            _bind_standalone_journal(journal)
+    else:
+        _bind_standalone_journal(journal)
+        lease.hang_advance = True
+        started = time.monotonic()
+        with pytest.raises(MicroLiveExecutionError, match="advance failed closed"):
+            journal.initialize(_standalone_journal_state(0))
+    assert time.monotonic() - started < 2.0
+
+
+def test_external_kill_survives_local_sidecar_deletion_and_restart(
+    tmp_path: Path,
+) -> None:
+    lease = _TestDurableRiskDomainLease(tmp_path / "authority")
+    root = tmp_path / "journal"
+    journal = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    _bind_standalone_journal(journal)
+    journal.initialize(_standalone_journal_state(0))
+    killed = journal.persist_emergency_kill(
+        authorization_id="standalone-journal-test-authorization",
+        risk_domain_id="f" * 64,
+        reason="test_irreversible_kill",
+        event_ts_ms=NOW_TS_MS,
+    )
+    journal.emergency_kill_path.unlink()
+
+    replacement = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    _bind_standalone_journal(replacement)
+    assert replacement.emergency_kill_snapshot() == killed
+    assert replacement.emergency_kill_path.exists()
+
+
+def test_execution_transport_is_immutable_and_attestation_is_not_replayable(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+
+    class CapturingTransport(FakeTransport):
+        attestation: bytes | None = None
+
+        def attest_execution_binding(self, request: dict[str, Any]) -> bytes:
+            self.attestation = super().attest_execution_binding(request)
+            return self.attestation
+
+    capturing = CapturingTransport()
+    executor = MicroLiveExecutor(verified, transport=capturing)
+    with pytest.raises(AttributeError):
+        executor.transport = FakeTransport()  # type: ignore[misc]
+    assert capturing.attestation is not None
+    swapped = FakeTransport()
+    executor._transport = swapped
+    with pytest.raises(MicroLiveExecutionError, match="capability changed"):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    assert swapped.submit_calls == []
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+    class ReplayTransport(FakeTransport):
+        def attest_execution_binding(self, request: dict[str, Any]) -> bytes:
+            del request
+            assert capturing.attestation is not None
+            return capturing.attestation
+
+    with pytest.raises(MicroLiveExecutionError, match="attestation is invalid"):
+        MicroLiveExecutor(verified, transport=ReplayTransport())
+
+
+def test_signed_operation_receipt_cannot_replay_across_requests(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+
+    class ReplaySubmitReceiptTransport(FakeTransport):
+        first_receipt: bytes | None = None
+
+        def submit_order(self, request: dict[str, Any]) -> bytes:
+            receipt = super().submit_order(request)
+            if self.first_receipt is None:
+                self.first_receipt = receipt
+                return receipt
+            return self.first_receipt
+
+    transport = ReplaySubmitReceiptTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    first = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    assert first["status"] == "ORDER_ACKNOWLEDGED"
+    with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+        executor.submit_signal(
+            **_signal(
+                candidate_bundle_sha256=verified.candidate_bundle_sha256,
+                market_id=f"0x{909:064x}",
+                up_token_id="90900",
+                down_token_id="90901",
+            )
+        )
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+
+def test_kill_switch_uses_fresh_clock_for_each_open_order(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport(
+        cursor_observed_advance_ms=100,
+        trusted_time_advance_ms=100,
+    )
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order_ids = []
+    for index in (910, 911):
+        result = executor.submit_signal(
+            **_signal(
+                candidate_bundle_sha256=verified.candidate_bundle_sha256,
+                market_id=f"0x{index:064x}",
+                up_token_id=f"{index}00",
+                down_token_id=f"{index}01",
+            )
+        )
+        order_ids.append(result["client_order_id"])
+    killed = executor.engage_kill_switch(
+        reason="multi_order_clock_test",
+        now_ts_ms=NOW_TS_MS + 1,
+    )
+    assert killed["canceled_client_order_ids"] == order_ids
+    assert killed["unknown_cancel_client_order_ids"] == []
+    event_times = [int(event["event_ts_ms"]) for event in executor.events]
+    assert event_times == sorted(event_times)
+
+
+def test_kill_switch_partial_fill_open_path_uses_fresh_exception_clock(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    class OpenAfterCancelTransport(FakeTransport):
+        def cancel_order(self, request: dict[str, Any]) -> bytes:
+            self.cancel_calls.append(copy.deepcopy(request))
+            response = _json_bytes(
+                {
+                    "client_order_id": request["client_order_id"],
+                    "exchange_order_id": request["exchange_order_id"],
+                    "status": "CANCEL_REQUESTED",
+                }
+            )
+            return self._authenticated_operation_response(request, response)
+
+    verified = _verified(authorized_fixture)
+    transport = OpenAfterCancelTransport(
+        cursor_observed_advance_ms=100,
+        trusted_time_advance_ms=100,
+    )
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    prepared, acknowledgement = _order_identity(executor, order["client_order_id"])
+    transport.register_authoritative_fill(
+        {
+            "event_type": "FILL",
+            "client_order_id": order["client_order_id"],
+            "exchange_order_id": acknowledgement["exchange_order_id"],
+            "fill_id": "partial-open-kill-fill",
+            "market_id": prepared["market_id"],
+            "token_id": prepared["token_id"],
+            "quantity": "0.5",
+            "price": prepared["limit_price"],
+            "fee_usd": "0.0002",
+            "executed_at_ts_ms": NOW_TS_MS + 1,
+            "fill_event_sequence": 1,
+            "cumulative_filled_quantity": "0.5",
+            "cumulative_fill_count": 1,
+        }
+    )
+    killed = executor.engage_kill_switch(
+        reason="partial_open_clock_test",
+        now_ts_ms=NOW_TS_MS + 1,
+    )
+    assert killed["unknown_cancel_client_order_ids"] == [order["client_order_id"]]
+    event_times = [int(event["event_ts_ms"]) for event in executor.events]
+    assert event_times == sorted(event_times)
+
+
+def test_unsigned_caller_supplied_settlement_is_rejected(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    _record_fill(
+        executor,
+        client_order_id=order["client_order_id"],
+        fill_id="unsigned-settlement-fill",
+        now_ts_ms=NOW_TS_MS,
+        quantity="1",
+        price="0.39",
+        fee_usd="0.0002",
+        transport_event_sha256="0" * 64,
+    )
+    executor.reconcile_authoritative_fill_cursor(
+        client_order_id=order["client_order_id"],
+        now_ts_ms=NOW_TS_MS,
+    )
+    prepared, _ = _order_identity(executor, order["client_order_id"])
+    unsigned = {
+        "event_type": "OFFICIAL_SETTLEMENT",
+        "settlement_id": "unsigned-settlement",
+        "market_id": prepared["market_id"],
+        "slug": prepared["slug"],
+        "winning_token_id": prepared["token_id"],
+        "payout_per_token": "1",
+        "finalized_at_ts_ms": SETTLEMENT_NOW_TS_MS,
+    }
+    with pytest.raises(MicroLiveExecutionError, match="settlement identity"):
+        executor.record_settlement(
+            client_order_id=order["client_order_id"],
+            settlement_id="unsigned-settlement",
+            now_ts_ms=SETTLEMENT_NOW_TS_MS,
+            payout_per_token="1",
+            raw_official_settlement_event=_json_bytes(unsigned),
+        )
+    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+
+def test_two_call_completion_budget_accepts_bounded_combined_latency(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    authorization = copy.deepcopy(authorized_fixture["authorization"])
+    authorization["execution_service_authority"]["maximum_clock_skew_ms"] = 0
+    binding = canonical_json_sha256(authorization["execution_service_authority"])
+    verified = _verified(authorized_fixture, authorization)
+    transport = FakeTransport(
+        execution_service_binding_sha256=binding,
+        cursor_observed_advance_ms=400,
+        trusted_time_advance_ms=400,
+        cursor_delay_ms=100,
+        trusted_time_delay_ms=100,
+    )
+    executor = MicroLiveExecutor(verified, transport=transport)
+    order = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    transport.authoritative_status[order["client_order_id"]] = "CANCELED"
+    closed = executor.reconcile_authoritative_fill_cursor(
+        client_order_id=order["client_order_id"],
+        now_ts_ms=NOW_TS_MS,
+    )
+    assert closed["status"] == "ORDER_CANCELED"
