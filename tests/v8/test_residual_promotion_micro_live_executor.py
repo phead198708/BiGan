@@ -96,26 +96,29 @@ TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256 = canonical_json_sha256(
     {"service": "test-external-risk-domain-authority-v1"}
 )
 TEST_RISK_DOMAIN_TENANT_ID = "bigan-test-tenant"
-_TEST_RSA_PRIME_P = int(
-    "ffe9a45eb2c0d77802e88eb47b6d4b6b233cc1c30a00c6be7aee34f463b85d2c"
-    "b2b5c41575d165ec1983437427aa40c110821f0490a0eef041d87752ccaf2b0c3"
-    "dd40546dd26ad042e661e9f1bd039138943b9bddcfeefa403da5105c3c427487b4"
-    "e61164487879521954958b77e09939720e165553111ef09258e8fe398f96b",
-    16,
+_TEST_RSA_PRIMES = tuple(
+    int(value, 16)
+    for value in (
+        "e984a7fbe8e8ed921d292d9f57917715cf6651ae104d5a06ca93ac397f40fbbb"
+        "5803784b7fe7504e8d705c235123fbc581965790d9e5c6e8f9af6da007337e13",
+        "dea17c8a2c8dbcd90773ace6f91a2acbf4fdf4f4878556a7ddc65d3d823db5d2"
+        "e220c6f6f63fafac5d561ad16a4698d21ac935d0ae107e04c47120150aabef3f",
+        "cd08bc39601391e26fe4bfe49cebdd7add2d5d47e4c9fd96d837aafcca7c23eb"
+        "80ced052df9abfb18ce41f159f1b132146fcf0dace232a54afb2c1de61812a39",
+        "f16421407039c0337f14c5ccf4d162a80b480adfaa6590ccaa1a597a2f28de57"
+        "952c3e12f1f6bc0d40f70d347d97c797ae153e00876394f426cb53a198954fbf",
+    )
 )
-_TEST_RSA_PRIME_Q = int(
-    "b8c880373e55826d54ce635c30e8173716fb127408960b6d3216453bae5894da"
-    "3878ccceac40c1a85c1f171bf5eaa8a10bf0f7d415a48420c27dea527fe05dd7"
-    "ee04f292087f5ded227954f4acca2d6321763049c340cb78bcdce9a716ae0dced"
-    "f29f74286bd5d228530fa80402ca849a92b09757e6b5b74cf089ec69d08c413",
-    16,
-)
-_TEST_RSA_MODULUS = _TEST_RSA_PRIME_P * _TEST_RSA_PRIME_Q
-_TEST_RSA_PHI = (_TEST_RSA_PRIME_P - 1) * (_TEST_RSA_PRIME_Q - 1)
+_TEST_RSA_MODULUS = 1
+_TEST_RSA_PHI = 1
+for _test_rsa_prime in _TEST_RSA_PRIMES:
+    _TEST_RSA_MODULUS *= _test_rsa_prime
+    _TEST_RSA_PHI *= _test_rsa_prime - 1
 _TEST_RSA_PRIVATE_EXPONENT = pow(65_537, -1, _TEST_RSA_PHI)
-_TEST_RSA_DP = _TEST_RSA_PRIVATE_EXPONENT % (_TEST_RSA_PRIME_P - 1)
-_TEST_RSA_DQ = _TEST_RSA_PRIVATE_EXPONENT % (_TEST_RSA_PRIME_Q - 1)
-_TEST_RSA_Q_INVERSE_MOD_P = pow(_TEST_RSA_PRIME_Q, -1, _TEST_RSA_PRIME_P)
+_TEST_RSA_REDUCED_EXPONENTS = tuple(
+    _TEST_RSA_PRIVATE_EXPONENT % (prime - 1)
+    for prime in _TEST_RSA_PRIMES
+)
 TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX = f"{_TEST_RSA_MODULUS:0512x}"
 TEST_RISK_DOMAIN_PRIVATE_EXPONENT_HEX = f"{_TEST_RSA_PRIVATE_EXPONENT:x}"
 
@@ -131,12 +134,25 @@ def _test_rsa_private_operation(
         private_exponent_hex == TEST_RISK_DOMAIN_PRIVATE_EXPONENT_HEX
         and public_modulus_hex == TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX
     ):
-        residue_p = pow(encoded_integer, _TEST_RSA_DP, _TEST_RSA_PRIME_P)
-        residue_q = pow(encoded_integer, _TEST_RSA_DQ, _TEST_RSA_PRIME_Q)
-        coefficient = (
-            _TEST_RSA_Q_INVERSE_MOD_P * (residue_p - residue_q)
-        ) % _TEST_RSA_PRIME_P
-        return residue_q + _TEST_RSA_PRIME_Q * coefficient
+        combined = pow(
+            encoded_integer,
+            _TEST_RSA_REDUCED_EXPONENTS[0],
+            _TEST_RSA_PRIMES[0],
+        )
+        combined_modulus = _TEST_RSA_PRIMES[0]
+        for prime, reduced_exponent in zip(
+            _TEST_RSA_PRIMES[1:],
+            _TEST_RSA_REDUCED_EXPONENTS[1:],
+            strict=True,
+        ):
+            residue = pow(encoded_integer, reduced_exponent, prime)
+            coefficient = (
+                (residue - combined)
+                * pow(combined_modulus, -1, prime)
+            ) % prime
+            combined += combined_modulus * coefficient
+            combined_modulus *= prime
+        return combined
     return pow(
         encoded_integer,
         int(private_exponent_hex, 16),
