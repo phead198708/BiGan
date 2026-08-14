@@ -57,7 +57,7 @@ STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v16"
 SIGNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-execution-signal-v2"
 JOURNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-durable-journal-v1"
 JOURNAL_NAMESPACE_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-journal-namespace-lease-receipt-v5"
+    "bigan-btc-15m-residual-promotion-journal-namespace-lease-receipt-v6"
 )
 JOURNAL_HIGH_WATER_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-journal-authority-high-water-v1"
@@ -132,6 +132,42 @@ CANCELLATION_SEMANTICS = (
 TERMINAL_CURSOR_OPERATION = "read_order_fill_cursor"
 TERMINAL_CURSOR_SEMANTICS = (
     "authoritative_monotonic_fill_cursor_and_terminal_order_state"
+)
+RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-risk-domain-authority-operations-v1"
+)
+REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS = (
+    "claim_risk_domain",
+    "advance_risk_domain_high_water",
+    "persist_risk_domain_kill",
+    "register_execution_invocation",
+    "commit_execution_outbox_command",
+    "recover_execution_outbox_command",
+    "begin_execution_dispatch",
+    "complete_execution_dispatch",
+    "recover_execution_dispatch",
+    "fence_execution_dispatch",
+)
+REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256 = canonical_json_sha256(
+    {
+        "schema_version": (RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION),
+        "required_operations": list(REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS),
+    }
+)
+RISK_DOMAIN_KILL_SEMANTICS = (
+    "irreversible_kill_atomically_fences_all_active_or_dispatchable_invocations"
+)
+RISK_DOMAIN_OUTBOX_RECOVERY_SEMANTICS = (
+    "signed_exact_committed_outbox_without_dispatch_bearer_capability"
+)
+RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS = (
+    "terminalize_exact_venue_outcome_for_consumed_single_use_dispatch_grant"
+)
+RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS = (
+    "lookup_only_terminalization_from_durable_grant_without_second_dispatch"
+)
+RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS = (
+    "fence_only_not_started_dispatch_else_report_terminal_or_in_progress"
 )
 EMERGENCY_KILL_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-emergency-kill-v1"
@@ -337,6 +373,14 @@ class DurableRiskDomainLeaseBackend(Protocol):
         authorization_id: str,
         risk_domain_id: str,
         journal_namespace_id: str,
+        operation_inventory_schema_version: str,
+        required_operations: Sequence[str],
+        required_operations_sha256: str,
+        kill_semantics: str,
+        outbox_recovery_semantics: str,
+        dispatch_completion_semantics: str,
+        dispatch_recovery_semantics: str,
+        dispatch_fence_semantics: str,
     ) -> bytes:
         """Atomically bind one risk domain and return exact receipt bytes."""
 
@@ -740,6 +784,20 @@ class AtomicFileMicroLiveStateJournal:
                 authorization_id=authorization_id,
                 risk_domain_id=risk_domain_id,
                 journal_namespace_id=journal_namespace_id,
+                operation_inventory_schema_version=(
+                    RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
+                ),
+                required_operations=list(REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS),
+                required_operations_sha256=(
+                    REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256
+                ),
+                kill_semantics=RISK_DOMAIN_KILL_SEMANTICS,
+                outbox_recovery_semantics=(RISK_DOMAIN_OUTBOX_RECOVERY_SEMANTICS),
+                dispatch_completion_semantics=(
+                    RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS
+                ),
+                dispatch_recovery_semantics=(RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS),
+                dispatch_fence_semantics=(RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS),
             )
         except Exception as exc:
             raise MicroLiveExecutionError(
@@ -775,6 +833,20 @@ class AtomicFileMicroLiveStateJournal:
             "kill_reason": kill_reason,
             "kill_event_ts_ms": kill_event_ts_ms,
             "kill_payload_sha256": kill_payload_sha256,
+            "operation_inventory_schema_version": (
+                RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
+            ),
+            "required_operations": list(REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS),
+            "required_operations_sha256": (
+                REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256
+            ),
+            "kill_semantics": RISK_DOMAIN_KILL_SEMANTICS,
+            "outbox_recovery_semantics": (RISK_DOMAIN_OUTBOX_RECOVERY_SEMANTICS),
+            "dispatch_completion_semantics": (
+                RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS
+            ),
+            "dispatch_recovery_semantics": (RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS),
+            "dispatch_fence_semantics": RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS,
         }
         if not (
             claim_status in {"FIRST_CLAIM", "EXISTING_CLAIM"}
@@ -810,6 +882,21 @@ class AtomicFileMicroLiveStateJournal:
                     and _is_sha256(kill_payload_sha256)
                 )
             )
+            and receipt.get("operation_inventory_schema_version")
+            == RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
+            and receipt.get("required_operations")
+            == list(REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS)
+            and receipt.get("required_operations_sha256")
+            == REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256
+            and receipt.get("kill_semantics") == RISK_DOMAIN_KILL_SEMANTICS
+            and receipt.get("outbox_recovery_semantics")
+            == RISK_DOMAIN_OUTBOX_RECOVERY_SEMANTICS
+            and receipt.get("dispatch_completion_semantics")
+            == RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS
+            and receipt.get("dispatch_recovery_semantics")
+            == RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS
+            and receipt.get("dispatch_fence_semantics")
+            == RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS
             and _verify_signed_risk_domain_receipt(
                 receipt,
                 expected_core=expected_receipt_core,
@@ -884,6 +971,22 @@ class AtomicFileMicroLiveStateJournal:
                 "signature_algorithm": RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM,
                 "public_key_modulus_hex": public_key_modulus_hex,
                 "public_key_exponent": public_key_exponent,
+                "operation_inventory_schema_version": (
+                    RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
+                ),
+                "required_operations": list(REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS),
+                "required_operations_sha256": (
+                    REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256
+                ),
+                "kill_semantics": RISK_DOMAIN_KILL_SEMANTICS,
+                "outbox_recovery_semantics": (RISK_DOMAIN_OUTBOX_RECOVERY_SEMANTICS),
+                "dispatch_completion_semantics": (
+                    RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS
+                ),
+                "dispatch_recovery_semantics": (
+                    RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS
+                ),
+                "dispatch_fence_semantics": (RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS),
             }
         )
         with self._exclusive_lock():
@@ -2676,6 +2779,20 @@ def _risk_domain_authority_binding_sha256(
             "public_key_exponent": (
                 authorization.risk_domain_lease_public_key_exponent
             ),
+            "operation_inventory_schema_version": (
+                RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
+            ),
+            "required_operations": list(REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS),
+            "required_operations_sha256": (
+                REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256
+            ),
+            "kill_semantics": RISK_DOMAIN_KILL_SEMANTICS,
+            "outbox_recovery_semantics": (RISK_DOMAIN_OUTBOX_RECOVERY_SEMANTICS),
+            "dispatch_completion_semantics": (
+                RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS
+            ),
+            "dispatch_recovery_semantics": (RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS),
+            "dispatch_fence_semantics": RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS,
         }
     )
 
@@ -3143,11 +3260,15 @@ def _require_startup_execution_capabilities(
             + ",".join(missing_operations)
         )
     authority = getattr(journal, "risk_domain_lease", None)
-    if not callable(
-        getattr(authority, "recover_execution_outbox_command", None)
-    ):
+    missing_authority_operations = [
+        operation
+        for operation in REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS
+        if not callable(getattr(authority, operation, None))
+    ]
+    if missing_authority_operations:
         raise MicroLiveExecutionError(
-            "external risk-domain authority lacks startup outbox recovery"
+            "external risk-domain authority lacks required startup operations: "
+            + ",".join(missing_authority_operations)
         )
 
 

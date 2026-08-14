@@ -85,6 +85,50 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
     load_residual_promotion_runtime,
 )
 
+_PRODUCTION_MAX_AUTHORITY_CALL_DURATION_MS = (
+    executor_module.MAX_AUTHORITY_CALL_DURATION_MS
+)
+_PRODUCTION_MAX_TRANSPORT_CALL_DURATION_MS = (
+    executor_module.MAX_TRANSPORT_CALL_DURATION_MS
+)
+_CORRECTNESS_TEST_CALL_DURATION_MS = 5_000
+# Ordinary correctness tests exercise protocol semantics, not host scheduling
+# or temporary-directory fsync latency.  Dedicated deadline tests below restore
+# the exact production bounds before exercising hung authority/transport calls.
+
+
+@pytest.fixture(autouse=True)
+def _correctness_test_call_deadlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        executor_module,
+        "MAX_AUTHORITY_CALL_DURATION_MS",
+        _CORRECTNESS_TEST_CALL_DURATION_MS,
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "MAX_TRANSPORT_CALL_DURATION_MS",
+        _CORRECTNESS_TEST_CALL_DURATION_MS,
+    )
+
+
+@pytest.fixture
+def _production_call_deadlines(
+    _correctness_test_call_deadlines: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        executor_module,
+        "MAX_AUTHORITY_CALL_DURATION_MS",
+        _PRODUCTION_MAX_AUTHORITY_CALL_DURATION_MS,
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "MAX_TRANSPORT_CALL_DURATION_MS",
+        _PRODUCTION_MAX_TRANSPORT_CALL_DURATION_MS,
+    )
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = (
     "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1"
@@ -217,6 +261,9 @@ TEST_EXECUTION_AUTHORITY = {
         auth_module.DEPLOYMENT_IMAGE_MANIFEST_DIGEST
     ),
 }
+_PRODUCTION_AUTHORIZED_TRANSPORT_CALL_DURATION_MS = int(
+    TEST_EXECUTION_AUTHORITY["maximum_call_duration_ms"]
+)
 TEST_EXECUTION_SERVICE_BINDING_SHA256 = canonical_json_sha256(
     TEST_EXECUTION_AUTHORITY
 )
@@ -613,6 +660,7 @@ class _TestDurableRiskDomainLease:
         private_exponent_hex: str = TEST_RISK_DOMAIN_PRIVATE_EXPONENT_HEX,
         initial_high_water_generation: int = -1,
         initial_high_water_state_sha256: str | None = None,
+        claim_receipt_overrides: dict[str, Any] | None = None,
     ) -> None:
         self.authority_root = Path(authority_root).resolve()
         self.authority_root.mkdir(parents=True, exist_ok=True)
@@ -620,6 +668,7 @@ class _TestDurableRiskDomainLease:
         self.private_exponent_hex = private_exponent_hex
         self.initial_high_water_generation = initial_high_water_generation
         self.initial_high_water_state_sha256 = initial_high_water_state_sha256
+        self.claim_receipt_overrides = dict(claim_receipt_overrides or {})
         self._lock = threading.RLock()
         self.hang_claim = False
         self.lose_next_claim_response = False
@@ -689,6 +738,14 @@ class _TestDurableRiskDomainLease:
         authorization_id: str,
         risk_domain_id: str,
         journal_namespace_id: str,
+        operation_inventory_schema_version: str,
+        required_operations: list[str],
+        required_operations_sha256: str,
+        kill_semantics: str,
+        outbox_recovery_semantics: str,
+        dispatch_completion_semantics: str,
+        dispatch_recovery_semantics: str,
+        dispatch_fence_semantics: str,
     ) -> bytes:
         if self.hang_claim:
             threading.Event().wait(10)
@@ -698,6 +755,21 @@ class _TestDurableRiskDomainLease:
             == TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256
             and tenant_id == TEST_RISK_DOMAIN_TENANT_ID
             and key_identity_sha256 == TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256
+            and operation_inventory_schema_version
+            == executor_module.RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
+            and required_operations
+            == list(executor_module.REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS)
+            and required_operations_sha256
+            == executor_module.REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256
+            and kill_semantics == executor_module.RISK_DOMAIN_KILL_SEMANTICS
+            and outbox_recovery_semantics
+            == executor_module.RISK_DOMAIN_OUTBOX_RECOVERY_SEMANTICS
+            and dispatch_completion_semantics
+            == executor_module.RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS
+            and dispatch_recovery_semantics
+            == executor_module.RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS
+            and dispatch_fence_semantics
+            == executor_module.RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS
         ):
             raise RuntimeError("risk-domain authority identity mismatch")
         binding_path = self._binding_path(risk_domain_id)
@@ -758,7 +830,18 @@ class _TestDurableRiskDomainLease:
             "kill_reason": authority_state["kill_reason"],
             "kill_event_ts_ms": authority_state["kill_event_ts_ms"],
             "kill_payload_sha256": authority_state["kill_payload_sha256"],
+            "operation_inventory_schema_version": (
+                operation_inventory_schema_version
+            ),
+            "required_operations": required_operations,
+            "required_operations_sha256": required_operations_sha256,
+            "kill_semantics": kill_semantics,
+            "outbox_recovery_semantics": outbox_recovery_semantics,
+            "dispatch_completion_semantics": dispatch_completion_semantics,
+            "dispatch_recovery_semantics": dispatch_recovery_semantics,
+            "dispatch_fence_semantics": dispatch_fence_semantics,
         }
+        receipt_core.update(self.claim_receipt_overrides)
         if self.lose_next_claim_response:
             self.lose_next_claim_response = False
             raise RuntimeError("synthetic claim response loss after commit")
@@ -1750,6 +1833,10 @@ class MicroLiveExecutor(_StrictMicroLiveExecutor):
         transport: Any,
         journal: AtomicFileMicroLiveStateJournal | None = None,
     ) -> None:
+        if getattr(transport, "_uses_default_execution_service_binding", False):
+            transport.execution_service_binding_sha256 = (
+                executor_module._execution_service_binding_sha256(authorization)
+            )
         super().__init__(
             authorization,
             transport=transport,
@@ -2075,9 +2162,7 @@ class FakeTransport:
         trusted_time_advance_ms: int = 0,
         cursor_observed_advance_ms: int = 0,
         cursor_response_post_signature_overrides: dict[str, Any] | None = None,
-        execution_service_binding_sha256: str = (
-            TEST_EXECUTION_SERVICE_BINDING_SHA256
-        ),
+        execution_service_binding_sha256: str | None = None,
         cursor_delay_ms: int = 0,
         venue_idempotency_authority: _TestVenueIdempotencyAuthority | None = None,
         trusted_time_delay_ms: int = 0,
@@ -2097,6 +2182,17 @@ class FakeTransport:
         self.cursor_response_post_signature_overrides = dict(
             cursor_response_post_signature_overrides or {}
         )
+        self._uses_default_execution_service_binding = (
+            execution_service_binding_sha256 is None
+        )
+        if execution_service_binding_sha256 is None:
+            default_authority = copy.deepcopy(TEST_EXECUTION_AUTHORITY)
+            default_authority["maximum_call_duration_ms"] = (
+                _CORRECTNESS_TEST_CALL_DURATION_MS
+            )
+            execution_service_binding_sha256 = canonical_json_sha256(
+                default_authority
+            )
         self.execution_service_binding_sha256 = execution_service_binding_sha256
         self.cursor_delay_ms = cursor_delay_ms
         self.trusted_time_delay_ms = trusted_time_delay_ms
@@ -3130,6 +3226,28 @@ def _multiprocess_issue_copied_id_receipt(
             authorization_id="a" * 64,
             risk_domain_id="b" * 64,
             journal_namespace_id="c" * 64,
+            operation_inventory_schema_version=(
+                executor_module.RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
+            ),
+            required_operations=list(
+                executor_module.REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS
+            ),
+            required_operations_sha256=(
+                executor_module.REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256
+            ),
+            kill_semantics=executor_module.RISK_DOMAIN_KILL_SEMANTICS,
+            outbox_recovery_semantics=(
+                executor_module.RISK_DOMAIN_OUTBOX_RECOVERY_SEMANTICS
+            ),
+            dispatch_completion_semantics=(
+                executor_module.RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS
+            ),
+            dispatch_recovery_semantics=(
+                executor_module.RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS
+            ),
+            dispatch_fence_semantics=(
+                executor_module.RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS
+            ),
         )
     )
 
@@ -3659,6 +3777,8 @@ def _authorization(
 def _verified(
     fixture: dict[str, Any],
     authorization_override: dict[str, Any] | None = None,
+    *,
+    execution_call_duration_ms: int = _CORRECTNESS_TEST_CALL_DURATION_MS,
 ):
     """Issue an explicit unit-test capability without exercising the blocked v7 gate."""
 
@@ -3712,11 +3832,7 @@ def _verified(
         execution_maximum_clock_skew_ms=int(
             authorization["execution_service_authority"]["maximum_clock_skew_ms"]
         ),
-        execution_maximum_call_duration_ms=int(
-            authorization["execution_service_authority"][
-                "maximum_call_duration_ms"
-            ]
-        ),
+        execution_maximum_call_duration_ms=execution_call_duration_ms,
         deployment_runtime_lock_sha256=(
             auth_module.DEPLOYMENT_RUNTIME_LOCK_SHA256
         ),
@@ -3748,6 +3864,15 @@ def _verified(
     object.__setattr__(capability, "_capability_sha256", capability_sha256)
     auth_module._register_verified_capability(capability, capability_sha256)
     return capability
+
+
+def _verified_for_production_deadline(fixture: dict[str, Any]):
+    return _verified(
+        fixture,
+        execution_call_duration_ms=(
+            _PRODUCTION_AUTHORIZED_TRANSPORT_CALL_DURATION_MS
+        ),
+    )
 
 
 def _signal(**overrides: Any) -> dict[str, Any]:
@@ -6770,8 +6895,9 @@ def test_cancel_crash_boundaries_are_wal_recoverable(
 
 def test_hung_submit_cannot_starve_independent_watchdog_kill(
     authorized_fixture: dict[str, Any],
+    _production_call_deadlines: None,
 ) -> None:
-    verified = _verified(authorized_fixture)
+    verified = _verified_for_production_deadline(authorized_fixture)
     journal = _new_journal()
     transport = HungTransport(hung_operation="submit_order")
     executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
@@ -6817,10 +6943,8 @@ def test_hung_submit_cannot_starve_independent_watchdog_kill(
         event["event_type"] == "ORDER_SUBMISSION_UNKNOWN"
         for event in executor.events
     )
-    # The authorized 250 ms transport deadline and the independent watchdog
-    # deliberately race here.  A busy runner may cross that deadline after the
-    # emergency kill is durable but before the released worker result is
-    # observed.  Both terminal observations are safe: either the exact venue
+    # The bounded transport call and the independent watchdog deliberately
+    # race here.  Both terminal observations are safe: either the exact venue
     # acknowledgement commits, or the submission remains unknown under kill.
     assert acknowledged is (not submission_unknown)
     if failures:
@@ -7557,8 +7681,9 @@ def test_lost_outbox_ack_replays_exactly_once_across_restart(
 
 def test_post_commit_timeout_recovers_exact_outbox_command_after_restart(
     authorized_fixture: dict[str, Any],
+    _production_call_deadlines: None,
 ) -> None:
-    verified = _verified(authorized_fixture)
+    verified = _verified_for_production_deadline(authorized_fixture)
     journal = _new_journal()
     transport = OutboxCommittedBeforeVenueTransport()
     executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
@@ -7625,8 +7750,13 @@ def test_crash_after_outbox_before_venue_recovers_without_redispatch(
 
 def test_hung_lookup_times_out_and_remains_conservatively_killed(
     authorized_fixture: dict[str, Any],
+    _production_call_deadlines: None,
 ) -> None:
-    verified = _verified(authorized_fixture)
+    verified = _verified_for_production_deadline(authorized_fixture)
+    assert (
+        verified.execution_maximum_call_duration_ms
+        == _PRODUCTION_AUTHORIZED_TRANSPORT_CALL_DURATION_MS
+    )
     transport = HungTransport(hung_operation="lookup_order")
     transport.fail_submit = True
     executor = MicroLiveExecutor(verified, transport=transport)
@@ -7652,8 +7782,9 @@ def test_hung_lookup_times_out_and_remains_conservatively_killed(
 
 def test_fence_precedes_authoritative_lookup_when_timed_out_submit_accepts_late(
     authorized_fixture: dict[str, Any],
+    _production_call_deadlines: None,
 ) -> None:
-    verified = _verified(authorized_fixture)
+    verified = _verified_for_production_deadline(authorized_fixture)
     transport = LateAcceptAfterRejectedLookupTransport()
     executor = MicroLiveExecutor(verified, transport=transport)
 
@@ -7707,8 +7838,9 @@ def test_fence_precedes_authoritative_lookup_when_timed_out_submit_accepts_late(
 
 def test_unfenced_submission_remains_unknown_without_any_lookup(
     authorized_fixture: dict[str, Any],
+    _production_call_deadlines: None,
 ) -> None:
-    verified = _verified(authorized_fixture)
+    verified = _verified_for_production_deadline(authorized_fixture)
     transport = LateAcceptAfterRejectedLookupTransport()
     executor = MicroLiveExecutor(verified, transport=transport)
     with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
@@ -7749,8 +7881,9 @@ def test_unfenced_submission_remains_unknown_without_any_lookup(
 
 def test_hung_cancel_persists_emergency_kill_then_cancel_unknown(
     authorized_fixture: dict[str, Any],
+    _production_call_deadlines: None,
 ) -> None:
-    verified = _verified(authorized_fixture)
+    verified = _verified_for_production_deadline(authorized_fixture)
     journal = _new_journal()
     transport = HungTransport(hung_operation="cancel_order")
     executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
@@ -8536,9 +8669,11 @@ def test_missing_required_transport_operation_fails_before_startup_or_venue(
             journal=journal,
         )
         raw_state = healthy.export_state_bytes()
+        wal_before = journal.state_path.read_bytes()
     else:
         journal = _new_journal()
         raw_state = None
+        wal_before = None
 
     authority_delegate = journal.risk_domain_lease
 
@@ -8600,12 +8735,28 @@ def test_missing_required_transport_operation_fails_before_startup_or_venue(
     if startup_mode == "construction":
         assert journal.state_path.exists() is False
         assert journal.risk_domain_receipt_path.exists() is False
+    else:
+        assert raw_state is not None
+        assert wal_before is not None
+        assert journal.state_path.read_bytes() == wal_before
+        assert journal.pending_state_path.exists() is False
 
 
+@pytest.mark.parametrize(
+    "missing_operation",
+    (
+        "recover_execution_outbox_command",
+        "persist_risk_domain_kill",
+        "complete_execution_dispatch",
+        "recover_execution_dispatch",
+        "fence_execution_dispatch",
+    ),
+)
 @pytest.mark.parametrize("startup_mode", ("construction", "restore"))
-def test_missing_authority_recovery_fails_before_startup_or_venue_effect(
+def test_missing_required_authority_operation_fails_before_startup_or_venue(
     authorized_fixture: dict[str, Any],
     startup_mode: str,
+    missing_operation: str,
 ) -> None:
     verified = _verified(authorized_fixture)
     if startup_mode == "restore":
@@ -8616,9 +8767,10 @@ def test_missing_authority_recovery_fails_before_startup_or_venue_effect(
             journal=journal,
         )
         raw_state = healthy.export_state_bytes()
+        wal_before = journal.state_path.read_bytes()
         delegate = journal.risk_domain_lease
     else:
-        base = Path(tempfile.mkdtemp(prefix="bigan-missing-recovery-test-"))
+        base = Path(tempfile.mkdtemp(prefix="bigan-missing-authority-test-"))
         delegate = _TestDurableRiskDomainLease(
             base / "external-risk-domain-lease"
         )
@@ -8627,13 +8779,14 @@ def test_missing_authority_recovery_fails_before_startup_or_venue_effect(
             risk_domain_lease=delegate,
         )
         raw_state = None
+        wal_before = None
 
-    class MissingRecoveryAuthority:
+    class MissingOperationAuthority:
         def __init__(self) -> None:
             self.claim_calls = 0
 
         def __getattr__(self, name: str) -> Any:
-            if name == "recover_execution_outbox_command":
+            if name == missing_operation:
                 raise AttributeError(name)
             return getattr(delegate, name)
 
@@ -8641,7 +8794,7 @@ def test_missing_authority_recovery_fails_before_startup_or_venue_effect(
             self.claim_calls += 1
             return delegate.claim_risk_domain(**kwargs)
 
-    authority = MissingRecoveryAuthority()
+    authority = MissingOperationAuthority()
     journal.risk_domain_lease = authority
 
     class CapturingTransport(FakeTransport):
@@ -8654,10 +8807,7 @@ def test_missing_authority_recovery_fails_before_startup_or_venue_effect(
             return super().attest_execution_binding(request)
 
     transport = CapturingTransport()
-    with pytest.raises(
-        MicroLiveExecutionError,
-        match="authority lacks startup outbox recovery",
-    ):
+    with pytest.raises(MicroLiveExecutionError) as exc_info:
         if raw_state is None:
             _StrictMicroLiveExecutor(
                 verified,
@@ -8672,13 +8822,115 @@ def test_missing_authority_recovery_fails_before_startup_or_venue_effect(
                 raw_state=raw_state,
             )
 
+    assert "authority lacks required startup operations" in str(exc_info.value)
+    assert missing_operation in str(exc_info.value)
     assert authority.claim_calls == 0
     assert transport.attestation_calls == 0
     assert transport.submit_calls == []
     assert transport.recovery_lookup_calls == []
+    assert transport.cancel_calls == []
+    assert transport.lookup_calls == []
+    assert transport.fill_cursor_calls == []
+    assert transport.fence_calls == []
+    assert transport.venue_idempotency_authority.outcomes_by_client_order_id == {}
     if startup_mode == "construction":
         assert journal.state_path.exists() is False
         assert journal.risk_domain_receipt_path.exists() is False
+    else:
+        assert raw_state is not None
+        assert wal_before is not None
+        assert journal.state_path.read_bytes() == wal_before
+        assert journal.pending_state_path.exists() is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("operation_inventory_schema_version", "legacy-v0"),
+        (
+            "required_operations",
+            [
+                operation
+                for operation in executor_module.REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS
+                if operation != "persist_risk_domain_kill"
+            ],
+        ),
+        ("required_operations_sha256", "0" * 64),
+        ("kill_semantics", "best_effort"),
+        ("outbox_recovery_semantics", "process_local_cache"),
+        ("dispatch_completion_semantics", "unsigned_completion"),
+        ("dispatch_recovery_semantics", "may_redispatch"),
+        ("dispatch_fence_semantics", "deadline_implies_fence"),
+    ),
+)
+def test_authority_operation_inventory_claim_is_signed_and_authorization_bound(
+    authorized_fixture: dict[str, Any],
+    tmp_path: Path,
+    field: str,
+    value: Any,
+) -> None:
+    verified = _verified(authorized_fixture)
+    lease = _TestDurableRiskDomainLease(
+        tmp_path / "authority",
+        claim_receipt_overrides={field: value},
+    )
+    journal = AtomicFileMicroLiveStateJournal(
+        tmp_path / "journal",
+        risk_domain_lease=lease,
+    )
+
+    class CapturingTransport(FakeTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attestation_calls = 0
+
+        def attest_execution_binding(self, request: dict[str, Any]) -> bytes:
+            self.attestation_calls += 1
+            return super().attest_execution_binding(request)
+
+    transport = CapturingTransport()
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="lease signed receipt is invalid",
+    ):
+        _StrictMicroLiveExecutor(
+            verified,
+            transport=transport,
+            journal=journal,
+        )
+
+    assert transport.attestation_calls == 1
+    assert transport.submit_calls == []
+    assert transport.recovery_lookup_calls == []
+    assert transport.cancel_calls == []
+    assert transport.lookup_calls == []
+    assert transport.fill_cursor_calls == []
+    assert transport.fence_calls == []
+    assert transport.venue_idempotency_authority.outcomes_by_client_order_id == {}
+    assert journal.state_path.exists() is False
+    assert journal.risk_domain_receipt_path.exists() is False
+
+
+def test_authority_operation_semantics_are_bound_into_capability_snapshot(
+    authorized_fixture: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verified = _verified(authorized_fixture)
+    bound = executor_module._BoundAuthorization.from_verified(verified)
+    expected_binding = bound.risk_domain_authority_binding_sha256
+    assert bound.matches_verified(verified) is True
+
+    monkeypatch.setattr(
+        executor_module,
+        "RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS",
+        "test-drifted-fence-semantics",
+    )
+
+    assert (
+        executor_module._risk_domain_authority_binding_sha256(verified)
+        != expected_binding
+    )
+    assert bound.matches_verified(verified) is False
 
 
 @pytest.mark.parametrize(
@@ -9041,6 +9293,7 @@ def test_crash_after_authority_commit_before_local_promote_recovers(
 def test_all_external_authority_calls_have_a_hard_deadline(
     tmp_path: Path,
     operation: str,
+    _production_call_deadlines: None,
 ) -> None:
     lease = _TestDurableRiskDomainLease(tmp_path / "authority")
     journal = AtomicFileMicroLiveStateJournal(
@@ -9523,7 +9776,13 @@ def test_two_call_completion_budget_accepts_bounded_combined_latency(
     authorization = copy.deepcopy(authorized_fixture["authorization"])
     authorization["execution_service_authority"]["maximum_clock_skew_ms"] = 0
     binding = canonical_json_sha256(authorization["execution_service_authority"])
-    verified = _verified(authorized_fixture, authorization)
+    verified = _verified(
+        authorized_fixture,
+        authorization,
+        execution_call_duration_ms=int(
+            authorization["execution_service_authority"]["maximum_call_duration_ms"]
+        ),
+    )
     transport = FakeTransport(
         execution_service_binding_sha256=binding,
         cursor_observed_advance_ms=400,
