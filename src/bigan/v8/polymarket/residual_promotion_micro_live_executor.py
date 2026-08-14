@@ -87,7 +87,7 @@ EXECUTION_DISPATCH_FENCE_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-dispatch-fence-v1"
 )
 EXECUTION_BINDING_ATTESTATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-binding-attestation-v7"
+    "bigan-btc-15m-residual-promotion-execution-binding-attestation-v8"
 )
 EXECUTION_OPERATION_RECEIPT_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-operation-receipt-v4"
@@ -104,6 +104,34 @@ SETTLEMENT_RECEIPT_SCHEMA_VERSION = (
 SUBMISSION_RECOVERY_OPERATION = "recover_order_submission"
 SUBMISSION_RECOVERY_SEMANTICS = (
     "venue_idempotency_lookup_only_no_submit_sign_wallet_or_write"
+)
+EXECUTION_TRANSPORT_OPERATION_INVENTORY_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-execution-transport-operations-v1"
+)
+REQUIRED_EXECUTION_TRANSPORT_OPERATIONS = (
+    "attest_execution_binding",
+    "bind_execution_dispatch_authority",
+    "read_trusted_time",
+    "submit_order",
+    SUBMISSION_RECOVERY_OPERATION,
+    "cancel_order",
+    "lookup_order",
+    "read_order_fill_cursor",
+    "fence_order_invocation",
+)
+REQUIRED_EXECUTION_TRANSPORT_OPERATIONS_SHA256 = canonical_json_sha256(
+    {
+        "schema_version": EXECUTION_TRANSPORT_OPERATION_INVENTORY_SCHEMA_VERSION,
+        "required_operations": list(REQUIRED_EXECUTION_TRANSPORT_OPERATIONS),
+    }
+)
+CANCELLATION_OPERATION = "cancel_order"
+CANCELLATION_SEMANTICS = (
+    "authenticated_cancel_of_acknowledged_open_order_with_unknown_fail_closed"
+)
+TERMINAL_CURSOR_OPERATION = "read_order_fill_cursor"
+TERMINAL_CURSOR_SEMANTICS = (
+    "authoritative_monotonic_fill_cursor_and_terminal_order_state"
 )
 EMERGENCY_KILL_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-emergency-kill-v1"
@@ -3097,16 +3125,22 @@ def _durable_entry(method: Any) -> Any:
     return wrapped
 
 
-def _require_startup_recovery_capabilities(
+def _require_startup_execution_capabilities(
     *,
     transport: MicroLiveOrderTransport,
     journal: MicroLiveStateJournal,
 ) -> None:
-    """Reject incomplete crash recovery surfaces before journal activation."""
+    """Reject an incomplete execution/unwind surface before journal activation."""
 
-    if not callable(getattr(transport, SUBMISSION_RECOVERY_OPERATION, None)):
+    missing_operations = [
+        operation
+        for operation in REQUIRED_EXECUTION_TRANSPORT_OPERATIONS
+        if not callable(getattr(transport, operation, None))
+    ]
+    if missing_operations:
         raise MicroLiveExecutionError(
-            "authenticated execution gateway lacks startup lookup-only recovery"
+            "authenticated execution gateway lacks required startup operations: "
+            + ",".join(missing_operations)
         )
     authority = getattr(journal, "risk_domain_lease", None)
     if not callable(
@@ -3161,7 +3195,7 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "micro-live journal must be the deployment-owned concrete implementation"
             )
-        _require_startup_recovery_capabilities(
+        _require_startup_execution_capabilities(
             transport=transport,
             journal=journal,
         )
@@ -4006,6 +4040,19 @@ class MicroLiveExecutor:
             "submission_recovery_operation": SUBMISSION_RECOVERY_OPERATION,
             "submission_recovery_semantics": SUBMISSION_RECOVERY_SEMANTICS,
             "submission_recovery_lookup_only_enforced": True,
+            "execution_transport_operation_inventory_schema_version": (
+                EXECUTION_TRANSPORT_OPERATION_INVENTORY_SCHEMA_VERSION
+            ),
+            "required_execution_transport_operations": list(
+                REQUIRED_EXECUTION_TRANSPORT_OPERATIONS
+            ),
+            "required_execution_transport_operations_sha256": (
+                REQUIRED_EXECUTION_TRANSPORT_OPERATIONS_SHA256
+            ),
+            "cancellation_operation": CANCELLATION_OPERATION,
+            "cancellation_semantics": CANCELLATION_SEMANTICS,
+            "terminal_cursor_operation": TERMINAL_CURSOR_OPERATION,
+            "terminal_cursor_semantics": TERMINAL_CURSOR_SEMANTICS,
             "venue_idempotency_key_field": VENUE_IDEMPOTENCY_KEY_FIELD,
             "venue_idempotency_scope": VENUE_IDEMPOTENCY_SCOPE,
             "venue_idempotency_semantics": VENUE_IDEMPOTENCY_SEMANTICS,
@@ -4083,6 +4130,19 @@ class MicroLiveExecutor:
             "submission_recovery_operation": SUBMISSION_RECOVERY_OPERATION,
             "submission_recovery_semantics": SUBMISSION_RECOVERY_SEMANTICS,
             "submission_recovery_lookup_only_enforced": True,
+            "execution_transport_operation_inventory_schema_version": (
+                EXECUTION_TRANSPORT_OPERATION_INVENTORY_SCHEMA_VERSION
+            ),
+            "required_execution_transport_operations": list(
+                REQUIRED_EXECUTION_TRANSPORT_OPERATIONS
+            ),
+            "required_execution_transport_operations_sha256": (
+                REQUIRED_EXECUTION_TRANSPORT_OPERATIONS_SHA256
+            ),
+            "cancellation_operation": CANCELLATION_OPERATION,
+            "cancellation_semantics": CANCELLATION_SEMANTICS,
+            "terminal_cursor_operation": TERMINAL_CURSOR_OPERATION,
+            "terminal_cursor_semantics": TERMINAL_CURSOR_SEMANTICS,
             "venue_idempotency_key_field": VENUE_IDEMPOTENCY_KEY_FIELD,
             "venue_idempotency_scope": VENUE_IDEMPOTENCY_SCOPE,
             "venue_idempotency_semantics": VENUE_IDEMPOTENCY_SEMANTICS,
@@ -6532,7 +6592,7 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "micro-live journal must be the deployment-owned concrete implementation"
             )
-        _require_startup_recovery_capabilities(
+        _require_startup_execution_capabilities(
             transport=transport,
             journal=journal,
         )

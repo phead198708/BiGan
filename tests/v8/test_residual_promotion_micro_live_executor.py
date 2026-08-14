@@ -2506,6 +2506,23 @@ class FakeTransport:
             "submission_recovery_lookup_only_enforced": request[
                 "submission_recovery_lookup_only_enforced"
             ],
+            "execution_transport_operation_inventory_schema_version": request[
+                "execution_transport_operation_inventory_schema_version"
+            ],
+            "required_execution_transport_operations": request[
+                "required_execution_transport_operations"
+            ],
+            "required_execution_transport_operations_sha256": request[
+                "required_execution_transport_operations_sha256"
+            ],
+            "cancellation_operation": request["cancellation_operation"],
+            "cancellation_semantics": request["cancellation_semantics"],
+            "terminal_cursor_operation": request[
+                "terminal_cursor_operation"
+            ],
+            "terminal_cursor_semantics": request[
+                "terminal_cursor_semantics"
+            ],
             "venue_idempotency_key_field": request[
                 "venue_idempotency_key_field"
             ],
@@ -3883,7 +3900,7 @@ def test_executor_rejects_transport_without_authenticated_execution_binding(
     with pytest.raises(
         MicroLiveExecutionError,
         match=(
-            "startup lookup-only recovery|one-shot dispatch authority|"
+            "required startup operations|one-shot dispatch authority|"
             "attest_execution_binding"
         ),
     ):
@@ -8500,10 +8517,15 @@ def test_execution_deployment_image_binding_is_authorization_pinned(
         MicroLiveExecutor(verified, transport=transport)
 
 
+@pytest.mark.parametrize(
+    "missing_operation",
+    ("recover_order_submission", "cancel_order", "read_order_fill_cursor"),
+)
 @pytest.mark.parametrize("startup_mode", ("construction", "restore"))
-def test_missing_transport_recovery_fails_before_startup_or_venue_effect(
+def test_missing_required_transport_operation_fails_before_startup_or_venue(
     authorized_fixture: dict[str, Any],
     startup_mode: str,
+    missing_operation: str,
 ) -> None:
     verified = _verified(authorized_fixture)
     if startup_mode == "restore":
@@ -8518,14 +8540,29 @@ def test_missing_transport_recovery_fails_before_startup_or_venue_effect(
         journal = _new_journal()
         raw_state = None
 
+    authority_delegate = journal.risk_domain_lease
+
+    class CountingAuthority:
+        def __init__(self) -> None:
+            self.claim_calls = 0
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(authority_delegate, name)
+
+        def claim_risk_domain(self, **kwargs: Any) -> bytes:
+            self.claim_calls += 1
+            return authority_delegate.claim_risk_domain(**kwargs)
+
+    authority = CountingAuthority()
+    journal.risk_domain_lease = authority
     delegate = FakeTransport()
 
-    class MissingRecoveryTransport:
+    class MissingOperationTransport:
         def __init__(self) -> None:
             self.attestation_calls = 0
 
         def __getattr__(self, name: str) -> Any:
-            if name == "recover_order_submission":
+            if name == missing_operation:
                 raise AttributeError(name)
             return getattr(delegate, name)
 
@@ -8533,11 +8570,8 @@ def test_missing_transport_recovery_fails_before_startup_or_venue_effect(
             self.attestation_calls += 1
             return delegate.attest_execution_binding(request)
 
-    transport = MissingRecoveryTransport()
-    with pytest.raises(
-        MicroLiveExecutionError,
-        match="gateway lacks startup lookup-only recovery",
-    ):
+    transport = MissingOperationTransport()
+    with pytest.raises(MicroLiveExecutionError) as exc_info:
         if raw_state is None:
             _StrictMicroLiveExecutor(
                 verified,
@@ -8552,9 +8586,17 @@ def test_missing_transport_recovery_fails_before_startup_or_venue_effect(
                 raw_state=raw_state,
             )
 
+    assert "gateway lacks required startup operations" in str(exc_info.value)
+    assert missing_operation in str(exc_info.value)
+    assert authority.claim_calls == 0
     assert transport.attestation_calls == 0
     assert delegate.submit_calls == []
     assert delegate.recovery_lookup_calls == []
+    assert delegate.cancel_calls == []
+    assert delegate.lookup_calls == []
+    assert delegate.fill_cursor_calls == []
+    assert delegate.fence_calls == []
+    assert delegate.venue_idempotency_authority.outcomes_by_client_order_id == {}
     if startup_mode == "construction":
         assert journal.state_path.exists() is False
         assert journal.risk_domain_receipt_path.exists() is False
@@ -8646,9 +8688,26 @@ def test_missing_authority_recovery_fails_before_startup_or_venue_effect(
         ("submission_recovery_operation", "lookup_order"),
         ("submission_recovery_semantics", "best_effort"),
         ("submission_recovery_lookup_only_enforced", False),
+        (
+            "execution_transport_operation_inventory_schema_version",
+            "legacy-v0",
+        ),
+        (
+            "required_execution_transport_operations",
+            [
+                operation
+                for operation in executor_module.REQUIRED_EXECUTION_TRANSPORT_OPERATIONS
+                if operation != "cancel_order"
+            ],
+        ),
+        ("required_execution_transport_operations_sha256", "0" * 64),
+        ("cancellation_operation", "lookup_order"),
+        ("cancellation_semantics", "best_effort"),
+        ("terminal_cursor_operation", "lookup_order"),
+        ("terminal_cursor_semantics", "process_local"),
     ),
 )
-def test_execution_recovery_binding_is_signed_and_startup_pinned(
+def test_execution_operation_inventory_binding_is_signed_and_startup_pinned(
     authorized_fixture: dict[str, Any],
     field: str,
     value: Any,
