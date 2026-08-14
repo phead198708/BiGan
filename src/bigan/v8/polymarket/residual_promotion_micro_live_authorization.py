@@ -83,6 +83,42 @@ MAX_AUTHORIZATION_JSON_BYTES = 1_048_576
 TRUSTED_RISK_DOMAIN_LEASE_ID = (
     "8f8095ecb36c141825baa4791f640c013dc581cc7042ea4747edf164c24fe7a8"
 )
+RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-risk-domain-authority-operations-v1"
+)
+REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS = (
+    "claim_risk_domain",
+    "advance_risk_domain_high_water",
+    "persist_risk_domain_kill",
+    "register_execution_invocation",
+    "commit_execution_outbox_command",
+    "recover_execution_outbox_command",
+    "begin_execution_dispatch",
+    "complete_execution_dispatch",
+    "recover_execution_dispatch",
+    "fence_execution_dispatch",
+)
+REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256 = canonical_json_sha256(
+    {
+        "schema_version": RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION,
+        "required_operations": list(REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS),
+    }
+)
+RISK_DOMAIN_KILL_SEMANTICS = (
+    "irreversible_kill_atomically_fences_all_active_or_dispatchable_invocations"
+)
+RISK_DOMAIN_OUTBOX_RECOVERY_SEMANTICS = (
+    "signed_exact_committed_outbox_without_dispatch_bearer_capability"
+)
+RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS = (
+    "terminalize_exact_venue_outcome_for_consumed_single_use_dispatch_grant"
+)
+RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS = (
+    "lookup_only_terminalization_from_durable_grant_without_second_dispatch"
+)
+RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS = (
+    "fence_only_not_started_dispatch_else_report_terminal_or_in_progress"
+)
 DEPLOYMENT_RUNTIME_LOCK_SHA256 = (
     "74036bc0c40ca2552e44074310f85ecf807bb51557ffad99eb815f97e6158bcb"
 )
@@ -126,6 +162,17 @@ class VerifiedMicroLiveAuthorization:
     risk_domain_lease_key_identity_sha256: str
     risk_domain_lease_public_key_modulus_hex: str
     risk_domain_lease_public_key_exponent: int
+    risk_domain_authority_adapter_implementation_sha256: str
+    risk_domain_authority_configuration_sha256: str
+    risk_domain_authority_operation_inventory_schema_version: str
+    risk_domain_authority_required_operations: tuple[str, ...]
+    risk_domain_authority_required_operations_sha256: str
+    risk_domain_authority_kill_semantics: str
+    risk_domain_authority_outbox_recovery_semantics: str
+    risk_domain_authority_dispatch_completion_semantics: str
+    risk_domain_authority_dispatch_recovery_semantics: str
+    risk_domain_authority_dispatch_fence_semantics: str
+    risk_domain_authority_binding_sha256: str
     execution_service_identity_sha256: str
     execution_adapter_implementation_sha256: str
     execution_configuration_sha256: str
@@ -405,6 +452,39 @@ def verify_micro_live_authorization(
         risk_domain_lease_public_key_exponent=int(
             risk_domain_lease_authority["public_key_exponent"]
         ),
+        risk_domain_authority_adapter_implementation_sha256=str(
+            risk_domain_lease_authority["adapter_implementation_sha256"]
+        ),
+        risk_domain_authority_configuration_sha256=str(
+            risk_domain_lease_authority["configuration_sha256"]
+        ),
+        risk_domain_authority_operation_inventory_schema_version=str(
+            risk_domain_lease_authority["operation_inventory_schema_version"]
+        ),
+        risk_domain_authority_required_operations=tuple(
+            risk_domain_lease_authority["required_operations"]
+        ),
+        risk_domain_authority_required_operations_sha256=str(
+            risk_domain_lease_authority["required_operations_sha256"]
+        ),
+        risk_domain_authority_kill_semantics=str(
+            risk_domain_lease_authority["kill_semantics"]
+        ),
+        risk_domain_authority_outbox_recovery_semantics=str(
+            risk_domain_lease_authority["outbox_recovery_semantics"]
+        ),
+        risk_domain_authority_dispatch_completion_semantics=str(
+            risk_domain_lease_authority["dispatch_completion_semantics"]
+        ),
+        risk_domain_authority_dispatch_recovery_semantics=str(
+            risk_domain_lease_authority["dispatch_recovery_semantics"]
+        ),
+        risk_domain_authority_dispatch_fence_semantics=str(
+            risk_domain_lease_authority["dispatch_fence_semantics"]
+        ),
+        risk_domain_authority_binding_sha256=str(
+            risk_domain_lease_authority["authority_binding_sha256"]
+        ),
         execution_service_identity_sha256=str(
             execution_service_authority["service_identity_sha256"]
         ),
@@ -523,7 +603,7 @@ def _capability_integrity_sha256(
     ):
         raise ValueError("loaded micro-live model bytes do not match the frozen runtime")
     payload = {
-        "schema_version": "verified-micro-live-authorization-capability-v5",
+        "schema_version": "verified-micro-live-authorization-capability-v6",
         "authorization_id": capability.authorization_id,
         "authorization_payload_sha256": capability.authorization_payload_sha256,
         "candidate_bundle_sha256": capability.candidate_bundle_sha256,
@@ -540,6 +620,39 @@ def _capability_integrity_sha256(
         ),
         "risk_domain_lease_public_key_exponent": (
             capability.risk_domain_lease_public_key_exponent
+        ),
+        "risk_domain_authority_adapter_implementation_sha256": (
+            capability.risk_domain_authority_adapter_implementation_sha256
+        ),
+        "risk_domain_authority_configuration_sha256": (
+            capability.risk_domain_authority_configuration_sha256
+        ),
+        "risk_domain_authority_operation_inventory_schema_version": (
+            capability.risk_domain_authority_operation_inventory_schema_version
+        ),
+        "risk_domain_authority_required_operations": list(
+            capability.risk_domain_authority_required_operations
+        ),
+        "risk_domain_authority_required_operations_sha256": (
+            capability.risk_domain_authority_required_operations_sha256
+        ),
+        "risk_domain_authority_kill_semantics": (
+            capability.risk_domain_authority_kill_semantics
+        ),
+        "risk_domain_authority_outbox_recovery_semantics": (
+            capability.risk_domain_authority_outbox_recovery_semantics
+        ),
+        "risk_domain_authority_dispatch_completion_semantics": (
+            capability.risk_domain_authority_dispatch_completion_semantics
+        ),
+        "risk_domain_authority_dispatch_recovery_semantics": (
+            capability.risk_domain_authority_dispatch_recovery_semantics
+        ),
+        "risk_domain_authority_dispatch_fence_semantics": (
+            capability.risk_domain_authority_dispatch_fence_semantics
+        ),
+        "risk_domain_authority_binding_sha256": (
+            capability.risk_domain_authority_binding_sha256
         ),
         "execution_service_identity_sha256": (
             capability.execution_service_identity_sha256
@@ -900,6 +1013,48 @@ def _validate_finite_json_tree(value: Any, *, depth: int = 0) -> None:
             _validate_finite_json_tree(item, depth=depth + 1)
 
 
+def compute_risk_domain_authority_binding_sha256(
+    authority: Mapping[str, Any],
+) -> str:
+    """Hash one complete externally attested authority capability contract."""
+
+    return canonical_json_sha256(
+        {
+            "lease_id": authority.get("lease_id"),
+            "service_identity_sha256": authority.get("service_identity_sha256"),
+            "tenant_id": authority.get("tenant_id"),
+            "key_identity_sha256": authority.get("key_identity_sha256"),
+            "signature_algorithm": authority.get("signature_algorithm"),
+            "public_key_modulus_hex": authority.get("public_key_modulus_hex"),
+            "public_key_exponent": authority.get("public_key_exponent"),
+            "adapter_implementation_sha256": authority.get(
+                "adapter_implementation_sha256"
+            ),
+            "configuration_sha256": authority.get("configuration_sha256"),
+            "operation_inventory_schema_version": authority.get(
+                "operation_inventory_schema_version"
+            ),
+            "required_operations": list(authority.get("required_operations") or []),
+            "required_operations_sha256": authority.get(
+                "required_operations_sha256"
+            ),
+            "kill_semantics": authority.get("kill_semantics"),
+            "outbox_recovery_semantics": authority.get(
+                "outbox_recovery_semantics"
+            ),
+            "dispatch_completion_semantics": authority.get(
+                "dispatch_completion_semantics"
+            ),
+            "dispatch_recovery_semantics": authority.get(
+                "dispatch_recovery_semantics"
+            ),
+            "dispatch_fence_semantics": authority.get(
+                "dispatch_fence_semantics"
+            ),
+        }
+    )
+
+
 def _validated_risk_domain_lease_authority(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise MicroLiveAuthorizationError(
@@ -914,6 +1069,17 @@ def _validated_risk_domain_lease_authority(value: Any) -> dict[str, Any]:
         "signature_algorithm",
         "public_key_modulus_hex",
         "public_key_exponent",
+        "adapter_implementation_sha256",
+        "configuration_sha256",
+        "operation_inventory_schema_version",
+        "required_operations",
+        "required_operations_sha256",
+        "kill_semantics",
+        "outbox_recovery_semantics",
+        "dispatch_completion_semantics",
+        "dispatch_recovery_semantics",
+        "dispatch_fence_semantics",
+        "authority_binding_sha256",
     }:
         raise MicroLiveAuthorizationError(
             "risk-domain lease authority binding schema is invalid"
@@ -941,6 +1107,25 @@ def _validated_risk_domain_lease_authority(value: Any) -> dict[str, Any]:
         and int(modulus, 16) % 2 == 1
         and exponent == 65_537
         and authority.get("key_identity_sha256") == expected_key_identity
+        and _is_sha256(authority.get("adapter_implementation_sha256"))
+        and _is_sha256(authority.get("configuration_sha256"))
+        and authority.get("operation_inventory_schema_version")
+        == RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
+        and authority.get("required_operations")
+        == list(REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS)
+        and authority.get("required_operations_sha256")
+        == REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256
+        and authority.get("kill_semantics") == RISK_DOMAIN_KILL_SEMANTICS
+        and authority.get("outbox_recovery_semantics")
+        == RISK_DOMAIN_OUTBOX_RECOVERY_SEMANTICS
+        and authority.get("dispatch_completion_semantics")
+        == RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS
+        and authority.get("dispatch_recovery_semantics")
+        == RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS
+        and authority.get("dispatch_fence_semantics")
+        == RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS
+        and authority.get("authority_binding_sha256")
+        == compute_risk_domain_authority_binding_sha256(authority)
     ):
         raise MicroLiveAuthorizationError(
             "risk-domain lease authority binding is invalid"

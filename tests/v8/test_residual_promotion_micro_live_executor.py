@@ -113,22 +113,6 @@ def _correctness_test_call_deadlines(
     )
 
 
-@pytest.fixture
-def _production_call_deadlines(
-    _correctness_test_call_deadlines: None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        executor_module,
-        "MAX_AUTHORITY_CALL_DURATION_MS",
-        _PRODUCTION_MAX_AUTHORITY_CALL_DURATION_MS,
-    )
-    monkeypatch.setattr(
-        executor_module,
-        "MAX_TRANSPORT_CALL_DURATION_MS",
-        _PRODUCTION_MAX_TRANSPORT_CALL_DURATION_MS,
-    )
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = (
     "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1"
@@ -210,6 +194,56 @@ TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256 = canonical_json_sha256(
         "public_key_exponent": 65_537,
     }
 )
+TEST_RISK_DOMAIN_ADAPTER_IMPLEMENTATION_SHA256 = canonical_json_sha256(
+    {"adapter": "test-durable-risk-domain-authority-adapter-v1"}
+)
+TEST_RISK_DOMAIN_CONFIGURATION_SHA256 = canonical_json_sha256(
+    {"configuration": "test-durable-risk-domain-authority-config-v1"}
+)
+
+
+def _test_risk_domain_authority_descriptor() -> dict[str, Any]:
+    descriptor = {
+        "lease_id": auth_module.TRUSTED_RISK_DOMAIN_LEASE_ID,
+        "service_identity_sha256": TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256,
+        "tenant_id": TEST_RISK_DOMAIN_TENANT_ID,
+        "key_identity_sha256": TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+        "signature_algorithm": executor_module.RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM,
+        "public_key_modulus_hex": TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
+        "public_key_exponent": 65_537,
+        "adapter_implementation_sha256": (
+            TEST_RISK_DOMAIN_ADAPTER_IMPLEMENTATION_SHA256
+        ),
+        "configuration_sha256": TEST_RISK_DOMAIN_CONFIGURATION_SHA256,
+        "operation_inventory_schema_version": (
+            executor_module.RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
+        ),
+        "required_operations": list(
+            executor_module.REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS
+        ),
+        "required_operations_sha256": (
+            executor_module.REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256
+        ),
+        "kill_semantics": executor_module.RISK_DOMAIN_KILL_SEMANTICS,
+        "outbox_recovery_semantics": (
+            executor_module.RISK_DOMAIN_OUTBOX_RECOVERY_SEMANTICS
+        ),
+        "dispatch_completion_semantics": (
+            executor_module.RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS
+        ),
+        "dispatch_recovery_semantics": (
+            executor_module.RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS
+        ),
+        "dispatch_fence_semantics": (
+            executor_module.RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS
+        ),
+    }
+    descriptor["authority_binding_sha256"] = (
+        auth_module.compute_risk_domain_authority_binding_sha256(descriptor)
+    )
+    return descriptor
+
+
 TEST_EXECUTION_SERVICE_IDENTITY_SHA256 = canonical_json_sha256(
     {"service": "test-authenticated-execution-service-v1"}
 )
@@ -661,6 +695,7 @@ class _TestDurableRiskDomainLease:
         initial_high_water_generation: int = -1,
         initial_high_water_state_sha256: str | None = None,
         claim_receipt_overrides: dict[str, Any] | None = None,
+        authority_descriptor: dict[str, Any] | None = None,
     ) -> None:
         self.authority_root = Path(authority_root).resolve()
         self.authority_root.mkdir(parents=True, exist_ok=True)
@@ -669,7 +704,11 @@ class _TestDurableRiskDomainLease:
         self.initial_high_water_generation = initial_high_water_generation
         self.initial_high_water_state_sha256 = initial_high_water_state_sha256
         self.claim_receipt_overrides = dict(claim_receipt_overrides or {})
+        self.authority_descriptor = copy.deepcopy(
+            authority_descriptor or _test_risk_domain_authority_descriptor()
+        )
         self._lock = threading.RLock()
+        self.claim_calls = 0
         self.hang_claim = False
         self.lose_next_claim_response = False
         self.hang_advance = False
@@ -738,6 +777,8 @@ class _TestDurableRiskDomainLease:
         authorization_id: str,
         risk_domain_id: str,
         journal_namespace_id: str,
+        adapter_implementation_sha256: str,
+        configuration_sha256: str,
         operation_inventory_schema_version: str,
         required_operations: list[str],
         required_operations_sha256: str,
@@ -746,30 +787,36 @@ class _TestDurableRiskDomainLease:
         dispatch_completion_semantics: str,
         dispatch_recovery_semantics: str,
         dispatch_fence_semantics: str,
+        authority_binding_sha256: str,
     ) -> bytes:
+        self.claim_calls += 1
         if self.hang_claim:
             threading.Event().wait(10)
+        expected = self.authority_descriptor
         if not (
             lease_id == self.lease_id
             and service_identity_sha256
             == TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256
             and tenant_id == TEST_RISK_DOMAIN_TENANT_ID
             and key_identity_sha256 == TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256
+            and adapter_implementation_sha256
+            == expected["adapter_implementation_sha256"]
+            and configuration_sha256 == expected["configuration_sha256"]
             and operation_inventory_schema_version
-            == executor_module.RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
-            and required_operations
-            == list(executor_module.REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS)
+            == expected["operation_inventory_schema_version"]
+            and required_operations == expected["required_operations"]
             and required_operations_sha256
-            == executor_module.REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256
-            and kill_semantics == executor_module.RISK_DOMAIN_KILL_SEMANTICS
+            == expected["required_operations_sha256"]
+            and kill_semantics == expected["kill_semantics"]
             and outbox_recovery_semantics
-            == executor_module.RISK_DOMAIN_OUTBOX_RECOVERY_SEMANTICS
+            == expected["outbox_recovery_semantics"]
             and dispatch_completion_semantics
-            == executor_module.RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS
+            == expected["dispatch_completion_semantics"]
             and dispatch_recovery_semantics
-            == executor_module.RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS
+            == expected["dispatch_recovery_semantics"]
             and dispatch_fence_semantics
-            == executor_module.RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS
+            == expected["dispatch_fence_semantics"]
+            and authority_binding_sha256 == expected["authority_binding_sha256"]
         ):
             raise RuntimeError("risk-domain authority identity mismatch")
         binding_path = self._binding_path(risk_domain_id)
@@ -830,6 +877,8 @@ class _TestDurableRiskDomainLease:
             "kill_reason": authority_state["kill_reason"],
             "kill_event_ts_ms": authority_state["kill_event_ts_ms"],
             "kill_payload_sha256": authority_state["kill_payload_sha256"],
+            "adapter_implementation_sha256": adapter_implementation_sha256,
+            "configuration_sha256": configuration_sha256,
             "operation_inventory_schema_version": (
                 operation_inventory_schema_version
             ),
@@ -840,6 +889,7 @@ class _TestDurableRiskDomainLease:
             "dispatch_completion_semantics": dispatch_completion_semantics,
             "dispatch_recovery_semantics": dispatch_recovery_semantics,
             "dispatch_fence_semantics": dispatch_fence_semantics,
+            "authority_binding_sha256": authority_binding_sha256,
         }
         receipt_core.update(self.claim_receipt_overrides)
         if self.lose_next_claim_response:
@@ -3212,6 +3262,7 @@ def _multiprocess_issue_copied_id_receipt(
     authority_root: str,
     output: Any,
 ) -> None:
+    authority_descriptor = _test_risk_domain_authority_descriptor()
     backend = _TestDurableRiskDomainLease(
         authority_root,
         lease_id=auth_module.TRUSTED_RISK_DOMAIN_LEASE_ID,
@@ -3226,6 +3277,10 @@ def _multiprocess_issue_copied_id_receipt(
             authorization_id="a" * 64,
             risk_domain_id="b" * 64,
             journal_namespace_id="c" * 64,
+            adapter_implementation_sha256=(
+                authority_descriptor["adapter_implementation_sha256"]
+            ),
+            configuration_sha256=authority_descriptor["configuration_sha256"],
             operation_inventory_schema_version=(
                 executor_module.RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
             ),
@@ -3247,6 +3302,9 @@ def _multiprocess_issue_copied_id_receipt(
             ),
             dispatch_fence_semantics=(
                 executor_module.RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS
+            ),
+            authority_binding_sha256=(
+                authority_descriptor["authority_binding_sha256"]
             ),
         )
     )
@@ -3659,15 +3717,7 @@ def _authorization(
         {name: value["sha256"] for name, value in sorted(required.items())}
     )
     candidate_sha = sha256_file(root / CANDIDATE_BUNDLE_REPOSITORY_PATH)
-    risk_domain_lease_authority = {
-        "lease_id": auth_module.TRUSTED_RISK_DOMAIN_LEASE_ID,
-        "service_identity_sha256": TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256,
-        "tenant_id": TEST_RISK_DOMAIN_TENANT_ID,
-        "key_identity_sha256": TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
-        "signature_algorithm": executor_module.RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM,
-        "public_key_modulus_hex": TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
-        "public_key_exponent": 65_537,
-    }
+    risk_domain_lease_authority = _test_risk_domain_authority_descriptor()
     execution_service_authority = copy.deepcopy(TEST_EXECUTION_AUTHORITY)
     identity = {
         "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
@@ -3788,6 +3838,7 @@ def _verified(
         expected_manifest_sha256=authorization["candidate_bundle"]["sha256"],
         repository_root=fixture["root"],
     )
+    risk_domain_authority = dict(authorization["risk_domain_lease_authority"])
     capability = VerifiedMicroLiveAuthorization(
         authorization_id=authorization["authorization_id"],
         authorization_payload_sha256=hashlib.sha256(
@@ -3806,6 +3857,39 @@ def _verified(
             TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX
         ),
         risk_domain_lease_public_key_exponent=65_537,
+        risk_domain_authority_adapter_implementation_sha256=str(
+            risk_domain_authority["adapter_implementation_sha256"]
+        ),
+        risk_domain_authority_configuration_sha256=str(
+            risk_domain_authority["configuration_sha256"]
+        ),
+        risk_domain_authority_operation_inventory_schema_version=str(
+            risk_domain_authority["operation_inventory_schema_version"]
+        ),
+        risk_domain_authority_required_operations=tuple(
+            risk_domain_authority["required_operations"]
+        ),
+        risk_domain_authority_required_operations_sha256=str(
+            risk_domain_authority["required_operations_sha256"]
+        ),
+        risk_domain_authority_kill_semantics=str(
+            risk_domain_authority["kill_semantics"]
+        ),
+        risk_domain_authority_outbox_recovery_semantics=str(
+            risk_domain_authority["outbox_recovery_semantics"]
+        ),
+        risk_domain_authority_dispatch_completion_semantics=str(
+            risk_domain_authority["dispatch_completion_semantics"]
+        ),
+        risk_domain_authority_dispatch_recovery_semantics=str(
+            risk_domain_authority["dispatch_recovery_semantics"]
+        ),
+        risk_domain_authority_dispatch_fence_semantics=str(
+            risk_domain_authority["dispatch_fence_semantics"]
+        ),
+        risk_domain_authority_binding_sha256=str(
+            risk_domain_authority["authority_binding_sha256"]
+        ),
         execution_service_identity_sha256=(
             TEST_EXECUTION_SERVICE_IDENTITY_SHA256
         ),
@@ -6895,7 +6979,6 @@ def test_cancel_crash_boundaries_are_wal_recoverable(
 
 def test_hung_submit_cannot_starve_independent_watchdog_kill(
     authorized_fixture: dict[str, Any],
-    _production_call_deadlines: None,
 ) -> None:
     verified = _verified_for_production_deadline(authorized_fixture)
     journal = _new_journal()
@@ -7681,7 +7764,6 @@ def test_lost_outbox_ack_replays_exactly_once_across_restart(
 
 def test_post_commit_timeout_recovers_exact_outbox_command_after_restart(
     authorized_fixture: dict[str, Any],
-    _production_call_deadlines: None,
 ) -> None:
     verified = _verified_for_production_deadline(authorized_fixture)
     journal = _new_journal()
@@ -7750,8 +7832,16 @@ def test_crash_after_outbox_before_venue_recovers_without_redispatch(
 
 def test_hung_lookup_times_out_and_remains_conservatively_killed(
     authorized_fixture: dict[str, Any],
-    _production_call_deadlines: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Freeze only the transport ceiling before verification/construction.  The
+    # authority claim and journal fsync remain under the ordinary correctness
+    # allowance so this test measures the post-startup transport failure path.
+    monkeypatch.setattr(
+        executor_module,
+        "MAX_TRANSPORT_CALL_DURATION_MS",
+        _PRODUCTION_MAX_TRANSPORT_CALL_DURATION_MS,
+    )
     verified = _verified_for_production_deadline(authorized_fixture)
     assert (
         verified.execution_maximum_call_duration_ms
@@ -7771,7 +7861,15 @@ def test_hung_lookup_times_out_and_remains_conservatively_killed(
             client_order_id=client_order_id,
             now_ts_ms=NOW_TS_MS + 1,
         )
-    assert time.monotonic() - started < 1.0
+    elapsed_seconds = time.monotonic() - started
+    complete_failure_path_bound_seconds = (
+        2 * _CORRECTNESS_TEST_CALL_DURATION_MS
+        + 2 * _PRODUCTION_AUTHORIZED_TRANSPORT_CALL_DURATION_MS
+    ) / 1_000 + 3.0
+    assert elapsed_seconds >= (
+        _PRODUCTION_AUTHORIZED_TRANSPORT_CALL_DURATION_MS / 1_000 * 0.8
+    )
+    assert elapsed_seconds < complete_failure_path_bound_seconds
     assert executor.reconciliation_snapshot()["kill_switch_active"] is True
     assert any(
         event["event_type"] == "ORDER_SUBMISSION_RECONCILIATION_FAILED"
@@ -7780,9 +7878,40 @@ def test_hung_lookup_times_out_and_remains_conservatively_killed(
     transport.release.set()
 
 
+def test_hung_transport_call_uses_exact_authorized_deadline_after_startup(
+    authorized_fixture: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        executor_module,
+        "MAX_TRANSPORT_CALL_DURATION_MS",
+        _PRODUCTION_MAX_TRANSPORT_CALL_DURATION_MS,
+    )
+    verified = _verified_for_production_deadline(authorized_fixture)
+    transport = HungTransport(hung_operation="lookup_order")
+    executor = MicroLiveExecutor(verified, transport=transport)
+
+    started = time.monotonic()
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="exceeded the mandatory transport deadline",
+    ):
+        executor._bounded_transport_call(
+            operation="lookup_order",
+            request={"test": "isolated-post-startup-deadline"},
+        )
+    elapsed_seconds = time.monotonic() - started
+
+    assert transport.started.is_set()
+    assert elapsed_seconds >= (
+        _PRODUCTION_AUTHORIZED_TRANSPORT_CALL_DURATION_MS / 1_000 * 0.8
+    )
+    assert elapsed_seconds < 2.0
+    transport.release.set()
+
+
 def test_fence_precedes_authoritative_lookup_when_timed_out_submit_accepts_late(
     authorized_fixture: dict[str, Any],
-    _production_call_deadlines: None,
 ) -> None:
     verified = _verified_for_production_deadline(authorized_fixture)
     transport = LateAcceptAfterRejectedLookupTransport()
@@ -7838,7 +7967,6 @@ def test_fence_precedes_authoritative_lookup_when_timed_out_submit_accepts_late(
 
 def test_unfenced_submission_remains_unknown_without_any_lookup(
     authorized_fixture: dict[str, Any],
-    _production_call_deadlines: None,
 ) -> None:
     verified = _verified_for_production_deadline(authorized_fixture)
     transport = LateAcceptAfterRejectedLookupTransport()
@@ -7881,7 +8009,6 @@ def test_unfenced_submission_remains_unknown_without_any_lookup(
 
 def test_hung_cancel_persists_emergency_kill_then_cancel_unknown(
     authorized_fixture: dict[str, Any],
-    _production_call_deadlines: None,
 ) -> None:
     verified = _verified_for_production_deadline(authorized_fixture)
     journal = _new_journal()
@@ -8675,21 +8802,8 @@ def test_missing_required_transport_operation_fails_before_startup_or_venue(
         raw_state = None
         wal_before = None
 
-    authority_delegate = journal.risk_domain_lease
-
-    class CountingAuthority:
-        def __init__(self) -> None:
-            self.claim_calls = 0
-
-        def __getattr__(self, name: str) -> Any:
-            return getattr(authority_delegate, name)
-
-        def claim_risk_domain(self, **kwargs: Any) -> bytes:
-            self.claim_calls += 1
-            return authority_delegate.claim_risk_domain(**kwargs)
-
-    authority = CountingAuthority()
-    journal.risk_domain_lease = authority
+    authority = journal.risk_domain_lease
+    claim_calls_before = authority.claim_calls
     delegate = FakeTransport()
 
     class MissingOperationTransport:
@@ -8723,7 +8837,7 @@ def test_missing_required_transport_operation_fails_before_startup_or_venue(
 
     assert "gateway lacks required startup operations" in str(exc_info.value)
     assert missing_operation in str(exc_info.value)
-    assert authority.claim_calls == 0
+    assert authority.claim_calls == claim_calls_before
     assert transport.attestation_calls == 0
     assert delegate.submit_calls == []
     assert delegate.recovery_lookup_calls == []
@@ -8760,24 +8874,22 @@ def test_missing_required_authority_operation_fails_before_startup_or_venue(
 ) -> None:
     verified = _verified(authorized_fixture)
     if startup_mode == "restore":
-        journal = _new_journal()
+        healthy_journal = _new_journal()
         healthy = _StrictMicroLiveExecutor(
             verified,
             transport=FakeTransport(),
-            journal=journal,
+            journal=healthy_journal,
         )
         raw_state = healthy.export_state_bytes()
-        wal_before = journal.state_path.read_bytes()
-        delegate = journal.risk_domain_lease
+        wal_before = healthy_journal.state_path.read_bytes()
+        delegate = healthy_journal.risk_domain_lease
+        journal_root = healthy_journal.root
     else:
         base = Path(tempfile.mkdtemp(prefix="bigan-missing-authority-test-"))
         delegate = _TestDurableRiskDomainLease(
             base / "external-risk-domain-lease"
         )
-        journal = AtomicFileMicroLiveStateJournal(
-            base / "journal",
-            risk_domain_lease=delegate,
-        )
+        journal_root = base / "journal"
         raw_state = None
         wal_before = None
 
@@ -8795,7 +8907,10 @@ def test_missing_required_authority_operation_fails_before_startup_or_venue(
             return delegate.claim_risk_domain(**kwargs)
 
     authority = MissingOperationAuthority()
-    journal.risk_domain_lease = authority
+    journal = AtomicFileMicroLiveStateJournal(
+        journal_root,
+        risk_domain_lease=authority,
+    )
 
     class CapturingTransport(FakeTransport):
         def __init__(self) -> None:
@@ -8846,6 +8961,8 @@ def test_missing_required_authority_operation_fails_before_startup_or_venue(
 @pytest.mark.parametrize(
     ("field", "value"),
     (
+        ("adapter_implementation_sha256", "0" * 64),
+        ("configuration_sha256", "0" * 64),
         ("operation_inventory_schema_version", "legacy-v0"),
         (
             "required_operations",
@@ -8861,6 +8978,7 @@ def test_missing_required_authority_operation_fails_before_startup_or_venue(
         ("dispatch_completion_semantics", "unsigned_completion"),
         ("dispatch_recovery_semantics", "may_redispatch"),
         ("dispatch_fence_semantics", "deadline_implies_fence"),
+        ("authority_binding_sha256", "0" * 64),
     ),
 )
 def test_authority_operation_inventory_claim_is_signed_and_authorization_bound(
@@ -8926,11 +9044,214 @@ def test_authority_operation_semantics_are_bound_into_capability_snapshot(
         "test-drifted-fence-semantics",
     )
 
-    assert (
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="authority capability is runtime-mismatched",
+    ):
         executor_module._risk_domain_authority_binding_sha256(verified)
-        != expected_binding
+    assert bound.risk_domain_authority_binding_sha256 == expected_binding
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="authority capability is runtime-mismatched",
+    ):
+        bound.matches_verified(verified)
+
+
+def test_raw_authority_identity_rejects_self_consistent_weakened_contracts() -> None:
+    authority = _test_risk_domain_authority_descriptor()
+    assert auth_module._validated_risk_domain_lease_authority(authority) == authority
+
+    weakened_inventory = copy.deepcopy(authority)
+    weakened_inventory["required_operations"].remove("persist_risk_domain_kill")
+    weakened_inventory["required_operations_sha256"] = canonical_json_sha256(
+        {
+            "schema_version": weakened_inventory[
+                "operation_inventory_schema_version"
+            ],
+            "required_operations": weakened_inventory["required_operations"],
+        }
     )
-    assert bound.matches_verified(verified) is False
+    weakened_inventory["authority_binding_sha256"] = (
+        auth_module.compute_risk_domain_authority_binding_sha256(
+            weakened_inventory
+        )
+    )
+
+    weakened_semantics = copy.deepcopy(authority)
+    weakened_semantics["kill_semantics"] = "best_effort_kill"
+    weakened_semantics["authority_binding_sha256"] = (
+        auth_module.compute_risk_domain_authority_binding_sha256(
+            weakened_semantics
+        )
+    )
+
+    for weakened in (weakened_inventory, weakened_semantics):
+        with pytest.raises(
+            MicroLiveAuthorizationError,
+            match="risk-domain lease authority binding is invalid",
+        ):
+            auth_module._validated_risk_domain_lease_authority(weakened)
+
+
+@pytest.mark.parametrize("drift", ("inventory", "semantics"))
+def test_verified_authority_contract_drift_fails_before_construction_effects(
+    authorized_fixture: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    verified = _verified(authorized_fixture)
+    assert authorization_capability_is_verified(verified) is True
+    authorized_descriptor = _test_risk_domain_authority_descriptor()
+    delegate = _TestDurableRiskDomainLease(
+        tmp_path / "authority",
+        authority_descriptor=authorized_descriptor,
+    )
+    missing_operation: str | None = None
+    if drift == "inventory":
+        missing_operation = "persist_risk_domain_kill"
+        reduced_operations = tuple(
+            operation
+            for operation in executor_module.REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS
+            if operation != missing_operation
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS",
+            reduced_operations,
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256",
+            canonical_json_sha256(
+                {
+                    "schema_version": (
+                        executor_module.RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
+                    ),
+                    "required_operations": list(reduced_operations),
+                }
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            executor_module,
+            "RISK_DOMAIN_KILL_SEMANTICS",
+            "test-weakened-kill-semantics",
+        )
+
+    class AuthorityProxy:
+        def __getattr__(self, name: str) -> Any:
+            if name == missing_operation:
+                raise AttributeError(name)
+            return getattr(delegate, name)
+
+    journal = AtomicFileMicroLiveStateJournal(
+        tmp_path / "journal",
+        risk_domain_lease=AuthorityProxy(),
+    )
+
+    class CapturingTransport(FakeTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attestation_calls = 0
+
+        def attest_execution_binding(self, request: dict[str, Any]) -> bytes:
+            self.attestation_calls += 1
+            return super().attest_execution_binding(request)
+
+    transport = CapturingTransport()
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="authority capability is runtime-mismatched",
+    ):
+        _StrictMicroLiveExecutor(
+            verified,
+            transport=transport,
+            journal=journal,
+        )
+
+    assert authorization_capability_is_verified(verified) is True
+    assert delegate.claim_calls == 0
+    assert transport.attestation_calls == 0
+    assert transport.submit_calls == []
+    assert transport.venue_idempotency_authority.outcomes_by_client_order_id == {}
+    assert journal.state_path.exists() is False
+    assert journal.pending_state_path.exists() is False
+    assert journal.risk_domain_receipt_path.exists() is False
+
+
+def test_risk_domain_authority_backend_cannot_be_replaced_after_construction(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    transport = FakeTransport()
+    _StrictMicroLiveExecutor(
+        verified,
+        transport=transport,
+        journal=journal,
+    )
+    original_authority = journal.risk_domain_lease
+    wal_before = journal.state_path.read_bytes()
+    claim_calls_before = original_authority.claim_calls
+
+    replacement = _TestDurableRiskDomainLease(
+        Path(tempfile.mkdtemp(prefix="bigan-replacement-authority-test-"))
+    )
+    with pytest.raises(AttributeError, match="authority backend is immutable"):
+        journal.risk_domain_lease = replacement
+    with pytest.raises(AttributeError, match="authority backend is immutable"):
+        journal._risk_domain_lease = replacement
+
+    assert journal.risk_domain_lease is original_authority
+    assert journal.risk_domain_lease_object_id == id(original_authority)
+    assert original_authority.claim_calls == claim_calls_before
+    assert journal.state_path.read_bytes() == wal_before
+    assert transport.submit_calls == []
+    assert transport.venue_idempotency_authority.outcomes_by_client_order_id == {}
+
+
+def test_open_order_retains_original_authority_kill_after_replacement_attempt(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    transport = FakeTransport()
+    executor = MicroLiveExecutor(
+        verified,
+        transport=transport,
+        journal=journal,
+    )
+    acknowledged = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    assert acknowledged["status"] == "ORDER_ACKNOWLEDGED"
+    original_authority = journal.risk_domain_lease
+    submit_count_before = len(transport.submit_calls)
+    cancel_count_before = len(transport.cancel_calls)
+
+    class MissingKillAuthority:
+        def __getattr__(self, name: str) -> Any:
+            if name == "persist_risk_domain_kill":
+                raise AttributeError(name)
+            return getattr(original_authority, name)
+
+    with pytest.raises(AttributeError, match="authority backend is immutable"):
+        journal.risk_domain_lease = MissingKillAuthority()
+    assert len(transport.submit_calls) == submit_count_before
+    assert len(transport.cancel_calls) == cancel_count_before
+
+    result = executor.engage_kill_switch(
+        reason="test-authoritative-unwind-after-replacement-attempt",
+        now_ts_ms=NOW_TS_MS + 1,
+    )
+
+    assert result["status"] == "KILL_SWITCH_ENGAGED"
+    assert journal.risk_domain_lease is original_authority
+    assert journal.emergency_kill_snapshot() is not None
+    assert executor.reconciliation_snapshot()["open_order_count"] == 0
+    assert len(transport.submit_calls) == 1
+    assert len(transport.cancel_calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -9175,6 +9496,7 @@ def test_semantically_equal_fill_bytes_reconcile_restart_and_settle(
 
 
 def _bind_standalone_journal(journal: AtomicFileMicroLiveStateJournal) -> None:
+    authority_descriptor = _test_risk_domain_authority_descriptor()
     journal.bind_risk_domain(
         authorization_id="standalone-journal-test-authorization",
         risk_domain_id="f" * 64,
@@ -9184,6 +9506,29 @@ def _bind_standalone_journal(journal: AtomicFileMicroLiveStateJournal) -> None:
         key_identity_sha256=TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
         public_key_modulus_hex=TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
         public_key_exponent=65_537,
+        adapter_implementation_sha256=(
+            authority_descriptor["adapter_implementation_sha256"]
+        ),
+        configuration_sha256=authority_descriptor["configuration_sha256"],
+        operation_inventory_schema_version=(
+            authority_descriptor["operation_inventory_schema_version"]
+        ),
+        required_operations=authority_descriptor["required_operations"],
+        required_operations_sha256=(
+            authority_descriptor["required_operations_sha256"]
+        ),
+        kill_semantics=authority_descriptor["kill_semantics"],
+        outbox_recovery_semantics=(
+            authority_descriptor["outbox_recovery_semantics"]
+        ),
+        dispatch_completion_semantics=(
+            authority_descriptor["dispatch_completion_semantics"]
+        ),
+        dispatch_recovery_semantics=(
+            authority_descriptor["dispatch_recovery_semantics"]
+        ),
+        dispatch_fence_semantics=authority_descriptor["dispatch_fence_semantics"],
+        authority_binding_sha256=authority_descriptor["authority_binding_sha256"],
     )
 
 
@@ -9293,12 +9638,21 @@ def test_crash_after_authority_commit_before_local_promote_recovers(
 def test_all_external_authority_calls_have_a_hard_deadline(
     tmp_path: Path,
     operation: str,
-    _production_call_deadlines: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     lease = _TestDurableRiskDomainLease(tmp_path / "authority")
     journal = AtomicFileMicroLiveStateJournal(
         tmp_path / "journal",
         risk_domain_lease=lease,
+    )
+    if operation == "advance":
+        # Establish the signed claim under the ordinary correctness allowance;
+        # this branch measures only the production high-water deadline.
+        _bind_standalone_journal(journal)
+    monkeypatch.setattr(
+        executor_module,
+        "MAX_AUTHORITY_CALL_DURATION_MS",
+        _PRODUCTION_MAX_AUTHORITY_CALL_DURATION_MS,
     )
     if operation == "claim":
         lease.hang_claim = True
@@ -9306,12 +9660,17 @@ def test_all_external_authority_calls_have_a_hard_deadline(
         with pytest.raises(MicroLiveExecutionError, match="claim failed closed"):
             _bind_standalone_journal(journal)
     else:
-        _bind_standalone_journal(journal)
         lease.hang_advance = True
         started = time.monotonic()
         with pytest.raises(MicroLiveExecutionError, match="advance failed closed"):
             journal.initialize(_standalone_journal_state(0))
-    assert time.monotonic() - started < 2.0
+    elapsed_seconds = time.monotonic() - started
+    assert elapsed_seconds >= (
+        _PRODUCTION_MAX_AUTHORITY_CALL_DURATION_MS / 1_000 * 0.8
+    )
+    assert elapsed_seconds < (
+        _PRODUCTION_MAX_AUTHORITY_CALL_DURATION_MS / 1_000 + 4.0
+    )
 
 
 def test_external_kill_survives_local_sidecar_deletion_and_restart(
