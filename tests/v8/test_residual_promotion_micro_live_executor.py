@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import copy
 import hashlib
+import inspect
 import json
 import multiprocessing
 import os
@@ -194,15 +195,23 @@ TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256 = canonical_json_sha256(
         "public_key_exponent": 65_537,
     }
 )
-TEST_RISK_DOMAIN_ADAPTER_IMPLEMENTATION_SHA256 = canonical_json_sha256(
-    {"adapter": "test-durable-risk-domain-authority-adapter-v1"}
-)
-TEST_RISK_DOMAIN_CONFIGURATION_SHA256 = canonical_json_sha256(
-    {"configuration": "test-durable-risk-domain-authority-config-v1"}
-)
+TEST_RISK_DOMAIN_RPC_ENDPOINT = "/tmp/bigan-test-risk-domain-authority-v1.sock"
+TEST_RISK_DOMAIN_RPC_CREDENTIAL = b"bigan-test-risk-domain-rpc-credential-v1"
 
 
 def _test_risk_domain_authority_descriptor() -> dict[str, Any]:
+    adapter_implementation_sha256 = (
+        executor_module.deployment_owned_risk_domain_authority_adapter_implementation_sha256()
+    )
+    configuration_sha256 = (
+        executor_module.deployment_owned_risk_domain_authority_configuration_sha256(
+            endpoint=TEST_RISK_DOMAIN_RPC_ENDPOINT,
+            credential=TEST_RISK_DOMAIN_RPC_CREDENTIAL,
+            service_identity_sha256=TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256,
+            tenant_id=TEST_RISK_DOMAIN_TENANT_ID,
+            key_identity_sha256=TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+        )
+    )
     descriptor = {
         "lease_id": auth_module.TRUSTED_RISK_DOMAIN_LEASE_ID,
         "service_identity_sha256": TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256,
@@ -212,9 +221,9 @@ def _test_risk_domain_authority_descriptor() -> dict[str, Any]:
         "public_key_modulus_hex": TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
         "public_key_exponent": 65_537,
         "adapter_implementation_sha256": (
-            TEST_RISK_DOMAIN_ADAPTER_IMPLEMENTATION_SHA256
+            adapter_implementation_sha256
         ),
-        "configuration_sha256": TEST_RISK_DOMAIN_CONFIGURATION_SHA256,
+        "configuration_sha256": configuration_sha256,
         "operation_inventory_schema_version": (
             executor_module.RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
         ),
@@ -1801,12 +1810,35 @@ class _TestDurableRiskDomainLease:
         )
 
 
+def _test_authority_adapter(
+    backend: Any,
+) -> executor_module.DeploymentOwnedRiskDomainAuthorityAdapter:
+    descriptor = _test_risk_domain_authority_descriptor()
+    return executor_module.DeploymentOwnedRiskDomainAuthorityAdapter._for_test_backend(
+        backend,
+        endpoint=TEST_RISK_DOMAIN_RPC_ENDPOINT,
+        credential=TEST_RISK_DOMAIN_RPC_CREDENTIAL,
+        service_identity_sha256=TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256,
+        tenant_id=TEST_RISK_DOMAIN_TENANT_ID,
+        key_identity_sha256=TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+        expected_adapter_implementation_sha256=(
+            descriptor["adapter_implementation_sha256"]
+        ),
+        expected_configuration_sha256=descriptor["configuration_sha256"],
+    )
+
+
+def _test_authority_backend(journal: AtomicFileMicroLiveStateJournal) -> Any:
+    adapter = journal.risk_domain_lease
+    return adapter._local_test_backend
+
+
 def _new_journal() -> AtomicFileMicroLiveStateJournal:
     base = Path(tempfile.mkdtemp(prefix="bigan-wal-test-"))
     return AtomicFileMicroLiveStateJournal(
         base / "journal",
-        risk_domain_lease=_TestDurableRiskDomainLease(
-            base / "external-risk-domain-lease"
+        risk_domain_lease=_test_authority_adapter(
+            _TestDurableRiskDomainLease(base / "external-risk-domain-lease")
         ),
     )
 
@@ -1814,7 +1846,7 @@ def _new_journal() -> AtomicFileMicroLiveStateJournal:
 def _durable_execution_outbox_commands(
     journal: AtomicFileMicroLiveStateJournal,
 ) -> dict[str, dict[str, Any]]:
-    lease = journal.risk_domain_lease
+    lease = _test_authority_backend(journal)
     if not isinstance(lease, _TestDurableRiskDomainLease):
         raise AssertionError("test journal lacks inspectable authority")
     state_paths = list(lease.authority_root.glob("*.json"))
@@ -1827,7 +1859,7 @@ def _durable_execution_outbox_commands(
 def _durable_execution_dispatches(
     journal: AtomicFileMicroLiveStateJournal,
 ) -> dict[str, dict[str, Any]]:
-    lease = journal.risk_domain_lease
+    lease = _test_authority_backend(journal)
     if not isinstance(lease, _TestDurableRiskDomainLease):
         raise AssertionError("test journal lacks inspectable authority")
     state_paths = list(lease.authority_root.glob("*.json"))
@@ -1841,9 +1873,8 @@ def _journal_factory_args() -> dict[str, Any]:
     base = Path(tempfile.mkdtemp(prefix="bigan-wal-factory-test-"))
     return {
         "journal_root": base / "journal",
-        "risk_domain_lease": _TestDurableRiskDomainLease(
-            base / "external-risk-domain-lease"
-        ),
+        "risk_domain_authority_endpoint": TEST_RISK_DOMAIN_RPC_ENDPOINT,
+        "risk_domain_authority_credential": TEST_RISK_DOMAIN_RPC_CREDENTIAL,
     }
 
 
@@ -1852,10 +1883,12 @@ def _journal_with_state(raw_state: bytes) -> AtomicFileMicroLiveStateJournal:
     base = Path(tempfile.mkdtemp(prefix="bigan-seeded-wal-test-"))
     journal = AtomicFileMicroLiveStateJournal(
         base / "journal",
-        risk_domain_lease=_TestDurableRiskDomainLease(
-            base / "external-risk-domain-lease",
-            initial_high_water_generation=generation,
-            initial_high_water_state_sha256=hashlib.sha256(raw_state).hexdigest(),
+        risk_domain_lease=_test_authority_adapter(
+            _TestDurableRiskDomainLease(
+                base / "external-risk-domain-lease",
+                initial_high_water_generation=generation,
+                initial_high_water_state_sha256=hashlib.sha256(raw_state).hexdigest(),
+            )
         ),
     )
     with journal._exclusive_lock():
@@ -3013,8 +3046,8 @@ def _crash_after_committed_event_journal(
     base = Path(directory)
     journal = AtomicFileMicroLiveStateJournal(
         base / "journal",
-        risk_domain_lease=_TestDurableRiskDomainLease(
-            base / "external-risk-domain-lease"
+        risk_domain_lease=_test_authority_adapter(
+            _TestDurableRiskDomainLease(base / "external-risk-domain-lease")
         ),
     )
     journal.target_event_type = None
@@ -3236,7 +3269,9 @@ def _multiprocess_hold_journal_lock(
 ) -> None:
     journal = AtomicFileMicroLiveStateJournal(
         root,
-        risk_domain_lease=_TestDurableRiskDomainLease(authority_root),
+        risk_domain_lease=_test_authority_adapter(
+            _TestDurableRiskDomainLease(authority_root)
+        ),
     )
     with journal._exclusive_lock():  # noqa: SLF001 - deliberate process-lock probe
         entered.set()
@@ -3251,7 +3286,9 @@ def _multiprocess_probe_journal_lock(
 ) -> None:
     journal = AtomicFileMicroLiveStateJournal(
         root,
-        risk_domain_lease=_TestDurableRiskDomainLease(authority_root),
+        risk_domain_lease=_test_authority_adapter(
+            _TestDurableRiskDomainLease(authority_root)
+        ),
     )
     entered.set()
     with journal._exclusive_lock():  # noqa: SLF001 - deliberate process-lock probe
@@ -4039,7 +4076,7 @@ def test_current_template_cannot_create_executor(
     assert transport.cancel_calls == []
 
 
-def test_executor_bundles_no_network_wallet_or_credential_adapter() -> None:
+def test_executor_bundles_no_venue_network_wallet_or_credential_adapter() -> None:
     paths = (
         REPO_ROOT
         / "src/bigan/v8/polymarket/residual_promotion_micro_live_authorization.py",
@@ -4070,6 +4107,19 @@ def test_executor_bundles_no_network_wallet_or_credential_adapter() -> None:
         assert imports.isdisjoint(forbidden_modules)
         assert "os.environ" not in source
         assert "getenv(" not in source
+
+
+def test_production_composition_root_owns_concrete_authority_route() -> None:
+    signature = inspect.signature(create_micro_live_executor)
+    assert "risk_domain_lease" not in signature.parameters
+    assert {
+        "risk_domain_authority_endpoint",
+        "risk_domain_authority_credential",
+    }.issubset(signature.parameters)
+    source = inspect.getsource(create_micro_live_executor)
+    assert "DeploymentOwnedRiskDomainAuthorityAdapter(" in source
+    assert "expected_adapter_implementation_sha256" in source
+    assert "expected_configuration_sha256" in source
 
 
 def test_legacy_local_graph_cannot_create_a_production_capability(
@@ -6677,12 +6727,12 @@ def test_same_authorization_cannot_reset_risk_budget_in_a_second_journal_root(
     )
     first = AtomicFileMicroLiveStateJournal(
         tmp_path / "journal-one",
-        risk_domain_lease=lease,
+        risk_domain_lease=_test_authority_adapter(lease),
     )
     MicroLiveExecutor(verified, transport=FakeTransport(), journal=first)
     second = AtomicFileMicroLiveStateJournal(
         tmp_path / "journal-two",
-        risk_domain_lease=lease,
+        risk_domain_lease=_test_authority_adapter(lease),
     )
     with pytest.raises(
         MicroLiveExecutionError,
@@ -6700,7 +6750,7 @@ def test_copied_lease_id_from_an_independent_backend_is_not_a_capability(
     first_backend = _TestDurableRiskDomainLease(tmp_path / "authority-one")
     first = AtomicFileMicroLiveStateJournal(
         tmp_path / "journal-one",
-        risk_domain_lease=first_backend,
+        risk_domain_lease=_test_authority_adapter(first_backend),
     )
     MicroLiveExecutor(verified, transport=FakeTransport(), journal=first)
 
@@ -6713,7 +6763,7 @@ def test_copied_lease_id_from_an_independent_backend_is_not_a_capability(
     )
     second = AtomicFileMicroLiveStateJournal(
         tmp_path / "journal-two",
-        risk_domain_lease=second_backend,
+        risk_domain_lease=_test_authority_adapter(second_backend),
     )
     with pytest.raises(
         MicroLiveExecutionError,
@@ -7107,7 +7157,7 @@ def test_kill_before_outbox_commit_fences_command_before_venue(
 ) -> None:
     verified = _verified(authorized_fixture)
     journal = _new_journal()
-    lease = journal.risk_domain_lease
+    lease = _test_authority_backend(journal)
     assert isinstance(lease, _TestDurableRiskDomainLease)
     lease.block_next_outbox_commit = True
     transport = FakeTransport()
@@ -7144,7 +7194,7 @@ def test_outbox_failure_before_commit_recovers_by_exact_replay(
 ) -> None:
     verified = _verified(authorized_fixture)
     journal = _new_journal()
-    lease = journal.risk_domain_lease
+    lease = _test_authority_backend(journal)
     assert isinstance(lease, _TestDurableRiskDomainLease)
     lease.fail_next_outbox_commit_before_commit = True
     transport = FakeTransport()
@@ -7286,7 +7336,7 @@ def test_gateway_expired_dispatch_capability_fails_closed_before_venue(
 ) -> None:
     verified = _verified(authorized_fixture)
     journal = _new_journal()
-    lease = journal.risk_domain_lease
+    lease = _test_authority_backend(journal)
     assert isinstance(lease, _TestDurableRiskDomainLease)
     transport = CrashBeforeDispatchConsumptionTransport()
     executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
@@ -7348,7 +7398,7 @@ def test_abandoned_dispatching_state_remains_in_progress_after_deadline(
 ) -> None:
     verified = _verified(authorized_fixture)
     journal = _new_journal()
-    lease = journal.risk_domain_lease
+    lease = _test_authority_backend(journal)
     assert isinstance(lease, _TestDurableRiskDomainLease)
     transport = CrashAfterOutboxBeforeVenueTransport()
     executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
@@ -7380,7 +7430,7 @@ def test_issued_dispatch_is_never_falsely_fenced_before_worker_release(
 ) -> None:
     verified = _verified(authorized_fixture)
     journal = _new_journal()
-    lease = journal.risk_domain_lease
+    lease = _test_authority_backend(journal)
     assert isinstance(lease, _TestDurableRiskDomainLease)
     transport = OutboxCommittedBeforeVenueTransport()
     executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
@@ -7434,12 +7484,12 @@ def test_venue_accept_then_crash_recovers_across_gateway_restart(
             **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
         )
     assert crashed_transport.venue_idempotency_authority.external_effect_count == 1
-    original_lease = journal.risk_domain_lease
+    original_lease = _test_authority_backend(journal)
     assert isinstance(original_lease, _TestDurableRiskDomainLease)
     fresh_lease = _TestDurableRiskDomainLease(original_lease.authority_root)
     fresh_journal = AtomicFileMicroLiveStateJournal(
         journal.root,
-        risk_domain_lease=fresh_lease,
+        risk_domain_lease=_test_authority_adapter(fresh_lease),
     )
     fresh_transport = FakeTransport(
         venue_idempotency_authority=(
@@ -7489,7 +7539,7 @@ def test_public_restart_recovery_without_venue_outcome_stays_unknown(
         executor.submit_signal(
             **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
         )
-    original_lease = journal.risk_domain_lease
+    original_lease = _test_authority_backend(journal)
     assert isinstance(original_lease, _TestDurableRiskDomainLease)
     fresh_transport = FakeTransport(
         venue_idempotency_authority=(
@@ -7501,8 +7551,8 @@ def test_public_restart_recovery_without_venue_outcome_stays_unknown(
         transport=fresh_transport,
         journal=AtomicFileMicroLiveStateJournal(
             journal.root,
-            risk_domain_lease=_TestDurableRiskDomainLease(
-                original_lease.authority_root
+            risk_domain_lease=_test_authority_adapter(
+                _TestDurableRiskDomainLease(original_lease.authority_root)
             ),
         ),
         raw_state=executor.export_state_bytes(),
@@ -7557,7 +7607,7 @@ def test_public_restart_recovery_rejects_tampered_venue_outcome(
         client_order_id=client_order_id,
         raw_outcome=_json_bytes(stored),
     )
-    original_lease = journal.risk_domain_lease
+    original_lease = _test_authority_backend(journal)
     assert isinstance(original_lease, _TestDurableRiskDomainLease)
     fresh_transport = FakeTransport(
         venue_idempotency_authority=(
@@ -7569,8 +7619,8 @@ def test_public_restart_recovery_rejects_tampered_venue_outcome(
         transport=fresh_transport,
         journal=AtomicFileMicroLiveStateJournal(
             journal.root,
-            risk_domain_lease=_TestDurableRiskDomainLease(
-                original_lease.authority_root
+            risk_domain_lease=_test_authority_adapter(
+                _TestDurableRiskDomainLease(original_lease.authority_root)
             ),
         ),
         raw_state=executor.export_state_bytes(),
@@ -7617,7 +7667,7 @@ def test_concurrent_old_worker_and_public_restart_recovery_are_idempotent(
             **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
         )
     assert old_transport.venue_accepted.is_set()
-    original_lease = journal.risk_domain_lease
+    original_lease = _test_authority_backend(journal)
     assert isinstance(original_lease, _TestDurableRiskDomainLease)
     fresh_transport = CoordinatedRecoveryTransport(
         venue_idempotency_authority=old_transport.venue_idempotency_authority
@@ -7627,8 +7677,8 @@ def test_concurrent_old_worker_and_public_restart_recovery_are_idempotent(
         transport=fresh_transport,
         journal=AtomicFileMicroLiveStateJournal(
             journal.root,
-            risk_domain_lease=_TestDurableRiskDomainLease(
-                original_lease.authority_root
+            risk_domain_lease=_test_authority_adapter(
+                _TestDurableRiskDomainLease(original_lease.authority_root)
             ),
         ),
         raw_state=executor.export_state_bytes(),
@@ -7686,7 +7736,7 @@ def test_public_restart_recovery_replays_lost_completion_ack(
         executor.submit_signal(
             **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
         )
-    original_lease = journal.risk_domain_lease
+    original_lease = _test_authority_backend(journal)
     assert isinstance(original_lease, _TestDurableRiskDomainLease)
     fresh_lease = _TestDurableRiskDomainLease(original_lease.authority_root)
     fresh_lease.lose_next_dispatch_recovery_response = True
@@ -7700,7 +7750,7 @@ def test_public_restart_recovery_replays_lost_completion_ack(
         transport=fresh_transport,
         journal=AtomicFileMicroLiveStateJournal(
             journal.root,
-            risk_domain_lease=fresh_lease,
+            risk_domain_lease=_test_authority_adapter(fresh_lease),
         ),
         raw_state=executor.export_state_bytes(),
     )
@@ -7726,7 +7776,7 @@ def test_lost_outbox_ack_replays_exactly_once_across_restart(
 ) -> None:
     verified = _verified(authorized_fixture)
     journal = _new_journal()
-    lease = journal.risk_domain_lease
+    lease = _test_authority_backend(journal)
     assert isinstance(lease, _TestDurableRiskDomainLease)
     transport = FakeTransport()
     executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
@@ -8726,7 +8776,7 @@ def test_existing_authority_high_water_rejects_deleted_wal_reset(
     journal_root = tmp_path / "journal"
     journal = AtomicFileMicroLiveStateJournal(
         journal_root,
-        risk_domain_lease=lease,
+        risk_domain_lease=_test_authority_adapter(lease),
     )
     executor = MicroLiveExecutor(
         verified,
@@ -8741,7 +8791,7 @@ def test_existing_authority_high_water_rejects_deleted_wal_reset(
 
     replacement = AtomicFileMicroLiveStateJournal(
         journal_root,
-        risk_domain_lease=lease,
+        risk_domain_lease=_test_authority_adapter(lease),
     )
     with pytest.raises(MicroLiveExecutionError, match="no recoverable local state"):
         MicroLiveExecutor(
@@ -8802,7 +8852,7 @@ def test_missing_required_transport_operation_fails_before_startup_or_venue(
         raw_state = None
         wal_before = None
 
-    authority = journal.risk_domain_lease
+    authority = _test_authority_backend(journal)
     claim_calls_before = authority.claim_calls
     delegate = FakeTransport()
 
@@ -8882,7 +8932,7 @@ def test_missing_required_authority_operation_fails_before_startup_or_venue(
         )
         raw_state = healthy.export_state_bytes()
         wal_before = healthy_journal.state_path.read_bytes()
-        delegate = healthy_journal.risk_domain_lease
+        delegate = _test_authority_backend(healthy_journal)
         journal_root = healthy_journal.root
     else:
         base = Path(tempfile.mkdtemp(prefix="bigan-missing-authority-test-"))
@@ -8909,7 +8959,7 @@ def test_missing_required_authority_operation_fails_before_startup_or_venue(
     authority = MissingOperationAuthority()
     journal = AtomicFileMicroLiveStateJournal(
         journal_root,
-        risk_domain_lease=authority,
+        risk_domain_lease=_test_authority_adapter(authority),
     )
 
     class CapturingTransport(FakeTransport):
@@ -8994,7 +9044,7 @@ def test_authority_operation_inventory_claim_is_signed_and_authorization_bound(
     )
     journal = AtomicFileMicroLiveStateJournal(
         tmp_path / "journal",
-        risk_domain_lease=lease,
+        risk_domain_lease=_test_authority_adapter(lease),
     )
 
     class CapturingTransport(FakeTransport):
@@ -9147,7 +9197,7 @@ def test_verified_authority_contract_drift_fails_before_construction_effects(
 
     journal = AtomicFileMicroLiveStateJournal(
         tmp_path / "journal",
-        risk_domain_lease=AuthorityProxy(),
+        risk_domain_lease=_test_authority_adapter(AuthorityProxy()),
     )
 
     class CapturingTransport(FakeTransport):
@@ -9192,8 +9242,9 @@ def test_risk_domain_authority_backend_cannot_be_replaced_after_construction(
         journal=journal,
     )
     original_authority = journal.risk_domain_lease
+    original_backend = _test_authority_backend(journal)
     wal_before = journal.state_path.read_bytes()
-    claim_calls_before = original_authority.claim_calls
+    claim_calls_before = original_backend.claim_calls
 
     replacement = _TestDurableRiskDomainLease(
         Path(tempfile.mkdtemp(prefix="bigan-replacement-authority-test-"))
@@ -9205,10 +9256,74 @@ def test_risk_domain_authority_backend_cannot_be_replaced_after_construction(
 
     assert journal.risk_domain_lease is original_authority
     assert journal.risk_domain_lease_object_id == id(original_authority)
-    assert original_authority.claim_calls == claim_calls_before
+    assert original_backend.claim_calls == claim_calls_before
     assert journal.state_path.read_bytes() == wal_before
     assert transport.submit_calls == []
     assert transport.venue_idempotency_authority.outcomes_by_client_order_id == {}
+
+
+def test_mutable_authority_proxy_is_rejected_before_startup_or_venue(
+    tmp_path: Path,
+) -> None:
+    delegate = _TestDurableRiskDomainLease(tmp_path / "authority")
+
+    class MutableAuthorityProxy:
+        def __init__(self) -> None:
+            self.delegate = delegate
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.delegate, name)
+
+    proxy = MutableAuthorityProxy()
+    outer_object_id = id(proxy)
+    mutated_delegate = object()
+    proxy.delegate = mutated_delegate
+    assert id(proxy) == outer_object_id
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="deployment-owned risk-domain authority adapter",
+    ):
+        AtomicFileMicroLiveStateJournal(
+            tmp_path / "journal",
+            risk_domain_lease=proxy,
+        )
+
+    assert proxy.delegate is mutated_delegate
+    assert delegate.claim_calls == 0
+    assert not (tmp_path / "journal" / "micro_live_state.wal").exists()
+    assert not (
+        tmp_path / "journal" / "micro_live_risk_domain_receipt.json"
+    ).exists()
+
+
+def test_deployment_owned_authority_route_derives_and_rechecks_actual_bytes(
+    tmp_path: Path,
+) -> None:
+    descriptor = _test_risk_domain_authority_descriptor()
+    adapter = _test_authority_adapter(
+        _TestDurableRiskDomainLease(tmp_path / "authority")
+    )
+
+    assert (
+        adapter.adapter_implementation_sha256
+        == descriptor["adapter_implementation_sha256"]
+    )
+    assert adapter.configuration_sha256 == descriptor["configuration_sha256"]
+    original_binding = adapter.route_binding_sha256
+    with pytest.raises(AttributeError, match="authority route is immutable"):
+        adapter._endpoint = "/tmp/mutated-risk-domain-authority.sock"
+    assert adapter.route_binding_sha256 == original_binding
+
+    object.__setattr__(
+        adapter,
+        "_endpoint",
+        "/tmp/bypassed-risk-domain-authority.sock",
+    )
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="authority route changed",
+    ):
+        adapter.assert_runtime_integrity()
 
 
 def test_open_order_retains_original_authority_kill_after_replacement_attempt(
@@ -9238,6 +9353,13 @@ def test_open_order_retains_original_authority_kill_after_replacement_attempt(
 
     with pytest.raises(AttributeError, match="authority backend is immutable"):
         journal.risk_domain_lease = MissingKillAuthority()
+    with pytest.raises(
+        AttributeError,
+        match="authority route is immutable",
+    ):
+        original_authority._local_test_backend = MissingKillAuthority()
+    assert journal.risk_domain_lease_object_id == id(original_authority)
+    original_authority.assert_runtime_integrity()
     assert len(transport.submit_calls) == submit_count_before
     assert len(transport.cancel_calls) == cancel_count_before
 
@@ -9548,7 +9670,9 @@ def test_pending_journal_transition_recovers_both_authority_views(
 ) -> None:
     lease = _TestDurableRiskDomainLease(tmp_path / "authority")
     root = tmp_path / "journal"
-    journal = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    journal = AtomicFileMicroLiveStateJournal(
+        root, risk_domain_lease=_test_authority_adapter(lease)
+    )
     _bind_standalone_journal(journal)
     journal.initialize(_standalone_journal_state(0))
     if failure_mode == "remote_old":
@@ -9565,7 +9689,9 @@ def test_pending_journal_transition_recovers_both_authority_views(
         )
     assert journal.pending_state_path.exists()
 
-    replacement = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    replacement = AtomicFileMicroLiveStateJournal(
+        root, risk_domain_lease=_test_authority_adapter(lease)
+    )
     _bind_standalone_journal(replacement)
     snapshot = replacement.snapshot()
     assert snapshot.generation == 1
@@ -9581,7 +9707,9 @@ def test_generation_zero_executor_restart_recovers_lost_claim_response(
     lease = _TestDurableRiskDomainLease(tmp_path / "authority")
     root = tmp_path / "journal"
     lease.lose_next_claim_response = True
-    first = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    first = AtomicFileMicroLiveStateJournal(
+        root, risk_domain_lease=_test_authority_adapter(lease)
+    )
     with pytest.raises(MicroLiveExecutionError, match="lease claim failed closed"):
         MicroLiveExecutor(
             verified,
@@ -9592,7 +9720,9 @@ def test_generation_zero_executor_restart_recovers_lost_claim_response(
     assert not first.state_path.exists()
     assert not first.pending_state_path.exists()
 
-    replacement = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    replacement = AtomicFileMicroLiveStateJournal(
+        root, risk_domain_lease=_test_authority_adapter(lease)
+    )
     restarted = MicroLiveExecutor(
         verified,
         transport=FakeTransport(),
@@ -9609,7 +9739,9 @@ def test_crash_after_authority_commit_before_local_promote_recovers(
 ) -> None:
     lease = _TestDurableRiskDomainLease(tmp_path / "authority")
     root = tmp_path / "journal"
-    journal = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    journal = AtomicFileMicroLiveStateJournal(
+        root, risk_domain_lease=_test_authority_adapter(lease)
+    )
     _bind_standalone_journal(journal)
     journal.initialize(_standalone_journal_state(0))
 
@@ -9628,7 +9760,9 @@ def test_crash_after_authority_commit_before_local_promote_recovers(
     assert journal.pending_state_path.exists()
     assert journal._read_locked().generation == 0
 
-    replacement = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    replacement = AtomicFileMicroLiveStateJournal(
+        root, risk_domain_lease=_test_authority_adapter(lease)
+    )
     _bind_standalone_journal(replacement)
     assert replacement.snapshot().generation == 1
     assert not replacement.pending_state_path.exists()
@@ -9643,7 +9777,7 @@ def test_all_external_authority_calls_have_a_hard_deadline(
     lease = _TestDurableRiskDomainLease(tmp_path / "authority")
     journal = AtomicFileMicroLiveStateJournal(
         tmp_path / "journal",
-        risk_domain_lease=lease,
+        risk_domain_lease=_test_authority_adapter(lease),
     )
     if operation == "advance":
         # Establish the signed claim under the ordinary correctness allowance;
@@ -9678,7 +9812,9 @@ def test_external_kill_survives_local_sidecar_deletion_and_restart(
 ) -> None:
     lease = _TestDurableRiskDomainLease(tmp_path / "authority")
     root = tmp_path / "journal"
-    journal = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    journal = AtomicFileMicroLiveStateJournal(
+        root, risk_domain_lease=_test_authority_adapter(lease)
+    )
     _bind_standalone_journal(journal)
     journal.initialize(_standalone_journal_state(0))
     killed = journal.persist_emergency_kill(
@@ -9689,7 +9825,9 @@ def test_external_kill_survives_local_sidecar_deletion_and_restart(
     )
     journal.emergency_kill_path.unlink()
 
-    replacement = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    replacement = AtomicFileMicroLiveStateJournal(
+        root, risk_domain_lease=_test_authority_adapter(lease)
+    )
     _bind_standalone_journal(replacement)
     assert replacement.emergency_kill_snapshot() == killed
     assert replacement.emergency_kill_path.exists()
@@ -9702,7 +9840,9 @@ def test_pending_kill_recovers_remote_old_and_remote_new(
 ) -> None:
     lease = _TestDurableRiskDomainLease(tmp_path / "authority")
     root = tmp_path / "journal"
-    journal = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    journal = AtomicFileMicroLiveStateJournal(
+        root, risk_domain_lease=_test_authority_adapter(lease)
+    )
     _bind_standalone_journal(journal)
     journal.initialize(_standalone_journal_state(0))
     if failure_mode == "before_commit":
@@ -9719,7 +9859,9 @@ def test_pending_kill_recovers_remote_old_and_remote_new(
     assert journal.emergency_kill_pending_path.exists()
     assert not journal.emergency_kill_path.exists()
 
-    replacement = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    replacement = AtomicFileMicroLiveStateJournal(
+        root, risk_domain_lease=_test_authority_adapter(lease)
+    )
     _bind_standalone_journal(replacement)
     killed = replacement.emergency_kill_snapshot()
     assert killed is not None
@@ -9734,7 +9876,9 @@ def test_remote_kill_commit_before_local_promote_recovers(
 ) -> None:
     lease = _TestDurableRiskDomainLease(tmp_path / "authority")
     root = tmp_path / "journal"
-    journal = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    journal = AtomicFileMicroLiveStateJournal(
+        root, risk_domain_lease=_test_authority_adapter(lease)
+    )
     _bind_standalone_journal(journal)
     journal.initialize(_standalone_journal_state(0))
 
@@ -9757,7 +9901,9 @@ def test_remote_kill_commit_before_local_promote_recovers(
     assert journal.emergency_kill_pending_path.exists()
     assert not journal.emergency_kill_path.exists()
 
-    replacement = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    replacement = AtomicFileMicroLiveStateJournal(
+        root, risk_domain_lease=_test_authority_adapter(lease)
+    )
     _bind_standalone_journal(replacement)
     killed = replacement.emergency_kill_snapshot()
     assert killed is not None
@@ -9769,7 +9915,9 @@ def test_remote_kill_reconstructs_after_all_local_kill_state_is_deleted(
 ) -> None:
     lease = _TestDurableRiskDomainLease(tmp_path / "authority")
     root = tmp_path / "journal"
-    journal = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    journal = AtomicFileMicroLiveStateJournal(
+        root, risk_domain_lease=_test_authority_adapter(lease)
+    )
     _bind_standalone_journal(journal)
     journal.initialize(_standalone_journal_state(0))
 
@@ -9786,7 +9934,9 @@ def test_remote_kill_reconstructs_after_all_local_kill_state_is_deleted(
         )
     journal.emergency_kill_pending_path.unlink()
 
-    replacement = AtomicFileMicroLiveStateJournal(root, risk_domain_lease=lease)
+    replacement = AtomicFileMicroLiveStateJournal(
+        root, risk_domain_lease=_test_authority_adapter(lease)
+    )
     _bind_standalone_journal(replacement)
     killed = replacement.emergency_kill_snapshot()
     assert killed is not None
@@ -9800,7 +9950,7 @@ def test_external_kill_revokes_every_registered_execution_invocation(
     lease = _TestDurableRiskDomainLease(tmp_path / "authority")
     journal = AtomicFileMicroLiveStateJournal(
         tmp_path / "journal",
-        risk_domain_lease=lease,
+        risk_domain_lease=_test_authority_adapter(lease),
     )
     _bind_standalone_journal(journal)
     journal.initialize(_standalone_journal_state(0))
