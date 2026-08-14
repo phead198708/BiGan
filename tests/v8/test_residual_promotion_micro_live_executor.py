@@ -2440,11 +2440,13 @@ class FakeTransport:
             request["authorization_id"],
             request["risk_domain_id"],
             request["risk_domain_authority_binding_sha256"],
+            request["authorization_expires_at_ts_ms"],
         )
         existing = (
             self._attested_authorization_id,
             self._attested_risk_domain_id,
             self._attested_authority_binding_sha256,
+            self._authorization_expires_at_ts_ms,
         )
         if any(value is not None for value in existing) and existing != identity:
             raise RuntimeError("execution gateway identity was rebound")
@@ -2452,6 +2454,7 @@ class FakeTransport:
             self._attested_authorization_id,
             self._attested_risk_domain_id,
             self._attested_authority_binding_sha256,
+            self._authorization_expires_at_ts_ms,
         ) = identity
         core = {
             "schema_version": (
@@ -2479,6 +2482,9 @@ class FakeTransport:
             "risk_domain_authority_binding_sha256": request[
                 "risk_domain_authority_binding_sha256"
             ],
+            "authorization_expires_at_ts_ms": request[
+                "authorization_expires_at_ts_ms"
+            ],
             "execution_fence_protocol_schema_version": request[
                 "execution_fence_protocol_schema_version"
             ],
@@ -2487,6 +2493,18 @@ class FakeTransport:
             ],
             "execution_dispatch_protocol_schema_version": request[
                 "execution_dispatch_protocol_schema_version"
+            ],
+            "execution_outbox_recovery_protocol_schema_version": request[
+                "execution_outbox_recovery_protocol_schema_version"
+            ],
+            "submission_recovery_operation": request[
+                "submission_recovery_operation"
+            ],
+            "submission_recovery_semantics": request[
+                "submission_recovery_semantics"
+            ],
+            "submission_recovery_lookup_only_enforced": request[
+                "submission_recovery_lookup_only_enforced"
             ],
             "venue_idempotency_key_field": request[
                 "venue_idempotency_key_field"
@@ -3864,7 +3882,10 @@ def test_executor_rejects_transport_without_authenticated_execution_binding(
 
     with pytest.raises(
         MicroLiveExecutionError,
-        match="one-shot dispatch authority|attest_execution_binding",
+        match=(
+            "startup lookup-only recovery|one-shot dispatch authority|"
+            "attest_execution_binding"
+        ),
     ):
         MicroLiveExecutor(
             verified,
@@ -8477,6 +8498,176 @@ def test_execution_deployment_image_binding_is_authorization_pinned(
     )
     with pytest.raises(MicroLiveExecutionError, match="binding attestation"):
         MicroLiveExecutor(verified, transport=transport)
+
+
+@pytest.mark.parametrize("startup_mode", ("construction", "restore"))
+def test_missing_transport_recovery_fails_before_startup_or_venue_effect(
+    authorized_fixture: dict[str, Any],
+    startup_mode: str,
+) -> None:
+    verified = _verified(authorized_fixture)
+    if startup_mode == "restore":
+        journal = _new_journal()
+        healthy = _StrictMicroLiveExecutor(
+            verified,
+            transport=FakeTransport(),
+            journal=journal,
+        )
+        raw_state = healthy.export_state_bytes()
+    else:
+        journal = _new_journal()
+        raw_state = None
+
+    delegate = FakeTransport()
+
+    class MissingRecoveryTransport:
+        def __init__(self) -> None:
+            self.attestation_calls = 0
+
+        def __getattr__(self, name: str) -> Any:
+            if name == "recover_order_submission":
+                raise AttributeError(name)
+            return getattr(delegate, name)
+
+        def attest_execution_binding(self, request: dict[str, Any]) -> bytes:
+            self.attestation_calls += 1
+            return delegate.attest_execution_binding(request)
+
+    transport = MissingRecoveryTransport()
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="gateway lacks startup lookup-only recovery",
+    ):
+        if raw_state is None:
+            _StrictMicroLiveExecutor(
+                verified,
+                transport=transport,
+                journal=journal,
+            )
+        else:
+            _StrictMicroLiveExecutor.restore(
+                authorization=verified,
+                transport=transport,
+                journal=journal,
+                raw_state=raw_state,
+            )
+
+    assert transport.attestation_calls == 0
+    assert delegate.submit_calls == []
+    assert delegate.recovery_lookup_calls == []
+    if startup_mode == "construction":
+        assert journal.state_path.exists() is False
+        assert journal.risk_domain_receipt_path.exists() is False
+
+
+@pytest.mark.parametrize("startup_mode", ("construction", "restore"))
+def test_missing_authority_recovery_fails_before_startup_or_venue_effect(
+    authorized_fixture: dict[str, Any],
+    startup_mode: str,
+) -> None:
+    verified = _verified(authorized_fixture)
+    if startup_mode == "restore":
+        journal = _new_journal()
+        healthy = _StrictMicroLiveExecutor(
+            verified,
+            transport=FakeTransport(),
+            journal=journal,
+        )
+        raw_state = healthy.export_state_bytes()
+        delegate = journal.risk_domain_lease
+    else:
+        base = Path(tempfile.mkdtemp(prefix="bigan-missing-recovery-test-"))
+        delegate = _TestDurableRiskDomainLease(
+            base / "external-risk-domain-lease"
+        )
+        journal = AtomicFileMicroLiveStateJournal(
+            base / "journal",
+            risk_domain_lease=delegate,
+        )
+        raw_state = None
+
+    class MissingRecoveryAuthority:
+        def __init__(self) -> None:
+            self.claim_calls = 0
+
+        def __getattr__(self, name: str) -> Any:
+            if name == "recover_execution_outbox_command":
+                raise AttributeError(name)
+            return getattr(delegate, name)
+
+        def claim_risk_domain(self, **kwargs: Any) -> bytes:
+            self.claim_calls += 1
+            return delegate.claim_risk_domain(**kwargs)
+
+    authority = MissingRecoveryAuthority()
+    journal.risk_domain_lease = authority
+
+    class CapturingTransport(FakeTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attestation_calls = 0
+
+        def attest_execution_binding(self, request: dict[str, Any]) -> bytes:
+            self.attestation_calls += 1
+            return super().attest_execution_binding(request)
+
+    transport = CapturingTransport()
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="authority lacks startup outbox recovery",
+    ):
+        if raw_state is None:
+            _StrictMicroLiveExecutor(
+                verified,
+                transport=transport,
+                journal=journal,
+            )
+        else:
+            _StrictMicroLiveExecutor.restore(
+                authorization=verified,
+                transport=transport,
+                journal=journal,
+                raw_state=raw_state,
+            )
+
+    assert authority.claim_calls == 0
+    assert transport.attestation_calls == 0
+    assert transport.submit_calls == []
+    assert transport.recovery_lookup_calls == []
+    if startup_mode == "construction":
+        assert journal.state_path.exists() is False
+        assert journal.risk_domain_receipt_path.exists() is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("execution_outbox_recovery_protocol_schema_version", "legacy-v0"),
+        ("submission_recovery_operation", "lookup_order"),
+        ("submission_recovery_semantics", "best_effort"),
+        ("submission_recovery_lookup_only_enforced", False),
+    ),
+)
+def test_execution_recovery_binding_is_signed_and_startup_pinned(
+    authorized_fixture: dict[str, Any],
+    field: str,
+    value: Any,
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    transport = FakeTransport(execution_binding_overrides={field: value})
+
+    with pytest.raises(MicroLiveExecutionError, match="binding attestation"):
+        _StrictMicroLiveExecutor(
+            verified,
+            transport=transport,
+            journal=journal,
+        )
+
+    assert transport.submit_calls == []
+    assert transport.recovery_lookup_calls == []
+    assert journal.state_path.exists() is False
+    assert journal.risk_domain_receipt_path.exists() is False
 
 
 @pytest.mark.parametrize(

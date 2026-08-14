@@ -87,7 +87,7 @@ EXECUTION_DISPATCH_FENCE_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-dispatch-fence-v1"
 )
 EXECUTION_BINDING_ATTESTATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-binding-attestation-v6"
+    "bigan-btc-15m-residual-promotion-execution-binding-attestation-v7"
 )
 EXECUTION_OPERATION_RECEIPT_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-operation-receipt-v4"
@@ -100,6 +100,10 @@ TRUSTED_TIME_RECEIPT_SCHEMA_VERSION = (
 )
 SETTLEMENT_RECEIPT_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-signed-settlement-receipt-v2"
+)
+SUBMISSION_RECOVERY_OPERATION = "recover_order_submission"
+SUBMISSION_RECOVERY_SEMANTICS = (
+    "venue_idempotency_lookup_only_no_submit_sign_wallet_or_write"
 )
 EMERGENCY_KILL_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-emergency-kill-v1"
@@ -3093,6 +3097,26 @@ def _durable_entry(method: Any) -> Any:
     return wrapped
 
 
+def _require_startup_recovery_capabilities(
+    *,
+    transport: MicroLiveOrderTransport,
+    journal: MicroLiveStateJournal,
+) -> None:
+    """Reject incomplete crash recovery surfaces before journal activation."""
+
+    if not callable(getattr(transport, SUBMISSION_RECOVERY_OPERATION, None)):
+        raise MicroLiveExecutionError(
+            "authenticated execution gateway lacks startup lookup-only recovery"
+        )
+    authority = getattr(journal, "risk_domain_lease", None)
+    if not callable(
+        getattr(authority, "recover_execution_outbox_command", None)
+    ):
+        raise MicroLiveExecutionError(
+            "external risk-domain authority lacks startup outbox recovery"
+        )
+
+
 class MicroLiveExecutor:
     """Append-only execution state machine behind a verified authorization."""
 
@@ -3137,6 +3161,10 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "micro-live journal must be the deployment-owned concrete implementation"
             )
+        _require_startup_recovery_capabilities(
+            transport=transport,
+            journal=journal,
+        )
         _require_production_runtime_matrix()
         if not (
             authorization.runtime.lineage_id == LINEAGE_ID
@@ -3178,6 +3206,10 @@ class MicroLiveExecutor:
             }
         )
         self._journal = journal
+        # The signed gateway recovery claim is verified before the journal is
+        # bound or initialized.  A legacy gateway cannot activate execution
+        # state and only then reveal that crash recovery is unavailable.
+        self._verify_execution_binding_attestation()
         self._journal.bind_risk_domain(
             authorization_id=self._authorization.authorization_id,
             risk_domain_id=self._risk_domain_id,
@@ -3204,7 +3236,6 @@ class MicroLiveExecutor:
                 "micro-live journal authority binding is authorization-mismatched"
             )
         self._bind_transport_dispatch_authority()
-        self._verify_execution_binding_attestation()
         self._generation = generation
         self._transaction_depth = 0
         self._active_journal_transaction: DurableJournalTransaction | None = None
@@ -3959,6 +3990,7 @@ class MicroLiveExecutor:
             "risk_domain_authority_binding_sha256": (
                 self._authorization.risk_domain_authority_binding_sha256
             ),
+            "authorization_expires_at_ts_ms": self._authorization.expires_at_ts_ms,
             "execution_fence_protocol_schema_version": (
                 EXECUTION_INVOCATION_FENCE_SCHEMA_VERSION
             ),
@@ -3968,6 +4000,12 @@ class MicroLiveExecutor:
             "execution_dispatch_protocol_schema_version": (
                 EXECUTION_DISPATCH_RECEIPT_SCHEMA_VERSION
             ),
+            "execution_outbox_recovery_protocol_schema_version": (
+                EXECUTION_OUTBOX_RECOVERY_SCHEMA_VERSION
+            ),
+            "submission_recovery_operation": SUBMISSION_RECOVERY_OPERATION,
+            "submission_recovery_semantics": SUBMISSION_RECOVERY_SEMANTICS,
+            "submission_recovery_lookup_only_enforced": True,
             "venue_idempotency_key_field": VENUE_IDEMPOTENCY_KEY_FIELD,
             "venue_idempotency_scope": VENUE_IDEMPOTENCY_SCOPE,
             "venue_idempotency_semantics": VENUE_IDEMPOTENCY_SEMANTICS,
@@ -4029,6 +4067,7 @@ class MicroLiveExecutor:
             "risk_domain_authority_binding_sha256": (
                 self._authorization.risk_domain_authority_binding_sha256
             ),
+            "authorization_expires_at_ts_ms": self._authorization.expires_at_ts_ms,
             "execution_fence_protocol_schema_version": (
                 EXECUTION_INVOCATION_FENCE_SCHEMA_VERSION
             ),
@@ -4038,6 +4077,12 @@ class MicroLiveExecutor:
             "execution_dispatch_protocol_schema_version": (
                 EXECUTION_DISPATCH_RECEIPT_SCHEMA_VERSION
             ),
+            "execution_outbox_recovery_protocol_schema_version": (
+                EXECUTION_OUTBOX_RECOVERY_SCHEMA_VERSION
+            ),
+            "submission_recovery_operation": SUBMISSION_RECOVERY_OPERATION,
+            "submission_recovery_semantics": SUBMISSION_RECOVERY_SEMANTICS,
+            "submission_recovery_lookup_only_enforced": True,
             "venue_idempotency_key_field": VENUE_IDEMPOTENCY_KEY_FIELD,
             "venue_idempotency_scope": VENUE_IDEMPOTENCY_SCOPE,
             "venue_idempotency_semantics": VENUE_IDEMPOTENCY_SEMANTICS,
@@ -6483,6 +6528,14 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "micro-live restore authorization capability is unverified"
             )
+        if journal.__class__ is not AtomicFileMicroLiveStateJournal:
+            raise MicroLiveExecutionError(
+                "micro-live journal must be the deployment-owned concrete implementation"
+            )
+        _require_startup_recovery_capabilities(
+            transport=transport,
+            journal=journal,
+        )
         authority_binding_sha256 = _risk_domain_authority_binding_sha256(authorization)
         execution_service_binding_sha256 = _execution_service_binding_sha256(
             authorization
@@ -6497,27 +6550,6 @@ class MicroLiveExecutor:
                 "lineage_id": LINEAGE_ID,
             }
         )
-        journal.bind_risk_domain(
-            authorization_id=authorization.authorization_id,
-            risk_domain_id=restore_risk_domain_id,
-            lease_id=authorization.risk_domain_lease_id,
-            service_identity_sha256=(
-                authorization.risk_domain_lease_service_identity_sha256
-            ),
-            tenant_id=authorization.risk_domain_lease_tenant_id,
-            key_identity_sha256=authorization.risk_domain_lease_key_identity_sha256,
-            public_key_modulus_hex=(
-                authorization.risk_domain_lease_public_key_modulus_hex
-            ),
-            public_key_exponent=authorization.risk_domain_lease_public_key_exponent,
-        )
-        if (
-            journal.authenticated_risk_domain_authority_binding_sha256
-            != authority_binding_sha256
-        ):
-            raise MicroLiveExecutionError(
-                "micro-live restore journal authority is authorization-mismatched"
-            )
         state, _, _ = _raw_json_object(
             raw_state,
             "micro-live state",
@@ -6561,16 +6593,6 @@ class MicroLiveExecutor:
             and state.get("state_sha256") == canonical_json_sha256(payload)
         ):
             raise MicroLiveExecutionError("micro-live state identity or SHA-256 mismatch")
-        snapshot = journal.snapshot()
-        if not (
-            journal.durable_single_writer is True
-            and snapshot.generation == generation
-            and snapshot.raw_state == raw_state
-            and snapshot.state_sha256 == hashlib.sha256(raw_state).hexdigest()
-        ):
-            raise MicroLiveExecutionError(
-                "micro-live restore state is not the journal high-water snapshot"
-            )
         restored = cls.__new__(cls)
         restored._initialize(
             authorization=authorization,
@@ -6581,6 +6603,16 @@ class MicroLiveExecutor:
             initialize_journal=False,
             restore_token=_RAW_STATE_RESTORE_TOKEN,
         )
+        snapshot = journal.snapshot()
+        if not (
+            journal.durable_single_writer is True
+            and snapshot.generation == generation
+            and snapshot.raw_state == raw_state
+            and snapshot.state_sha256 == hashlib.sha256(raw_state).hexdigest()
+        ):
+            raise MicroLiveExecutionError(
+                "micro-live restore state is not the journal high-water snapshot"
+            )
         restored._recover_incomplete_external_side_effects()
         return restored
 
