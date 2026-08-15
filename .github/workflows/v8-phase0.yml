@@ -84,6 +84,7 @@ jobs:
             tests/v8/test_residual_promotion_security_review_v2.py \
             tests/v8/test_residual_promotion_security_review_v3.py \
             tests/v8/test_residual_promotion_runtime.py \
+            tests/v8/test_residual_promotion_execution_gateway.py \
             tests/v8/test_residual_promotion_micro_live_executor.py \
             tests/v8/test_residual_promotion_release_evidence.py \
             tests/v8/test_residual_promotion_execution_readiness.py \
@@ -122,6 +123,8 @@ jobs:
         run: |
           python -m pytest \
             tests/v8/test_residual_promotion_runtime_matrix.py \
+            tests/v8/test_residual_promotion_execution_gateway.py \
+            tests/v8/test_residual_promotion_security_review_v3.py \
             tests/v8/test_residual_promotion_micro_live_executor.py \
             tests/v8/test_residual_promotion_v1.py::test_repository_local_bundle_loads_and_matches_frozen_parity \
             -q

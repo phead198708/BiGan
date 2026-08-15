@@ -9,7 +9,7 @@
   "created_at": "2026-08-15T00:00:00Z",
   "execution_gateway_service_manifest": {
     "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json",
-    "sha256": "2ef02055ca6fb98974a1fa89ce850ba4e23ea68b683e13c2961f3e2167db4fa4"
+    "sha256": "420b0153145e5f2765616f06a61687554ecff9f0aafe5530325570017fe7a736"
   },
   "execution_safety_contract": {
     "maximum_future_initial_capital_fraction": 0.01,
@@ -25,6 +25,10 @@
     "p2_p3_must_be_reported": true,
     "resolved_p0_p1_requires_resolution_commit": true
   },
+  "py_clob_client_v2_wheel_sbom": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/py_clob_client_v2_wheel_sbom_v1.json",
+    "sha256": "4230d323a9b90720c29f371221d12dad68ea2d7fd11dc608612d9c9f329b93d5"
+  },
   "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
   "required_control_evidence_paths": {
     "artifact_hash_and_candidate_identity": [
@@ -37,7 +41,9 @@
       "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py",
       "tests/v8/test_residual_promotion_micro_live_executor.py",
       "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json"
+      "tests/v8/test_residual_promotion_execution_gateway.py",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/py_clob_client_v2_wheel_sbom_v1.json"
     ],
     "authorization_separation_and_exact_payload_binding": [
       "src/bigan/v8/polymarket/residual_promotion_release_readiness_v6.py",
@@ -48,7 +54,9 @@
       "tests/v8/test_residual_promotion_micro_live_executor.py",
       "tests/v8/test_residual_promotion_security_review_v2.py",
       "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json"
+      "tests/v8/test_residual_promotion_execution_gateway.py",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/py_clob_client_v2_wheel_sbom_v1.json"
     ],
     "btc_15m_market_allowlist": [
       "src/bigan/v8/polymarket/residual_promotion_execution_readiness.py",
@@ -63,7 +71,9 @@
       "tests/v8/test_residual_promotion_runtime.py",
       "tests/v8/test_residual_promotion_micro_live_executor.py",
       "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json"
+      "tests/v8/test_residual_promotion_execution_gateway.py",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/py_clob_client_v2_wheel_sbom_v1.json"
     ],
     "conflicting_duplicate_fail_closed": [
       "src/bigan/v8/polymarket/residual_promotion_execution_readiness.py",
@@ -71,13 +81,17 @@
       "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py",
       "tests/v8/test_residual_promotion_micro_live_executor.py",
       "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json"
+      "tests/v8/test_residual_promotion_execution_gateway.py",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/py_clob_client_v2_wheel_sbom_v1.json"
     ],
     "credential_and_wallet_isolation": [
       "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py",
       "tests/v8/test_residual_promotion_micro_live_executor.py",
       "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json"
+      "tests/v8/test_residual_promotion_execution_gateway.py",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/py_clob_client_v2_wheel_sbom_v1.json"
     ],
     "idempotent_order_and_business_identity": [
       "src/bigan/v8/polymarket/residual_promotion_execution_readiness.py",
@@ -85,7 +99,9 @@
       "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py",
       "tests/v8/test_residual_promotion_micro_live_executor.py",
       "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json"
+      "tests/v8/test_residual_promotion_execution_gateway.py",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/py_clob_client_v2_wheel_sbom_v1.json"
     ],
     "kill_switch_and_operator_heartbeat": [
       "src/bigan/v8/polymarket/residual_promotion_execution_readiness.py",
@@ -93,7 +109,9 @@
       "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py",
       "tests/v8/test_residual_promotion_micro_live_executor.py",
       "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json"
+      "tests/v8/test_residual_promotion_execution_gateway.py",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/py_clob_client_v2_wheel_sbom_v1.json"
     ],
     "one_percent_cap_and_no_automatic_launch": [
       "src/bigan/v8/polymarket/residual_promotion_release_readiness_v6.py",
@@ -104,7 +122,9 @@
       "tests/v8/test_residual_promotion_micro_live_executor.py",
       "tests/v8/test_residual_promotion_security_review_v2.py",
       "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json"
+      "tests/v8/test_residual_promotion_execution_gateway.py",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/py_clob_client_v2_wheel_sbom_v1.json"
     ],
     "order_fill_position_cash_settlement_reconciliation": [
       "src/bigan/v8/polymarket/residual_promotion_execution_readiness.py",
@@ -112,7 +132,9 @@
       "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py",
       "tests/v8/test_residual_promotion_micro_live_executor.py",
       "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json"
+      "tests/v8/test_residual_promotion_execution_gateway.py",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/py_clob_client_v2_wheel_sbom_v1.json"
     ],
     "rollback_to_no_trade": [
       "src/bigan/v8/polymarket/residual_promotion_rollback.py",
@@ -122,7 +144,9 @@
       "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py",
       "tests/v8/test_residual_promotion_micro_live_executor.py",
       "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json"
+      "tests/v8/test_residual_promotion_execution_gateway.py",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json",
+      "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/py_clob_client_v2_wheel_sbom_v1.json"
     ]
   },
   "required_control_ids": [
@@ -148,6 +172,7 @@
     "phase6_pipeline": "src/bigan/v8/phase6/pipeline.py",
     "production_execution_gateway": "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
     "production_execution_gateway_manifest": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json",
+    "py_clob_client_v2_wheel_sbom": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/py_clob_client_v2_wheel_sbom_v1.json",
     "release_readiness_v6": "src/bigan/v8/polymarket/residual_promotion_release_readiness_v6.py",
     "release_readiness_v7": "src/bigan/v8/polymarket/residual_promotion_release_readiness_v7.py",
     "residual_runtime": "src/bigan/v8/polymarket/pooled_residual_runtime.py",
@@ -190,14 +215,18 @@
   "strict_successor_contract": {
     "authenticated_session_registry_required": true,
     "candidate_model_or_gate_change": false,
+    "concrete_clob_wire_and_lifecycle_contract_required": true,
     "concrete_gateway_backend_required": true,
     "concrete_gateway_server_required": true,
     "concrete_polymarket_venue_boundary_required": true,
     "credential_owned_receipt_signer_required": true,
     "durable_restart_state_required": true,
+    "exact_deployed_wheel_source_sbom_required": true,
     "exact_gateway_implementation_config_image_evidence_required": true,
     "legacy_v2_report_sufficient": false,
     "process_test_mocks_only_outer_venue_boundary": true,
+    "runtime_identity_derived_from_gateway_venue_api_account_and_signer": true,
+    "service_enforced_deadlines_and_independent_safety_lane_required": true,
     "strict_raw_json_parser_required": true,
     "v2_protocol_bytes_preserved": true,
     "v2_scope_and_controls_preserved": true
@@ -208,6 +237,6 @@
   },
   "validator_implementation": {
     "path": "src/bigan/v8/polymarket/residual_promotion_security_review_v3.py",
-    "sha256": "3776eab334e3adaf271021b94bf2f964f281db9f8d4825ebaa1f06dd94ecb87a"
+    "sha256": "2f8564568dd1f1a81f4fc95f2cb6243314e745f4c864d829e2f79c224bbd1568"
   }
 }

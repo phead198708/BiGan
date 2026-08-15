@@ -43,9 +43,12 @@ from bigan.v8.polymarket.residual_promotion_evaluation import (
     REQUIRED_GATE_NAMES,
 )
 from bigan.v8.polymarket.residual_promotion_execution_gateway import (
+    VENUE_RUNTIME_BINDING_SCHEMA_VERSION,
     DeploymentOwnedExecutionGatewayServer,
     ExecutionGatewayError,
     ExecutionGatewayServiceConfig,
+    VenueOrderOutcome,
+    production_execution_service_identity_sha256,
     production_gateway_implementation_sha256,
 )
 from bigan.v8.polymarket.residual_promotion_micro_live_authorization import (
@@ -279,8 +282,11 @@ def _test_risk_domain_authority_descriptor() -> dict[str, Any]:
     return descriptor
 
 
-TEST_EXECUTION_SERVICE_IDENTITY_SHA256 = canonical_json_sha256(
-    {"service": "test-authenticated-execution-service-v1"}
+TEST_GATEWAY_VENUE_CONFIGURATION_SHA256 = canonical_json_sha256(
+    {"venue_configuration": "test-production-server-venue-v1"}
+)
+TEST_GATEWAY_API_CREDENTIALS_IDENTITY_SHA256 = canonical_json_sha256(
+    {"api_credentials": "test-production-server-api-v1"}
 )
 TEST_EXECUTION_RPC_ENDPOINT = str(
     Path(tempfile.mkdtemp(prefix="bigan-execution-rpc-", dir="/tmp"))
@@ -295,6 +301,18 @@ TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256 = canonical_json_sha256(
 )
 TEST_EXECUTION_SIGNER_IDENTITY_SHA256 = canonical_json_sha256(
     {"signer": "test-wallet-boundary-v1"}
+)
+TEST_EXECUTION_SERVICE_IDENTITY_SHA256 = (
+    production_execution_service_identity_sha256(
+        gateway_implementation_sha256=production_gateway_implementation_sha256(),
+        venue_configuration_sha256=TEST_GATEWAY_VENUE_CONFIGURATION_SHA256,
+        api_credentials_identity_sha256=(
+            TEST_GATEWAY_API_CREDENTIALS_IDENTITY_SHA256
+        ),
+        exchange_endpoint_sha256=TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256,
+        exchange_account_sha256=TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256,
+        signer_identity_sha256=TEST_EXECUTION_SIGNER_IDENTITY_SHA256,
+    )
 )
 TEST_EXECUTION_CLOCK_IDENTITY_SHA256 = canonical_json_sha256(
     {"clock": "test-trusted-clock-v1"}
@@ -3899,8 +3917,18 @@ def _multiprocess_issue_copied_id_receipt(
 class _ProcessMockVenueBoundary:
     """Mock only the production service's outermost venue boundary."""
 
-    def __init__(self, *, fail_submit: bool) -> None:
+    def __init__(
+        self,
+        *,
+        fail_submit: bool,
+        submit_stalled: Any | None = None,
+        release_submit: Any | None = None,
+        submitted_requests: Any | None = None,
+    ) -> None:
         self.fail_submit = fail_submit
+        self.submit_stalled = submit_stalled
+        self.release_submit = release_submit
+        self.submitted_requests = submitted_requests
         self.outcomes: dict[str, bytes] = {}
         self.requests: dict[str, dict[str, Any]] = {}
         self.submit_calls = 0
@@ -3908,18 +3936,38 @@ class _ProcessMockVenueBoundary:
         self.fence_calls = 0
         self.cancel_calls = 0
 
+    @property
+    def runtime_binding(self) -> dict[str, Any]:
+        return {
+            "schema_version": VENUE_RUNTIME_BINDING_SCHEMA_VERSION,
+            "gateway_implementation_sha256": (
+                production_gateway_implementation_sha256()
+            ),
+            "venue_configuration_sha256": (
+                TEST_GATEWAY_VENUE_CONFIGURATION_SHA256
+            ),
+            "api_credentials_identity_sha256": (
+                TEST_GATEWAY_API_CREDENTIALS_IDENTITY_SHA256
+            ),
+            "exchange_endpoint_sha256": TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256,
+            "exchange_account_sha256": TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256,
+            "signer_identity_sha256": TEST_EXECUTION_SIGNER_IDENTITY_SHA256,
+            "service_identity_sha256": TEST_EXECUTION_SERVICE_IDENTITY_SHA256,
+        }
+
     def prepare_submission(self, request: dict[str, Any]) -> dict[str, Any]:
         return {
             "schema_version": "test-prepared-venue-submission-v1",
             "client_order_id": request["client_order_id"],
             "exact_request_sha256": canonical_json_sha256(request),
+            "order_hash": f"exchange-{request['client_order_id'][:12]}",
         }
 
     def submit_prepared(
         self,
         prepared: dict[str, Any],
         request: dict[str, Any],
-    ) -> bytes:
+    ) -> VenueOrderOutcome:
         assert prepared["exact_request_sha256"] == canonical_json_sha256(request)
         key = request["client_order_id"]
         response = _json_bytes(
@@ -3940,22 +3988,49 @@ class _ProcessMockVenueBoundary:
             self.submit_calls += 1
             self.requests[key] = copy.deepcopy(request)
             self.outcomes[key] = response
+        if self.submitted_requests is not None:
+            self.submitted_requests.put(copy.deepcopy(request))
+        if self.submit_stalled is not None:
+            self.submit_stalled.set()
+            if self.release_submit is None or not self.release_submit.wait(timeout=10):
+                raise RuntimeError("synthetic venue stall was not released")
         if self.fail_submit:
             self.fail_submit = False
             raise RuntimeError("synthetic post-venue transport timeout")
-        return self.outcomes[key]
+        return VenueOrderOutcome(
+            normalized_response=self.outcomes[key],
+            raw_venue_response=_json_bytes(
+                {
+                    "success": True,
+                    "errorMsg": "",
+                    "orderID": f"exchange-{key[:12]}",
+                    "status": "live",
+                }
+            ),
+        )
 
     def lookup_submission(
         self,
         prepared: dict[str, Any],
         request: dict[str, Any],
-    ) -> bytes | None:
+    ) -> VenueOrderOutcome | None:
         del prepared
         self.recovery_calls += 1
         existing = self.requests.get(request["client_order_id"])
         if existing is not None and existing != request:
             raise RuntimeError("mock venue recovery identity conflict")
-        return self.outcomes.get(request["client_order_id"])
+        response = self.outcomes.get(request["client_order_id"])
+        if response is None:
+            return None
+        return VenueOrderOutcome(
+            normalized_response=response,
+            raw_venue_response=_json_bytes(
+                {
+                    "id": f"exchange-{request['client_order_id'][:12]}",
+                    "status": "live",
+                }
+            ),
+        )
 
     def cancel(self, request: dict[str, Any]) -> bytes:
         self.cancel_calls += 1
@@ -4055,6 +4130,9 @@ def _isolated_execution_gateway_process(
     ready: Any,
     stop: Any,
     audit: Any,
+    submit_stalled: Any | None = None,
+    release_submit: Any | None = None,
+    submitted_requests: Any | None = None,
 ) -> None:
     """Run the exact production server; mock only its outer venue boundary."""
 
@@ -4069,7 +4147,12 @@ def _isolated_execution_gateway_process(
     )
     credential_path.chmod(0o600)
     exponent_path.chmod(0o600)
-    venue = _ProcessMockVenueBoundary(fail_submit=fail_submit)
+    venue = _ProcessMockVenueBoundary(
+        fail_submit=fail_submit,
+        submit_stalled=submit_stalled,
+        release_submit=release_submit,
+        submitted_requests=submitted_requests,
+    )
     config = ExecutionGatewayServiceConfig(
         endpoint=endpoint,
         rpc_credential_path=str(credential_path),
@@ -4185,6 +4268,75 @@ def test_production_gateway_configuration_and_strict_json_fail_closed(
         match="implementation/configuration/route is mismatched",
     ):
         drifted.validated()
+
+
+def test_separate_process_parked_authenticated_connection_cannot_starve_service(
+    tmp_path: Path,
+) -> None:
+    context = multiprocessing.get_context("fork")
+    socket_root = Path(tempfile.mkdtemp(prefix="bigan-egw-parked-", dir="/tmp"))
+    endpoint = str(socket_root / "gateway.sock")
+    credential = b"bigan-parked-connection-gateway-credential-v1"
+    execution_authority = _test_execution_authority_descriptor(
+        endpoint=endpoint,
+        credential=credential,
+        maximum_call_duration_ms=500,
+    )
+    ready = context.Event()
+    stop = context.Event()
+    audit = context.Queue()
+    process = context.Process(
+        target=_isolated_execution_gateway_process,
+        args=(
+            endpoint,
+            credential,
+            execution_authority,
+            False,
+            ready,
+            stop,
+            audit,
+        ),
+    )
+    process.start()
+    assert ready.wait(timeout=5)
+    parked = Client(endpoint, family="AF_UNIX", authkey=credential)
+    try:
+        started = time.monotonic()
+        probe = Client(endpoint, family="AF_UNIX", authkey=credential)
+        try:
+            probe.send_bytes(b"{}")
+            response = json.loads(
+                probe.recv_bytes(
+                    executor_module.MAX_EXECUTION_TRANSPORT_EVENT_BYTES
+                )
+            )
+        finally:
+            probe.close()
+        assert time.monotonic() - started < 1.5
+        assert response == {
+            "schema_version": executor_module.EXECUTION_GATEWAY_RPC_SCHEMA_VERSION,
+            "status": "ERROR",
+            "error_code": "OPERATION_FAILED",
+        }
+        stop.set()
+        process.join(timeout=2)
+        assert not process.is_alive()
+    finally:
+        parked.close()
+        stop.set()
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        while True:
+            record = audit.get(timeout=2)
+            if record["operation"] == "FINAL":
+                break
+        audit.close()
+        audit.cancel_join_thread()
+        process_exitcode = process.exitcode
+        process.close()
+        shutil.rmtree(socket_root)
+    assert process_exitcode == 0
 
 
 @pytest.fixture(scope="module")
@@ -7852,6 +8004,141 @@ def test_serialized_gateway_route_works_in_a_genuinely_separate_process(
         assert "recover_order_submission" in operations
         assert final["recovery_calls"] == 1
         assert final["cancel_calls"] == 1
+
+
+def test_separate_process_slow_venue_does_not_starve_fence_or_stop(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    context = multiprocessing.get_context("fork")
+    socket_root = Path(tempfile.mkdtemp(prefix="bigan-egw-stalled-", dir="/tmp"))
+    endpoint = str(socket_root / "gateway.sock")
+    credential = b"bigan-stalled-venue-gateway-credential-v1"
+    maximum_call_duration_ms = 1_000
+    execution_authority = _test_execution_authority_descriptor(
+        endpoint=endpoint,
+        credential=credential,
+        maximum_call_duration_ms=maximum_call_duration_ms,
+    )
+    authorization = copy.deepcopy(authorized_fixture["authorization"])
+    authorization["execution_service_authority"] = execution_authority
+    verified = _verified(
+        authorized_fixture,
+        authorization,
+        execution_call_duration_ms=maximum_call_duration_ms,
+    )
+    ready = context.Event()
+    stop = context.Event()
+    submit_stalled = context.Event()
+    release_submit = context.Event()
+    audit = context.Queue()
+    submitted_requests = context.Queue()
+    process = context.Process(
+        target=_isolated_execution_gateway_process,
+        args=(
+            endpoint,
+            credential,
+            execution_authority,
+            False,
+            ready,
+            stop,
+            audit,
+            submit_stalled,
+            release_submit,
+            submitted_requests,
+        ),
+    )
+    process.start()
+    assert ready.wait(timeout=5)
+    executor = _StrictMicroLiveExecutor(
+        verified,
+        transport=_execution_adapter_for_serialized_route(
+            verified,
+            endpoint=endpoint,
+            credential=credential,
+        ),
+        journal=_new_journal(),
+    )
+    submit_errors: list[BaseException] = []
+
+    def submit() -> None:
+        try:
+            executor.submit_signal(
+                raw_signal_payload=_json_bytes(
+                    _signal(
+                        candidate_bundle_sha256=(
+                            verified.candidate_bundle_sha256
+                        )
+                    )["signal_payload"]
+                ),
+                raw_feature_row=_json_bytes(BASE_FEATURE_ROW),
+                provider_feature_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
+                now_ts_ms=NOW_TS_MS,
+                operator_heartbeat_ts_ms=NOW_TS_MS,
+                market_identity_evidence=_market_identity_evidence(
+                    BASE_SIGNAL_PAYLOAD
+                ),
+            )
+        except BaseException as exc:
+            submit_errors.append(exc)
+
+    worker = threading.Thread(target=submit, daemon=True)
+    worker.start()
+    try:
+        assert submit_stalled.wait(timeout=5)
+        submitted = submitted_requests.get(timeout=5)
+        fence_request = {
+            key: submitted[key]
+            for key in (
+                "authorization_id",
+                "client_order_id",
+                "business_key",
+                "market_id",
+                "token_id",
+                "transport_invocation_id",
+            )
+        }
+        started = time.monotonic()
+        fence = json.loads(
+            executor._bounded_transport_call(
+                operation="fence_order_invocation",
+                request=fence_request,
+            )
+        )
+        assert time.monotonic() - started < 0.75
+        assert fence == {
+            "authorization_id": submitted["authorization_id"],
+            "client_order_id": submitted["client_order_id"],
+            "transport_invocation_id": submitted["transport_invocation_id"],
+            # The venue call is already in progress, so the authority must
+            # respond promptly but must not falsely claim it was fenced.
+            "side_effects_fenced": False,
+        }
+        stop.set()
+        process.join(timeout=3)
+        assert not process.is_alive()
+    finally:
+        stop.set()
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        while True:
+            record = audit.get(timeout=2)
+            if record["operation"] == "FINAL":
+                break
+        audit.close()
+        audit.cancel_join_thread()
+        submitted_requests.close()
+        submitted_requests.cancel_join_thread()
+        process_exitcode = process.exitcode
+        process.close()
+        with contextlib.suppress(FileNotFoundError):
+            Path(endpoint).unlink()
+        shutil.rmtree(socket_root)
+    assert process_exitcode == 0
+    assert submit_errors
+    assert isinstance(submit_errors[0], MicroLiveExecutionError)
 
 
 @pytest.mark.parametrize(

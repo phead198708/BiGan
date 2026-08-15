@@ -12,6 +12,8 @@ import pytest
 from bigan.v8.polymarket.challenge_development_lane import sha256_file
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 from bigan.v8.polymarket.residual_promotion_security_review_v3 import (
+    CLOB_CONTRACT_TEST_REPOSITORY_PATH,
+    CLOB_WHEEL_SBOM_REPOSITORY_PATH,
     GATEWAY_MANIFEST_REPOSITORY_PATH,
     GATEWAY_REPOSITORY_PATH,
     GATEWAY_TEST_REPOSITORY_PATH,
@@ -21,6 +23,7 @@ from bigan.v8.polymarket.residual_promotion_security_review_v3 import (
     TEMPLATE_REPOSITORY_PATH,
     V2_PROTOCOL_REPOSITORY_PATH,
     SecurityReviewV3Error,
+    validate_py_clob_client_v2_wheel_sbom,
     validate_security_review_protocol_v3,
     validate_security_review_template_v4,
 )
@@ -83,7 +86,9 @@ def test_v2_bytes_are_preserved_and_gateway_scope_is_additive() -> None:
         evidence = set(REQUIRED_CONTROL_EVIDENCE_PATHS[control_id])
         assert GATEWAY_REPOSITORY_PATH in evidence
         assert GATEWAY_TEST_REPOSITORY_PATH in evidence
+        assert CLOB_CONTRACT_TEST_REPOSITORY_PATH in evidence
         assert GATEWAY_MANIFEST_REPOSITORY_PATH in evidence
+        assert CLOB_WHEEL_SBOM_REPOSITORY_PATH in evidence
 
 
 def test_gateway_manifest_hashes_exact_production_graph() -> None:
@@ -97,8 +102,10 @@ def test_gateway_manifest_hashes_exact_production_graph() -> None:
     for descriptor in (
         manifest["gateway_implementation"],
         manifest["gateway_process_integration_test"],
+        manifest["concrete_clob_contract_test"],
         manifest["execution_gateway_runtime_lock"],
         manifest["frozen_model_runtime_lock"],
+        manifest["py_clob_client_v2_wheel_sbom"],
     ):
         assert sha256_file(ROOT / descriptor["path"]) == descriptor["sha256"]
     assert manifest["credential_ownership_contract"] == {
@@ -108,6 +115,40 @@ def test_gateway_manifest_hashes_exact_production_graph() -> None:
         "private_key_owner": "gateway_process_only",
         "receipt_signing_key_owner": "gateway_process_only",
     }
+    assert manifest["runtime_identity_contract"] == {
+        "api_credentials_identity_derived_at_runtime": True,
+        "exchange_account_derived_from_funder_and_signature_type": True,
+        "exchange_endpoint_derived_from_host_and_chain_id": True,
+        "gateway_implementation_digest_included": True,
+        "signer_identity_derived_from_private_key": True,
+        "venue_configuration_digest_included": True,
+    }
+    assert all(manifest["service_deadline_contract"].values())
+
+
+def test_exact_deployed_clob_wheel_sources_match_frozen_sbom() -> None:
+    sbom = _json(CLOB_WHEEL_SBOM_REPOSITORY_PATH)
+    validate_py_clob_client_v2_wheel_sbom(sbom, repository_root=ROOT)
+    _assert_sidecar(CLOB_WHEEL_SBOM_REPOSITORY_PATH)
+    assert sbom["review_scope_semantics"][
+        "actual_deployed_wheel_bytes_are_authoritative"
+    ] is True
+    assert sbom["review_scope_semantics"][
+        "reproducible_source_to_wheel_equivalence_claimed"
+    ] is False
+
+
+def test_clob_wheel_source_or_manifest_drift_fails_closed() -> None:
+    sbom = _json(CLOB_WHEEL_SBOM_REPOSITORY_PATH)
+    changed = copy.deepcopy(sbom)
+    changed["files"][0]["sha256"] = "0" * 64
+    with pytest.raises(SecurityReviewV3Error, match="manifest digest is invalid"):
+        validate_py_clob_client_v2_wheel_sbom(changed, repository_root=ROOT)
+
+    changed = copy.deepcopy(sbom)
+    changed["wheel_sha256"] = "0" * 64
+    with pytest.raises(SecurityReviewV3Error, match="wheel SBOM is invalid"):
+        validate_py_clob_client_v2_wheel_sbom(changed, repository_root=ROOT)
 
 
 def test_gateway_scope_or_descriptor_drift_fails_closed() -> None:

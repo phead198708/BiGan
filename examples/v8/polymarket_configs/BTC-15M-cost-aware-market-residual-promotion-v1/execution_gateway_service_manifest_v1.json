@@ -9,6 +9,10 @@
     "receipt_signing_key_owner": "gateway_process_only"
   },
   "deployment_base_image_manifest_digest": "sha256:a074fac67aa01841fee592d00bae14d25dcaf98ef6e12a683ecceb7e0147e2d1",
+  "concrete_clob_contract_test": {
+    "path": "tests/v8/test_residual_promotion_execution_gateway.py",
+    "sha256": "a69a0e18f111efa2e628d4477373daa847f7c40f6e8486be93315ecfe8b2a1c1"
+  },
   "durability_contract": {
     "atomic_replace": true,
     "directory_fsync": true,
@@ -26,11 +30,11 @@
   },
   "gateway_implementation": {
     "path": "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-    "sha256": "0646198439df0c009db9256cd4e25553bf7a1c279835ab12ebe58844395b5ffb"
+    "sha256": "8ca15ff40556b491476315939a8ae8650bc22d7952713ab1c31be5dab6b22348"
   },
   "gateway_process_integration_test": {
     "path": "tests/v8/test_residual_promotion_micro_live_executor.py",
-    "sha256": "6396fafb93f37bda70e3b66f2bcdfb61c203c612d87c8ceb2937d0bc0b35be30"
+    "sha256": "28ec83c12f17213bb4235792b37da9728fc9c5a5821fd4451db55ea7bd5bb3a5"
   },
   "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
   "model_or_gate_bytes_changed": false,
@@ -48,6 +52,18 @@
     "source_setup_sha256": "c6d30329d3555b031048597bfbdf2923e9902350a67d482e7bea9359d0b7c863",
     "version": "1.1.0"
   },
+  "py_clob_client_v2_wheel_sbom": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/py_clob_client_v2_wheel_sbom_v1.json",
+    "sha256": "4230d323a9b90720c29f371221d12dad68ea2d7fd11dc608612d9c9f329b93d5"
+  },
+  "runtime_identity_contract": {
+    "api_credentials_identity_derived_at_runtime": true,
+    "exchange_account_derived_from_funder_and_signature_type": true,
+    "exchange_endpoint_derived_from_host_and_chain_id": true,
+    "gateway_implementation_digest_included": true,
+    "signer_identity_derived_from_private_key": true,
+    "venue_configuration_digest_included": true
+  },
   "safety": {
     "#134_resume_allowed": false,
     "#146_start_allowed": false,
@@ -63,6 +79,13 @@
   },
   "schema_version": "bigan-btc-15m-residual-promotion-execution-gateway-service-manifest-v1",
   "security_state": "NOT_INDEPENDENTLY_REVIEWED_NO_GO",
+  "service_deadline_contract": {
+    "authenticated_payload_receive_is_bounded": true,
+    "maximum_call_duration_is_service_enforced": true,
+    "parked_connection_cannot_block_accept_loop": true,
+    "safety_operations_use_independent_lane": true,
+    "slow_submit_cannot_block_fence_or_stop": true
+  },
   "strict_json_duplicate_keys_rejected": true,
   "wallet_signing_allowed": false,
   "polymarket_write_allowed": false,

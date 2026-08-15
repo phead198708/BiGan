@@ -17,6 +17,7 @@ import hashlib
 import json
 import multiprocessing.connection
 import os
+import queue
 import stat
 import threading
 import time
@@ -33,15 +34,22 @@ SERVICE_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-gateway-service-v1"
 )
 STATE_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-gateway-state-v1"
+    "bigan-btc-15m-residual-promotion-execution-gateway-state-v2"
 )
 VENUE_BOUNDARY_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-polymarket-clob-v2-boundary-v1"
+    "bigan-btc-15m-residual-promotion-polymarket-clob-v2-boundary-v2"
+)
+VENUE_RUNTIME_BINDING_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-venue-runtime-binding-v1"
 )
 
 
 class ExecutionGatewayError(executor.MicroLiveExecutionError):
     """Raised when the deployment-owned gateway must fail closed."""
+
+
+class ExecutionGatewayDeadlineExceeded(ExecutionGatewayError):
+    """Raised when the signed service deadline is exhausted."""
 
 
 def _json_bytes(value: Mapping[str, Any]) -> bytes:
@@ -97,6 +105,66 @@ def _private_file(path: Path | str, label: str) -> Path:
     if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
         raise ExecutionGatewayError(f"{label} ownership/mode must be current uid/0600")
     return resolved
+
+
+def polymarket_exchange_endpoint_sha256(*, host: str, chain_id: int) -> str:
+    """Canonical identity of the exact CLOB endpoint and chain."""
+
+    return executor.canonical_json_sha256(
+        {"host": host, "chain_id": chain_id}
+    )
+
+
+def polymarket_exchange_account_sha256(
+    *,
+    funder: str,
+    signature_type: int,
+) -> str:
+    """Canonical identity of the account that the CLOB client writes for."""
+
+    return executor.canonical_json_sha256(
+        {
+            "funder": funder.lower(),
+            "signature_type": signature_type,
+        }
+    )
+
+
+def polymarket_signer_identity_sha256(*, signer_address: str) -> str:
+    """Canonical public wallet identity derived from the loaded private key."""
+
+    return executor.canonical_json_sha256(
+        {"signer_address": signer_address.lower()}
+    )
+
+
+def production_execution_service_identity_sha256(
+    *,
+    gateway_implementation_sha256: str,
+    venue_configuration_sha256: str,
+    api_credentials_identity_sha256: str,
+    exchange_endpoint_sha256: str,
+    exchange_account_sha256: str,
+    signer_identity_sha256: str,
+) -> str:
+    """Bind the signed service identity to the concrete credential owner."""
+
+    values = {
+        "gateway_implementation_sha256": gateway_implementation_sha256,
+        "venue_configuration_sha256": venue_configuration_sha256,
+        "api_credentials_identity_sha256": api_credentials_identity_sha256,
+        "exchange_endpoint_sha256": exchange_endpoint_sha256,
+        "exchange_account_sha256": exchange_account_sha256,
+        "signer_identity_sha256": signer_identity_sha256,
+    }
+    for field, value in values.items():
+        _require_sha256(value, field)
+    return executor.canonical_json_sha256(
+        {
+            "schema_version": VENUE_RUNTIME_BINDING_SCHEMA_VERSION,
+            **values,
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,8 +473,19 @@ class RsaSha256ReceiptSigner:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class VenueOrderOutcome:
+    """Executor response plus the exact upstream lifecycle bytes."""
+
+    normalized_response: bytes
+    raw_venue_response: bytes
+
+
 class ExactVenueBoundary(Protocol):
     """Only mockable boundary: exact prepared writes and authoritative reads."""
+
+    @property
+    def runtime_binding(self) -> Mapping[str, Any]: ...
 
     def prepare_submission(self, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
@@ -414,13 +493,13 @@ class ExactVenueBoundary(Protocol):
         self,
         prepared: Mapping[str, Any],
         request: Mapping[str, Any],
-    ) -> bytes: ...
+    ) -> VenueOrderOutcome: ...
 
     def lookup_submission(
         self,
         prepared: Mapping[str, Any],
         request: Mapping[str, Any],
-    ) -> bytes | None: ...
+    ) -> VenueOrderOutcome | None: ...
 
     def cancel(self, request: Mapping[str, Any]) -> bytes: ...
 
@@ -437,7 +516,7 @@ class PolymarketClobV2VenueBoundary:
     lookup-only; it never calls ``post_order``.
     """
 
-    __slots__ = ("_client", "_order_type")
+    __slots__ = ("_client", "_order_type", "_runtime_binding")
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         del kwargs
@@ -452,7 +531,22 @@ class PolymarketClobV2VenueBoundary:
         chain_id: int,
         signature_type: int,
         funder: str,
+        maximum_call_duration_ms: int,
     ) -> None:
+        venue_config = PolymarketVenueConfig(
+            private_key_path=str(private_key_path),
+            api_credentials_path=str(api_credentials_path),
+            host=host,
+            chain_id=chain_id,
+            signature_type=signature_type,
+            funder=funder,
+        ).validated()
+        if not (
+            isinstance(maximum_call_duration_ms, int)
+            and not isinstance(maximum_call_duration_ms, bool)
+            and maximum_call_duration_ms > 0
+        ):
+            raise ExecutionGatewayError("venue HTTP deadline is invalid")
         private_key = _private_file(
             private_key_path,
             "Polymarket private key",
@@ -474,6 +568,20 @@ class PolymarketClobV2VenueBoundary:
             raise ExecutionGatewayError(
                 "pinned py-clob-client-v2 runtime is unavailable"
             ) from exc
+        try:
+            import httpx
+            from py_clob_client_v2.http_helpers import helpers as http_helpers
+        except ImportError as exc:
+            raise ExecutionGatewayError(
+                "pinned py-clob-client-v2 HTTP runtime is unavailable"
+            ) from exc
+        old_http_client = http_helpers._http_client
+        http_helpers._http_client = httpx.Client(
+            http2=True,
+            timeout=httpx.Timeout(maximum_call_duration_ms / 1_000),
+        )
+        with contextlib.suppress(BaseException):
+            old_http_client.close()
         self._client = ClobClient(
             host=host,
             chain_id=chain_id,
@@ -484,6 +592,46 @@ class PolymarketClobV2VenueBoundary:
             retry_on_error=False,
         )
         self._order_type = OrderType.GTC
+        signer_address = str(self._client.signer.address())
+        endpoint_sha256 = polymarket_exchange_endpoint_sha256(
+            host=host,
+            chain_id=chain_id,
+        )
+        account_sha256 = polymarket_exchange_account_sha256(
+            funder=funder,
+            signature_type=signature_type,
+        )
+        signer_sha256 = polymarket_signer_identity_sha256(
+            signer_address=signer_address,
+        )
+        api_credentials_identity_sha256 = _sha256(_json_bytes(credentials))
+        gateway_implementation_sha256 = production_gateway_implementation_sha256()
+        venue_configuration_sha256 = venue_config.configuration_sha256
+        self._runtime_binding = {
+            "schema_version": VENUE_RUNTIME_BINDING_SCHEMA_VERSION,
+            "gateway_implementation_sha256": gateway_implementation_sha256,
+            "venue_configuration_sha256": venue_configuration_sha256,
+            "api_credentials_identity_sha256": api_credentials_identity_sha256,
+            "exchange_endpoint_sha256": endpoint_sha256,
+            "exchange_account_sha256": account_sha256,
+            "signer_identity_sha256": signer_sha256,
+            "service_identity_sha256": (
+                production_execution_service_identity_sha256(
+                    gateway_implementation_sha256=gateway_implementation_sha256,
+                    venue_configuration_sha256=venue_configuration_sha256,
+                    api_credentials_identity_sha256=(
+                        api_credentials_identity_sha256
+                    ),
+                    exchange_endpoint_sha256=endpoint_sha256,
+                    exchange_account_sha256=account_sha256,
+                    signer_identity_sha256=signer_sha256,
+                )
+            ),
+        }
+
+    @property
+    def runtime_binding(self) -> Mapping[str, Any]:
+        return copy.deepcopy(self._runtime_binding)
 
     def prepare_submission(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         try:
@@ -551,16 +699,14 @@ class PolymarketClobV2VenueBoundary:
         return SignedOrderV2(**values)
 
     @staticmethod
-    def _normalized_order_response(
-        raw: Mapping[str, Any],
-        request: Mapping[str, Any],
+    def _executor_order_response(
         *,
+        request: Mapping[str, Any],
         order_hash: str,
+        status: str,
     ) -> bytes:
-        exchange_order_id = raw.get("orderID") or raw.get("order_id") or raw.get("id")
-        if exchange_order_id is not None and str(exchange_order_id) != order_hash:
-            raise ExecutionGatewayError("venue order identity is mismatched")
-        status = str(raw.get("status") or "ACCEPTED").upper()
+        if status not in {"ACCEPTED", "REJECTED"}:
+            raise ExecutionGatewayError("executor order disposition is invalid")
         return _json_bytes(
             {
                 "client_order_id": request["client_order_id"],
@@ -573,11 +719,89 @@ class PolymarketClobV2VenueBoundary:
             }
         )
 
+    @classmethod
+    def _normalized_submission_response(
+        cls,
+        raw: Mapping[str, Any],
+        request: Mapping[str, Any],
+        *,
+        order_hash: str,
+    ) -> VenueOrderOutcome:
+        required = {"success", "errorMsg", "orderID", "status"}
+        if not required.issubset(raw):
+            raise ExecutionGatewayError("venue submission response schema is invalid")
+        success = raw["success"]
+        error_message = raw["errorMsg"]
+        exchange_order_id = raw["orderID"]
+        venue_status = str(raw["status"]).lower()
+        if not (
+            isinstance(success, bool)
+            and isinstance(error_message, str)
+            and isinstance(exchange_order_id, str)
+        ):
+            raise ExecutionGatewayError("venue submission response types are invalid")
+        if exchange_order_id and exchange_order_id != order_hash:
+            raise ExecutionGatewayError("venue order identity is mismatched")
+        if success:
+            if not (
+                exchange_order_id == order_hash
+                and error_message == ""
+                and venue_status in {"live", "matched"}
+            ):
+                raise ExecutionGatewayError(
+                    "successful venue submission response is contradictory"
+                )
+            disposition = "ACCEPTED"
+        else:
+            if not (
+                error_message
+                and venue_status in {"", "failed", "rejected"}
+                and exchange_order_id in {"", order_hash}
+            ):
+                raise ExecutionGatewayError(
+                    "rejected venue submission response is contradictory"
+                )
+            disposition = "REJECTED"
+        return VenueOrderOutcome(
+            normalized_response=cls._executor_order_response(
+                request=request,
+                order_hash=order_hash,
+                status=disposition,
+            ),
+            raw_venue_response=_json_bytes(raw),
+        )
+
+    @classmethod
+    def _normalized_lookup_response(
+        cls,
+        raw: Mapping[str, Any],
+        request: Mapping[str, Any],
+        *,
+        order_hash: str,
+    ) -> VenueOrderOutcome:
+        exchange_order_id = raw.get("id") or raw.get("orderID")
+        venue_status = str(raw.get("status") or "").lower()
+        if not (
+            isinstance(exchange_order_id, str)
+            and exchange_order_id == order_hash
+            and venue_status
+            in {"live", "matched", "canceled", "cancelled", "expired"}
+        ):
+            raise ExecutionGatewayError("venue lookup response is invalid")
+        return VenueOrderOutcome(
+            normalized_response=cls._executor_order_response(
+                request=request,
+                order_hash=order_hash,
+                status="ACCEPTED",
+            ),
+            raw_venue_response=_json_bytes(raw),
+        )
+
     def submit_prepared(
         self,
         prepared: Mapping[str, Any],
         request: Mapping[str, Any],
-    ) -> bytes:
+    ) -> VenueOrderOutcome:
         if prepared.get("exact_request_sha256") != executor.canonical_json_sha256(
             request
         ):
@@ -585,7 +809,7 @@ class PolymarketClobV2VenueBoundary:
         raw = self._client.post_order(self._signed_order(prepared), self._order_type)
         if not isinstance(raw, Mapping):
             raise ExecutionGatewayError("venue submission response is invalid")
-        return self._normalized_order_response(
+        return self._normalized_submission_response(
             raw,
             request,
             order_hash=str(prepared["order_hash"]),
@@ -595,7 +819,7 @@ class PolymarketClobV2VenueBoundary:
         self,
         prepared: Mapping[str, Any],
         request: Mapping[str, Any],
-    ) -> bytes | None:
+    ) -> VenueOrderOutcome | None:
         try:
             raw = self._client.get_order(str(prepared["order_hash"]))
         except BaseException as exc:  # third-party exception taxonomy is unstable
@@ -604,7 +828,7 @@ class PolymarketClobV2VenueBoundary:
             raise ExecutionGatewayError("venue recovery lookup failed closed") from exc
         if not isinstance(raw, Mapping) or not raw:
             return None
-        return self._normalized_order_response(
+        return self._normalized_lookup_response(
             raw,
             request,
             order_hash=str(prepared["order_hash"]),
@@ -620,6 +844,15 @@ class PolymarketClobV2VenueBoundary:
         )
         if not isinstance(raw, Mapping):
             raise ExecutionGatewayError("venue cancel response is invalid")
+        canceled = raw.get("canceled")
+        not_canceled = raw.get("not_canceled")
+        if not (
+            isinstance(canceled, list)
+            and canceled == [str(request["exchange_order_id"])]
+            and isinstance(not_canceled, Mapping)
+            and not not_canceled
+        ):
+            raise ExecutionGatewayError("venue cancel acknowledgement is invalid")
         return _json_bytes(
             {
                 "client_order_id": request["client_order_id"],
@@ -632,18 +865,36 @@ class PolymarketClobV2VenueBoundary:
         raw = self._client.get_order(str(request["exchange_order_id"]))
         if not isinstance(raw, Mapping):
             raise ExecutionGatewayError("venue order lookup response is invalid")
-        return self._normalized_order_response(
+        return self._normalized_lookup_response(
             raw,
             request,
             order_hash=str(request["exchange_order_id"]),
-        )
+        ).normalized_response
 
     def read_fill_cursor(self, request: Mapping[str, Any]) -> bytes:
         raw = self._client.get_order(str(request["exchange_order_id"]))
         if not isinstance(raw, Mapping):
             raise ExecutionGatewayError("venue fill cursor response is invalid")
-        status = str(raw.get("status") or "OPEN").upper()
-        filled = Decimal(str(raw.get("size_matched") or raw.get("filled_size") or "0"))
+        venue_status = str(raw.get("status") or "").upper()
+        if venue_status not in {
+            "LIVE",
+            "MATCHED",
+            "CANCELED",
+            "CANCELLED",
+            "EXPIRED",
+        }:
+            raise ExecutionGatewayError("venue order lifecycle status is invalid")
+        try:
+            filled = Decimal(
+                str(raw.get("size_matched") or raw.get("filled_size") or "0")
+            )
+            original_size = Decimal(
+                str(raw.get("original_size") or raw.get("size") or "0")
+            )
+        except Exception as exc:
+            raise ExecutionGatewayError("venue order sizes are invalid") from exc
+        if filled < 0 or original_size <= 0 or filled > original_size:
+            raise ExecutionGatewayError("venue order sizes are invalid")
         fill_events = self._authoritative_fill_events(request, raw)
         cumulative = (
             Decimal(str(fill_events[-1]["cumulative_filled_quantity"]))
@@ -654,7 +905,15 @@ class PolymarketClobV2VenueBoundary:
             raise ExecutionGatewayError(
                 "authoritative venue fills do not reconcile to order size_matched"
             )
-        terminal = status in {"FILLED", "CANCELED", "EXPIRED"}
+        if filled == original_size:
+            status = "FILLED"
+        elif venue_status in {"CANCELED", "CANCELLED"}:
+            status = "CANCELED"
+        elif venue_status == "EXPIRED":
+            status = "EXPIRED"
+        else:
+            status = "OPEN"
+        terminal = status != "OPEN"
         observed_at = int(request["request_started_at_ts_ms"])
         response: dict[str, Any] = {
             "schema_version": executor.EXECUTION_CURSOR_SCHEMA_VERSION,
@@ -709,6 +968,14 @@ class PolymarketClobV2VenueBoundary:
             trade = rows[0]
             if str(trade.get("id")) != trade_id:
                 raise ExecutionGatewayError("authoritative venue trade identity is mismatched")
+            if str(trade.get("status") or "").upper() not in {
+                "MATCHED",
+                "MINED",
+                "CONFIRMED",
+            }:
+                raise ExecutionGatewayError(
+                    "authoritative venue trade is not an executed fill"
+                )
             leg: Mapping[str, Any] = trade
             if str(trade.get("taker_order_id") or "") != order_id:
                 maker_orders = trade.get("maker_orders")
@@ -744,14 +1011,28 @@ class PolymarketClobV2VenueBoundary:
                     )
                 )
                 price = Decimal(str(leg.get("price") or trade.get("price")))
-                fee = Decimal(
-                    str(
-                        leg.get("fee_usd")
-                        or leg.get("fee")
-                        or trade.get("fee_usd")
-                        or trade.get("fee")
-                    )
+                fee_value = (
+                    leg.get("fee_usd")
+                    or leg.get("fee")
+                    or trade.get("fee_usd")
+                    or trade.get("fee")
                 )
+                if fee_value is not None:
+                    fee = Decimal(str(fee_value))
+                else:
+                    fee_rate_bps = Decimal(
+                        str(
+                            leg.get("fee_rate_bps")
+                            if leg.get("fee_rate_bps") is not None
+                            else trade.get("fee_rate_bps")
+                        )
+                    )
+                    if not Decimal("0") <= fee_rate_bps <= Decimal("10000"):
+                        raise ValueError("fee_rate_bps outside contract bounds")
+                    # CTF Exchange v2 validates absolute collateral fees
+                    # against cashValue * feeRateBps / 10_000.  For a BUY
+                    # fill, cashValue is matched shares * execution price.
+                    fee = quantity * price * fee_rate_bps / Decimal("10000")
             except Exception as exc:
                 raise ExecutionGatewayError(
                     "authoritative venue trade economics are incomplete"
@@ -838,6 +1119,7 @@ class _DurableGatewayState:
                 "sessions": {},
                 "requests": {},
                 "prepared": {},
+                "venue_lifecycle_base64": {},
                 "venue_outcomes_base64": {},
                 "dispatch_receipts_base64": {},
                 "terminal_receipts_base64": {},
@@ -866,6 +1148,58 @@ class _DurableGatewayState:
                 os.close(directory)
 
 
+def _validated_venue_runtime_binding(
+    venue: ExactVenueBoundary,
+    authority: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        binding = dict(venue.runtime_binding)
+    except Exception as exc:
+        raise ExecutionGatewayError("venue runtime binding is unavailable") from exc
+    required = {
+        "schema_version",
+        "gateway_implementation_sha256",
+        "venue_configuration_sha256",
+        "api_credentials_identity_sha256",
+        "exchange_endpoint_sha256",
+        "exchange_account_sha256",
+        "signer_identity_sha256",
+        "service_identity_sha256",
+    }
+    if set(binding) != required or binding.get("schema_version") != (
+        VENUE_RUNTIME_BINDING_SCHEMA_VERSION
+    ):
+        raise ExecutionGatewayError("venue runtime binding is not exact")
+    for field in required - {"schema_version"}:
+        _require_sha256(binding[field], f"venue runtime binding {field}")
+    expected_service_identity = production_execution_service_identity_sha256(
+        gateway_implementation_sha256=production_gateway_implementation_sha256(),
+        venue_configuration_sha256=binding["venue_configuration_sha256"],
+        api_credentials_identity_sha256=binding[
+            "api_credentials_identity_sha256"
+        ],
+        exchange_endpoint_sha256=binding["exchange_endpoint_sha256"],
+        exchange_account_sha256=binding["exchange_account_sha256"],
+        signer_identity_sha256=binding["signer_identity_sha256"],
+    )
+    if not (
+        binding["gateway_implementation_sha256"]
+        == production_gateway_implementation_sha256()
+        and binding["service_identity_sha256"] == expected_service_identity
+        and authority["service_identity_sha256"] == expected_service_identity
+        and authority["exchange_endpoint_sha256"]
+        == binding["exchange_endpoint_sha256"]
+        and authority["exchange_account_sha256"]
+        == binding["exchange_account_sha256"]
+        and authority["signer_identity_sha256"]
+        == binding["signer_identity_sha256"]
+    ):
+        raise ExecutionGatewayError(
+            "concrete gateway venue/wallet identity is mismatched"
+        )
+    return copy.deepcopy(binding)
+
+
 class DeploymentOwnedExecutionGatewayBackend:
     """Exact service-side backend; only its outer venue may be mocked."""
 
@@ -882,9 +1216,15 @@ class DeploymentOwnedExecutionGatewayBackend:
         signer: RsaSha256ReceiptSigner,
     ) -> None:
         self.config = config.validated()
+        self.venue_runtime_binding = _validated_venue_runtime_binding(
+            venue,
+            self.config.execution_authority,
+        )
         self.venue = venue
         self.state = state
         self.signer = signer
+        self._state_lock = threading.RLock()
+        self._submit_lock = threading.Lock()
         self._dispatch_begin: Callable[..., bytes] | None = None
         self._dispatch_recover: Callable[..., bytes] | None = None
         self._dispatch_complete: Callable[..., bytes] | None = None
@@ -1040,14 +1380,45 @@ class DeploymentOwnedExecutionGatewayBackend:
         if self._dispatch_complete is None:
             raise ExecutionGatewayError("gateway dispatch completion is unbound")
         terminal = self._dispatch_complete(dispatch_receipt, raw_response)
-        self.state.value["terminal_receipts_base64"][key] = base64.b64encode(
-            terminal
-        ).decode("ascii")
-        self.state.value["venue_outcomes_base64"][key] = base64.b64encode(
-            raw_response
-        ).decode("ascii")
-        self.state.flush()
+        with self._state_lock:
+            self.state.value["terminal_receipts_base64"][key] = base64.b64encode(
+                terminal
+            ).decode("ascii")
+            self.state.value["venue_outcomes_base64"][key] = base64.b64encode(
+                raw_response
+            ).decode("ascii")
+            self.state.flush()
         return terminal
+
+    def _persist_venue_lifecycle(
+        self,
+        key: str,
+        outcome: VenueOrderOutcome,
+    ) -> bytes:
+        if not (
+            isinstance(outcome, VenueOrderOutcome)
+            and isinstance(outcome.normalized_response, bytes)
+            and isinstance(outcome.raw_venue_response, bytes)
+        ):
+            raise ExecutionGatewayError("venue outcome contract is invalid")
+        _, canonical_lifecycle, _ = executor._raw_json_object(
+            outcome.raw_venue_response,
+            "raw venue lifecycle",
+            maximum_bytes=executor.MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        if outcome.raw_venue_response != canonical_lifecycle.encode("utf-8"):
+            raise ExecutionGatewayError("raw venue lifecycle is not canonical")
+        executor._raw_json_object(
+            outcome.normalized_response,
+            "normalized venue outcome",
+            maximum_bytes=executor.MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        with self._state_lock:
+            self.state.value["venue_lifecycle_base64"][key] = base64.b64encode(
+                outcome.raw_venue_response
+            ).decode("ascii")
+            self.state.flush()
+        return outcome.normalized_response
 
     def _authenticated_response(
         self,
@@ -1058,9 +1429,10 @@ class DeploymentOwnedExecutionGatewayBackend:
         submit = authentication["operation"] == "submit_order"
         terminal = None
         if submit:
-            encoded = self.state.value["terminal_receipts_base64"].get(
-                request["client_order_id"]
-            )
+            with self._state_lock:
+                encoded = self.state.value["terminal_receipts_base64"].get(
+                    request["client_order_id"]
+                )
             if not isinstance(encoded, str):
                 raise ExecutionGatewayError("dispatch terminal receipt is absent")
             terminal = base64.b64decode(encoded, validate=True)
@@ -1116,60 +1488,68 @@ class DeploymentOwnedExecutionGatewayBackend:
         )
 
     def submit_order(self, request: Mapping[str, Any]) -> bytes:
-        proof = self._proof(request)
-        if self._dispatch_begin is None:
-            raise ExecutionGatewayError("gateway dispatch begin is unbound")
-        key = str(request["client_order_id"])
-        raw_dispatch = self._dispatch_begin(
-            proof["outbox_acceptance_receipt_json"].encode("utf-8"),
-            venue_idempotency_key=key,
-            venue_idempotency_scope=executor.VENUE_IDEMPOTENCY_SCOPE,
-            dispatch_deadline_ts_ms=request["execution_authentication"][
-                "dispatch_deadline_ts_ms"
-            ],
-            authorization_expires_at_ts_ms=request["execution_authentication"][
-                "authorization_expires_at_ts_ms"
-            ],
-        )
-        dispatch, _, _ = executor._raw_json_object(
-            raw_dispatch,
-            "gateway dispatch receipt",
-        )
-        if dispatch["status"] == "DISPATCHED":
-            outcome = dispatch["raw_outcome_json"].encode("utf-8")
-            self.state.value["terminal_receipts_base64"][key] = base64.b64encode(
-                raw_dispatch
-            ).decode("ascii")
-            self.state.flush()
-            return self._authenticated_response(request, outcome)
-        if dispatch["status"] != "DISPATCHING":
-            raise ExecutionGatewayError("gateway dispatch is not permitted")
-        self.state.value["requests"][key] = copy.deepcopy(dict(request))
-        self.state.value["dispatch_receipts_base64"][key] = base64.b64encode(
-            raw_dispatch
-        ).decode("ascii")
-        prepared = self.state.value["prepared"].get(key)
-        if prepared is None:
-            prepared = copy.deepcopy(dict(self.venue.prepare_submission(request)))
-            self.state.value["prepared"][key] = prepared
-        self.state.flush()  # prepared signed bytes precede the network side effect
-        raw_response = self.venue.submit_prepared(prepared, request)
-        self._complete(key, raw_dispatch, raw_response)
-        return self._authenticated_response(request, raw_response)
+        with self._submit_lock:
+            proof = self._proof(request)
+            if self._dispatch_begin is None:
+                raise ExecutionGatewayError("gateway dispatch begin is unbound")
+            key = str(request["client_order_id"])
+            raw_dispatch = self._dispatch_begin(
+                proof["outbox_acceptance_receipt_json"].encode("utf-8"),
+                venue_idempotency_key=key,
+                venue_idempotency_scope=executor.VENUE_IDEMPOTENCY_SCOPE,
+                dispatch_deadline_ts_ms=request["execution_authentication"][
+                    "dispatch_deadline_ts_ms"
+                ],
+                authorization_expires_at_ts_ms=request["execution_authentication"][
+                    "authorization_expires_at_ts_ms"
+                ],
+            )
+            dispatch, _, _ = executor._raw_json_object(
+                raw_dispatch,
+                "gateway dispatch receipt",
+            )
+            if dispatch["status"] == "DISPATCHED":
+                raw_response = dispatch["raw_outcome_json"].encode("utf-8")
+                with self._state_lock:
+                    self.state.value["terminal_receipts_base64"][key] = (
+                        base64.b64encode(raw_dispatch).decode("ascii")
+                    )
+                    self.state.flush()
+                return self._authenticated_response(request, raw_response)
+            if dispatch["status"] != "DISPATCHING":
+                raise ExecutionGatewayError("gateway dispatch is not permitted")
+            with self._state_lock:
+                self.state.value["requests"][key] = copy.deepcopy(dict(request))
+                self.state.value["dispatch_receipts_base64"][key] = (
+                    base64.b64encode(raw_dispatch).decode("ascii")
+                )
+                prepared = self.state.value["prepared"].get(key)
+                if prepared is None:
+                    prepared = copy.deepcopy(
+                        dict(self.venue.prepare_submission(request))
+                    )
+                    self.state.value["prepared"][key] = prepared
+                self.state.flush()  # signed bytes precede the network side effect
+            outcome = self.venue.submit_prepared(prepared, request)
+            raw_response = self._persist_venue_lifecycle(key, outcome)
+            self._complete(key, raw_dispatch, raw_response)
+            return self._authenticated_response(request, raw_response)
 
     def recover_order_submission(self, request: Mapping[str, Any]) -> bytes:
         self._proof(request)
         key = str(request["client_order_id"])
-        prepared = self.state.value["prepared"].get(key)
+        with self._state_lock:
+            prepared = copy.deepcopy(self.state.value["prepared"].get(key))
         if not isinstance(prepared, Mapping):
             raise executor.SubmissionRecoveryOutcomeNotFoundError(
                 "gateway has no durable prepared submission"
             )
-        raw_response = self.venue.lookup_submission(prepared, request)
-        if raw_response is None:
+        outcome = self.venue.lookup_submission(prepared, request)
+        if outcome is None:
             raise executor.SubmissionRecoveryOutcomeNotFoundError(
                 "venue idempotency lookup found no outcome"
             )
+        raw_response = self._persist_venue_lifecycle(key, outcome)
         raw_response = executor.verify_recovered_submission_outcome(
             request,
             raw_response,
@@ -1184,20 +1564,36 @@ class DeploymentOwnedExecutionGatewayBackend:
             ],
             raw_outcome=raw_response,
         )
-        self.state.value["terminal_receipts_base64"][key] = base64.b64encode(
-            terminal
-        ).decode("ascii")
-        self.state.value["venue_outcomes_base64"][key] = base64.b64encode(
-            raw_response
-        ).decode("ascii")
-        self.state.flush()
+        with self._state_lock:
+            self.state.value["terminal_receipts_base64"][key] = base64.b64encode(
+                terminal
+            ).decode("ascii")
+            self.state.value["venue_outcomes_base64"][key] = base64.b64encode(
+                raw_response
+            ).decode("ascii")
+            self.state.flush()
         return self._authenticated_response(request, raw_response)
 
     def cancel_order(self, request: Mapping[str, Any]) -> bytes:
         return self._authenticated_response(request, self.venue.cancel(request))
 
     def lookup_order(self, request: Mapping[str, Any]) -> bytes:
-        return self._authenticated_response(request, self.venue.lookup(request))
+        key = str(request["client_order_id"])
+        with self._state_lock:
+            original = copy.deepcopy(self.state.value["requests"].get(key))
+            prepared = copy.deepcopy(self.state.value["prepared"].get(key))
+        if not isinstance(original, Mapping) or not isinstance(prepared, Mapping):
+            raise ExecutionGatewayError("gateway lookup identity is not durable")
+        venue_request = {
+            **dict(request),
+            "exchange_order_id": prepared["order_hash"],
+            "quantity": original["quantity"],
+            "limit_price": original["limit_price"],
+        }
+        return self._authenticated_response(
+            request,
+            self.venue.lookup(venue_request),
+        )
 
     def read_order_fill_cursor(self, request: Mapping[str, Any]) -> bytes:
         raw = self.venue.read_fill_cursor(request)
@@ -1207,7 +1603,8 @@ class DeploymentOwnedExecutionGatewayBackend:
 
     def fence_order_invocation(self, request: Mapping[str, Any]) -> bytes:
         key = str(request["client_order_id"])
-        submitted = self.state.value["requests"].get(key)
+        with self._state_lock:
+            submitted = copy.deepcopy(self.state.value["requests"].get(key))
         if not isinstance(submitted, Mapping) or self._dispatch_fence is None:
             raise ExecutionGatewayError("gateway dispatch fence is unbound")
         raw_fence = self._dispatch_fence(
@@ -1251,6 +1648,20 @@ def _rpc_response(
 class DeploymentOwnedExecutionGatewayServer:
     """Final authenticated AF_UNIX server with a durable session registry."""
 
+    _MAXIMUM_CONCURRENT_CONNECTIONS = 64
+    _SAFETY_LANE_OPERATIONS = frozenset(
+        {
+            "attest_execution_binding",
+            "bind_execution_dispatch_authority",
+            "read_trusted_time",
+            "recover_order_submission",
+            "cancel_order",
+            "lookup_order",
+            "read_order_fill_cursor",
+            "fence_order_invocation",
+        }
+    )
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         del kwargs
         raise TypeError("deployment-owned execution gateway server is final")
@@ -1262,6 +1673,10 @@ class DeploymentOwnedExecutionGatewayServer:
         venue: ExactVenueBoundary,
     ) -> None:
         self.config = config.validated()
+        self.venue_runtime_binding = _validated_venue_runtime_binding(
+            venue,
+            self.config.execution_authority,
+        )
         self.state = _DurableGatewayState(config.state_path)
         self.signer = RsaSha256ReceiptSigner(
             private_exponent_path=config.receipt_private_exponent_path,
@@ -1278,6 +1693,204 @@ class DeploymentOwnedExecutionGatewayServer:
             state=self.state,
             signer=self.signer,
         )
+        self._connection_slots = threading.BoundedSemaphore(
+            self._MAXIMUM_CONCURRENT_CONNECTIONS
+        )
+        self._submit_lane = threading.BoundedSemaphore(1)
+        self._safety_lane = threading.BoundedSemaphore(16)
+        self._active_handlers: set[threading.Thread] = set()
+        self._active_handlers_lock = threading.Lock()
+
+    @property
+    def _maximum_call_duration_seconds(self) -> float:
+        return (
+            int(self.config.execution_authority["maximum_call_duration_ms"])
+            / 1_000
+        )
+
+    @staticmethod
+    def _remaining_seconds(deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ExecutionGatewayDeadlineExceeded(
+                "execution gateway service deadline exceeded"
+            )
+        return remaining
+
+    def _invoke_with_deadline(
+        self,
+        *,
+        operation: str,
+        deadline: float,
+        call: Callable[[], bytes],
+    ) -> bytes:
+        result: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+        lane = (
+            self._safety_lane
+            if operation in self._SAFETY_LANE_OPERATIONS
+            else self._submit_lane
+        )
+
+        def invoke() -> None:
+            acquired = False
+            try:
+                acquired = lane.acquire(timeout=self._remaining_seconds(deadline))
+                if not acquired:
+                    raise ExecutionGatewayDeadlineExceeded(
+                        "execution gateway service lane is unavailable"
+                    )
+                value = call()
+                with contextlib.suppress(queue.Full):
+                    result.put_nowait(("OK", value))
+            except BaseException as exc:
+                with contextlib.suppress(queue.Full):
+                    result.put_nowait(("ERROR", exc))
+            finally:
+                if acquired:
+                    lane.release()
+
+        threading.Thread(
+            target=invoke,
+            name=f"execution-gateway-{operation}",
+            daemon=True,
+        ).start()
+        try:
+            status, value = result.get(timeout=self._remaining_seconds(deadline))
+        except queue.Empty as exc:
+            raise ExecutionGatewayDeadlineExceeded(
+                "execution gateway service operation timed out"
+            ) from exc
+        if status != "OK":
+            raise value
+        if not isinstance(value, bytes):
+            raise ExecutionGatewayError("gateway backend returned non-byte response")
+        return value
+
+    def _handle_connection(self, connection: Any, audit: Any | None) -> None:
+        operation = "invalid"
+        deadline = time.monotonic() + self._maximum_call_duration_seconds
+        try:
+            if not connection.poll(self._remaining_seconds(deadline)):
+                raise ExecutionGatewayDeadlineExceeded(
+                    "execution gateway request payload timed out"
+                )
+            raw_request = connection.recv_bytes(
+                executor.MAX_EXECUTION_TRANSPORT_EVENT_BYTES
+            )
+            request, _, _ = executor._raw_json_object(
+                raw_request,
+                "execution gateway RPC request",
+                maximum_bytes=executor.MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+            )
+            verified = executor.verify_execution_gateway_rpc_session(
+                request,
+                expected_route_binding_sha256=str(
+                    self.config.execution_authority["route_binding_sha256"]
+                ),
+                public_key_modulus_hex=str(
+                    self.config.execution_authority["public_key_modulus_hex"]
+                ),
+                public_key_exponent=int(
+                    self.config.execution_authority["public_key_exponent"]
+                ),
+            )
+            operation = str(verified["operation"])
+            session_sha256 = str(verified["client_session_sha256"])
+            payload = _decode_rpc_value(verified["payload"])
+            if operation == "attest_execution_binding":
+                if not (
+                    payload.get("client_session_sha256") == session_sha256
+                    and payload.get("client_session_binding")
+                    == verified["client_session_binding"]
+                ):
+                    raise ExecutionGatewayError(
+                        "gateway attestation session is mismatched"
+                    )
+                raw_response = self._invoke_with_deadline(
+                    operation=operation,
+                    deadline=deadline,
+                    call=lambda: self.backend.attest_execution_binding(payload),
+                )
+                with self.backend._state_lock:
+                    self.state.value["sessions"][session_sha256] = {
+                        "client_session_binding": copy.deepcopy(
+                            verified["client_session_binding"]
+                        ),
+                        "attestation_sha256": _sha256(raw_response),
+                    }
+                    self.state.flush()
+            else:
+                with self.backend._state_lock:
+                    session = copy.deepcopy(
+                        self.state.value["sessions"].get(session_sha256)
+                    )
+                if not (
+                    isinstance(session, Mapping)
+                    and session.get("client_session_binding")
+                    == verified["client_session_binding"]
+                    and session.get("attestation_sha256")
+                    == verified["client_session_attestation_sha256"]
+                ):
+                    raise ExecutionGatewayError(
+                        "gateway signed session is not registered"
+                    )
+                if operation == "bind_execution_dispatch_authority":
+
+                    def bind() -> bytes:
+                        executor.bind_execution_backend_to_dispatch_authority(
+                            self.backend,
+                            **payload,
+                        )
+                        return b'{"bound":true}'
+
+                    raw_response = self._invoke_with_deadline(
+                        operation=operation,
+                        deadline=deadline,
+                        call=bind,
+                    )
+                else:
+                    method = getattr(self.backend, operation)
+                    raw_response = self._invoke_with_deadline(
+                        operation=operation,
+                        deadline=deadline,
+                        call=lambda: method(payload),
+                    )
+            connection.send_bytes(_rpc_response(raw_response=raw_response))
+            if audit is not None:
+                audit.put({"operation": operation, "status": "OK"})
+        except executor.SubmissionRecoveryOutcomeNotFoundError:
+            with contextlib.suppress(BaseException):
+                connection.send_bytes(
+                    _rpc_response(error_code="SUBMISSION_RECOVERY_OUTCOME_NOT_FOUND")
+                )
+            if audit is not None:
+                audit.put({"operation": operation, "status": "NOT_FOUND"})
+        except ExecutionGatewayDeadlineExceeded:
+            with contextlib.suppress(BaseException):
+                connection.send_bytes(_rpc_response(error_code="DEADLINE_EXCEEDED"))
+            if audit is not None:
+                audit.put({"operation": operation, "status": "DEADLINE_EXCEEDED"})
+        except BaseException as exc:
+            with contextlib.suppress(BaseException):
+                connection.send_bytes(_rpc_response(error_code="OPERATION_FAILED"))
+            if audit is not None:
+                audit.put(
+                    {
+                        "operation": operation,
+                        "status": "ERROR",
+                        "error": exc.__class__.__name__,
+                    }
+                )
+        finally:
+            connection.close()
+
+    def _run_connection_handler(self, connection: Any, audit: Any | None) -> None:
+        try:
+            self._handle_connection(connection, audit)
+        finally:
+            with self._active_handlers_lock:
+                self._active_handlers.discard(threading.current_thread())
+            self._connection_slots.release()
 
     def serve_forever(
         self,
@@ -1301,108 +1914,44 @@ class DeploymentOwnedExecutionGatewayServer:
             backlog=16,
             authkey=credential,
         )
+        raw_socket = listener._listener._socket
+        raw_socket.settimeout(
+            min(0.1, self._maximum_call_duration_seconds)
+        )
         if ready is not None:
             ready.set()
         try:
             while True:
-                connection = listener.accept()
+                if stop is not None and stop.is_set():
+                    break
+                try:
+                    connection = listener.accept()
+                except TimeoutError:
+                    continue
                 if stop is not None and stop.is_set():
                     connection.close()
                     break
-                operation = "invalid"
-                try:
-                    raw_request = connection.recv_bytes(
-                        executor.MAX_EXECUTION_TRANSPORT_EVENT_BYTES
-                    )
-                    request, _, _ = executor._raw_json_object(
-                        raw_request,
-                        "execution gateway RPC request",
-                        maximum_bytes=executor.MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
-                    )
-                    verified = executor.verify_execution_gateway_rpc_session(
-                        request,
-                        expected_route_binding_sha256=str(
-                            self.config.execution_authority["route_binding_sha256"]
-                        ),
-                        public_key_modulus_hex=str(
-                            self.config.execution_authority[
-                                "public_key_modulus_hex"
-                            ]
-                        ),
-                        public_key_exponent=int(
-                            self.config.execution_authority["public_key_exponent"]
-                        ),
-                    )
-                    operation = str(verified["operation"])
-                    session_sha256 = str(verified["client_session_sha256"])
-                    payload = _decode_rpc_value(verified["payload"])
-                    sessions = self.state.value["sessions"]
-                    if operation == "attest_execution_binding":
-                        if not (
-                            payload.get("client_session_sha256") == session_sha256
-                            and payload.get("client_session_binding")
-                            == verified["client_session_binding"]
-                        ):
-                            raise ExecutionGatewayError(
-                                "gateway attestation session is mismatched"
-                            )
-                        raw_response = self.backend.attest_execution_binding(payload)
-                        sessions[session_sha256] = {
-                            "client_session_binding": copy.deepcopy(
-                                verified["client_session_binding"]
-                            ),
-                            "attestation_sha256": _sha256(raw_response),
-                        }
-                        self.state.flush()
-                    else:
-                        session = sessions.get(session_sha256)
-                        if not (
-                            isinstance(session, Mapping)
-                            and session.get("client_session_binding")
-                            == verified["client_session_binding"]
-                            and session.get("attestation_sha256")
-                            == verified["client_session_attestation_sha256"]
-                        ):
-                            raise ExecutionGatewayError(
-                                "gateway signed session is not registered"
-                            )
-                        if operation == "bind_execution_dispatch_authority":
-                            executor.bind_execution_backend_to_dispatch_authority(
-                                self.backend,
-                                **payload,
-                            )
-                            raw_response = b'{"bound":true}'
-                        else:
-                            method = getattr(self.backend, operation)
-                            raw_response = method(payload)
-                    connection.send_bytes(_rpc_response(raw_response=raw_response))
-                    if audit is not None:
-                        audit.put({"operation": operation, "status": "OK"})
-                except executor.SubmissionRecoveryOutcomeNotFoundError:
-                    connection.send_bytes(
-                        _rpc_response(
-                            error_code="SUBMISSION_RECOVERY_OUTCOME_NOT_FOUND"
-                        )
-                    )
-                    if audit is not None:
-                        audit.put({"operation": operation, "status": "NOT_FOUND"})
-                except BaseException as exc:
-                    with contextlib.suppress(BaseException):
-                        connection.send_bytes(
-                            _rpc_response(error_code="OPERATION_FAILED")
-                        )
-                    if audit is not None:
-                        audit.put(
-                            {
-                                "operation": operation,
-                                "status": "ERROR",
-                                "error": exc.__class__.__name__,
-                            }
-                        )
-                finally:
+                if not self._connection_slots.acquire(blocking=False):
                     connection.close()
+                    continue
+                handler = threading.Thread(
+                    target=self._run_connection_handler,
+                    args=(connection, audit),
+                    name="execution-gateway-connection",
+                    daemon=True,
+                )
+                with self._active_handlers_lock:
+                    self._active_handlers.add(handler)
+                handler.start()
         finally:
             listener.close()
+            shutdown_deadline = (
+                time.monotonic() + self._maximum_call_duration_seconds
+            )
+            with self._active_handlers_lock:
+                handlers = tuple(self._active_handlers)
+            for handler in handlers:
+                handler.join(timeout=max(0, shutdown_deadline - time.monotonic()))
             if endpoint.exists() and stat.S_ISSOCK(endpoint.lstat().st_mode):
                 endpoint.unlink()
 
@@ -1437,6 +1986,7 @@ def run_production_execution_gateway(
 ) -> None:
     """Production entrypoint: no injectable backend, signer, wallet, or client."""
 
+    service_config.validated()
     venue_config.validated()
     venue = PolymarketClobV2VenueBoundary(
         private_key_path=venue_config.private_key_path,
@@ -1445,6 +1995,9 @@ def run_production_execution_gateway(
         chain_id=venue_config.chain_id,
         signature_type=venue_config.signature_type,
         funder=venue_config.funder,
+        maximum_call_duration_ms=int(
+            service_config.execution_authority["maximum_call_duration_ms"]
+        ),
     )
     DeploymentOwnedExecutionGatewayServer(
         service_config,
