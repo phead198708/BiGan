@@ -90,6 +90,14 @@ def test_project_and_ci_use_the_frozen_runtime_matrix() -> None:
     assert 'python-version-file: ".python-version"' in workflow
     assert "verify_residual_promotion_runtime_matrix.py --static-only" in workflow
     assert "verify_residual_promotion_runtime_matrix.py" in workflow
+    assert 'PYTHONPATH: "src:."' in workflow
+    assert workflow.index(
+        "Verify exact deployment image, ABI, and distribution graph"
+    ) < workflow.index(
+        "Install additive execution-gateway runtime graph",
+        workflow.index("exact-deployment-runtime:"),
+    )
+    assert "python -m pip check" in workflow
     assert "BIGAN_DEPLOYMENT_IMAGE_MANIFEST_DIGEST" not in workflow
     assert "tests/v8/test_residual_promotion_micro_live_executor.py" in workflow
     assert (

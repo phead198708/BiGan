@@ -1,5 +1,8 @@
 name: v8 hard gates
 
+env:
+  PYTHONPATH: "src:."
+
 on:
   pull_request:
     paths:
@@ -27,17 +30,21 @@ jobs:
         with:
           python-version-file: ".python-version"
 
-      - name: Install exact hash-locked deployment graph
+      - name: Install frozen model runtime graph
         run: |
           python -m pip install --require-hashes --only-binary=:all: \
             -r examples/v8/residual_promotion_runtime-linux-x86_64.lock.txt
-          python -m pip install --require-hashes --only-binary=:all: \
-            -r examples/v8/residual_promotion_execution_gateway-linux-x86_64.lock.txt
           python -m pip install --no-deps --no-build-isolation -e .
 
       - name: Verify frozen deployment runtime matrix
         run: |
           python examples/v8/verify_residual_promotion_runtime_matrix.py --static-only
+
+      - name: Install additive execution-gateway runtime graph
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: \
+            -r examples/v8/residual_promotion_execution_gateway-linux-x86_64.lock.txt
+          python -m pip check
 
       - name: Lint v8
         run: python -m ruff check src/bigan/v8 tests/v8 examples/v8
@@ -96,16 +103,20 @@ jobs:
       - name: Check out repository without deployment mutation
         uses: actions/checkout@v4
 
-      - name: Install exact hash-locked deployment graph
+      - name: Install frozen model runtime graph
         run: |
           python -m pip install --require-hashes --only-binary=:all: \
             -r examples/v8/residual_promotion_runtime-linux-x86_64.lock.txt
-          python -m pip install --require-hashes --only-binary=:all: \
-            -r examples/v8/residual_promotion_execution_gateway-linux-x86_64.lock.txt
           python -m pip install --no-deps --no-build-isolation -e .
 
       - name: Verify exact deployment image, ABI, and distribution graph
         run: python examples/v8/verify_residual_promotion_runtime_matrix.py
+
+      - name: Install additive execution-gateway runtime graph
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: \
+            -r examples/v8/residual_promotion_execution_gateway-linux-x86_64.lock.txt
+          python -m pip check
 
       - name: Exercise frozen model and execution behavior in exact image
         run: |
