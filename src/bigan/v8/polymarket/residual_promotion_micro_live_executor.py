@@ -49,6 +49,7 @@ from bigan.v8.polymarket.residual_promotion_micro_live_authorization import (
     REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS,
     REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256,
     RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION,
+    RISK_DOMAIN_AUTHORITY_ROUTE_MODE,
     RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS,
     RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS,
     RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS,
@@ -69,7 +70,7 @@ STATE_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-micro-live-state-v16"
 SIGNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-execution-signal-v2"
 JOURNAL_SCHEMA_VERSION = "bigan-btc-15m-residual-promotion-durable-journal-v1"
 JOURNAL_NAMESPACE_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-journal-namespace-lease-receipt-v7"
+    "bigan-btc-15m-residual-promotion-journal-namespace-lease-receipt-v8"
 )
 JOURNAL_HIGH_WATER_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-journal-authority-high-water-v1"
@@ -351,6 +352,8 @@ class DurableRiskDomainLeaseBackend(Protocol):
         journal_namespace_id: str,
         adapter_implementation_sha256: str,
         configuration_sha256: str,
+        route_mode: str,
+        route_binding_sha256: str,
         operation_inventory_schema_version: str,
         required_operations: Sequence[str],
         required_operations_sha256: str,
@@ -519,7 +522,7 @@ class DurableRiskDomainLeaseBackend(Protocol):
 
 
 RISK_DOMAIN_AUTHORITY_RPC_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-risk-domain-authority-rpc-v1"
+    "bigan-btc-15m-residual-promotion-risk-domain-authority-rpc-v2"
 )
 RISK_DOMAIN_AUTHORITY_RPC_ROUTE_SEMANTICS = (
     "immutable_af_unix_endpoint_and_credential_identity_for_authorization_lifetime"
@@ -539,6 +542,7 @@ def deployment_owned_risk_domain_authority_adapter_implementation_sha256() -> st
             "required_operations_sha256": (
                 REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256
             ),
+            "route_mode": RISK_DOMAIN_AUTHORITY_ROUTE_MODE,
             "route_semantics": RISK_DOMAIN_AUTHORITY_RPC_ROUTE_SEMANTICS,
         }
     )
@@ -594,6 +598,52 @@ def _risk_domain_rpc_value(value: Any) -> Any:
     return value
 
 
+def deployment_owned_risk_domain_authority_route_binding_sha256(
+    *,
+    endpoint: Path | str,
+    credential: bytes,
+    service_identity_sha256: str,
+    tenant_id: str,
+    key_identity_sha256: str,
+    adapter_implementation_sha256: str,
+    configuration_sha256: str,
+) -> str:
+    """Derive the exact authorization-bound deployment RPC route."""
+
+    endpoint_path = Path(endpoint)
+    expected_configuration_sha256 = (
+        deployment_owned_risk_domain_authority_configuration_sha256(
+            endpoint=endpoint_path,
+            credential=credential,
+            service_identity_sha256=service_identity_sha256,
+            tenant_id=tenant_id,
+            key_identity_sha256=key_identity_sha256,
+        )
+    )
+    if not (
+        _is_sha256(adapter_implementation_sha256)
+        and configuration_sha256 == expected_configuration_sha256
+    ):
+        raise MicroLiveExecutionError(
+            "risk-domain authority route implementation/configuration is invalid"
+        )
+    return canonical_json_sha256(
+        {
+            "schema_version": RISK_DOMAIN_AUTHORITY_RPC_SCHEMA_VERSION,
+            "adapter_implementation_sha256": adapter_implementation_sha256,
+            "configuration_sha256": configuration_sha256,
+            "endpoint": str(endpoint_path),
+            "family": "AF_UNIX",
+            "credential_identity_sha256": hashlib.sha256(credential).hexdigest(),
+            "service_identity_sha256": service_identity_sha256,
+            "tenant_id": tenant_id,
+            "key_identity_sha256": key_identity_sha256,
+            "route_semantics": RISK_DOMAIN_AUTHORITY_RPC_ROUTE_SEMANTICS,
+            "route_mode": RISK_DOMAIN_AUTHORITY_ROUTE_MODE,
+        }
+    )
+
+
 class DeploymentOwnedRiskDomainAuthorityAdapter:
     """Exact immutable AF_UNIX client owned by the reviewed composition root."""
 
@@ -601,11 +651,10 @@ class DeploymentOwnedRiskDomainAuthorityAdapter:
         "_adapter_implementation_sha256",
         "_configuration_sha256",
         "_credential",
-        "_credential_identity_sha256",
         "_endpoint",
         "_key_identity_sha256",
-        "_local_test_backend",
         "_route_binding_sha256",
+        "_route_mode",
         "_sealed",
         "_service_identity_sha256",
         "_tenant_id",
@@ -622,13 +671,6 @@ class DeploymentOwnedRiskDomainAuthorityAdapter:
             )
         object.__setattr__(self, name, value)
 
-    def __getattribute__(self, name: str) -> Any:
-        if name in REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS:
-            backend = object.__getattribute__(self, "_local_test_backend")
-            if backend is not None and not callable(getattr(backend, name, None)):
-                raise AttributeError(name)
-        return object.__getattribute__(self, name)
-
     def __delattr__(self, name: str) -> None:
         del name
         raise AttributeError("deployment-owned risk-domain authority route is immutable")
@@ -643,61 +685,8 @@ class DeploymentOwnedRiskDomainAuthorityAdapter:
         key_identity_sha256: str,
         expected_adapter_implementation_sha256: str,
         expected_configuration_sha256: str,
-    ) -> None:
-        self._initialize_route(
-            endpoint=endpoint,
-            credential=credential,
-            service_identity_sha256=service_identity_sha256,
-            tenant_id=tenant_id,
-            key_identity_sha256=key_identity_sha256,
-            expected_adapter_implementation_sha256=(
-                expected_adapter_implementation_sha256
-            ),
-            expected_configuration_sha256=expected_configuration_sha256,
-            local_test_backend=None,
-        )
-
-    @classmethod
-    def _for_test_backend(
-        cls,
-        backend: DurableRiskDomainLeaseBackend,
-        *,
-        endpoint: Path | str,
-        credential: bytes,
-        service_identity_sha256: str,
-        tenant_id: str,
-        key_identity_sha256: str,
-        expected_adapter_implementation_sha256: str,
-        expected_configuration_sha256: str,
-    ) -> DeploymentOwnedRiskDomainAuthorityAdapter:
-        """Create a non-production in-process harness behind the same final shell."""
-
-        instance = object.__new__(cls)
-        instance._initialize_route(
-            endpoint=endpoint,
-            credential=credential,
-            service_identity_sha256=service_identity_sha256,
-            tenant_id=tenant_id,
-            key_identity_sha256=key_identity_sha256,
-            expected_adapter_implementation_sha256=(
-                expected_adapter_implementation_sha256
-            ),
-            expected_configuration_sha256=expected_configuration_sha256,
-            local_test_backend=backend,
-        )
-        return instance
-
-    def _initialize_route(
-        self,
-        *,
-        endpoint: Path | str,
-        credential: bytes,
-        service_identity_sha256: str,
-        tenant_id: str,
-        key_identity_sha256: str,
-        expected_adapter_implementation_sha256: str,
-        expected_configuration_sha256: str,
-        local_test_backend: DurableRiskDomainLeaseBackend | None,
+        expected_route_mode: str,
+        expected_route_binding_sha256: str,
     ) -> None:
         endpoint_path = Path(endpoint)
         implementation_sha256 = (
@@ -712,20 +701,29 @@ class DeploymentOwnedRiskDomainAuthorityAdapter:
                 key_identity_sha256=key_identity_sha256,
             )
         )
+        route_binding_sha256 = (
+            deployment_owned_risk_domain_authority_route_binding_sha256(
+                endpoint=endpoint_path,
+                credential=credential,
+                service_identity_sha256=service_identity_sha256,
+                tenant_id=tenant_id,
+                key_identity_sha256=key_identity_sha256,
+                adapter_implementation_sha256=implementation_sha256,
+                configuration_sha256=configuration_sha256,
+            )
+        )
         if not (
             implementation_sha256 == expected_adapter_implementation_sha256
             and configuration_sha256 == expected_configuration_sha256
+            and expected_route_mode == RISK_DOMAIN_AUTHORITY_ROUTE_MODE
+            and route_binding_sha256 == expected_route_binding_sha256
         ):
             raise MicroLiveExecutionError(
-                "risk-domain authority adapter implementation/configuration mismatch"
+                "risk-domain authority adapter implementation/configuration/route "
+                "mismatch"
             )
         object.__setattr__(self, "_endpoint", str(endpoint_path))
         object.__setattr__(self, "_credential", bytes(credential))
-        object.__setattr__(
-            self,
-            "_credential_identity_sha256",
-            hashlib.sha256(credential).hexdigest(),
-        )
         object.__setattr__(
             self,
             "_service_identity_sha256",
@@ -739,12 +737,8 @@ class DeploymentOwnedRiskDomainAuthorityAdapter:
             implementation_sha256,
         )
         object.__setattr__(self, "_configuration_sha256", configuration_sha256)
-        object.__setattr__(self, "_local_test_backend", local_test_backend)
-        object.__setattr__(
-            self,
-            "_route_binding_sha256",
-            self._computed_route_binding_sha256(),
-        )
+        object.__setattr__(self, "_route_mode", RISK_DOMAIN_AUTHORITY_ROUTE_MODE)
+        object.__setattr__(self, "_route_binding_sha256", route_binding_sha256)
         object.__setattr__(self, "_sealed", True)
 
     @property
@@ -760,29 +754,20 @@ class DeploymentOwnedRiskDomainAuthorityAdapter:
         self.assert_runtime_integrity()
         return self._route_binding_sha256
 
+    @property
+    def route_mode(self) -> str:
+        self.assert_runtime_integrity()
+        return self._route_mode
+
     def _computed_route_binding_sha256(self) -> str:
-        return canonical_json_sha256(
-            {
-                "schema_version": RISK_DOMAIN_AUTHORITY_RPC_SCHEMA_VERSION,
-                "adapter_implementation_sha256": (
-                    self._adapter_implementation_sha256
-                ),
-                "configuration_sha256": self._configuration_sha256,
-                "endpoint": self._endpoint,
-                "family": "AF_UNIX",
-                "credential_identity_sha256": (
-                    self._credential_identity_sha256
-                ),
-                "service_identity_sha256": self._service_identity_sha256,
-                "tenant_id": self._tenant_id,
-                "key_identity_sha256": self._key_identity_sha256,
-                "route_semantics": RISK_DOMAIN_AUTHORITY_RPC_ROUTE_SEMANTICS,
-                "mode": (
-                    "in_process_test_harness"
-                    if self._local_test_backend is not None
-                    else "deployment_af_unix_rpc"
-                ),
-            }
+        return deployment_owned_risk_domain_authority_route_binding_sha256(
+            endpoint=self._endpoint,
+            credential=self._credential,
+            service_identity_sha256=self._service_identity_sha256,
+            tenant_id=self._tenant_id,
+            key_identity_sha256=self._key_identity_sha256,
+            adapter_implementation_sha256=self._adapter_implementation_sha256,
+            configuration_sha256=self._configuration_sha256,
         )
 
     def assert_runtime_integrity(self) -> None:
@@ -798,6 +783,7 @@ class DeploymentOwnedRiskDomainAuthorityAdapter:
                 tenant_id=self._tenant_id,
                 key_identity_sha256=self._key_identity_sha256,
             )
+            and self._route_mode == RISK_DOMAIN_AUTHORITY_ROUTE_MODE
             and self._computed_route_binding_sha256()
             == self._route_binding_sha256
         ):
@@ -811,13 +797,6 @@ class DeploymentOwnedRiskDomainAuthorityAdapter:
             raise MicroLiveExecutionError(
                 "risk-domain authority RPC operation is not authorized"
             )
-        if self._local_test_backend is not None:
-            method = getattr(self._local_test_backend, operation, None)
-            if not callable(method):
-                raise MicroLiveExecutionError(
-                    f"external authority operation {operation} is absent"
-                )
-            return method(**dict(kwargs))
         request = _canonical_json_bytes(
             {
                 "schema_version": RISK_DOMAIN_AUTHORITY_RPC_SCHEMA_VERSION,
@@ -913,6 +892,8 @@ class MicroLiveStateJournal(Protocol):
         public_key_exponent: int,
         adapter_implementation_sha256: str,
         configuration_sha256: str,
+        route_mode: str,
+        route_binding_sha256: str,
         operation_inventory_schema_version: str,
         required_operations: Sequence[str],
         required_operations_sha256: str,
@@ -1135,6 +1116,8 @@ class AtomicFileMicroLiveStateJournal:
         public_key_exponent: int,
         adapter_implementation_sha256: str,
         configuration_sha256: str,
+        route_mode: str,
+        route_binding_sha256: str,
         operation_inventory_schema_version: str,
         required_operations: Sequence[str],
         required_operations_sha256: str,
@@ -1158,6 +1141,8 @@ class AtomicFileMicroLiveStateJournal:
             "public_key_exponent": public_key_exponent,
             "adapter_implementation_sha256": adapter_implementation_sha256,
             "configuration_sha256": configuration_sha256,
+            "route_mode": route_mode,
+            "route_binding_sha256": route_binding_sha256,
             "operation_inventory_schema_version": operation_inventory_schema_version,
             "required_operations": list(required_operations),
             "required_operations_sha256": required_operations_sha256,
@@ -1171,11 +1156,16 @@ class AtomicFileMicroLiveStateJournal:
         if not (
             _is_sha256(adapter_implementation_sha256)
             and _is_sha256(configuration_sha256)
+            and route_mode == RISK_DOMAIN_AUTHORITY_ROUTE_MODE
+            and _is_sha256(route_binding_sha256)
             and _is_sha256(authority_binding_sha256)
             and self._risk_domain_lease.adapter_implementation_sha256
             == adapter_implementation_sha256
             and self._risk_domain_lease.configuration_sha256
             == configuration_sha256
+            and self._risk_domain_lease.route_mode == route_mode
+            and self._risk_domain_lease.route_binding_sha256
+            == route_binding_sha256
             and compute_risk_domain_authority_binding_sha256(authority_descriptor)
             == authority_binding_sha256
         ):
@@ -1202,6 +1192,8 @@ class AtomicFileMicroLiveStateJournal:
                 journal_namespace_id=journal_namespace_id,
                 adapter_implementation_sha256=adapter_implementation_sha256,
                 configuration_sha256=configuration_sha256,
+                route_mode=route_mode,
+                route_binding_sha256=route_binding_sha256,
                 operation_inventory_schema_version=operation_inventory_schema_version,
                 required_operations=list(required_operations),
                 required_operations_sha256=required_operations_sha256,
@@ -1248,6 +1240,8 @@ class AtomicFileMicroLiveStateJournal:
             "kill_payload_sha256": kill_payload_sha256,
             "adapter_implementation_sha256": adapter_implementation_sha256,
             "configuration_sha256": configuration_sha256,
+            "route_mode": route_mode,
+            "route_binding_sha256": route_binding_sha256,
             "operation_inventory_schema_version": operation_inventory_schema_version,
             "required_operations": list(required_operations),
             "required_operations_sha256": required_operations_sha256,
@@ -1295,6 +1289,8 @@ class AtomicFileMicroLiveStateJournal:
             and receipt.get("adapter_implementation_sha256")
             == adapter_implementation_sha256
             and receipt.get("configuration_sha256") == configuration_sha256
+            and receipt.get("route_mode") == route_mode
+            and receipt.get("route_binding_sha256") == route_binding_sha256
             and receipt.get("operation_inventory_schema_version")
             == operation_inventory_schema_version
             and receipt.get("required_operations") == list(required_operations)
@@ -3175,6 +3171,10 @@ def _risk_domain_authority_binding_sha256(
         "configuration_sha256": (
             authorization.risk_domain_authority_configuration_sha256
         ),
+        "route_mode": authorization.risk_domain_authority_route_mode,
+        "route_binding_sha256": (
+            authorization.risk_domain_authority_route_binding_sha256
+        ),
         "operation_inventory_schema_version": (
             authorization.risk_domain_authority_operation_inventory_schema_version
         ),
@@ -3202,7 +3202,10 @@ def _risk_domain_authority_binding_sha256(
         ),
     }
     if not (
-        authorization.risk_domain_authority_operation_inventory_schema_version
+        authorization.risk_domain_authority_route_mode
+        == RISK_DOMAIN_AUTHORITY_ROUTE_MODE
+        and _is_sha256(authorization.risk_domain_authority_route_binding_sha256)
+        and authorization.risk_domain_authority_operation_inventory_schema_version
         == RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
         and authorization.risk_domain_authority_required_operations
         == tuple(REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS)
@@ -3477,6 +3480,8 @@ class _BoundAuthorization:
     risk_domain_lease_public_key_exponent: int
     risk_domain_authority_adapter_implementation_sha256: str
     risk_domain_authority_configuration_sha256: str
+    risk_domain_authority_route_mode: str
+    risk_domain_authority_route_binding_sha256: str
     risk_domain_authority_operation_inventory_schema_version: str
     risk_domain_authority_required_operations: tuple[str, ...]
     risk_domain_authority_required_operations_sha256: str
@@ -3545,6 +3550,12 @@ class _BoundAuthorization:
             ),
             risk_domain_authority_configuration_sha256=(
                 authorization.risk_domain_authority_configuration_sha256
+            ),
+            risk_domain_authority_route_mode=(
+                authorization.risk_domain_authority_route_mode
+            ),
+            risk_domain_authority_route_binding_sha256=(
+                authorization.risk_domain_authority_route_binding_sha256
             ),
             risk_domain_authority_operation_inventory_schema_version=(
                 authorization.risk_domain_authority_operation_inventory_schema_version
@@ -3649,6 +3660,10 @@ class _BoundAuthorization:
             == authorization.risk_domain_authority_adapter_implementation_sha256
             and self.risk_domain_authority_configuration_sha256
             == authorization.risk_domain_authority_configuration_sha256
+            and self.risk_domain_authority_route_mode
+            == authorization.risk_domain_authority_route_mode
+            and self.risk_domain_authority_route_binding_sha256
+            == authorization.risk_domain_authority_route_binding_sha256
             and self.risk_domain_authority_operation_inventory_schema_version
             == authorization.risk_domain_authority_operation_inventory_schema_version
             and self.risk_domain_authority_required_operations
@@ -3725,6 +3740,10 @@ def create_micro_live_executor(
         ),
         expected_configuration_sha256=(
             verified.risk_domain_authority_configuration_sha256
+        ),
+        expected_route_mode=verified.risk_domain_authority_route_mode,
+        expected_route_binding_sha256=(
+            verified.risk_domain_authority_route_binding_sha256
         ),
     )
     return MicroLiveExecutor._from_verified_authorization(
@@ -3852,6 +3871,10 @@ class MicroLiveExecutor:
             == self._authorization.risk_domain_authority_adapter_implementation_sha256
             and authority.configuration_sha256
             == self._authorization.risk_domain_authority_configuration_sha256
+            and authority.route_mode
+            == self._authorization.risk_domain_authority_route_mode
+            and authority.route_binding_sha256
+            == self._authorization.risk_domain_authority_route_binding_sha256
         ):
             raise MicroLiveExecutionError(
                 "deployment-owned risk-domain authority route is authorization-mismatched"
@@ -3910,6 +3933,10 @@ class MicroLiveExecutor:
             ),
             configuration_sha256=(
                 self._authorization.risk_domain_authority_configuration_sha256
+            ),
+            route_mode=self._authorization.risk_domain_authority_route_mode,
+            route_binding_sha256=(
+                self._authorization.risk_domain_authority_route_binding_sha256
             ),
             operation_inventory_schema_version=(
                 self._authorization.risk_domain_authority_operation_inventory_schema_version
@@ -4896,9 +4923,18 @@ class MicroLiveExecutor:
     ) -> None:
         if authorization_capability_is_verified(self.authorization):
             try:
-                self._journal.risk_domain_lease.assert_runtime_integrity()
+                authority = self._journal.risk_domain_lease
+                authority.assert_runtime_integrity()
                 if (
                     self._authorization.matches_verified(self.authorization)
+                    and authority.adapter_implementation_sha256
+                    == self._authorization.risk_domain_authority_adapter_implementation_sha256
+                    and authority.configuration_sha256
+                    == self._authorization.risk_domain_authority_configuration_sha256
+                    and authority.route_mode
+                    == self._authorization.risk_domain_authority_route_mode
+                    and authority.route_binding_sha256
+                    == self._authorization.risk_domain_authority_route_binding_sha256
                     and id(self._transport) == self._transport_object_id
                     and self._journal.risk_domain_lease_object_id
                     == self._risk_domain_lease_object_id

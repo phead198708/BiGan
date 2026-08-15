@@ -35,7 +35,7 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
 )
 
 AUTHORIZATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v6"
+    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v7"
 )
 HUMAN_ATTESTATION_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-human-micro-live-attestation-v2"
@@ -119,6 +119,7 @@ RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS = (
 RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS = (
     "fence_only_not_started_dispatch_else_report_terminal_or_in_progress"
 )
+RISK_DOMAIN_AUTHORITY_ROUTE_MODE = "deployment_af_unix_rpc"
 DEPLOYMENT_RUNTIME_LOCK_SHA256 = (
     "74036bc0c40ca2552e44074310f85ecf807bb51557ffad99eb815f97e6158bcb"
 )
@@ -164,6 +165,8 @@ class VerifiedMicroLiveAuthorization:
     risk_domain_lease_public_key_exponent: int
     risk_domain_authority_adapter_implementation_sha256: str
     risk_domain_authority_configuration_sha256: str
+    risk_domain_authority_route_mode: str
+    risk_domain_authority_route_binding_sha256: str
     risk_domain_authority_operation_inventory_schema_version: str
     risk_domain_authority_required_operations: tuple[str, ...]
     risk_domain_authority_required_operations_sha256: str
@@ -458,6 +461,12 @@ def verify_micro_live_authorization(
         risk_domain_authority_configuration_sha256=str(
             risk_domain_lease_authority["configuration_sha256"]
         ),
+        risk_domain_authority_route_mode=str(
+            risk_domain_lease_authority["route_mode"]
+        ),
+        risk_domain_authority_route_binding_sha256=str(
+            risk_domain_lease_authority["route_binding_sha256"]
+        ),
         risk_domain_authority_operation_inventory_schema_version=str(
             risk_domain_lease_authority["operation_inventory_schema_version"]
         ),
@@ -603,7 +612,7 @@ def _capability_integrity_sha256(
     ):
         raise ValueError("loaded micro-live model bytes do not match the frozen runtime")
     payload = {
-        "schema_version": "verified-micro-live-authorization-capability-v6",
+        "schema_version": "verified-micro-live-authorization-capability-v7",
         "authorization_id": capability.authorization_id,
         "authorization_payload_sha256": capability.authorization_payload_sha256,
         "candidate_bundle_sha256": capability.candidate_bundle_sha256,
@@ -626,6 +635,12 @@ def _capability_integrity_sha256(
         ),
         "risk_domain_authority_configuration_sha256": (
             capability.risk_domain_authority_configuration_sha256
+        ),
+        "risk_domain_authority_route_mode": (
+            capability.risk_domain_authority_route_mode
+        ),
+        "risk_domain_authority_route_binding_sha256": (
+            capability.risk_domain_authority_route_binding_sha256
         ),
         "risk_domain_authority_operation_inventory_schema_version": (
             capability.risk_domain_authority_operation_inventory_schema_version
@@ -1031,6 +1046,8 @@ def compute_risk_domain_authority_binding_sha256(
                 "adapter_implementation_sha256"
             ),
             "configuration_sha256": authority.get("configuration_sha256"),
+            "route_mode": authority.get("route_mode"),
+            "route_binding_sha256": authority.get("route_binding_sha256"),
             "operation_inventory_schema_version": authority.get(
                 "operation_inventory_schema_version"
             ),
@@ -1071,6 +1088,8 @@ def _validated_risk_domain_lease_authority(value: Any) -> dict[str, Any]:
         "public_key_exponent",
         "adapter_implementation_sha256",
         "configuration_sha256",
+        "route_mode",
+        "route_binding_sha256",
         "operation_inventory_schema_version",
         "required_operations",
         "required_operations_sha256",
@@ -1109,6 +1128,8 @@ def _validated_risk_domain_lease_authority(value: Any) -> dict[str, Any]:
         and authority.get("key_identity_sha256") == expected_key_identity
         and _is_sha256(authority.get("adapter_implementation_sha256"))
         and _is_sha256(authority.get("configuration_sha256"))
+        and authority.get("route_mode") == RISK_DOMAIN_AUTHORITY_ROUTE_MODE
+        and _is_sha256(authority.get("route_binding_sha256"))
         and authority.get("operation_inventory_schema_version")
         == RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
         and authority.get("required_operations")
@@ -1253,6 +1274,7 @@ __all__ = [
     "MAXIMUM_OPERATOR_HEARTBEAT_AGE_MS",
     "MAXIMUM_SIGNAL_AGE_MS",
     "MicroLiveAuthorizationError",
+    "RISK_DOMAIN_AUTHORITY_ROUTE_MODE",
     "REQUIRED_SUCCESSOR_DEPLOYMENT_COMPONENTS",
     "TRUSTED_RISK_DOMAIN_LEASE_ID",
     "TRUSTED_APPROVER_LOGINS",
