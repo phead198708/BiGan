@@ -17,7 +17,7 @@ import threading
 import time
 from dataclasses import replace
 from decimal import Decimal
-from multiprocessing.connection import Listener
+from multiprocessing.connection import Client, Listener
 from pathlib import Path
 from typing import Any
 
@@ -301,14 +301,16 @@ TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256 = canonical_json_sha256(
 def _test_execution_authority_descriptor(
     *,
     maximum_call_duration_ms: int = 250,
+    endpoint: str = TEST_EXECUTION_RPC_ENDPOINT,
+    credential: bytes = TEST_EXECUTION_RPC_CREDENTIAL,
 ) -> dict[str, Any]:
     adapter_implementation_sha256 = (
         executor_module.deployment_owned_execution_gateway_adapter_implementation_sha256()
     )
     configuration_sha256 = (
         executor_module.deployment_owned_execution_gateway_configuration_sha256(
-            endpoint=TEST_EXECUTION_RPC_ENDPOINT,
-            credential=TEST_EXECUTION_RPC_CREDENTIAL,
+            endpoint=endpoint,
+            credential=credential,
             service_identity_sha256=TEST_EXECUTION_SERVICE_IDENTITY_SHA256,
             exchange_endpoint_sha256=TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256,
             exchange_account_sha256=TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256,
@@ -322,8 +324,8 @@ def _test_execution_authority_descriptor(
     )
     route_binding_sha256 = (
         executor_module.deployment_owned_execution_gateway_route_binding_sha256(
-            endpoint=TEST_EXECUTION_RPC_ENDPOINT,
-            credential=TEST_EXECUTION_RPC_CREDENTIAL,
+            endpoint=endpoint,
+            credential=credential,
             service_identity_sha256=TEST_EXECUTION_SERVICE_IDENTITY_SHA256,
             exchange_endpoint_sha256=TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256,
             exchange_account_sha256=TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256,
@@ -2008,21 +2010,21 @@ class _TestExecutionGatewayRpcService:
             backlog=128,
             authkey=TEST_EXECUTION_RPC_CREDENTIAL,
         )
-        self._registrations: dict[str, tuple[Any, AtomicFileMicroLiveStateJournal]] = {}
+        self._registrations: dict[str, Any] = {}
+        self._pending_backends: list[Any] = []
         self._lock = threading.RLock()
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
 
     def register(
         self,
-        adapter: executor_module.DeploymentOwnedExecutionGatewayAdapter,
         backend: Any,
-        journal: AtomicFileMicroLiveStateJournal,
     ) -> None:
         with self._lock:
-            if adapter.client_session_sha256 in self._registrations:
-                raise AssertionError("test execution gateway session was rebound")
-            self._registrations[adapter.client_session_sha256] = (backend, journal)
+            # Test construction is synchronous: a preflight failure may leave
+            # an unconsumed backend, so only the newest construction attempt
+            # is eligible for the next signed session handshake.
+            self._pending_backends[:] = [backend]
 
     def _serve(self) -> None:
         while True:
@@ -2058,57 +2060,87 @@ class _TestExecutionGatewayRpcService:
                     executor_module.MAX_EXECUTION_TRANSPORT_EVENT_BYTES
                 )
             )
-            if not (
-                isinstance(request, dict)
-                and set(request)
-                == {
-                    "schema_version",
-                    "operation",
-                    "route_binding_sha256",
-                    "client_session_sha256",
-                    "payload",
-                }
-                and request["schema_version"]
-                == executor_module.EXECUTION_GATEWAY_RPC_SCHEMA_VERSION
-                and request["route_binding_sha256"]
-                == TEST_EXECUTION_AUTHORITY["route_binding_sha256"]
-                and request["operation"]
-                in executor_module.REQUIRED_EXECUTION_TRANSPORT_OPERATIONS
-                and isinstance(request["payload"], dict)
-            ):
+            try:
+                executor_module.verify_execution_gateway_rpc_session(
+                    request,
+                    expected_route_binding_sha256=(
+                        TEST_EXECUTION_AUTHORITY["route_binding_sha256"]
+                    ),
+                    public_key_modulus_hex=(
+                        TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX
+                    ),
+                    public_key_exponent=65_537,
+                )
+            except MicroLiveExecutionError:
                 connection.send_bytes(self._response(error_code="INVALID_REQUEST"))
                 return
-            with self._lock:
-                registration = self._registrations.get(
-                    request["client_session_sha256"]
-                )
-            if registration is None:
-                connection.send_bytes(self._response(error_code="UNREGISTERED_SESSION"))
-                return
-            backend, journal = registration
             payload = _decode_test_authority_rpc_value(request["payload"])
-            if request["operation"] == "bind_execution_dispatch_authority":
-                backend.bind_execution_dispatch_authority(
-                    journal.begin_execution_dispatch,
-                    journal.recover_execution_dispatch,
-                    journal.complete_execution_dispatch,
-                    journal.fence_execution_dispatch,
-                    **payload,
-                )
-                raw_response = b'{"bound":true}'
+            session_sha256 = request["client_session_sha256"]
+            if request["operation"] == "attest_execution_binding":
+                if not (
+                    payload.get("client_session_sha256") == session_sha256
+                    and payload.get("client_session_binding")
+                    == request["client_session_binding"]
+                ):
+                    connection.send_bytes(
+                        self._response(error_code="INVALID_SESSION_BINDING")
+                    )
+                    return
+                with self._lock:
+                    backend = (
+                        None
+                        if not self._pending_backends
+                        else self._pending_backends.pop(0)
+                    )
+                if backend is None:
+                    connection.send_bytes(
+                        self._response(error_code="UNREGISTERED_SESSION")
+                    )
+                    return
+                raw_response = backend.attest_execution_binding(payload)
+                attestation = json.loads(raw_response)
+                if not executor_module._signed_attestation_binds_client_session(
+                    attestation,
+                    client_session_binding=request["client_session_binding"],
+                    client_session_sha256=session_sha256,
+                    public_key_modulus_hex=(
+                        TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX
+                    ),
+                    public_key_exponent=65_537,
+                ):
+                    connection.send_bytes(
+                        self._response(error_code="INVALID_SESSION_ATTESTATION")
+                    )
+                    return
+                with self._lock:
+                    self._registrations[session_sha256] = backend
             else:
-                method = getattr(backend, request["operation"], None)
-                if not callable(method):
+                with self._lock:
+                    backend = self._registrations.get(session_sha256)
+                if backend is None:
                     connection.send_bytes(
-                        self._response(error_code="MISSING_OPERATION")
+                        self._response(error_code="UNREGISTERED_SESSION")
                     )
                     return
-                raw_response = method(payload)
-                if not isinstance(raw_response, bytes):
-                    connection.send_bytes(
-                        self._response(error_code="NON_BYTES_RESPONSE")
+                if request["operation"] == "bind_execution_dispatch_authority":
+                    executor_module.bind_execution_backend_to_dispatch_authority(
+                        backend,
+                        **payload,
                     )
-                    return
+                    raw_response = b'{"bound":true}'
+                else:
+                    method = getattr(backend, request["operation"], None)
+                    if not callable(method):
+                        connection.send_bytes(
+                            self._response(error_code="MISSING_OPERATION")
+                        )
+                        return
+                    raw_response = method(payload)
+                    if not isinstance(raw_response, bytes):
+                        connection.send_bytes(
+                            self._response(error_code="NON_BYTES_RESPONSE")
+                        )
+                        return
             connection.send_bytes(self._response(raw_response=raw_response))
         except BaseException as exc:
             if exc.__class__.__name__ == "SimulatedProcessCrash":
@@ -2156,6 +2188,8 @@ def _test_execution_adapter(
     authorization: VerifiedMicroLiveAuthorization,
     backend: Any,
     journal: AtomicFileMicroLiveStateJournal,
+    *,
+    register_backend: bool = True,
 ) -> executor_module.DeploymentOwnedExecutionGatewayAdapter:
     adapter = executor_module.DeploymentOwnedExecutionGatewayAdapter(
         endpoint=TEST_EXECUTION_RPC_ENDPOINT,
@@ -2182,7 +2216,9 @@ def _test_execution_adapter(
             authorization.execution_gateway_route_binding_sha256
         ),
     )
-    _TEST_EXECUTION_GATEWAY_RPC_SERVICE.register(adapter, backend, journal)
+    del journal
+    if register_backend:
+        _TEST_EXECUTION_GATEWAY_RPC_SERVICE.register(backend)
     return adapter
 
 
@@ -2372,6 +2408,49 @@ def _strict_restore(
         transport=_test_execution_adapter(authorization, transport, journal),
         journal=journal,
         raw_state=raw_state,
+    )
+
+
+def _execution_adapter_for_serialized_route(
+    authorization: VerifiedMicroLiveAuthorization,
+    *,
+    endpoint: str,
+    credential: bytes,
+) -> executor_module.DeploymentOwnedExecutionGatewayAdapter:
+    return executor_module.DeploymentOwnedExecutionGatewayAdapter(
+        endpoint=endpoint,
+        credential=credential,
+        service_identity_sha256=(
+            authorization.execution_service_identity_sha256
+        ),
+        exchange_endpoint_sha256=(
+            authorization.execution_exchange_endpoint_sha256
+        ),
+        exchange_account_sha256=(
+            authorization.execution_exchange_account_sha256
+        ),
+        signer_identity_sha256=(
+            authorization.execution_signer_identity_sha256
+        ),
+        cursor_key_identity_sha256=(
+            authorization.execution_cursor_key_identity_sha256
+        ),
+        clock_identity_sha256=(
+            authorization.execution_clock_identity_sha256
+        ),
+        settlement_authority_identity_sha256=(
+            authorization.execution_settlement_authority_identity_sha256
+        ),
+        expected_adapter_implementation_sha256=(
+            authorization.execution_adapter_implementation_sha256
+        ),
+        expected_configuration_sha256=(
+            authorization.execution_configuration_sha256
+        ),
+        expected_route_mode=authorization.execution_gateway_route_mode,
+        expected_route_binding_sha256=(
+            authorization.execution_gateway_route_binding_sha256
+        ),
     )
 
 
@@ -2674,6 +2753,7 @@ class FakeTransport:
         cursor_observed_advance_ms: int = 0,
         cursor_response_post_signature_overrides: dict[str, Any] | None = None,
         execution_service_binding_sha256: str | None = None,
+        execution_authority: dict[str, Any] | None = None,
         cursor_delay_ms: int = 0,
         venue_idempotency_authority: _TestVenueIdempotencyAuthority | None = None,
         trusted_time_delay_ms: int = 0,
@@ -2696,8 +2776,11 @@ class FakeTransport:
         self._uses_default_execution_service_binding = (
             execution_service_binding_sha256 is None
         )
+        selected_authority = copy.deepcopy(
+            execution_authority or TEST_EXECUTION_AUTHORITY
+        )
         if execution_service_binding_sha256 is None:
-            default_authority = copy.deepcopy(TEST_EXECUTION_AUTHORITY)
+            default_authority = copy.deepcopy(selected_authority)
             default_authority["maximum_call_duration_ms"] = (
                 _CORRECTNESS_TEST_CALL_DURATION_MS
             )
@@ -2705,6 +2788,7 @@ class FakeTransport:
                 default_authority
             )
         self.execution_service_binding_sha256 = execution_service_binding_sha256
+        self.execution_authority = selected_authority
         self.cursor_delay_ms = cursor_delay_ms
         self.trusted_time_delay_ms = trusted_time_delay_ms
         self.submit_calls: list[dict[str, Any]] = []
@@ -3068,28 +3152,46 @@ class FakeTransport:
                 executor_module.EXECUTION_BINDING_ATTESTATION_SCHEMA_VERSION
             ),
             "authorization_id": request["authorization_id"],
+            "client_session_sha256": request["client_session_sha256"],
+            "client_session_binding": request["client_session_binding"],
             "challenge_sha256": request["challenge_sha256"],
             "execution_service_binding_sha256": (
                 self.execution_service_binding_sha256
             ),
-            "service_identity_sha256": TEST_EXECUTION_SERVICE_IDENTITY_SHA256,
+            "service_identity_sha256": self.execution_authority[
+                "service_identity_sha256"
+            ],
             "adapter_implementation_sha256": (
-                TEST_EXECUTION_ADAPTER_IMPLEMENTATION_SHA256
+                self.execution_authority["adapter_implementation_sha256"]
             ),
-            "configuration_sha256": TEST_EXECUTION_CONFIGURATION_SHA256,
+            "configuration_sha256": self.execution_authority[
+                "configuration_sha256"
+            ],
             "execution_gateway_route_mode": request[
                 "execution_gateway_route_mode"
             ],
             "execution_gateway_route_binding_sha256": request[
                 "execution_gateway_route_binding_sha256"
             ],
-            "exchange_endpoint_sha256": TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256,
-            "exchange_account_sha256": TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256,
-            "signer_identity_sha256": TEST_EXECUTION_SIGNER_IDENTITY_SHA256,
-            "cursor_key_identity_sha256": TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
-            "clock_identity_sha256": TEST_EXECUTION_CLOCK_IDENTITY_SHA256,
+            "exchange_endpoint_sha256": self.execution_authority[
+                "exchange_endpoint_sha256"
+            ],
+            "exchange_account_sha256": self.execution_authority[
+                "exchange_account_sha256"
+            ],
+            "signer_identity_sha256": self.execution_authority[
+                "signer_identity_sha256"
+            ],
+            "cursor_key_identity_sha256": self.execution_authority[
+                "cursor_key_identity_sha256"
+            ],
+            "clock_identity_sha256": self.execution_authority[
+                "clock_identity_sha256"
+            ],
             "settlement_authority_identity_sha256": (
-                TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256
+                self.execution_authority[
+                    "settlement_authority_identity_sha256"
+                ]
             ),
             "risk_domain_id": request["risk_domain_id"],
             "risk_domain_authority_binding_sha256": request[
@@ -3788,6 +3890,154 @@ def _multiprocess_issue_copied_id_receipt(
     )
 
 
+def _isolated_gateway_response(
+    *,
+    raw_response: bytes | None = None,
+    error_code: str | None = None,
+) -> bytes:
+    if raw_response is not None and error_code is None:
+        return _json_bytes(
+            {
+                "schema_version": (
+                    executor_module.EXECUTION_GATEWAY_RPC_SCHEMA_VERSION
+                ),
+                "status": "OK",
+                "raw_response_base64": base64.b64encode(raw_response).decode(
+                    "ascii"
+                ),
+            }
+        )
+    return _json_bytes(
+        {
+            "schema_version": (
+                executor_module.EXECUTION_GATEWAY_RPC_SCHEMA_VERSION
+            ),
+            "status": "ERROR",
+            "error_code": error_code or "OPERATION_FAILED",
+        }
+    )
+
+
+def _isolated_execution_gateway_process(
+    endpoint: str,
+    credential: bytes,
+    execution_authority: dict[str, Any],
+    fail_submit: bool,
+    ready: Any,
+    stop: Any,
+    audit: Any,
+) -> None:
+    """Run a real gateway process with no parent backend/journal objects."""
+
+    backend = FakeTransport(
+        fail_submit=fail_submit,
+        execution_authority=execution_authority,
+        execution_service_binding_sha256=canonical_json_sha256(
+            execution_authority
+        ),
+    )
+    sessions: set[str] = set()
+    listener = Listener(
+        endpoint,
+        family="AF_UNIX",
+        backlog=16,
+        authkey=credential,
+    )
+    ready.set()
+    try:
+        while True:
+            connection = listener.accept()
+            if stop.is_set():
+                connection.close()
+                break
+            operation = "invalid"
+            try:
+                request = json.loads(
+                    connection.recv_bytes(
+                        executor_module.MAX_EXECUTION_TRANSPORT_EVENT_BYTES
+                    )
+                )
+                executor_module.verify_execution_gateway_rpc_session(
+                    request,
+                    expected_route_binding_sha256=str(
+                        execution_authority["route_binding_sha256"]
+                    ),
+                    public_key_modulus_hex=str(
+                        execution_authority["public_key_modulus_hex"]
+                    ),
+                    public_key_exponent=int(
+                        execution_authority["public_key_exponent"]
+                    ),
+                )
+                operation = str(request["operation"])
+                session_sha256 = str(request["client_session_sha256"])
+                payload = _decode_test_authority_rpc_value(request["payload"])
+                if operation == "attest_execution_binding":
+                    if not (
+                        payload.get("client_session_sha256")
+                        == session_sha256
+                        and payload.get("client_session_binding")
+                        == request["client_session_binding"]
+                    ):
+                        raise RuntimeError("session binding mismatch")
+                    raw_response = backend.attest_execution_binding(payload)
+                    sessions.add(session_sha256)
+                else:
+                    if session_sha256 not in sessions:
+                        raise RuntimeError("unregistered signed session")
+                    if operation == "bind_execution_dispatch_authority":
+                        executor_module.bind_execution_backend_to_dispatch_authority(
+                            backend,
+                            **payload,
+                        )
+                        raw_response = b'{"bound":true}'
+                    else:
+                        method = getattr(backend, operation)
+                        raw_response = method(payload)
+                audit.put(
+                    {
+                        "operation": operation,
+                        "submit_calls": len(backend.submit_calls),
+                        "recovery_calls": len(backend.recovery_lookup_calls),
+                        "fence_calls": len(backend.fence_calls),
+                        "cancel_calls": len(backend.cancel_calls),
+                    }
+                )
+                connection.send_bytes(
+                    _isolated_gateway_response(raw_response=raw_response)
+                )
+            except BaseException as exc:
+                audit.put(
+                    {
+                        "operation": operation,
+                        "error": exc.__class__.__name__,
+                        "submit_calls": len(backend.submit_calls),
+                        "recovery_calls": len(backend.recovery_lookup_calls),
+                        "fence_calls": len(backend.fence_calls),
+                        "cancel_calls": len(backend.cancel_calls),
+                    }
+                )
+                with contextlib.suppress(Exception):
+                    connection.send_bytes(
+                        _isolated_gateway_response(
+                            error_code="OPERATION_FAILED"
+                        )
+                    )
+            finally:
+                connection.close()
+    finally:
+        listener.close()
+        audit.put(
+            {
+                "operation": "FINAL",
+                "submit_calls": len(backend.submit_calls),
+                "recovery_calls": len(backend.recovery_lookup_calls),
+                "fence_calls": len(backend.fence_calls),
+                "cancel_calls": len(backend.cancel_calls),
+            }
+        )
+
+
 @pytest.fixture(scope="module")
 def authorized_fixture(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     root = tmp_path_factory.mktemp("micro-live-repository") / "repo"
@@ -4317,6 +4567,7 @@ def _verified(
         repository_root=fixture["root"],
     )
     risk_domain_authority = dict(authorization["risk_domain_lease_authority"])
+    execution_authority = dict(authorization["execution_service_authority"])
     capability = VerifiedMicroLiveAuthorization(
         authorization_id=authorization["authorization_id"],
         authorization_payload_sha256=hashlib.sha256(
@@ -4375,12 +4626,14 @@ def _verified(
             risk_domain_authority["authority_binding_sha256"]
         ),
         execution_service_identity_sha256=(
-            TEST_EXECUTION_SERVICE_IDENTITY_SHA256
+            execution_authority["service_identity_sha256"]
         ),
         execution_adapter_implementation_sha256=(
-            TEST_EXECUTION_ADAPTER_IMPLEMENTATION_SHA256
+            execution_authority["adapter_implementation_sha256"]
         ),
-        execution_configuration_sha256=TEST_EXECUTION_CONFIGURATION_SHA256,
+        execution_configuration_sha256=execution_authority[
+            "configuration_sha256"
+        ],
         execution_gateway_route_mode=str(
             authorization["execution_service_authority"]["route_mode"]
         ),
@@ -4390,21 +4643,29 @@ def _verified(
             ]
         ),
         execution_exchange_endpoint_sha256=(
-            TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256
+            execution_authority["exchange_endpoint_sha256"]
         ),
         execution_exchange_account_sha256=(
-            TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256
+            execution_authority["exchange_account_sha256"]
         ),
-        execution_signer_identity_sha256=TEST_EXECUTION_SIGNER_IDENTITY_SHA256,
+        execution_signer_identity_sha256=execution_authority[
+            "signer_identity_sha256"
+        ],
         execution_cursor_key_identity_sha256=(
-            TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256
+            execution_authority["cursor_key_identity_sha256"]
         ),
-        execution_clock_identity_sha256=TEST_EXECUTION_CLOCK_IDENTITY_SHA256,
+        execution_clock_identity_sha256=execution_authority[
+            "clock_identity_sha256"
+        ],
         execution_settlement_authority_identity_sha256=(
-            TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256
+            execution_authority["settlement_authority_identity_sha256"]
         ),
-        execution_public_key_modulus_hex=TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
-        execution_public_key_exponent=65_537,
+        execution_public_key_modulus_hex=execution_authority[
+            "public_key_modulus_hex"
+        ],
+        execution_public_key_exponent=execution_authority[
+            "public_key_exponent"
+        ],
         execution_maximum_clock_skew_ms=int(
             authorization["execution_service_authority"]["maximum_clock_skew_ms"]
         ),
@@ -7302,6 +7563,149 @@ def test_real_processes_serialize_on_the_same_journal_root(tmp_path: Path) -> No
     assert probe.exitcode == 0
 
 
+@pytest.mark.parametrize("recovery_mode", ("fence_and_unwind", "restore"))
+def test_serialized_gateway_route_works_in_a_genuinely_separate_process(
+    authorized_fixture: dict[str, Any],
+    recovery_mode: str,
+) -> None:
+    context = multiprocessing.get_context("fork")
+    socket_root = Path(tempfile.mkdtemp(prefix="bigan-egw-process-", dir="/tmp"))
+    endpoint = str(socket_root / "gateway.sock")
+    credential = b"bigan-isolated-execution-gateway-credential-v1"
+    execution_authority = _test_execution_authority_descriptor(
+        endpoint=endpoint,
+        credential=credential,
+        maximum_call_duration_ms=_CORRECTNESS_TEST_CALL_DURATION_MS,
+    )
+    authorization = copy.deepcopy(authorized_fixture["authorization"])
+    authorization["execution_service_authority"] = execution_authority
+    verified = _verified(
+        authorized_fixture,
+        authorization,
+        execution_call_duration_ms=_CORRECTNESS_TEST_CALL_DURATION_MS,
+    )
+    ready = context.Event()
+    stop = context.Event()
+    audit = context.Queue()
+    process = context.Process(
+        target=_isolated_execution_gateway_process,
+        args=(
+            endpoint,
+            credential,
+            execution_authority,
+            True,
+            ready,
+            stop,
+            audit,
+        ),
+    )
+    process.start()
+    assert ready.wait(timeout=5)
+    journal = _new_journal()
+    try:
+        executor = _StrictMicroLiveExecutor(
+            verified,
+            transport=_execution_adapter_for_serialized_route(
+                verified,
+                endpoint=endpoint,
+                credential=credential,
+            ),
+            journal=journal,
+        )
+        with pytest.raises(
+            MicroLiveExecutionError,
+            match="submission became unknown",
+        ):
+            executor.submit_signal(
+                raw_signal_payload=_json_bytes(
+                    _signal(
+                        candidate_bundle_sha256=(
+                            verified.candidate_bundle_sha256
+                        )
+                    )["signal_payload"]
+                ),
+                raw_feature_row=_json_bytes(BASE_FEATURE_ROW),
+                provider_feature_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
+                now_ts_ms=NOW_TS_MS,
+                operator_heartbeat_ts_ms=NOW_TS_MS,
+                market_identity_evidence=_market_identity_evidence(
+                    BASE_SIGNAL_PAYLOAD
+                ),
+            )
+        if recovery_mode == "fence_and_unwind":
+            client_order_id = next(
+                event["payload"]["client_order_id"]
+                for event in executor.events
+                if event["event_type"] == "ORDER_PREPARED"
+            )
+            result = executor.reconcile_unknown_submission(
+                client_order_id=client_order_id,
+                now_ts_ms=NOW_TS_MS + 1,
+            )
+            assert result["status"] == "ORDER_SUBMISSION_RECONCILED_ACCEPTED"
+            assert executor.reconciliation_snapshot()["open_order_count"] == 0
+        else:
+            snapshot = journal.snapshot()
+            restored = _StrictMicroLiveExecutor.restore(
+                authorization=verified,
+                transport=_execution_adapter_for_serialized_route(
+                    verified,
+                    endpoint=endpoint,
+                    credential=credential,
+                ),
+                journal=journal,
+                raw_state=snapshot.raw_state,
+            )
+            assert restored.reconciliation_snapshot()["kill_switch_active"] is True
+            client_order_id = next(
+                event["payload"]["client_order_id"]
+                for event in restored.events
+                if event["event_type"] == "ORDER_PREPARED"
+            )
+            recovered = restored.reconcile_unknown_submission(
+                client_order_id=client_order_id,
+                now_ts_ms=NOW_TS_MS + 1,
+            )
+            assert recovered["status"] == "ORDER_SUBMISSION_RECONCILED_ACCEPTED"
+            assert restored.reconciliation_snapshot()["open_order_count"] == 0
+    finally:
+        stop.set()
+        with contextlib.suppress(Exception):
+            wake = Client(endpoint, family="AF_UNIX", authkey=credential)
+            wake.close()
+        process.join(timeout=10)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        with contextlib.suppress(FileNotFoundError):
+            Path(endpoint).unlink()
+        socket_root.rmdir()
+    assert process.exitcode == 0
+
+    records: list[dict[str, Any]] = []
+    while True:
+        record = audit.get(timeout=5)
+        records.append(record)
+        if record["operation"] == "FINAL":
+            break
+    operations = [record["operation"] for record in records]
+    assert "bind_execution_dispatch_authority" in operations
+    assert "submit_order" in operations
+    final = records[-1]
+    assert final["submit_calls"] == 1
+    if recovery_mode == "fence_and_unwind":
+        assert "fence_order_invocation" in operations
+        assert "recover_order_submission" in operations
+        assert "cancel_order" in operations
+        assert final["fence_calls"] == 1
+        assert final["recovery_calls"] == 1
+        assert final["cancel_calls"] == 1
+    else:
+        assert "recover_order_submission" in operations
+        assert final["recovery_calls"] == 1
+        assert final["cancel_calls"] == 1
+
+
 @pytest.mark.parametrize(
     ("crash_event", "expected_transport_calls", "expected_unknown"),
     (
@@ -9542,7 +9946,9 @@ def test_authority_operation_inventory_claim_is_signed_and_authorization_bound(
             journal=journal,
         )
 
-    assert transport.attestation_calls == 1
+    # The journal authority receipt must validate before its namespace/epoch
+    # can be incorporated into the signed execution-gateway session.
+    assert transport.attestation_calls == 0
     assert transport.submit_calls == []
     assert transport.recovery_lookup_calls == []
     assert transport.cancel_calls == []
@@ -9948,7 +10354,9 @@ def test_execution_operation_inventory_binding_is_signed_and_startup_pinned(
     assert transport.submit_calls == []
     assert transport.recovery_lookup_calls == []
     assert journal.state_path.exists() is False
-    assert journal.risk_domain_receipt_path.exists() is False
+    # The signed risk-domain identity is persisted before it is incorporated
+    # into the gateway session; no executable state is initialized.
+    assert journal.risk_domain_receipt_path.exists() is True
 
 
 @pytest.mark.parametrize(
@@ -10009,7 +10417,12 @@ def test_deployment_owned_execution_route_derives_and_rechecks_actual_bytes(
 ) -> None:
     verified = _verified(authorized_fixture)
     journal = _new_journal()
-    adapter = _test_execution_adapter(verified, FakeTransport(), journal)
+    adapter = _test_execution_adapter(
+        verified,
+        FakeTransport(),
+        journal,
+        register_backend=False,
+    )
     descriptor = _test_execution_authority_descriptor()
 
     assert (
@@ -10040,13 +10453,64 @@ def test_deployment_owned_execution_route_derives_and_rechecks_actual_bytes(
         adapter.assert_runtime_integrity()
 
 
+def test_two_signed_gateway_sessions_cannot_be_swapped_before_venue(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    first_backend = FakeTransport()
+    second_backend = FakeTransport()
+    first = _strict_executor(
+        verified,
+        transport=first_backend,
+        journal=_new_journal(),
+    )
+    second = _strict_executor(
+        verified,
+        transport=second_backend,
+        journal=_new_journal(),
+    )
+    first_adapter = first._transport
+    second_adapter = second._transport
+    assert (
+        first_adapter.client_session_sha256
+        != second_adapter.client_session_sha256
+    )
+
+    for field in (
+        "_client_session_sha256",
+        "_client_session_binding",
+        "_client_session_attestation_json",
+        "_client_session_attestation_sha256",
+        "_client_session_verification_key",
+    ):
+        object.__setattr__(
+            first_adapter,
+            field,
+            copy.deepcopy(getattr(second_adapter, field)),
+        )
+
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="execution gateway route changed",
+    ):
+        first_adapter.assert_runtime_integrity()
+
+    assert first_backend.submit_calls == []
+    assert second_backend.submit_calls == []
+
+
 def test_mutable_execution_proxy_is_rejected_before_startup_or_venue(
     authorized_fixture: dict[str, Any],
 ) -> None:
     verified = _verified(authorized_fixture)
     journal = _new_journal()
     backend = FakeTransport()
-    adapter = _test_execution_adapter(verified, backend, journal)
+    adapter = _test_execution_adapter(
+        verified,
+        backend,
+        journal,
+        register_backend=False,
+    )
     authority_backend = _test_authority_backend(journal)
 
     class MutableExecutionProxy:
@@ -10727,7 +11191,10 @@ def test_execution_gateway_has_no_mutable_delegate_and_open_order_still_unwinds(
             assert capturing.attestation is not None
             return capturing.attestation
 
-    with pytest.raises(MicroLiveExecutionError, match="attestation is invalid"):
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="operation failed closed|attestation is invalid",
+    ):
         MicroLiveExecutor(verified, transport=ReplayTransport())
 
 

@@ -23,7 +23,7 @@ import queue
 import re
 import stat
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -125,6 +125,12 @@ EXECUTION_TRANSPORT_OPERATION_INVENTORY_SCHEMA_VERSION = (
 )
 EXECUTION_GATEWAY_RPC_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-gateway-rpc-v1"
+)
+EXECUTION_GATEWAY_SESSION_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-execution-gateway-session-v1"
+)
+DISPATCH_AUTHORITY_ROUTE_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-dispatch-authority-route-v1"
 )
 EXECUTION_GATEWAY_RPC_ROUTE_SEMANTICS = (
     "immutable_af_unix_wallet_signer_and_venue_route_for_authorization_lifetime"
@@ -771,6 +777,25 @@ class DeploymentOwnedRiskDomainAuthorityAdapter:
         self.assert_runtime_integrity()
         return self._route_mode
 
+    def serialized_dispatch_route(self) -> dict[str, Any]:
+        """Return the exact authenticated route needed by the gateway service."""
+
+        self.assert_runtime_integrity()
+        return {
+            "schema_version": RISK_DOMAIN_AUTHORITY_RPC_SCHEMA_VERSION,
+            "endpoint": self._endpoint,
+            "credential": bytes(self._credential),
+            "service_identity_sha256": self._service_identity_sha256,
+            "tenant_id": self._tenant_id,
+            "key_identity_sha256": self._key_identity_sha256,
+            "adapter_implementation_sha256": (
+                self._adapter_implementation_sha256
+            ),
+            "configuration_sha256": self._configuration_sha256,
+            "route_mode": self._route_mode,
+            "route_binding_sha256": self._route_binding_sha256,
+        }
+
     def _computed_route_binding_sha256(self) -> str:
         return deployment_owned_risk_domain_authority_route_binding_sha256(
             endpoint=self._endpoint,
@@ -917,6 +942,9 @@ class MicroLiveStateJournal(Protocol):
         authority_binding_sha256: str,
     ) -> None:
         """Bind one authorization/risk domain to this unique journal namespace."""
+
+    def execution_dispatch_authority_route(self) -> dict[str, Any]:
+        """Return the exact serialized authority route for the gateway process."""
 
     def persist_emergency_kill(
         self,
@@ -1114,6 +1142,46 @@ class AtomicFileMicroLiveStateJournal:
     @property
     def authenticated_risk_domain_authority_binding_sha256(self) -> str | None:
         return self._authenticated_authority_binding_sha256
+
+    def execution_dispatch_authority_route(self) -> dict[str, Any]:
+        """Serialize the exact bound authority path for an external gateway."""
+
+        self._require_bound()
+        identity = self._required_lease_identity()
+        if not (
+            self._journal_namespace_id is not None
+            and self._journal_epoch is not None
+            and self._authorization_id is not None
+            and self._risk_domain_id is not None
+            and self._authenticated_authority_binding_sha256 is not None
+        ):
+            raise MicroLiveExecutionError(
+                "dispatch authority route is not completely bound"
+            )
+        route = {
+            "schema_version": DISPATCH_AUTHORITY_ROUTE_SCHEMA_VERSION,
+            "authority_rpc": self._risk_domain_lease.serialized_dispatch_route(),
+            "lease_id": str(identity["lease_id"]),
+            "service_identity_sha256": str(identity["service_identity_sha256"]),
+            "tenant_id": str(identity["tenant_id"]),
+            "key_identity_sha256": str(identity["key_identity_sha256"]),
+            "public_key_modulus_hex": str(identity["public_key_modulus_hex"]),
+            "public_key_exponent": int(identity["public_key_exponent"]),
+            "authorization_id": self._authorization_id,
+            "risk_domain_id": self._risk_domain_id,
+            "journal_namespace_id": self._journal_namespace_id,
+            "journal_epoch": self._journal_epoch,
+            "authority_binding_sha256": (
+                self._authenticated_authority_binding_sha256
+            ),
+            "required_operations": [
+                "begin_execution_dispatch",
+                "complete_execution_dispatch",
+                "recover_execution_dispatch",
+                "fence_execution_dispatch",
+            ],
+        }
+        return copy.deepcopy(route)
 
     def bind_risk_domain(
         self,
@@ -2863,6 +2931,330 @@ class AtomicFileMicroLiveStateJournal:
         )
 
 
+def _validated_dispatch_authority_route(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise MicroLiveExecutionError("dispatch authority route is absent")
+    route = copy.deepcopy(dict(value))
+    if set(route) != {
+        "schema_version",
+        "authority_rpc",
+        "lease_id",
+        "service_identity_sha256",
+        "tenant_id",
+        "key_identity_sha256",
+        "public_key_modulus_hex",
+        "public_key_exponent",
+        "authorization_id",
+        "risk_domain_id",
+        "journal_namespace_id",
+        "journal_epoch",
+        "authority_binding_sha256",
+        "required_operations",
+    }:
+        raise MicroLiveExecutionError("dispatch authority route schema is invalid")
+    authority = route.get("authority_rpc")
+    if not isinstance(authority, Mapping) or set(authority) != {
+        "schema_version",
+        "endpoint",
+        "credential",
+        "service_identity_sha256",
+        "tenant_id",
+        "key_identity_sha256",
+        "adapter_implementation_sha256",
+        "configuration_sha256",
+        "route_mode",
+        "route_binding_sha256",
+    }:
+        raise MicroLiveExecutionError(
+            "dispatch authority RPC route schema is invalid"
+        )
+    authority = dict(authority)
+    expected_operations = [
+        "begin_execution_dispatch",
+        "complete_execution_dispatch",
+        "recover_execution_dispatch",
+        "fence_execution_dispatch",
+    ]
+    modulus = route.get("public_key_modulus_hex")
+    exponent = route.get("public_key_exponent")
+    expected_key_identity = canonical_json_sha256(
+        {
+            "signature_algorithm": RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM,
+            "public_key_modulus_hex": modulus,
+            "public_key_exponent": exponent,
+        }
+    )
+    if not (
+        route.get("schema_version") == DISPATCH_AUTHORITY_ROUTE_SCHEMA_VERSION
+        and authority.get("schema_version")
+        == RISK_DOMAIN_AUTHORITY_RPC_SCHEMA_VERSION
+        and isinstance(authority.get("endpoint"), str)
+        and Path(str(authority["endpoint"])).is_absolute()
+        and isinstance(authority.get("credential"), bytes)
+        and len(authority["credential"]) >= 32
+        and route.get("service_identity_sha256")
+        == authority.get("service_identity_sha256")
+        and route.get("tenant_id") == authority.get("tenant_id")
+        and route.get("key_identity_sha256")
+        == authority.get("key_identity_sha256")
+        == expected_key_identity
+        and isinstance(route.get("lease_id"), str)
+        and bool(route["lease_id"])
+        and isinstance(route.get("tenant_id"), str)
+        and bool(route["tenant_id"])
+        and isinstance(modulus, str)
+        and re.fullmatch(r"[0-9a-f]{512}", modulus) is not None
+        and exponent == 65_537
+        and all(
+            _is_sha256(route.get(field))
+            for field in (
+                "service_identity_sha256",
+                "key_identity_sha256",
+                "authorization_id",
+                "risk_domain_id",
+                "journal_namespace_id",
+                "journal_epoch",
+                "authority_binding_sha256",
+            )
+        )
+        and route.get("required_operations") == expected_operations
+    ):
+        raise MicroLiveExecutionError("dispatch authority route identity is invalid")
+    DeploymentOwnedRiskDomainAuthorityAdapter(
+        endpoint=str(authority["endpoint"]),
+        credential=bytes(authority["credential"]),
+        service_identity_sha256=str(authority["service_identity_sha256"]),
+        tenant_id=str(authority["tenant_id"]),
+        key_identity_sha256=str(authority["key_identity_sha256"]),
+        expected_adapter_implementation_sha256=str(
+            authority["adapter_implementation_sha256"]
+        ),
+        expected_configuration_sha256=str(authority["configuration_sha256"]),
+        expected_route_mode=str(authority["route_mode"]),
+        expected_route_binding_sha256=str(authority["route_binding_sha256"]),
+    )
+    return route
+
+
+def dispatch_authority_route_sha256(value: Any) -> str:
+    """Hash the exact serialized dispatch route without exposing its credential."""
+
+    route = _validated_dispatch_authority_route(value)
+    return canonical_json_sha256(_risk_domain_rpc_value(route))
+
+
+class DeploymentOwnedDispatchAuthorityClient:
+    """Final service-side view of the serialized risk-authority RPC route."""
+
+    __slots__ = (
+        "_authenticated_authority_binding_sha256",
+        "_authorization_id",
+        "_journal_epoch",
+        "_journal_namespace_id",
+        "_lease_identity",
+        "_risk_domain_id",
+        "_risk_domain_lease",
+        "_risk_domain_lease_object_id",
+        "_route",
+        "_route_sha256",
+        "_sealed",
+    )
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        del kwargs
+        raise TypeError("deployment-owned dispatch authority client is final")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("dispatch authority route is immutable")
+        object.__setattr__(self, name, value)
+
+    def __init__(self, route: Mapping[str, Any]) -> None:
+        validated = _validated_dispatch_authority_route(route)
+        authority = dict(validated["authority_rpc"])
+        adapter = DeploymentOwnedRiskDomainAuthorityAdapter(
+            endpoint=str(authority["endpoint"]),
+            credential=bytes(authority["credential"]),
+            service_identity_sha256=str(authority["service_identity_sha256"]),
+            tenant_id=str(authority["tenant_id"]),
+            key_identity_sha256=str(authority["key_identity_sha256"]),
+            expected_adapter_implementation_sha256=str(
+                authority["adapter_implementation_sha256"]
+            ),
+            expected_configuration_sha256=str(
+                authority["configuration_sha256"]
+            ),
+            expected_route_mode=str(authority["route_mode"]),
+            expected_route_binding_sha256=str(
+                authority["route_binding_sha256"]
+            ),
+        )
+        object.__setattr__(self, "_risk_domain_lease", adapter)
+        object.__setattr__(self, "_risk_domain_lease_object_id", id(adapter))
+        object.__setattr__(
+            self,
+            "_authenticated_authority_binding_sha256",
+            str(validated["authority_binding_sha256"]),
+        )
+        object.__setattr__(
+            self, "_authorization_id", str(validated["authorization_id"])
+        )
+        object.__setattr__(
+            self, "_risk_domain_id", str(validated["risk_domain_id"])
+        )
+        object.__setattr__(
+            self,
+            "_journal_namespace_id",
+            str(validated["journal_namespace_id"]),
+        )
+        object.__setattr__(
+            self, "_journal_epoch", str(validated["journal_epoch"])
+        )
+        object.__setattr__(
+            self,
+            "_lease_identity",
+            {
+                "lease_id": str(validated["lease_id"]),
+                "service_identity_sha256": str(
+                    validated["service_identity_sha256"]
+                ),
+                "tenant_id": str(validated["tenant_id"]),
+                "key_identity_sha256": str(validated["key_identity_sha256"]),
+                "public_key_modulus_hex": str(
+                    validated["public_key_modulus_hex"]
+                ),
+                "public_key_exponent": int(validated["public_key_exponent"]),
+            },
+        )
+        object.__setattr__(
+            self, "_route", copy.deepcopy(validated)
+        )
+        object.__setattr__(
+            self, "_route_sha256", dispatch_authority_route_sha256(validated)
+        )
+        object.__setattr__(self, "_sealed", True)
+
+    @property
+    def route_sha256(self) -> str:
+        self.assert_runtime_integrity()
+        return self._route_sha256
+
+    def assert_runtime_integrity(self) -> None:
+        if not (
+            self.__class__ is DeploymentOwnedDispatchAuthorityClient
+            and id(self._risk_domain_lease) == self._risk_domain_lease_object_id
+            and self._risk_domain_lease.__class__
+            is DeploymentOwnedRiskDomainAuthorityAdapter
+            and isinstance(self._route, dict)
+            and dispatch_authority_route_sha256(self._route)
+            == self._route_sha256
+            and self._authorization_id == self._route["authorization_id"]
+            and self._risk_domain_id == self._route["risk_domain_id"]
+            and self._journal_namespace_id
+            == self._route["journal_namespace_id"]
+            and self._journal_epoch == self._route["journal_epoch"]
+            and self._authenticated_authority_binding_sha256
+            == self._route["authority_binding_sha256"]
+            and self._lease_identity
+            == {
+                "lease_id": self._route["lease_id"],
+                "service_identity_sha256": self._route[
+                    "service_identity_sha256"
+                ],
+                "tenant_id": self._route["tenant_id"],
+                "key_identity_sha256": self._route["key_identity_sha256"],
+                "public_key_modulus_hex": self._route[
+                    "public_key_modulus_hex"
+                ],
+                "public_key_exponent": self._route["public_key_exponent"],
+            }
+        ):
+            raise MicroLiveExecutionError("dispatch authority route changed")
+        self._risk_domain_lease.assert_runtime_integrity()
+
+    def _require_bound(self) -> None:
+        self.assert_runtime_integrity()
+        AtomicFileMicroLiveStateJournal._require_bound(self)
+
+    _required_lease_identity = (
+        AtomicFileMicroLiveStateJournal._required_lease_identity
+    )
+
+    def _bounded_authority_call(
+        self,
+        authority_operation: str,
+        **kwargs: Any,
+    ) -> bytes:
+        self.assert_runtime_integrity()
+        return AtomicFileMicroLiveStateJournal._bounded_authority_call(
+            self,
+            authority_operation,
+            **kwargs,
+        )
+
+    _execution_invocation_receipt_core = (
+        AtomicFileMicroLiveStateJournal._execution_invocation_receipt_core
+    )
+    _authority_receipt_identity_core = (
+        AtomicFileMicroLiveStateJournal._authority_receipt_identity_core
+    )
+    _execution_dispatch_receipt_core = (
+        AtomicFileMicroLiveStateJournal._execution_dispatch_receipt_core
+    )
+    begin_execution_dispatch = (
+        AtomicFileMicroLiveStateJournal.begin_execution_dispatch
+    )
+    complete_execution_dispatch = (
+        AtomicFileMicroLiveStateJournal.complete_execution_dispatch
+    )
+    recover_execution_dispatch = (
+        AtomicFileMicroLiveStateJournal.recover_execution_dispatch
+    )
+    fence_execution_dispatch = (
+        AtomicFileMicroLiveStateJournal.fence_execution_dispatch
+    )
+
+
+def bind_execution_backend_to_dispatch_authority(
+    backend: MicroLiveOrderTransport,
+    *,
+    dispatch_authority_route: Mapping[str, Any],
+    authorization_id: str,
+    risk_domain_id: str,
+    risk_domain_authority_binding_sha256: str,
+    authorization_expires_at_ts_ms: int,
+) -> DeploymentOwnedDispatchAuthorityClient:
+    """Bind a gateway backend using only serialized, reviewed RPC configuration."""
+
+    client = DeploymentOwnedDispatchAuthorityClient(dispatch_authority_route)
+    route = _validated_dispatch_authority_route(dispatch_authority_route)
+    if not (
+        route["authorization_id"] == authorization_id
+        and route["risk_domain_id"] == risk_domain_id
+        and route["authority_binding_sha256"]
+        == risk_domain_authority_binding_sha256
+        and isinstance(authorization_expires_at_ts_ms, int)
+        and not isinstance(authorization_expires_at_ts_ms, bool)
+        and authorization_expires_at_ts_ms > 0
+    ):
+        raise MicroLiveExecutionError(
+            "gateway dispatch authority identity is mismatched"
+        )
+    backend.bind_execution_dispatch_authority(
+        client.begin_execution_dispatch,
+        client.recover_execution_dispatch,
+        client.complete_execution_dispatch,
+        client.fence_execution_dispatch,
+        authorization_id=authorization_id,
+        risk_domain_id=risk_domain_id,
+        risk_domain_authority_binding_sha256=(
+            risk_domain_authority_binding_sha256
+        ),
+        authorization_expires_at_ts_ms=authorization_expires_at_ts_ms,
+    )
+    return client
+
+
 @dataclass(frozen=True, slots=True)
 class VerifiedProviderFeatureEvidence:
     """Exact raw streams and the feature row deterministically rebuilt from them."""
@@ -2894,11 +3286,8 @@ class MicroLiveOrderTransport(Protocol):
 
     def bind_execution_dispatch_authority(
         self,
-        begin: Callable[..., bytes],
-        recover: Callable[..., bytes],
-        complete: Callable[[bytes, bytes], bytes],
-        fence: Callable[..., bytes],
         *,
+        dispatch_authority_route: Mapping[str, Any],
         authorization_id: str,
         risk_domain_id: str,
         risk_domain_authority_binding_sha256: str,
@@ -3104,12 +3493,188 @@ def deployment_owned_execution_gateway_route_binding_sha256(
     )
 
 
+def _valid_execution_gateway_session_binding(value: Any) -> bool:
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_version",
+        "client_instance_nonce_sha256",
+        "authorization_id",
+        "risk_domain_id",
+        "journal_namespace_id",
+        "journal_epoch",
+        "execution_gateway_route_binding_sha256",
+        "risk_domain_authority_binding_sha256",
+        "dispatch_authority_route_sha256",
+        "authorization_expires_at_ts_ms",
+    }:
+        return False
+    return bool(
+        value.get("schema_version") == EXECUTION_GATEWAY_SESSION_SCHEMA_VERSION
+        and _is_sha256(value.get("client_instance_nonce_sha256"))
+        and all(
+            _is_sha256(value.get(field))
+            for field in (
+                "authorization_id",
+                "risk_domain_id",
+                "journal_namespace_id",
+                "journal_epoch",
+                "execution_gateway_route_binding_sha256",
+                "risk_domain_authority_binding_sha256",
+                "dispatch_authority_route_sha256",
+            )
+        )
+        and isinstance(value.get("authorization_expires_at_ts_ms"), int)
+        and not isinstance(value.get("authorization_expires_at_ts_ms"), bool)
+        and int(value["authorization_expires_at_ts_ms"]) > 0
+    )
+
+
+def _strict_json_object_from_text(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, str) or not value:
+        raise MicroLiveExecutionError(f"{label} is absent")
+    try:
+        parsed = json.loads(
+            value,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json,
+        )
+        _validate_finite_json_tree(parsed)
+    except (ValueError, RecursionError) as exc:
+        raise MicroLiveExecutionError(f"{label} is not strict JSON") from exc
+    if not isinstance(parsed, dict):
+        raise MicroLiveExecutionError(f"{label} is not an object")
+    return parsed
+
+
+def _signed_attestation_binds_client_session(
+    attestation: Mapping[str, Any],
+    *,
+    client_session_binding: Mapping[str, Any],
+    client_session_sha256: str,
+    public_key_modulus_hex: str,
+    public_key_exponent: int,
+) -> bool:
+    if not (
+        _valid_execution_gateway_session_binding(client_session_binding)
+        and canonical_json_sha256(client_session_binding)
+        == client_session_sha256
+        and isinstance(attestation, Mapping)
+        and "signature_algorithm" in attestation
+        and "signature_hex" in attestation
+    ):
+        return False
+    core = {
+        key: copy.deepcopy(value)
+        for key, value in attestation.items()
+        if key not in {"signature_algorithm", "signature_hex"}
+    }
+    return bool(
+        core.get("schema_version")
+        == EXECUTION_BINDING_ATTESTATION_SCHEMA_VERSION
+        and core.get("client_session_sha256") == client_session_sha256
+        and core.get("client_session_binding") == dict(client_session_binding)
+        and core.get("authorization_id")
+        == client_session_binding.get("authorization_id")
+        and core.get("risk_domain_id")
+        == client_session_binding.get("risk_domain_id")
+        and core.get("risk_domain_authority_binding_sha256")
+        == client_session_binding.get("risk_domain_authority_binding_sha256")
+        and core.get("authorization_expires_at_ts_ms")
+        == client_session_binding.get("authorization_expires_at_ts_ms")
+        and core.get("execution_gateway_route_binding_sha256")
+        == client_session_binding.get("execution_gateway_route_binding_sha256")
+        and _verify_signed_risk_domain_receipt(
+            attestation,
+            expected_core=core,
+            public_key_modulus_hex=public_key_modulus_hex,
+            public_key_exponent=public_key_exponent,
+        )
+    )
+
+
+def verify_execution_gateway_rpc_session(
+    request: Mapping[str, Any],
+    *,
+    expected_route_binding_sha256: str,
+    public_key_modulus_hex: str,
+    public_key_exponent: int,
+) -> dict[str, Any]:
+    """Validate one route/session-bound gateway envelope, fail closed."""
+
+    operation = request.get("operation") if isinstance(request, Mapping) else None
+    base_keys = {
+        "schema_version",
+        "operation",
+        "route_binding_sha256",
+        "client_session_sha256",
+        "client_session_binding",
+        "payload",
+    }
+    expected_keys = (
+        base_keys
+        if operation == "attest_execution_binding"
+        else {
+            *base_keys,
+            "raw_client_session_attestation_json",
+            "client_session_attestation_sha256",
+        }
+    )
+    if not (
+        isinstance(request, Mapping)
+        and set(request) == expected_keys
+        and request.get("schema_version") == EXECUTION_GATEWAY_RPC_SCHEMA_VERSION
+        and operation in REQUIRED_EXECUTION_TRANSPORT_OPERATIONS
+        and request.get("route_binding_sha256")
+        == expected_route_binding_sha256
+        and isinstance(request.get("payload"), Mapping)
+        and _valid_execution_gateway_session_binding(
+            request.get("client_session_binding")
+        )
+        and request["client_session_binding"][
+            "execution_gateway_route_binding_sha256"
+        ]
+        == expected_route_binding_sha256
+        and canonical_json_sha256(request["client_session_binding"])
+        == request.get("client_session_sha256")
+    ):
+        raise MicroLiveExecutionError(
+            "execution gateway RPC session envelope is invalid"
+        )
+    if operation != "attest_execution_binding":
+        raw_attestation_json = request.get(
+            "raw_client_session_attestation_json"
+        )
+        attestation = _strict_json_object_from_text(
+            raw_attestation_json,
+            "execution gateway RPC session attestation",
+        )
+        if not (
+            hashlib.sha256(raw_attestation_json.encode("utf-8")).hexdigest()
+            == request.get("client_session_attestation_sha256")
+            and _signed_attestation_binds_client_session(
+                attestation,
+                client_session_binding=request["client_session_binding"],
+                client_session_sha256=str(request["client_session_sha256"]),
+                public_key_modulus_hex=public_key_modulus_hex,
+                public_key_exponent=public_key_exponent,
+            )
+        ):
+            raise MicroLiveExecutionError(
+                "execution gateway RPC session attestation is invalid"
+            )
+    return copy.deepcopy(dict(request))
+
+
 class DeploymentOwnedExecutionGatewayAdapter:
     """Final immutable AF_UNIX boundary for venue writes, signing, and reads."""
 
     __slots__ = (
         "_adapter_implementation_sha256",
+        "_client_session_attestation_json",
+        "_client_session_attestation_sha256",
+        "_client_session_binding",
         "_client_session_sha256",
+        "_client_session_verification_key",
+        "_client_instance_nonce_sha256",
         "_clock_identity_sha256",
         "_configuration_sha256",
         "_credential",
@@ -3216,11 +3781,16 @@ class DeploymentOwnedExecutionGatewayAdapter:
         object.__setattr__(self, "_configuration_sha256", configuration_sha256)
         object.__setattr__(self, "_route_mode", EXECUTION_GATEWAY_ROUTE_MODE)
         object.__setattr__(self, "_route_binding_sha256", route_binding_sha256)
+        object.__setattr__(self, "_client_session_sha256", None)
         object.__setattr__(
             self,
-            "_client_session_sha256",
+            "_client_instance_nonce_sha256",
             hashlib.sha256(os.urandom(32)).hexdigest(),
         )
+        object.__setattr__(self, "_client_session_binding", None)
+        object.__setattr__(self, "_client_session_attestation_json", None)
+        object.__setattr__(self, "_client_session_attestation_sha256", None)
+        object.__setattr__(self, "_client_session_verification_key", None)
         object.__setattr__(self, "_sealed", True)
 
     @property
@@ -3244,7 +3814,112 @@ class DeploymentOwnedExecutionGatewayAdapter:
     @property
     def client_session_sha256(self) -> str:
         self.assert_runtime_integrity()
+        if self._client_session_sha256 is None:
+            raise MicroLiveExecutionError(
+                "execution gateway client session is not bound"
+            )
         return self._client_session_sha256
+
+    @property
+    def client_session_binding(self) -> dict[str, Any]:
+        self.assert_runtime_integrity()
+        if self._client_session_binding is None:
+            raise MicroLiveExecutionError(
+                "execution gateway client session is not bound"
+            )
+        return copy.deepcopy(self._client_session_binding)
+
+    def bind_client_session(
+        self,
+        *,
+        authorization_id: str,
+        risk_domain_id: str,
+        journal_namespace_id: str,
+        journal_epoch: str,
+        risk_domain_authority_binding_sha256: str,
+        dispatch_authority_route_sha256: str,
+        authorization_expires_at_ts_ms: int,
+    ) -> str:
+        """Bind one immutable gateway session to all execution authorities."""
+
+        self.assert_runtime_integrity()
+        binding = {
+            "schema_version": EXECUTION_GATEWAY_SESSION_SCHEMA_VERSION,
+            "client_instance_nonce_sha256": (
+                self._client_instance_nonce_sha256
+            ),
+            "authorization_id": authorization_id,
+            "risk_domain_id": risk_domain_id,
+            "journal_namespace_id": journal_namespace_id,
+            "journal_epoch": journal_epoch,
+            "execution_gateway_route_binding_sha256": (
+                self._route_binding_sha256
+            ),
+            "risk_domain_authority_binding_sha256": (
+                risk_domain_authority_binding_sha256
+            ),
+            "dispatch_authority_route_sha256": (
+                dispatch_authority_route_sha256
+            ),
+            "authorization_expires_at_ts_ms": authorization_expires_at_ts_ms,
+        }
+        if not _valid_execution_gateway_session_binding(binding):
+            raise MicroLiveExecutionError(
+                "execution gateway client session binding is invalid"
+            )
+        session_sha256 = canonical_json_sha256(binding)
+        existing = self._client_session_binding
+        if existing is not None and existing != binding:
+            raise MicroLiveExecutionError(
+                "execution gateway client session was rebound"
+            )
+        object.__setattr__(self, "_client_session_binding", binding)
+        object.__setattr__(self, "_client_session_sha256", session_sha256)
+        return session_sha256
+
+    def confirm_client_session(
+        self,
+        raw_attestation: bytes,
+        *,
+        public_key_modulus_hex: str,
+        public_key_exponent: int,
+    ) -> None:
+        """Pin the server-signed attestation used on every later RPC."""
+
+        self.assert_runtime_integrity()
+        if self._client_session_binding is None:
+            raise MicroLiveExecutionError(
+                "execution gateway client session is not bound"
+            )
+        attestation, raw_json, raw_sha256 = _raw_json_object(
+            raw_attestation,
+            "execution gateway client session attestation",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        if not _signed_attestation_binds_client_session(
+            attestation,
+            client_session_binding=self._client_session_binding,
+            client_session_sha256=str(self._client_session_sha256),
+            public_key_modulus_hex=public_key_modulus_hex,
+            public_key_exponent=public_key_exponent,
+        ):
+            raise MicroLiveExecutionError(
+                "execution gateway client session attestation is invalid"
+            )
+        existing = self._client_session_attestation_json
+        if existing is not None and existing != raw_json:
+            raise MicroLiveExecutionError(
+                "execution gateway client session attestation changed"
+            )
+        object.__setattr__(self, "_client_session_attestation_json", raw_json)
+        object.__setattr__(
+            self, "_client_session_attestation_sha256", raw_sha256
+        )
+        object.__setattr__(
+            self,
+            "_client_session_verification_key",
+            (public_key_modulus_hex, public_key_exponent),
+        )
 
     def _configuration_identity_sha256(self) -> str:
         return deployment_owned_execution_gateway_configuration_sha256(
@@ -3279,6 +3954,62 @@ class DeploymentOwnedExecutionGatewayAdapter:
         )
 
     def assert_runtime_integrity(self) -> None:
+        session_unbound = all(
+            value is None
+            for value in (
+                self._client_session_sha256,
+                self._client_session_binding,
+                self._client_session_attestation_json,
+                self._client_session_attestation_sha256,
+                self._client_session_verification_key,
+            )
+        )
+        session_bound = (
+            isinstance(self._client_session_binding, dict)
+            and _valid_execution_gateway_session_binding(
+                self._client_session_binding
+            )
+            and self._client_session_binding[
+                "client_instance_nonce_sha256"
+            ]
+            == self._client_instance_nonce_sha256
+            and canonical_json_sha256(self._client_session_binding)
+            == self._client_session_sha256
+        )
+        if session_bound and self._client_session_attestation_json is not None:
+            try:
+                attestation = _strict_json_object_from_text(
+                    self._client_session_attestation_json,
+                    "execution gateway client session attestation",
+                )
+            except MicroLiveExecutionError:
+                session_bound = False
+            verification_key = self._client_session_verification_key
+            session_bound = bool(
+                session_bound
+                and isinstance(verification_key, tuple)
+                and len(verification_key) == 2
+                and hashlib.sha256(
+                    self._client_session_attestation_json.encode("utf-8")
+                ).hexdigest()
+                == self._client_session_attestation_sha256
+                and _signed_attestation_binds_client_session(
+                    attestation,
+                    client_session_binding=self._client_session_binding,
+                    client_session_sha256=str(self._client_session_sha256),
+                    public_key_modulus_hex=str(verification_key[0]),
+                    public_key_exponent=int(verification_key[1]),
+                )
+            )
+        elif session_bound:
+            session_bound = all(
+                value is None
+                for value in (
+                    self._client_session_attestation_json,
+                    self._client_session_attestation_sha256,
+                    self._client_session_verification_key,
+                )
+            )
         if not (
             self.__class__ is DeploymentOwnedExecutionGatewayAdapter
             and self._adapter_implementation_sha256
@@ -3286,7 +4017,8 @@ class DeploymentOwnedExecutionGatewayAdapter:
             and self._configuration_sha256 == self._configuration_identity_sha256()
             and self._route_mode == EXECUTION_GATEWAY_ROUTE_MODE
             and self._computed_route_binding_sha256() == self._route_binding_sha256
-            and _is_sha256(self._client_session_sha256)
+            and _is_sha256(self._client_instance_nonce_sha256)
+            and (session_unbound or session_bound)
         ):
             raise MicroLiveExecutionError(
                 "deployment-owned execution gateway route changed"
@@ -3298,15 +4030,34 @@ class DeploymentOwnedExecutionGatewayAdapter:
             raise MicroLiveExecutionError(
                 "execution gateway RPC operation is not authorized"
             )
-        raw_request = _canonical_json_bytes(
-            {
-                "schema_version": EXECUTION_GATEWAY_RPC_SCHEMA_VERSION,
-                "operation": operation,
-                "route_binding_sha256": self._route_binding_sha256,
-                "client_session_sha256": self._client_session_sha256,
-                "payload": _risk_domain_rpc_value(payload),
-            }
-        )
+        if self._client_session_binding is None:
+            raise MicroLiveExecutionError(
+                "execution gateway client session is not bound"
+            )
+        envelope = {
+            "schema_version": EXECUTION_GATEWAY_RPC_SCHEMA_VERSION,
+            "operation": operation,
+            "route_binding_sha256": self._route_binding_sha256,
+            "client_session_sha256": self._client_session_sha256,
+            "client_session_binding": self._client_session_binding,
+            "payload": _risk_domain_rpc_value(payload),
+        }
+        if operation != "attest_execution_binding":
+            if self._client_session_attestation_json is None:
+                raise MicroLiveExecutionError(
+                    "execution gateway client session is not attested"
+                )
+            envelope.update(
+                {
+                    "raw_client_session_attestation_json": (
+                        self._client_session_attestation_json
+                    ),
+                    "client_session_attestation_sha256": (
+                        self._client_session_attestation_sha256
+                    ),
+                }
+            )
+        raw_request = _canonical_json_bytes(envelope)
         try:
             connection = multiprocessing.connection.Client(
                 self._endpoint,
@@ -3368,22 +4119,32 @@ class DeploymentOwnedExecutionGatewayAdapter:
 
     def bind_execution_dispatch_authority(
         self,
-        begin: Callable[..., bytes],
-        recover: Callable[..., bytes],
-        complete: Callable[[bytes, bytes], bytes],
-        fence: Callable[..., bytes],
-        **identity: Any,
+        *,
+        dispatch_authority_route: Mapping[str, Any],
+        authorization_id: str,
+        risk_domain_id: str,
+        risk_domain_authority_binding_sha256: str,
+        authorization_expires_at_ts_ms: int,
     ) -> None:
-        callbacks = (begin, recover, complete, fence)
-        owner = getattr(begin, "__self__", None)
+        route = _validated_dispatch_authority_route(dispatch_authority_route)
         if not (
-            owner.__class__ is AtomicFileMicroLiveStateJournal
-            and all(getattr(callback, "__self__", None) is owner for callback in callbacks)
+            self._client_session_binding is not None
+            and dispatch_authority_route_sha256(route)
+            == self._client_session_binding["dispatch_authority_route_sha256"]
         ):
             raise MicroLiveExecutionError(
-                "execution dispatch callbacks are not the concrete journal boundary"
+                "execution dispatch authority route is session-mismatched"
             )
-        if self._call("bind_execution_dispatch_authority", identity) != b'{"bound":true}':
+        payload = {
+            "dispatch_authority_route": route,
+            "authorization_id": authorization_id,
+            "risk_domain_id": risk_domain_id,
+            "risk_domain_authority_binding_sha256": (
+                risk_domain_authority_binding_sha256
+            ),
+            "authorization_expires_at_ts_ms": authorization_expires_at_ts_ms,
+        }
+        if self._call("bind_execution_dispatch_authority", payload) != b'{"bound":true}':
             raise MicroLiveExecutionError(
                 "execution gateway dispatch authority binding failed closed"
             )
@@ -4451,10 +5212,6 @@ class MicroLiveExecutor:
         )
         self._journal = journal
         self._risk_domain_lease_object_id = journal.risk_domain_lease_object_id
-        # The signed gateway recovery claim is verified before the journal is
-        # bound or initialized.  A legacy gateway cannot activate execution
-        # state and only then reveal that crash recovery is unavailable.
-        self._verify_execution_binding_attestation()
         self._journal.bind_risk_domain(
             authorization_id=self._authorization.authorization_id,
             risk_domain_id=self._risk_domain_id,
@@ -4517,6 +5274,38 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "micro-live journal authority binding is authorization-mismatched"
             )
+        self._dispatch_authority_route = (
+            self._journal.execution_dispatch_authority_route()
+        )
+        dispatch_route = _validated_dispatch_authority_route(
+            self._dispatch_authority_route
+        )
+        if not (
+            dispatch_route["authorization_id"]
+            == self._authorization.authorization_id
+            and dispatch_route["risk_domain_id"] == self._risk_domain_id
+            and dispatch_route["authority_binding_sha256"]
+            == self._authorization.risk_domain_authority_binding_sha256
+        ):
+            raise MicroLiveExecutionError(
+                "dispatch authority route is authorization-mismatched"
+            )
+        self._transport.bind_client_session(
+            authorization_id=self._authorization.authorization_id,
+            risk_domain_id=self._risk_domain_id,
+            journal_namespace_id=str(dispatch_route["journal_namespace_id"]),
+            journal_epoch=str(dispatch_route["journal_epoch"]),
+            risk_domain_authority_binding_sha256=(
+                self._authorization.risk_domain_authority_binding_sha256
+            ),
+            dispatch_authority_route_sha256=(
+                dispatch_authority_route_sha256(dispatch_route)
+            ),
+            authorization_expires_at_ts_ms=self._authorization.expires_at_ts_ms,
+        )
+        # The signed receipt binds the external gateway to this exact
+        # authorization, journal epoch, risk route, and dispatch route.
+        self._verify_execution_binding_attestation()
         self._bind_transport_dispatch_authority()
         self._generation = generation
         self._transaction_depth = 0
@@ -4937,10 +5726,7 @@ class MicroLiveExecutor:
                 "authenticated execution gateway lacks one-shot dispatch authority"
             )
         method(
-            self._journal.begin_execution_dispatch,
-            self._journal.recover_execution_dispatch,
-            self._journal.complete_execution_dispatch,
-            self._journal.fence_execution_dispatch,
+            dispatch_authority_route=self._dispatch_authority_route,
             authorization_id=self._authorization.authorization_id,
             risk_domain_id=self._risk_domain_id,
             risk_domain_authority_binding_sha256=(
@@ -5292,6 +6078,8 @@ class MicroLiveExecutor:
         )
         request = {
             "authorization_id": self._authorization.authorization_id,
+            "client_session_sha256": self._transport.client_session_sha256,
+            "client_session_binding": self._transport.client_session_binding,
             "challenge_sha256": challenge_sha256,
             "execution_gateway_route_mode": (
                 self._authorization.execution_gateway_route_mode
@@ -5358,6 +6146,8 @@ class MicroLiveExecutor:
         expected_core = {
             "schema_version": EXECUTION_BINDING_ATTESTATION_SCHEMA_VERSION,
             "authorization_id": self._authorization.authorization_id,
+            "client_session_sha256": self._transport.client_session_sha256,
+            "client_session_binding": self._transport.client_session_binding,
             "challenge_sha256": challenge_sha256,
             "execution_service_binding_sha256": (
                 self._authorization.execution_service_binding_sha256
@@ -5453,6 +6243,15 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "execution service binding attestation is invalid"
             )
+        self._transport.confirm_client_session(
+            raw_attestation,
+            public_key_modulus_hex=(
+                self._authorization.execution_public_key_modulus_hex
+            ),
+            public_key_exponent=(
+                self._authorization.execution_public_key_exponent
+            ),
+        )
 
     def _verified_trusted_completion(
         self,
