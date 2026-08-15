@@ -1,0 +1,70 @@
+{
+  "automatic_authorization_or_launch": false,
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "credential_ownership_contract": {
+    "api_credentials_owner": "gateway_process_only",
+    "credential_file_mode": "0600",
+    "credential_material_over_rpc": false,
+    "private_key_owner": "gateway_process_only",
+    "receipt_signing_key_owner": "gateway_process_only"
+  },
+  "deployment_base_image_manifest_digest": "sha256:a074fac67aa01841fee592d00bae14d25dcaf98ef6e12a683ecceb7e0147e2d1",
+  "durability_contract": {
+    "atomic_replace": true,
+    "directory_fsync": true,
+    "prepared_signed_order_persisted_before_venue_write": true,
+    "restart_session_registry_persisted": true,
+    "venue_recovery_lookup_only": true
+  },
+  "execution_gateway_runtime_lock": {
+    "path": "examples/v8/residual_promotion_execution_gateway-linux-x86_64.lock.txt",
+    "sha256": "444b692c476dc48cff1aa3a2eb18970b2addb162502c0277e5bd7d7709b6cdd8"
+  },
+  "frozen_model_runtime_lock": {
+    "path": "examples/v8/residual_promotion_runtime-linux-x86_64.lock.txt",
+    "sha256": "aca8c2e21202f25d9132cf2ef14132bbc12db05c9f775635869f7c501320d335"
+  },
+  "gateway_implementation": {
+    "path": "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
+    "sha256": "0646198439df0c009db9256cd4e25553bf7a1c279835ab12ebe58844395b5ffb"
+  },
+  "gateway_process_integration_test": {
+    "path": "tests/v8/test_residual_promotion_micro_live_executor.py",
+    "sha256": "6396fafb93f37bda70e3b66f2bcdfb61c203c612d87c8ceb2937d0bc0b35be30"
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "model_or_gate_bytes_changed": false,
+  "production_entrypoint": "bigan.v8.polymarket.residual_promotion_execution_gateway.run_production_execution_gateway",
+  "production_types": {
+    "backend": "DeploymentOwnedExecutionGatewayBackend",
+    "receipt_signer": "RsaSha256ReceiptSigner",
+    "server": "DeploymentOwnedExecutionGatewayServer",
+    "venue": "PolymarketClobV2VenueBoundary"
+  },
+  "py_clob_client_v2_source": {
+    "repository": "https://github.com/Polymarket/py-clob-client-v2",
+    "source_commit": "215fc63a8fd6ec3a10c7edb73997c9772d8686d3",
+    "source_requirements_sha256": "c8846755ca05b863fb476eaa29769add5c4305c1c7761cea1640efb234eace8d",
+    "source_setup_sha256": "c6d30329d3555b031048597bfbdf2923e9902350a67d482e7bea9359d0b7c863",
+    "version": "1.1.0"
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-execution-gateway-service-manifest-v1",
+  "security_state": "NOT_INDEPENDENTLY_REVIEWED_NO_GO",
+  "strict_json_duplicate_keys_rejected": true,
+  "wallet_signing_allowed": false,
+  "polymarket_write_allowed": false,
+  "capital_at_risk": false
+}

@@ -42,6 +42,12 @@ from bigan.v8.polymarket.residual_promotion_evaluation import (
     EVALUATION_SCHEMA_VERSION,
     REQUIRED_GATE_NAMES,
 )
+from bigan.v8.polymarket.residual_promotion_execution_gateway import (
+    DeploymentOwnedExecutionGatewayServer,
+    ExecutionGatewayError,
+    ExecutionGatewayServiceConfig,
+    production_gateway_implementation_sha256,
+)
 from bigan.v8.polymarket.residual_promotion_micro_live_authorization import (
     AUTHORIZATION_SCHEMA_VERSION,
     HUMAN_ATTESTATION_SCHEMA_VERSION,
@@ -3890,32 +3896,155 @@ def _multiprocess_issue_copied_id_receipt(
     )
 
 
-def _isolated_gateway_response(
-    *,
-    raw_response: bytes | None = None,
-    error_code: str | None = None,
-) -> bytes:
-    if raw_response is not None and error_code is None:
-        return _json_bytes(
+class _ProcessMockVenueBoundary:
+    """Mock only the production service's outermost venue boundary."""
+
+    def __init__(self, *, fail_submit: bool) -> None:
+        self.fail_submit = fail_submit
+        self.outcomes: dict[str, bytes] = {}
+        self.requests: dict[str, dict[str, Any]] = {}
+        self.submit_calls = 0
+        self.recovery_calls = 0
+        self.fence_calls = 0
+        self.cancel_calls = 0
+
+    def prepare_submission(self, request: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema_version": "test-prepared-venue-submission-v1",
+            "client_order_id": request["client_order_id"],
+            "exact_request_sha256": canonical_json_sha256(request),
+        }
+
+    def submit_prepared(
+        self,
+        prepared: dict[str, Any],
+        request: dict[str, Any],
+    ) -> bytes:
+        assert prepared["exact_request_sha256"] == canonical_json_sha256(request)
+        key = request["client_order_id"]
+        response = _json_bytes(
             {
-                "schema_version": (
-                    executor_module.EXECUTION_GATEWAY_RPC_SCHEMA_VERSION
-                ),
-                "status": "OK",
-                "raw_response_base64": base64.b64encode(raw_response).decode(
-                    "ascii"
-                ),
+                "client_order_id": key,
+                "exchange_order_id": f"exchange-{key[:12]}",
+                "status": "ACCEPTED",
+                "market_id": request["market_id"],
+                "token_id": request["token_id"],
+                "accepted_quantity": request["quantity"],
+                "limit_price": request["limit_price"],
             }
         )
-    return _json_bytes(
-        {
-            "schema_version": (
-                executor_module.EXECUTION_GATEWAY_RPC_SCHEMA_VERSION
-            ),
-            "status": "ERROR",
-            "error_code": error_code or "OPERATION_FAILED",
+        existing = self.requests.get(key)
+        if existing is not None and existing != request:
+            raise RuntimeError("mock venue identity conflict")
+        if key not in self.outcomes:
+            self.submit_calls += 1
+            self.requests[key] = copy.deepcopy(request)
+            self.outcomes[key] = response
+        if self.fail_submit:
+            self.fail_submit = False
+            raise RuntimeError("synthetic post-venue transport timeout")
+        return self.outcomes[key]
+
+    def lookup_submission(
+        self,
+        prepared: dict[str, Any],
+        request: dict[str, Any],
+    ) -> bytes | None:
+        del prepared
+        self.recovery_calls += 1
+        existing = self.requests.get(request["client_order_id"])
+        if existing is not None and existing != request:
+            raise RuntimeError("mock venue recovery identity conflict")
+        return self.outcomes.get(request["client_order_id"])
+
+    def cancel(self, request: dict[str, Any]) -> bytes:
+        self.cancel_calls += 1
+        return _json_bytes(
+            {
+                "client_order_id": request["client_order_id"],
+                "exchange_order_id": request["exchange_order_id"],
+                "status": "CANCEL_REQUESTED",
+            }
+        )
+
+    def lookup(self, request: dict[str, Any]) -> bytes:
+        submitted = self.requests[request["client_order_id"]]
+        status = (
+            "CANCELED"
+            if request.get("lookup_purpose") == "cancel_reconciliation"
+            else "ACCEPTED"
+        )
+        effective = NOW_TS_MS + 1 if status == "CANCELED" else None
+        return _json_bytes(
+            {
+                "client_order_id": request["client_order_id"],
+                "exchange_order_id": request["exchange_order_id"],
+                "status": status,
+                "market_id": submitted["market_id"],
+                "token_id": submitted["token_id"],
+                "accepted_quantity": submitted["quantity"],
+                "limit_price": submitted["limit_price"],
+                "observed_at_ts_ms": NOW_TS_MS + 2,
+                "effective_at_ts_ms": effective,
+                "cumulative_filled_quantity": (
+                    request.get("expected_cumulative_filled_quantity")
+                    if effective is not None
+                    else None
+                ),
+                "final_fill_event_sequence": (
+                    request.get("expected_final_fill_event_sequence")
+                    if effective is not None
+                    else None
+                ),
+                "final_fill_count": (
+                    request.get("expected_final_fill_count")
+                    if effective is not None
+                    else None
+                ),
+                "final_fill_watermark": (
+                    canonical_json_sha256(
+                        {
+                            "authority": "production-server-test-venue",
+                            "client_order_id": request["client_order_id"],
+                            "effective_at_ts_ms": effective,
+                        }
+                    )
+                    if effective is not None
+                    else None
+                ),
+                "fill_delivery_complete": effective is not None,
+            }
+        )
+
+    def read_fill_cursor(self, request: dict[str, Any]) -> bytes:
+        submitted = self.requests[request["client_order_id"]]
+        observed_at = int(request["request_started_at_ts_ms"])
+        response = {
+            "schema_version": executor_module.EXECUTION_CURSOR_SCHEMA_VERSION,
+            "authorization_id": request["authorization_id"],
+            "execution_service_binding_sha256": request[
+                "execution_service_binding_sha256"
+            ],
+            "request_started_at_ts_ms": request["request_started_at_ts_ms"],
+            "event_type": "ORDER_FILL_CURSOR",
+            "client_order_id": request["client_order_id"],
+            "exchange_order_id": request["exchange_order_id"],
+            "market_id": submitted["market_id"],
+            "token_id": submitted["token_id"],
+            "status": "CANCELED",
+            "observed_at_ts_ms": observed_at,
+            "effective_at_ts_ms": observed_at,
+            "cumulative_filled_quantity": "0",
+            "final_fill_event_sequence": 0,
+            "final_fill_count": 0,
+            "final_fill_watermark": None,
+            "fill_delivery_complete": True,
+            "fill_events": [],
         }
-    )
+        response["final_fill_watermark"] = (
+            executor_module._expected_final_fill_watermark(response)
+        )
+        return _json_bytes(response)
 
 
 def _isolated_execution_gateway_process(
@@ -3927,115 +4056,135 @@ def _isolated_execution_gateway_process(
     stop: Any,
     audit: Any,
 ) -> None:
-    """Run a real gateway process with no parent backend/journal objects."""
+    """Run the exact production server; mock only its outer venue boundary."""
 
-    backend = FakeTransport(
-        fail_submit=fail_submit,
+    service_root = Path(endpoint).parent
+    credential_path = service_root / "gateway-rpc.credential"
+    exponent_path = service_root / "gateway-receipt-private-exponent.hex"
+    state_path = service_root / "gateway-state.json"
+    credential_path.write_bytes(credential)
+    exponent_path.write_text(
+        TEST_RISK_DOMAIN_PRIVATE_EXPONENT_HEX,
+        encoding="ascii",
+    )
+    credential_path.chmod(0o600)
+    exponent_path.chmod(0o600)
+    venue = _ProcessMockVenueBoundary(fail_submit=fail_submit)
+    config = ExecutionGatewayServiceConfig(
+        endpoint=endpoint,
+        rpc_credential_path=str(credential_path),
+        receipt_private_exponent_path=str(exponent_path),
+        state_path=str(state_path),
         execution_authority=execution_authority,
-        execution_service_binding_sha256=canonical_json_sha256(
-            execution_authority
-        ),
+        risk_lease_id=auth_module.TRUSTED_RISK_DOMAIN_LEASE_ID,
+        risk_service_identity_sha256=TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256,
+        risk_tenant_id=TEST_RISK_DOMAIN_TENANT_ID,
+        risk_key_identity_sha256=TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+        risk_public_key_modulus_hex=TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
+        risk_public_key_exponent=65_537,
     )
-    sessions: set[str] = set()
-    listener = Listener(
-        endpoint,
-        family="AF_UNIX",
-        backlog=16,
-        authkey=credential,
-    )
-    ready.set()
+    server = DeploymentOwnedExecutionGatewayServer(config, venue=venue)
     try:
-        while True:
-            connection = listener.accept()
-            if stop.is_set():
-                connection.close()
-                break
-            operation = "invalid"
-            try:
-                request = json.loads(
-                    connection.recv_bytes(
-                        executor_module.MAX_EXECUTION_TRANSPORT_EVENT_BYTES
-                    )
-                )
-                executor_module.verify_execution_gateway_rpc_session(
-                    request,
-                    expected_route_binding_sha256=str(
-                        execution_authority["route_binding_sha256"]
-                    ),
-                    public_key_modulus_hex=str(
-                        execution_authority["public_key_modulus_hex"]
-                    ),
-                    public_key_exponent=int(
-                        execution_authority["public_key_exponent"]
-                    ),
-                )
-                operation = str(request["operation"])
-                session_sha256 = str(request["client_session_sha256"])
-                payload = _decode_test_authority_rpc_value(request["payload"])
-                if operation == "attest_execution_binding":
-                    if not (
-                        payload.get("client_session_sha256")
-                        == session_sha256
-                        and payload.get("client_session_binding")
-                        == request["client_session_binding"]
-                    ):
-                        raise RuntimeError("session binding mismatch")
-                    raw_response = backend.attest_execution_binding(payload)
-                    sessions.add(session_sha256)
-                else:
-                    if session_sha256 not in sessions:
-                        raise RuntimeError("unregistered signed session")
-                    if operation == "bind_execution_dispatch_authority":
-                        executor_module.bind_execution_backend_to_dispatch_authority(
-                            backend,
-                            **payload,
-                        )
-                        raw_response = b'{"bound":true}'
-                    else:
-                        method = getattr(backend, operation)
-                        raw_response = method(payload)
-                audit.put(
-                    {
-                        "operation": operation,
-                        "submit_calls": len(backend.submit_calls),
-                        "recovery_calls": len(backend.recovery_lookup_calls),
-                        "fence_calls": len(backend.fence_calls),
-                        "cancel_calls": len(backend.cancel_calls),
-                    }
-                )
-                connection.send_bytes(
-                    _isolated_gateway_response(raw_response=raw_response)
-                )
-            except BaseException as exc:
-                audit.put(
-                    {
-                        "operation": operation,
-                        "error": exc.__class__.__name__,
-                        "submit_calls": len(backend.submit_calls),
-                        "recovery_calls": len(backend.recovery_lookup_calls),
-                        "fence_calls": len(backend.fence_calls),
-                        "cancel_calls": len(backend.cancel_calls),
-                    }
-                )
-                with contextlib.suppress(Exception):
-                    connection.send_bytes(
-                        _isolated_gateway_response(
-                            error_code="OPERATION_FAILED"
-                        )
-                    )
-            finally:
-                connection.close()
+        server.serve_forever(ready=ready, stop=stop, audit=audit)
     finally:
-        listener.close()
         audit.put(
             {
                 "operation": "FINAL",
-                "submit_calls": len(backend.submit_calls),
-                "recovery_calls": len(backend.recovery_lookup_calls),
-                "fence_calls": len(backend.fence_calls),
-                "cancel_calls": len(backend.cancel_calls),
+                "submit_calls": venue.submit_calls,
+                "recovery_calls": venue.recovery_calls,
+                "fence_calls": venue.fence_calls,
+                "cancel_calls": venue.cancel_calls,
             }
         )
+
+
+def test_production_gateway_configuration_and_strict_json_fail_closed(
+    tmp_path: Path,
+) -> None:
+    context = multiprocessing.get_context("fork")
+    socket_root = Path(tempfile.mkdtemp(prefix="bigan-egw-config-", dir="/tmp"))
+    endpoint = str(socket_root / "gateway.sock")
+    credential = b"bigan-production-gateway-config-test-credential-v1"
+    execution_authority = _test_execution_authority_descriptor(
+        endpoint=endpoint,
+        credential=credential,
+        maximum_call_duration_ms=_CORRECTNESS_TEST_CALL_DURATION_MS,
+    )
+    ready = context.Event()
+    stop = context.Event()
+    audit = context.Queue()
+    process = context.Process(
+        target=_isolated_execution_gateway_process,
+        args=(
+            endpoint,
+            credential,
+            execution_authority,
+            False,
+            ready,
+            stop,
+            audit,
+        ),
+    )
+    process.start()
+    assert ready.wait(timeout=5)
+    try:
+        connection = Client(endpoint, family="AF_UNIX", authkey=credential)
+        try:
+            connection.send_bytes(
+                b'{"schema_version":"invalid","operation":"x","operation":"y"}'
+            )
+            response = json.loads(
+                connection.recv_bytes(
+                    executor_module.MAX_EXECUTION_TRANSPORT_EVENT_BYTES
+                )
+            )
+        finally:
+            connection.close()
+        assert response == {
+            "schema_version": executor_module.EXECUTION_GATEWAY_RPC_SCHEMA_VERSION,
+            "status": "ERROR",
+            "error_code": "OPERATION_FAILED",
+        }
+    finally:
+        stop.set()
+        with contextlib.suppress(Exception):
+            wake = Client(endpoint, family="AF_UNIX", authkey=credential)
+            wake.close()
+        process.join(timeout=10)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        shutil.rmtree(socket_root)
+    assert process.exitcode == 0
+    assert len(production_gateway_implementation_sha256()) == 64
+
+    credential_path = tmp_path / "gateway-rpc.credential"
+    exponent_path = tmp_path / "gateway-receipt-private-exponent.hex"
+    credential_path.write_bytes(b"wrong-credential-after-route-freeze" * 2)
+    exponent_path.write_text(
+        TEST_RISK_DOMAIN_PRIVATE_EXPONENT_HEX,
+        encoding="ascii",
+    )
+    credential_path.chmod(0o600)
+    exponent_path.chmod(0o600)
+    drifted = ExecutionGatewayServiceConfig(
+        endpoint=endpoint,
+        rpc_credential_path=str(credential_path),
+        receipt_private_exponent_path=str(exponent_path),
+        state_path=str(tmp_path / "drifted-state.json"),
+        execution_authority=execution_authority,
+        risk_lease_id=auth_module.TRUSTED_RISK_DOMAIN_LEASE_ID,
+        risk_service_identity_sha256=TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256,
+        risk_tenant_id=TEST_RISK_DOMAIN_TENANT_ID,
+        risk_key_identity_sha256=TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+        risk_public_key_modulus_hex=TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
+        risk_public_key_exponent=65_537,
+    )
+    with pytest.raises(
+        ExecutionGatewayError,
+        match="implementation/configuration/route is mismatched",
+    ):
+        drifted.validated()
 
 
 @pytest.fixture(scope="module")
@@ -7679,7 +7828,7 @@ def test_serialized_gateway_route_works_in_a_genuinely_separate_process(
             process.join(timeout=5)
         with contextlib.suppress(FileNotFoundError):
             Path(endpoint).unlink()
-        socket_root.rmdir()
+        shutil.rmtree(socket_root)
     assert process.exitcode == 0
 
     records: list[dict[str, Any]] = []
@@ -7697,7 +7846,6 @@ def test_serialized_gateway_route_works_in_a_genuinely_separate_process(
         assert "fence_order_invocation" in operations
         assert "recover_order_submission" in operations
         assert "cancel_order" in operations
-        assert final["fence_calls"] == 1
         assert final["recovery_calls"] == 1
         assert final["cancel_calls"] == 1
     else:
@@ -10459,16 +10607,22 @@ def test_two_signed_gateway_sessions_cannot_be_swapped_before_venue(
     verified = _verified(authorized_fixture)
     first_backend = FakeTransport()
     second_backend = FakeTransport()
-    first = _strict_executor(
+    journal = _new_journal()
+    first = MicroLiveExecutor(
         verified,
         transport=first_backend,
-        journal=_new_journal(),
+        journal=journal,
     )
-    second = _strict_executor(
+    second = MicroLiveExecutor(
         verified,
         transport=second_backend,
         journal=_new_journal(),
     )
+    acknowledged = first.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    assert acknowledged["status"] == "ORDER_ACKNOWLEDGED"
+    restart_snapshot = journal.snapshot()
     first_adapter = first._transport
     second_adapter = second._transport
     assert (
@@ -10477,6 +10631,7 @@ def test_two_signed_gateway_sessions_cannot_be_swapped_before_venue(
     )
 
     for field in (
+        "_client_instance_nonce_sha256",
         "_client_session_sha256",
         "_client_session_binding",
         "_client_session_attestation_json",
@@ -10489,14 +10644,34 @@ def test_two_signed_gateway_sessions_cannot_be_swapped_before_venue(
             copy.deepcopy(getattr(second_adapter, field)),
         )
 
+    # The transplanted adapter remains internally self-consistent.  The
+    # executor-owned expected binding is the independent rejection boundary.
+    first_adapter.assert_runtime_integrity()
     with pytest.raises(
         MicroLiveExecutionError,
-        match="execution gateway route changed",
+        match="execution transport session changed",
     ):
-        first_adapter.assert_runtime_integrity()
+        first._assert_transport_session_integrity()
 
-    assert first_backend.submit_calls == []
+    assert len(first_backend.submit_calls) == 1
+    assert first_backend.cancel_calls == []
     assert second_backend.submit_calls == []
+    assert second_backend.cancel_calls == []
+
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=first_backend,
+        journal=journal,
+        raw_state=restart_snapshot.raw_state,
+    )
+    killed = restored.engage_kill_switch(
+        reason="session-swap-recovery-unwind",
+        now_ts_ms=NOW_TS_MS + 1,
+    )
+    assert killed["status"] == "KILL_SWITCH_ENGAGED"
+    assert restored.reconciliation_snapshot()["open_order_count"] == 0
+    assert len(first_backend.submit_calls) == 1
+    assert len(first_backend.cancel_calls) == 1
 
 
 def test_mutable_execution_proxy_is_rejected_before_startup_or_venue(

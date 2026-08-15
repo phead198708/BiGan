@@ -5303,6 +5303,12 @@ class MicroLiveExecutor:
             ),
             authorization_expires_at_ts_ms=self._authorization.expires_at_ts_ms,
         )
+        self._expected_client_session_binding = (
+            self._transport.client_session_binding
+        )
+        self._expected_client_session_sha256 = canonical_json_sha256(
+            self._expected_client_session_binding
+        )
         # The signed receipt binds the external gateway to this exact
         # authorization, journal epoch, risk route, and dispatch route.
         self._verify_execution_binding_attestation()
@@ -5420,22 +5426,7 @@ class MicroLiveExecutor:
         operation: str,
         request: Mapping[str, Any],
     ) -> bytes:
-        self._transport.assert_runtime_integrity()
-        if not (
-            self._transport.__class__ is DeploymentOwnedExecutionGatewayAdapter
-            and id(self._transport) == self._transport_object_id
-            and self._transport.adapter_implementation_sha256
-            == self._authorization.execution_adapter_implementation_sha256
-            and self._transport.configuration_sha256
-            == self._authorization.execution_configuration_sha256
-            and self._transport.route_mode
-            == self._authorization.execution_gateway_route_mode
-            and self._transport.route_binding_sha256
-            == self._authorization.execution_gateway_route_binding_sha256
-        ):
-            raise MicroLiveExecutionError(
-                "authenticated execution transport changed after construction"
-            )
+        self._assert_transport_session_integrity()
         outbound_request = copy.deepcopy(dict(request))
         raw_invocation_fence: bytes | None = None
         invocation_fence_sha256: str | None = None
@@ -5605,22 +5596,7 @@ class MicroLiveExecutor:
     ) -> bytes:
         """Run the public gateway's lookup-only recovery on durable bytes."""
 
-        self._transport.assert_runtime_integrity()
-        if not (
-            self._transport.__class__ is DeploymentOwnedExecutionGatewayAdapter
-            and id(self._transport) == self._transport_object_id
-            and self._transport.adapter_implementation_sha256
-            == self._authorization.execution_adapter_implementation_sha256
-            and self._transport.configuration_sha256
-            == self._authorization.execution_configuration_sha256
-            and self._transport.route_mode
-            == self._authorization.execution_gateway_route_mode
-            and self._transport.route_binding_sha256
-            == self._authorization.execution_gateway_route_binding_sha256
-        ):
-            raise MicroLiveExecutionError(
-                "authenticated execution transport changed after construction"
-            )
+        self._assert_transport_session_integrity()
         raw_request = self._journal.recover_execution_outbox_request(
             transport_invocation_id=str(prepared["transport_invocation_id"]),
         )
@@ -5719,7 +5695,7 @@ class MicroLiveExecutor:
         )
 
     def _bind_transport_dispatch_authority(self) -> None:
-        self._transport.assert_runtime_integrity()
+        self._assert_transport_session_integrity()
         method = getattr(self._transport, "bind_execution_dispatch_authority", None)
         if not callable(method):
             raise MicroLiveExecutionError(
@@ -5734,6 +5710,52 @@ class MicroLiveExecutor:
             ),
             authorization_expires_at_ts_ms=self._authorization.expires_at_ts_ms,
         )
+
+    def _assert_transport_session_integrity(self) -> None:
+        """Recheck the executor-owned session identity before every gateway use."""
+
+        self._transport.assert_runtime_integrity()
+        if not (
+            self._transport.__class__ is DeploymentOwnedExecutionGatewayAdapter
+            and id(self._transport) == self._transport_object_id
+            and self._transport.adapter_implementation_sha256
+            == self._authorization.execution_adapter_implementation_sha256
+            and self._transport.configuration_sha256
+            == self._authorization.execution_configuration_sha256
+            and self._transport.route_mode
+            == self._authorization.execution_gateway_route_mode
+            and self._transport.route_binding_sha256
+            == self._authorization.execution_gateway_route_binding_sha256
+            and isinstance(self._expected_client_session_binding, dict)
+            and _valid_execution_gateway_session_binding(
+                self._expected_client_session_binding
+            )
+            and canonical_json_sha256(
+                self._expected_client_session_binding
+            )
+            == self._expected_client_session_sha256
+            and self._transport.client_session_binding
+            == self._expected_client_session_binding
+            and self._transport.client_session_sha256
+            == self._expected_client_session_sha256
+            and self._expected_client_session_binding["authorization_id"]
+            == self._authorization.authorization_id
+            and self._expected_client_session_binding["risk_domain_id"]
+            == self._risk_domain_id
+            and self._expected_client_session_binding[
+                "risk_domain_authority_binding_sha256"
+            ]
+            == self._authorization.risk_domain_authority_binding_sha256
+            and self._expected_client_session_binding[
+                "dispatch_authority_route_sha256"
+            ]
+            == dispatch_authority_route_sha256(
+                self._dispatch_authority_route
+            )
+        ):
+            raise MicroLiveExecutionError(
+                "authenticated execution transport session changed after construction"
+            )
 
     def _verify_execution_operation_receipt(
         self,
@@ -6305,7 +6327,7 @@ class MicroLiveExecutor:
             try:
                 authority = self._journal.risk_domain_lease
                 authority.assert_runtime_integrity()
-                self._transport.assert_runtime_integrity()
+                self._assert_transport_session_integrity()
                 if (
                     self._authorization.matches_verified(self.authorization)
                     and authority.adapter_implementation_sha256
@@ -6316,17 +6338,6 @@ class MicroLiveExecutor:
                     == self._authorization.risk_domain_authority_route_mode
                     and authority.route_binding_sha256
                     == self._authorization.risk_domain_authority_route_binding_sha256
-                    and self._transport.__class__
-                    is DeploymentOwnedExecutionGatewayAdapter
-                    and id(self._transport) == self._transport_object_id
-                    and self._transport.adapter_implementation_sha256
-                    == self._authorization.execution_adapter_implementation_sha256
-                    and self._transport.configuration_sha256
-                    == self._authorization.execution_configuration_sha256
-                    and self._transport.route_mode
-                    == self._authorization.execution_gateway_route_mode
-                    and self._transport.route_binding_sha256
-                    == self._authorization.execution_gateway_route_binding_sha256
                     and self._journal.risk_domain_lease_object_id
                     == self._risk_domain_lease_object_id
                     and self._journal.authenticated_risk_domain_authority_binding_sha256
