@@ -75,6 +75,7 @@ def test_requirements_lock_byte_drift_fails_closed(
 
 def test_project_and_ci_use_the_frozen_runtime_matrix() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    assert (ROOT / "examples/__init__.py").is_file()
     assert project["requires-python"] == "==3.12.4"
     assert {"numpy==2.4.6", "scipy==1.17.1", "xgboost==3.2.0"} <= set(
         project["dependencies"]
