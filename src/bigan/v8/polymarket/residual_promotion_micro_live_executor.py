@@ -1,9 +1,10 @@
 """Capability-gated BTC-15M micro-live execution core.
 
-There is intentionally no Polymarket client, network session, wallet, signing
-key, or venue credential implementation here.  The reviewed composition root
-owns the risk-authority RPC route; the venue transport remains capability-
-injected and is never called unless the separately verified authorization passes.
+Network sessions, wallet keys, and venue credentials remain isolated in the
+deployment execution-gateway service.  The reviewed composition root owns final
+authenticated AF_UNIX adapters for both that service and the risk authority;
+their implementation bytes, endpoints, credentials, account, signer, clock,
+cursor, and settlement routes are authorization-bound before either can be used.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from bigan.v8.polymarket.corpus.contracts import PolymarketCorpusBuildConfig
 from bigan.v8.polymarket.corpus.features import build_polymarket_corpus_feature_rows
 from bigan.v8.polymarket.moe_confirmatory_v2 import SAFETY
 from bigan.v8.polymarket.residual_promotion_micro_live_authorization import (
+    EXECUTION_GATEWAY_ROUTE_MODE,
     REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS,
     REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256,
     RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION,
@@ -120,6 +122,12 @@ SUBMISSION_RECOVERY_SEMANTICS = (
 )
 EXECUTION_TRANSPORT_OPERATION_INVENTORY_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-transport-operations-v1"
+)
+EXECUTION_GATEWAY_RPC_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-execution-gateway-rpc-v1"
+)
+EXECUTION_GATEWAY_RPC_ROUTE_SEMANTICS = (
+    "immutable_af_unix_wallet_signer_and_venue_route_for_authorization_lifetime"
 )
 REQUIRED_EXECUTION_TRANSPORT_OPERATIONS = (
     "attest_execution_binding",
@@ -306,6 +314,10 @@ class MicroLiveExecutionError(RuntimeError):
 
 class SubmissionRecoveryOutcomeNotFoundError(MicroLiveExecutionError):
     """Raised only when a lookup-only recovery proves no venue outcome exists."""
+
+
+class ExecutionGatewayProcessTerminated(BaseException):
+    """Represents an abrupt external gateway process boundary termination."""
 
 
 class ProviderFeatureEvidenceError(ValueError):
@@ -2870,11 +2882,11 @@ class VerifiedProviderFeatureEvidence:
 
 
 class MicroLiveOrderTransport(Protocol):
-    """Minimal injected capability returning exact exchange response bytes.
+    """Service-side gateway operation surface returning exact response bytes.
 
-    The adapter must not parse or normalize a response before handing it to
-    the executor.  This keeps duplicate-key, non-finite-number, and exact-byte
-    evidence checks inside the fail-closed trust boundary.
+    Production construction does not accept this protocol. It instantiates
+    the final deployment-owned AF_UNIX adapter below; this surface documents
+    the externally deployed gateway implementation that the route reaches.
     """
 
     def attest_execution_binding(self, request: Mapping[str, Any]) -> bytes:
@@ -2934,6 +2946,471 @@ class MicroLiveOrderTransport(Protocol):
         guarantee, not a point-in-time lookup.  The executor obtains it before
         the only authoritative post-timeout lookup.
         """
+
+
+def deployment_owned_execution_gateway_adapter_implementation_sha256() -> str:
+    """Derive the exact reviewed gateway client and wallet-boundary identity."""
+
+    return canonical_json_sha256(
+        {
+            "schema_version": EXECUTION_GATEWAY_RPC_SCHEMA_VERSION,
+            "module": __name__,
+            "class": "DeploymentOwnedExecutionGatewayAdapter",
+            "module_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "required_operations_sha256": (
+                REQUIRED_EXECUTION_TRANSPORT_OPERATIONS_SHA256
+            ),
+            "route_mode": EXECUTION_GATEWAY_ROUTE_MODE,
+            "route_semantics": EXECUTION_GATEWAY_RPC_ROUTE_SEMANTICS,
+        }
+    )
+
+
+def _execution_gateway_route_identities(
+    *,
+    service_identity_sha256: str,
+    exchange_endpoint_sha256: str,
+    exchange_account_sha256: str,
+    signer_identity_sha256: str,
+    cursor_key_identity_sha256: str,
+    clock_identity_sha256: str,
+    settlement_authority_identity_sha256: str,
+) -> dict[str, str]:
+    identities = {
+        "service_identity_sha256": service_identity_sha256,
+        "exchange_endpoint_sha256": exchange_endpoint_sha256,
+        "exchange_account_sha256": exchange_account_sha256,
+        "signer_identity_sha256": signer_identity_sha256,
+        "cursor_key_identity_sha256": cursor_key_identity_sha256,
+        "clock_identity_sha256": clock_identity_sha256,
+        "settlement_authority_identity_sha256": (
+            settlement_authority_identity_sha256
+        ),
+    }
+    for label, value in identities.items():
+        _require_sha256(value, f"execution gateway {label}")
+    return identities
+
+
+def deployment_owned_execution_gateway_configuration_sha256(
+    *,
+    endpoint: Path | str,
+    credential: bytes,
+    service_identity_sha256: str,
+    exchange_endpoint_sha256: str,
+    exchange_account_sha256: str,
+    signer_identity_sha256: str,
+    cursor_key_identity_sha256: str,
+    clock_identity_sha256: str,
+    settlement_authority_identity_sha256: str,
+) -> str:
+    """Derive one immutable venue, account, signer, cursor, and clock route."""
+
+    endpoint_path = Path(endpoint)
+    if not endpoint_path.is_absolute():
+        raise MicroLiveExecutionError(
+            "execution gateway RPC endpoint must be absolute"
+        )
+    if not isinstance(credential, bytes) or len(credential) < 32:
+        raise MicroLiveExecutionError("execution gateway RPC credential is invalid")
+    identities = _execution_gateway_route_identities(
+        service_identity_sha256=service_identity_sha256,
+        exchange_endpoint_sha256=exchange_endpoint_sha256,
+        exchange_account_sha256=exchange_account_sha256,
+        signer_identity_sha256=signer_identity_sha256,
+        cursor_key_identity_sha256=cursor_key_identity_sha256,
+        clock_identity_sha256=clock_identity_sha256,
+        settlement_authority_identity_sha256=(
+            settlement_authority_identity_sha256
+        ),
+    )
+    return canonical_json_sha256(
+        {
+            "schema_version": EXECUTION_GATEWAY_RPC_SCHEMA_VERSION,
+            "endpoint": str(endpoint_path),
+            "family": "AF_UNIX",
+            "credential_identity_sha256": hashlib.sha256(credential).hexdigest(),
+            **identities,
+            "required_operations_sha256": (
+                REQUIRED_EXECUTION_TRANSPORT_OPERATIONS_SHA256
+            ),
+            "route_mode": EXECUTION_GATEWAY_ROUTE_MODE,
+            "route_semantics": EXECUTION_GATEWAY_RPC_ROUTE_SEMANTICS,
+        }
+    )
+
+
+def deployment_owned_execution_gateway_route_binding_sha256(
+    *,
+    endpoint: Path | str,
+    credential: bytes,
+    service_identity_sha256: str,
+    exchange_endpoint_sha256: str,
+    exchange_account_sha256: str,
+    signer_identity_sha256: str,
+    cursor_key_identity_sha256: str,
+    clock_identity_sha256: str,
+    settlement_authority_identity_sha256: str,
+    adapter_implementation_sha256: str,
+    configuration_sha256: str,
+) -> str:
+    """Bind the reviewed adapter to the exact external wallet/write route."""
+
+    expected_configuration_sha256 = (
+        deployment_owned_execution_gateway_configuration_sha256(
+            endpoint=endpoint,
+            credential=credential,
+            service_identity_sha256=service_identity_sha256,
+            exchange_endpoint_sha256=exchange_endpoint_sha256,
+            exchange_account_sha256=exchange_account_sha256,
+            signer_identity_sha256=signer_identity_sha256,
+            cursor_key_identity_sha256=cursor_key_identity_sha256,
+            clock_identity_sha256=clock_identity_sha256,
+            settlement_authority_identity_sha256=(
+                settlement_authority_identity_sha256
+            ),
+        )
+    )
+    if not (
+        _is_sha256(adapter_implementation_sha256)
+        and configuration_sha256 == expected_configuration_sha256
+    ):
+        raise MicroLiveExecutionError(
+            "execution gateway route implementation/configuration is invalid"
+        )
+    identities = _execution_gateway_route_identities(
+        service_identity_sha256=service_identity_sha256,
+        exchange_endpoint_sha256=exchange_endpoint_sha256,
+        exchange_account_sha256=exchange_account_sha256,
+        signer_identity_sha256=signer_identity_sha256,
+        cursor_key_identity_sha256=cursor_key_identity_sha256,
+        clock_identity_sha256=clock_identity_sha256,
+        settlement_authority_identity_sha256=(
+            settlement_authority_identity_sha256
+        ),
+    )
+    return canonical_json_sha256(
+        {
+            "schema_version": EXECUTION_GATEWAY_RPC_SCHEMA_VERSION,
+            "adapter_implementation_sha256": adapter_implementation_sha256,
+            "configuration_sha256": configuration_sha256,
+            "endpoint": str(Path(endpoint)),
+            "family": "AF_UNIX",
+            "credential_identity_sha256": hashlib.sha256(credential).hexdigest(),
+            **identities,
+            "route_mode": EXECUTION_GATEWAY_ROUTE_MODE,
+            "route_semantics": EXECUTION_GATEWAY_RPC_ROUTE_SEMANTICS,
+        }
+    )
+
+
+class DeploymentOwnedExecutionGatewayAdapter:
+    """Final immutable AF_UNIX boundary for venue writes, signing, and reads."""
+
+    __slots__ = (
+        "_adapter_implementation_sha256",
+        "_client_session_sha256",
+        "_clock_identity_sha256",
+        "_configuration_sha256",
+        "_credential",
+        "_cursor_key_identity_sha256",
+        "_endpoint",
+        "_exchange_account_sha256",
+        "_exchange_endpoint_sha256",
+        "_route_binding_sha256",
+        "_route_mode",
+        "_sealed",
+        "_service_identity_sha256",
+        "_settlement_authority_identity_sha256",
+        "_signer_identity_sha256",
+    )
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        del kwargs
+        raise TypeError("deployment-owned execution gateway adapter is final")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("deployment-owned execution gateway route is immutable")
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        del name
+        raise AttributeError("deployment-owned execution gateway route is immutable")
+
+    def __init__(
+        self,
+        *,
+        endpoint: Path | str,
+        credential: bytes,
+        service_identity_sha256: str,
+        exchange_endpoint_sha256: str,
+        exchange_account_sha256: str,
+        signer_identity_sha256: str,
+        cursor_key_identity_sha256: str,
+        clock_identity_sha256: str,
+        settlement_authority_identity_sha256: str,
+        expected_adapter_implementation_sha256: str,
+        expected_configuration_sha256: str,
+        expected_route_mode: str,
+        expected_route_binding_sha256: str,
+    ) -> None:
+        implementation_sha256 = (
+            deployment_owned_execution_gateway_adapter_implementation_sha256()
+        )
+        configuration_sha256 = (
+            deployment_owned_execution_gateway_configuration_sha256(
+                endpoint=endpoint,
+                credential=credential,
+                service_identity_sha256=service_identity_sha256,
+                exchange_endpoint_sha256=exchange_endpoint_sha256,
+                exchange_account_sha256=exchange_account_sha256,
+                signer_identity_sha256=signer_identity_sha256,
+                cursor_key_identity_sha256=cursor_key_identity_sha256,
+                clock_identity_sha256=clock_identity_sha256,
+                settlement_authority_identity_sha256=(
+                    settlement_authority_identity_sha256
+                ),
+            )
+        )
+        route_binding_sha256 = (
+            deployment_owned_execution_gateway_route_binding_sha256(
+                endpoint=endpoint,
+                credential=credential,
+                service_identity_sha256=service_identity_sha256,
+                exchange_endpoint_sha256=exchange_endpoint_sha256,
+                exchange_account_sha256=exchange_account_sha256,
+                signer_identity_sha256=signer_identity_sha256,
+                cursor_key_identity_sha256=cursor_key_identity_sha256,
+                clock_identity_sha256=clock_identity_sha256,
+                settlement_authority_identity_sha256=(
+                    settlement_authority_identity_sha256
+                ),
+                adapter_implementation_sha256=implementation_sha256,
+                configuration_sha256=configuration_sha256,
+            )
+        )
+        if not (
+            implementation_sha256 == expected_adapter_implementation_sha256
+            and configuration_sha256 == expected_configuration_sha256
+            and expected_route_mode == EXECUTION_GATEWAY_ROUTE_MODE
+            and route_binding_sha256 == expected_route_binding_sha256
+        ):
+            raise MicroLiveExecutionError(
+                "execution gateway adapter implementation/configuration/route mismatch"
+            )
+        object.__setattr__(self, "_endpoint", str(Path(endpoint)))
+        object.__setattr__(self, "_credential", bytes(credential))
+        object.__setattr__(self, "_service_identity_sha256", service_identity_sha256)
+        object.__setattr__(self, "_exchange_endpoint_sha256", exchange_endpoint_sha256)
+        object.__setattr__(self, "_exchange_account_sha256", exchange_account_sha256)
+        object.__setattr__(self, "_signer_identity_sha256", signer_identity_sha256)
+        object.__setattr__(self, "_cursor_key_identity_sha256", cursor_key_identity_sha256)
+        object.__setattr__(self, "_clock_identity_sha256", clock_identity_sha256)
+        object.__setattr__(
+            self,
+            "_settlement_authority_identity_sha256",
+            settlement_authority_identity_sha256,
+        )
+        object.__setattr__(self, "_adapter_implementation_sha256", implementation_sha256)
+        object.__setattr__(self, "_configuration_sha256", configuration_sha256)
+        object.__setattr__(self, "_route_mode", EXECUTION_GATEWAY_ROUTE_MODE)
+        object.__setattr__(self, "_route_binding_sha256", route_binding_sha256)
+        object.__setattr__(
+            self,
+            "_client_session_sha256",
+            hashlib.sha256(os.urandom(32)).hexdigest(),
+        )
+        object.__setattr__(self, "_sealed", True)
+
+    @property
+    def adapter_implementation_sha256(self) -> str:
+        return self._adapter_implementation_sha256
+
+    @property
+    def configuration_sha256(self) -> str:
+        return self._configuration_sha256
+
+    @property
+    def route_mode(self) -> str:
+        self.assert_runtime_integrity()
+        return self._route_mode
+
+    @property
+    def route_binding_sha256(self) -> str:
+        self.assert_runtime_integrity()
+        return self._route_binding_sha256
+
+    @property
+    def client_session_sha256(self) -> str:
+        self.assert_runtime_integrity()
+        return self._client_session_sha256
+
+    def _configuration_identity_sha256(self) -> str:
+        return deployment_owned_execution_gateway_configuration_sha256(
+            endpoint=self._endpoint,
+            credential=self._credential,
+            service_identity_sha256=self._service_identity_sha256,
+            exchange_endpoint_sha256=self._exchange_endpoint_sha256,
+            exchange_account_sha256=self._exchange_account_sha256,
+            signer_identity_sha256=self._signer_identity_sha256,
+            cursor_key_identity_sha256=self._cursor_key_identity_sha256,
+            clock_identity_sha256=self._clock_identity_sha256,
+            settlement_authority_identity_sha256=(
+                self._settlement_authority_identity_sha256
+            ),
+        )
+
+    def _computed_route_binding_sha256(self) -> str:
+        return deployment_owned_execution_gateway_route_binding_sha256(
+            endpoint=self._endpoint,
+            credential=self._credential,
+            service_identity_sha256=self._service_identity_sha256,
+            exchange_endpoint_sha256=self._exchange_endpoint_sha256,
+            exchange_account_sha256=self._exchange_account_sha256,
+            signer_identity_sha256=self._signer_identity_sha256,
+            cursor_key_identity_sha256=self._cursor_key_identity_sha256,
+            clock_identity_sha256=self._clock_identity_sha256,
+            settlement_authority_identity_sha256=(
+                self._settlement_authority_identity_sha256
+            ),
+            adapter_implementation_sha256=self._adapter_implementation_sha256,
+            configuration_sha256=self._configuration_sha256,
+        )
+
+    def assert_runtime_integrity(self) -> None:
+        if not (
+            self.__class__ is DeploymentOwnedExecutionGatewayAdapter
+            and self._adapter_implementation_sha256
+            == deployment_owned_execution_gateway_adapter_implementation_sha256()
+            and self._configuration_sha256 == self._configuration_identity_sha256()
+            and self._route_mode == EXECUTION_GATEWAY_ROUTE_MODE
+            and self._computed_route_binding_sha256() == self._route_binding_sha256
+            and _is_sha256(self._client_session_sha256)
+        ):
+            raise MicroLiveExecutionError(
+                "deployment-owned execution gateway route changed"
+            )
+
+    def _call(self, operation: str, payload: Mapping[str, Any]) -> bytes:
+        self.assert_runtime_integrity()
+        if operation not in REQUIRED_EXECUTION_TRANSPORT_OPERATIONS:
+            raise MicroLiveExecutionError(
+                "execution gateway RPC operation is not authorized"
+            )
+        raw_request = _canonical_json_bytes(
+            {
+                "schema_version": EXECUTION_GATEWAY_RPC_SCHEMA_VERSION,
+                "operation": operation,
+                "route_binding_sha256": self._route_binding_sha256,
+                "client_session_sha256": self._client_session_sha256,
+                "payload": _risk_domain_rpc_value(payload),
+            }
+        )
+        try:
+            connection = multiprocessing.connection.Client(
+                self._endpoint,
+                family="AF_UNIX",
+                authkey=self._credential,
+            )
+            try:
+                connection.send_bytes(raw_request)
+                raw_response = connection.recv_bytes(
+                    MAX_EXECUTION_TRANSPORT_EVENT_BYTES
+                )
+            finally:
+                connection.close()
+        except (EOFError, OSError) as exc:
+            raise MicroLiveExecutionError(
+                "execution gateway RPC failed closed"
+            ) from exc
+        response, _, _ = _raw_json_object(
+            raw_response,
+            "execution gateway RPC response",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        if response.get("schema_version") != EXECUTION_GATEWAY_RPC_SCHEMA_VERSION:
+            raise MicroLiveExecutionError("execution gateway RPC response is invalid")
+        if response.get("status") == "OK" and set(response) == {
+            "schema_version",
+            "status",
+            "raw_response_base64",
+        }:
+            encoded = response.get("raw_response_base64")
+            if not isinstance(encoded, str):
+                raise MicroLiveExecutionError(
+                    "execution gateway RPC response bytes are absent"
+                )
+            try:
+                return base64.b64decode(encoded, validate=True)
+            except ValueError as exc:
+                raise MicroLiveExecutionError(
+                    "execution gateway RPC response bytes are invalid"
+                ) from exc
+        if response.get("status") == "ERROR" and set(response) == {
+            "schema_version",
+            "status",
+            "error_code",
+        }:
+            error_code = response.get("error_code")
+            if error_code == "SUBMISSION_RECOVERY_OUTCOME_NOT_FOUND":
+                raise SubmissionRecoveryOutcomeNotFoundError(
+                    "external gateway found no recoverable venue outcome"
+                )
+            if error_code == "PROCESS_TERMINATED":
+                raise ExecutionGatewayProcessTerminated(
+                    "external execution gateway process terminated"
+                )
+            raise MicroLiveExecutionError(
+                "external execution gateway operation failed closed"
+            )
+        raise MicroLiveExecutionError("execution gateway RPC response is invalid")
+
+    def bind_execution_dispatch_authority(
+        self,
+        begin: Callable[..., bytes],
+        recover: Callable[..., bytes],
+        complete: Callable[[bytes, bytes], bytes],
+        fence: Callable[..., bytes],
+        **identity: Any,
+    ) -> None:
+        callbacks = (begin, recover, complete, fence)
+        owner = getattr(begin, "__self__", None)
+        if not (
+            owner.__class__ is AtomicFileMicroLiveStateJournal
+            and all(getattr(callback, "__self__", None) is owner for callback in callbacks)
+        ):
+            raise MicroLiveExecutionError(
+                "execution dispatch callbacks are not the concrete journal boundary"
+            )
+        if self._call("bind_execution_dispatch_authority", identity) != b'{"bound":true}':
+            raise MicroLiveExecutionError(
+                "execution gateway dispatch authority binding failed closed"
+            )
+
+    def attest_execution_binding(self, request: Mapping[str, Any]) -> bytes:
+        return self._call("attest_execution_binding", request)
+
+    def read_trusted_time(self, request: Mapping[str, Any]) -> bytes:
+        return self._call("read_trusted_time", request)
+
+    def submit_order(self, request: Mapping[str, Any]) -> bytes:
+        return self._call("submit_order", request)
+
+    def recover_order_submission(self, request: Mapping[str, Any]) -> bytes:
+        return self._call("recover_order_submission", request)
+
+    def cancel_order(self, request: Mapping[str, Any]) -> bytes:
+        return self._call("cancel_order", request)
+
+    def lookup_order(self, request: Mapping[str, Any]) -> bytes:
+        return self._call("lookup_order", request)
+
+    def read_order_fill_cursor(self, request: Mapping[str, Any]) -> bytes:
+        return self._call("read_order_fill_cursor", request)
+
+    def fence_order_invocation(self, request: Mapping[str, Any]) -> bytes:
+        return self._call("fence_order_invocation", request)
 
 
 def verify_dispatchable_outbox_request(
@@ -3233,6 +3710,14 @@ def _risk_domain_authority_binding_sha256(
 def _execution_service_binding_sha256(
     authorization: VerifiedMicroLiveAuthorization,
 ) -> str:
+    if not (
+        authorization.execution_gateway_route_mode
+        == EXECUTION_GATEWAY_ROUTE_MODE
+        and _is_sha256(authorization.execution_gateway_route_binding_sha256)
+    ):
+        raise MicroLiveExecutionError(
+            "verified execution gateway capability is runtime-mismatched"
+        )
     return canonical_json_sha256(
         {
             "service_identity_sha256": authorization.execution_service_identity_sha256,
@@ -3240,6 +3725,10 @@ def _execution_service_binding_sha256(
                 authorization.execution_adapter_implementation_sha256
             ),
             "configuration_sha256": authorization.execution_configuration_sha256,
+            "route_mode": authorization.execution_gateway_route_mode,
+            "route_binding_sha256": (
+                authorization.execution_gateway_route_binding_sha256
+            ),
             "exchange_endpoint_sha256": (
                 authorization.execution_exchange_endpoint_sha256
             ),
@@ -3494,6 +3983,8 @@ class _BoundAuthorization:
     execution_service_identity_sha256: str
     execution_adapter_implementation_sha256: str
     execution_configuration_sha256: str
+    execution_gateway_route_mode: str
+    execution_gateway_route_binding_sha256: str
     execution_exchange_endpoint_sha256: str
     execution_exchange_account_sha256: str
     execution_signer_identity_sha256: str
@@ -3593,6 +4084,12 @@ class _BoundAuthorization:
             execution_configuration_sha256=(
                 authorization.execution_configuration_sha256
             ),
+            execution_gateway_route_mode=(
+                authorization.execution_gateway_route_mode
+            ),
+            execution_gateway_route_binding_sha256=(
+                authorization.execution_gateway_route_binding_sha256
+            ),
             execution_exchange_endpoint_sha256=(
                 authorization.execution_exchange_endpoint_sha256
             ),
@@ -3682,6 +4179,10 @@ class _BoundAuthorization:
             == authorization.risk_domain_authority_dispatch_fence_semantics
             and self.risk_domain_authority_binding_sha256
             == _risk_domain_authority_binding_sha256(authorization)
+            and self.execution_gateway_route_mode
+            == authorization.execution_gateway_route_mode
+            and self.execution_gateway_route_binding_sha256
+            == authorization.execution_gateway_route_binding_sha256
             and self.execution_service_binding_sha256
             == _execution_service_binding_sha256(authorization)
             and self.deployment_runtime_lock_sha256
@@ -3714,12 +4215,13 @@ def create_micro_live_executor(
     repository_root: Path | str,
     evidence_root: Path | str,
     now_ts_ms: int,
-    transport: MicroLiveOrderTransport,
     journal_root: Path | str,
     risk_domain_authority_endpoint: Path | str,
     risk_domain_authority_credential: bytes,
+    execution_gateway_endpoint: Path | str,
+    execution_gateway_credential: bytes,
 ) -> MicroLiveExecutor:
-    """Create the WAL and immutable authority route in the reviewed root."""
+    """Create both immutable RPC routes in the reviewed composition root."""
 
     verified = verify_micro_live_authorization(
         raw_authorization,
@@ -3746,9 +4248,32 @@ def create_micro_live_executor(
             verified.risk_domain_authority_route_binding_sha256
         ),
     )
+    gateway = DeploymentOwnedExecutionGatewayAdapter(
+        endpoint=execution_gateway_endpoint,
+        credential=execution_gateway_credential,
+        service_identity_sha256=verified.execution_service_identity_sha256,
+        exchange_endpoint_sha256=verified.execution_exchange_endpoint_sha256,
+        exchange_account_sha256=verified.execution_exchange_account_sha256,
+        signer_identity_sha256=verified.execution_signer_identity_sha256,
+        cursor_key_identity_sha256=verified.execution_cursor_key_identity_sha256,
+        clock_identity_sha256=verified.execution_clock_identity_sha256,
+        settlement_authority_identity_sha256=(
+            verified.execution_settlement_authority_identity_sha256
+        ),
+        expected_adapter_implementation_sha256=(
+            verified.execution_adapter_implementation_sha256
+        ),
+        expected_configuration_sha256=(
+            verified.execution_configuration_sha256
+        ),
+        expected_route_mode=verified.execution_gateway_route_mode,
+        expected_route_binding_sha256=(
+            verified.execution_gateway_route_binding_sha256
+        ),
+    )
     return MicroLiveExecutor._from_verified_authorization(
         verified,
-        transport=transport,
+        transport=gateway,
         journal=AtomicFileMicroLiveStateJournal(
             journal_root,
             risk_domain_lease=authority,
@@ -3769,11 +4294,16 @@ def _durable_entry(method: Any) -> Any:
 
 def _require_startup_execution_capabilities(
     *,
-    transport: MicroLiveOrderTransport,
+    transport: DeploymentOwnedExecutionGatewayAdapter,
     journal: MicroLiveStateJournal,
 ) -> None:
     """Reject an incomplete execution/unwind surface before journal activation."""
 
+    if transport.__class__ is not DeploymentOwnedExecutionGatewayAdapter:
+        raise MicroLiveExecutionError(
+            "deployment-owned execution gateway adapter is required"
+        )
+    transport.assert_runtime_integrity()
     missing_operations = [
         operation
         for operation in REQUIRED_EXECUTION_TRANSPORT_OPERATIONS
@@ -3809,7 +4339,7 @@ class MicroLiveExecutor:
         self,
         authorization: VerifiedMicroLiveAuthorization,
         *,
-        transport: MicroLiveOrderTransport,
+        transport: DeploymentOwnedExecutionGatewayAdapter,
         journal: MicroLiveStateJournal,
     ) -> None:
         self._initialize(
@@ -3825,7 +4355,7 @@ class MicroLiveExecutor:
         self,
         *,
         authorization: VerifiedMicroLiveAuthorization,
-        transport: MicroLiveOrderTransport,
+        transport: DeploymentOwnedExecutionGatewayAdapter,
         journal: MicroLiveStateJournal,
         events: Sequence[Mapping[str, Any]],
         generation: int,
@@ -3878,6 +4408,20 @@ class MicroLiveExecutor:
         ):
             raise MicroLiveExecutionError(
                 "deployment-owned risk-domain authority route is authorization-mismatched"
+            )
+        transport.assert_runtime_integrity()
+        if not (
+            transport.adapter_implementation_sha256
+            == self._authorization.execution_adapter_implementation_sha256
+            and transport.configuration_sha256
+            == self._authorization.execution_configuration_sha256
+            and transport.route_mode
+            == self._authorization.execution_gateway_route_mode
+            and transport.route_binding_sha256
+            == self._authorization.execution_gateway_route_binding_sha256
+        ):
+            raise MicroLiveExecutionError(
+                "deployment-owned execution gateway route is authorization-mismatched"
             )
         maximum_call_duration_ms = (
             self._authorization.execution_maximum_call_duration_ms
@@ -4004,7 +4548,7 @@ class MicroLiveExecutor:
         cls,
         authorization: VerifiedMicroLiveAuthorization,
         *,
-        transport: MicroLiveOrderTransport,
+        transport: DeploymentOwnedExecutionGatewayAdapter,
         journal: MicroLiveStateJournal,
     ) -> MicroLiveExecutor:
         return cls(authorization, transport=transport, journal=journal)
@@ -4015,7 +4559,7 @@ class MicroLiveExecutor:
             return tuple(copy.deepcopy(self._events))
 
     @property
-    def transport(self) -> MicroLiveOrderTransport:
+    def transport(self) -> DeploymentOwnedExecutionGatewayAdapter:
         """Return the construction-bound adapter without permitting replacement."""
 
         return self._transport
@@ -4087,7 +4631,19 @@ class MicroLiveExecutor:
         operation: str,
         request: Mapping[str, Any],
     ) -> bytes:
-        if id(self._transport) != self._transport_object_id:
+        self._transport.assert_runtime_integrity()
+        if not (
+            self._transport.__class__ is DeploymentOwnedExecutionGatewayAdapter
+            and id(self._transport) == self._transport_object_id
+            and self._transport.adapter_implementation_sha256
+            == self._authorization.execution_adapter_implementation_sha256
+            and self._transport.configuration_sha256
+            == self._authorization.execution_configuration_sha256
+            and self._transport.route_mode
+            == self._authorization.execution_gateway_route_mode
+            and self._transport.route_binding_sha256
+            == self._authorization.execution_gateway_route_binding_sha256
+        ):
             raise MicroLiveExecutionError(
                 "authenticated execution transport changed after construction"
             )
@@ -4260,7 +4816,19 @@ class MicroLiveExecutor:
     ) -> bytes:
         """Run the public gateway's lookup-only recovery on durable bytes."""
 
-        if id(self._transport) != self._transport_object_id:
+        self._transport.assert_runtime_integrity()
+        if not (
+            self._transport.__class__ is DeploymentOwnedExecutionGatewayAdapter
+            and id(self._transport) == self._transport_object_id
+            and self._transport.adapter_implementation_sha256
+            == self._authorization.execution_adapter_implementation_sha256
+            and self._transport.configuration_sha256
+            == self._authorization.execution_configuration_sha256
+            and self._transport.route_mode
+            == self._authorization.execution_gateway_route_mode
+            and self._transport.route_binding_sha256
+            == self._authorization.execution_gateway_route_binding_sha256
+        ):
             raise MicroLiveExecutionError(
                 "authenticated execution transport changed after construction"
             )
@@ -4362,6 +4930,7 @@ class MicroLiveExecutor:
         )
 
     def _bind_transport_dispatch_authority(self) -> None:
+        self._transport.assert_runtime_integrity()
         method = getattr(self._transport, "bind_execution_dispatch_authority", None)
         if not callable(method):
             raise MicroLiveExecutionError(
@@ -4724,6 +5293,12 @@ class MicroLiveExecutor:
         request = {
             "authorization_id": self._authorization.authorization_id,
             "challenge_sha256": challenge_sha256,
+            "execution_gateway_route_mode": (
+                self._authorization.execution_gateway_route_mode
+            ),
+            "execution_gateway_route_binding_sha256": (
+                self._authorization.execution_gateway_route_binding_sha256
+            ),
             "risk_domain_id": self._risk_domain_id,
             "risk_domain_authority_binding_sha256": (
                 self._authorization.risk_domain_authority_binding_sha256
@@ -4795,6 +5370,12 @@ class MicroLiveExecutor:
             ),
             "configuration_sha256": (
                 self._authorization.execution_configuration_sha256
+            ),
+            "execution_gateway_route_mode": (
+                self._authorization.execution_gateway_route_mode
+            ),
+            "execution_gateway_route_binding_sha256": (
+                self._authorization.execution_gateway_route_binding_sha256
             ),
             "exchange_endpoint_sha256": (
                 self._authorization.execution_exchange_endpoint_sha256
@@ -4925,6 +5506,7 @@ class MicroLiveExecutor:
             try:
                 authority = self._journal.risk_domain_lease
                 authority.assert_runtime_integrity()
+                self._transport.assert_runtime_integrity()
                 if (
                     self._authorization.matches_verified(self.authorization)
                     and authority.adapter_implementation_sha256
@@ -4935,7 +5517,17 @@ class MicroLiveExecutor:
                     == self._authorization.risk_domain_authority_route_mode
                     and authority.route_binding_sha256
                     == self._authorization.risk_domain_authority_route_binding_sha256
+                    and self._transport.__class__
+                    is DeploymentOwnedExecutionGatewayAdapter
                     and id(self._transport) == self._transport_object_id
+                    and self._transport.adapter_implementation_sha256
+                    == self._authorization.execution_adapter_implementation_sha256
+                    and self._transport.configuration_sha256
+                    == self._authorization.execution_configuration_sha256
+                    and self._transport.route_mode
+                    == self._authorization.execution_gateway_route_mode
+                    and self._transport.route_binding_sha256
+                    == self._authorization.execution_gateway_route_binding_sha256
                     and self._journal.risk_domain_lease_object_id
                     == self._risk_domain_lease_object_id
                     and self._journal.authenticated_risk_domain_authority_binding_sha256
@@ -7296,7 +7888,7 @@ class MicroLiveExecutor:
         cls,
         *,
         authorization: VerifiedMicroLiveAuthorization,
-        transport: MicroLiveOrderTransport,
+        transport: DeploymentOwnedExecutionGatewayAdapter,
         journal: MicroLiveStateJournal,
         raw_state: bytes,
     ) -> MicroLiveExecutor:
@@ -10750,6 +11342,8 @@ def _is_sha256(value: Any) -> bool:
 
 
 __all__ = [
+    "DeploymentOwnedExecutionGatewayAdapter",
+    "ExecutionGatewayProcessTerminated",
     "IMPLEMENTATION_REPOSITORY_PATH",
     "MicroLiveExecutionError",
     "MicroLiveExecutor",

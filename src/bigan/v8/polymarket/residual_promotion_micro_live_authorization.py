@@ -35,7 +35,7 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
 )
 
 AUTHORIZATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v7"
+    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v8"
 )
 HUMAN_ATTESTATION_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-human-micro-live-attestation-v2"
@@ -120,6 +120,7 @@ RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS = (
     "fence_only_not_started_dispatch_else_report_terminal_or_in_progress"
 )
 RISK_DOMAIN_AUTHORITY_ROUTE_MODE = "deployment_af_unix_rpc"
+EXECUTION_GATEWAY_ROUTE_MODE = "deployment_af_unix_rpc"
 DEPLOYMENT_RUNTIME_LOCK_SHA256 = (
     "74036bc0c40ca2552e44074310f85ecf807bb51557ffad99eb815f97e6158bcb"
 )
@@ -179,6 +180,8 @@ class VerifiedMicroLiveAuthorization:
     execution_service_identity_sha256: str
     execution_adapter_implementation_sha256: str
     execution_configuration_sha256: str
+    execution_gateway_route_mode: str
+    execution_gateway_route_binding_sha256: str
     execution_exchange_endpoint_sha256: str
     execution_exchange_account_sha256: str
     execution_signer_identity_sha256: str
@@ -503,6 +506,12 @@ def verify_micro_live_authorization(
         execution_configuration_sha256=str(
             execution_service_authority["configuration_sha256"]
         ),
+        execution_gateway_route_mode=str(
+            execution_service_authority["route_mode"]
+        ),
+        execution_gateway_route_binding_sha256=str(
+            execution_service_authority["route_binding_sha256"]
+        ),
         execution_exchange_endpoint_sha256=str(
             execution_service_authority["exchange_endpoint_sha256"]
         ),
@@ -612,7 +621,7 @@ def _capability_integrity_sha256(
     ):
         raise ValueError("loaded micro-live model bytes do not match the frozen runtime")
     payload = {
-        "schema_version": "verified-micro-live-authorization-capability-v7",
+        "schema_version": "verified-micro-live-authorization-capability-v8",
         "authorization_id": capability.authorization_id,
         "authorization_payload_sha256": capability.authorization_payload_sha256,
         "candidate_bundle_sha256": capability.candidate_bundle_sha256,
@@ -677,6 +686,10 @@ def _capability_integrity_sha256(
         ),
         "execution_configuration_sha256": (
             capability.execution_configuration_sha256
+        ),
+        "execution_gateway_route_mode": capability.execution_gateway_route_mode,
+        "execution_gateway_route_binding_sha256": (
+            capability.execution_gateway_route_binding_sha256
         ),
         "execution_exchange_endpoint_sha256": (
             capability.execution_exchange_endpoint_sha256
@@ -1166,6 +1179,8 @@ def _validated_execution_service_authority(value: Any) -> dict[str, Any]:
         "service_identity_sha256",
         "adapter_implementation_sha256",
         "configuration_sha256",
+        "route_mode",
+        "route_binding_sha256",
         "exchange_endpoint_sha256",
         "exchange_account_sha256",
         "signer_identity_sha256",
@@ -1208,6 +1223,8 @@ def _validated_execution_service_authority(value: Any) -> dict[str, Any]:
     maximum_call_duration_ms = authority.get("maximum_call_duration_ms")
     if not (
         all(_is_sha256(authority.get(field)) for field in identity_fields)
+        and authority.get("route_mode") == EXECUTION_GATEWAY_ROUTE_MODE
+        and _is_sha256(authority.get("route_binding_sha256"))
         and authority.get("cursor_key_identity_sha256") == expected_key_identity
         and authority.get("signature_algorithm")
         == "RSASSA-PKCS1-v1_5-SHA256"
@@ -1267,6 +1284,7 @@ __all__ = [
     "ALLOWED_ACTIONS",
     "AUTHORIZATION_SCHEMA_VERSION",
     "CURRENT_AUTHORIZATION_GATE_STATE",
+    "EXECUTION_GATEWAY_ROUTE_MODE",
     "HUMAN_ATTESTATION_SCHEMA_VERSION",
     "IMPLEMENTATION_REPOSITORY_PATH",
     "MARKET_ALLOWLIST",

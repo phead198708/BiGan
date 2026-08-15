@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import contextlib
 import copy
 import hashlib
 import inspect
@@ -53,6 +54,7 @@ from bigan.v8.polymarket.residual_promotion_micro_live_executor import (
     PROVIDER_FEATURE_FILENAMES,
     SIGNAL_SCHEMA_VERSION,
     AtomicFileMicroLiveStateJournal,
+    ExecutionGatewayProcessTerminated,
     MicroLiveExecutionError,
     ProviderFeatureEvidenceError,
     SubmissionRecoveryOutcomeNotFoundError,
@@ -274,12 +276,11 @@ def _test_risk_domain_authority_descriptor() -> dict[str, Any]:
 TEST_EXECUTION_SERVICE_IDENTITY_SHA256 = canonical_json_sha256(
     {"service": "test-authenticated-execution-service-v1"}
 )
-TEST_EXECUTION_ADAPTER_IMPLEMENTATION_SHA256 = canonical_json_sha256(
-    {"adapter": "test-exchange-adapter-v1"}
+TEST_EXECUTION_RPC_ENDPOINT = str(
+    Path(tempfile.mkdtemp(prefix="bigan-execution-rpc-", dir="/tmp"))
+    / "gateway.sock"
 )
-TEST_EXECUTION_CONFIGURATION_SHA256 = canonical_json_sha256(
-    {"configuration": "test-deployment-config-v1"}
-)
+TEST_EXECUTION_RPC_CREDENTIAL = b"bigan-test-execution-gateway-rpc-credential-v1"
 TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256 = canonical_json_sha256(
     {"endpoint": "test-polymarket-endpoint-v1"}
 )
@@ -295,33 +296,87 @@ TEST_EXECUTION_CLOCK_IDENTITY_SHA256 = canonical_json_sha256(
 TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256 = canonical_json_sha256(
     {"settlement_authority": "test-official-settlement-provider-v1"}
 )
-TEST_EXECUTION_AUTHORITY = {
-    "service_identity_sha256": TEST_EXECUTION_SERVICE_IDENTITY_SHA256,
-    "adapter_implementation_sha256": TEST_EXECUTION_ADAPTER_IMPLEMENTATION_SHA256,
-    "configuration_sha256": TEST_EXECUTION_CONFIGURATION_SHA256,
-    "exchange_endpoint_sha256": TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256,
-    "exchange_account_sha256": TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256,
-    "signer_identity_sha256": TEST_EXECUTION_SIGNER_IDENTITY_SHA256,
-    "cursor_key_identity_sha256": TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
-    "clock_identity_sha256": TEST_EXECUTION_CLOCK_IDENTITY_SHA256,
-    "settlement_authority_identity_sha256": (
-        TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256
-    ),
-    "signature_algorithm": executor_module.RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM,
-    "public_key_modulus_hex": TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
-    "public_key_exponent": 65_537,
-    "maximum_clock_skew_ms": 250,
-    "maximum_call_duration_ms": 250,
-    "deployment_runtime_lock_sha256": (
-        auth_module.DEPLOYMENT_RUNTIME_LOCK_SHA256
-    ),
-    "deployment_requirements_lock_sha256": (
-        auth_module.DEPLOYMENT_REQUIREMENTS_LOCK_SHA256
-    ),
-    "deployment_image_manifest_digest": (
-        auth_module.DEPLOYMENT_IMAGE_MANIFEST_DIGEST
-    ),
-}
+
+
+def _test_execution_authority_descriptor(
+    *,
+    maximum_call_duration_ms: int = 250,
+) -> dict[str, Any]:
+    adapter_implementation_sha256 = (
+        executor_module.deployment_owned_execution_gateway_adapter_implementation_sha256()
+    )
+    configuration_sha256 = (
+        executor_module.deployment_owned_execution_gateway_configuration_sha256(
+            endpoint=TEST_EXECUTION_RPC_ENDPOINT,
+            credential=TEST_EXECUTION_RPC_CREDENTIAL,
+            service_identity_sha256=TEST_EXECUTION_SERVICE_IDENTITY_SHA256,
+            exchange_endpoint_sha256=TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256,
+            exchange_account_sha256=TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256,
+            signer_identity_sha256=TEST_EXECUTION_SIGNER_IDENTITY_SHA256,
+            cursor_key_identity_sha256=TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+            clock_identity_sha256=TEST_EXECUTION_CLOCK_IDENTITY_SHA256,
+            settlement_authority_identity_sha256=(
+                TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256
+            ),
+        )
+    )
+    route_binding_sha256 = (
+        executor_module.deployment_owned_execution_gateway_route_binding_sha256(
+            endpoint=TEST_EXECUTION_RPC_ENDPOINT,
+            credential=TEST_EXECUTION_RPC_CREDENTIAL,
+            service_identity_sha256=TEST_EXECUTION_SERVICE_IDENTITY_SHA256,
+            exchange_endpoint_sha256=TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256,
+            exchange_account_sha256=TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256,
+            signer_identity_sha256=TEST_EXECUTION_SIGNER_IDENTITY_SHA256,
+            cursor_key_identity_sha256=TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+            clock_identity_sha256=TEST_EXECUTION_CLOCK_IDENTITY_SHA256,
+            settlement_authority_identity_sha256=(
+                TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256
+            ),
+            adapter_implementation_sha256=adapter_implementation_sha256,
+            configuration_sha256=configuration_sha256,
+        )
+    )
+    return {
+        "service_identity_sha256": TEST_EXECUTION_SERVICE_IDENTITY_SHA256,
+        "adapter_implementation_sha256": adapter_implementation_sha256,
+        "configuration_sha256": configuration_sha256,
+        "route_mode": auth_module.EXECUTION_GATEWAY_ROUTE_MODE,
+        "route_binding_sha256": route_binding_sha256,
+        "exchange_endpoint_sha256": TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256,
+        "exchange_account_sha256": TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256,
+        "signer_identity_sha256": TEST_EXECUTION_SIGNER_IDENTITY_SHA256,
+        "cursor_key_identity_sha256": TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+        "clock_identity_sha256": TEST_EXECUTION_CLOCK_IDENTITY_SHA256,
+        "settlement_authority_identity_sha256": (
+            TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256
+        ),
+        "signature_algorithm": (
+            executor_module.RISK_DOMAIN_RECEIPT_SIGNATURE_ALGORITHM
+        ),
+        "public_key_modulus_hex": TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
+        "public_key_exponent": 65_537,
+        "maximum_clock_skew_ms": 250,
+        "maximum_call_duration_ms": maximum_call_duration_ms,
+        "deployment_runtime_lock_sha256": (
+            auth_module.DEPLOYMENT_RUNTIME_LOCK_SHA256
+        ),
+        "deployment_requirements_lock_sha256": (
+            auth_module.DEPLOYMENT_REQUIREMENTS_LOCK_SHA256
+        ),
+        "deployment_image_manifest_digest": (
+            auth_module.DEPLOYMENT_IMAGE_MANIFEST_DIGEST
+        ),
+    }
+
+
+TEST_EXECUTION_AUTHORITY = _test_execution_authority_descriptor()
+TEST_EXECUTION_ADAPTER_IMPLEMENTATION_SHA256 = str(
+    TEST_EXECUTION_AUTHORITY["adapter_implementation_sha256"]
+)
+TEST_EXECUTION_CONFIGURATION_SHA256 = str(
+    TEST_EXECUTION_AUTHORITY["configuration_sha256"]
+)
 _PRODUCTION_AUTHORIZED_TRANSPORT_CALL_DURATION_MS = int(
     TEST_EXECUTION_AUTHORITY["maximum_call_duration_ms"]
 )
@@ -1943,6 +1998,134 @@ class _TestRiskDomainAuthorityRpcService:
 _TEST_RISK_DOMAIN_AUTHORITY_RPC_SERVICE = _TestRiskDomainAuthorityRpcService()
 
 
+class _TestExecutionGatewayRpcService:
+    """Authenticated AF_UNIX execution service outside the final adapter."""
+
+    def __init__(self) -> None:
+        self._listener = Listener(
+            TEST_EXECUTION_RPC_ENDPOINT,
+            family="AF_UNIX",
+            backlog=128,
+            authkey=TEST_EXECUTION_RPC_CREDENTIAL,
+        )
+        self._registrations: dict[str, tuple[Any, AtomicFileMicroLiveStateJournal]] = {}
+        self._lock = threading.RLock()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def register(
+        self,
+        adapter: executor_module.DeploymentOwnedExecutionGatewayAdapter,
+        backend: Any,
+        journal: AtomicFileMicroLiveStateJournal,
+    ) -> None:
+        with self._lock:
+            if adapter.client_session_sha256 in self._registrations:
+                raise AssertionError("test execution gateway session was rebound")
+            self._registrations[adapter.client_session_sha256] = (backend, journal)
+
+    def _serve(self) -> None:
+        while True:
+            connection = self._listener.accept()
+            threading.Thread(
+                target=self._handle_connection,
+                args=(connection,),
+                daemon=True,
+            ).start()
+
+    @staticmethod
+    def _response(*, raw_response: bytes | None = None, error_code: str | None = None) -> bytes:
+        if raw_response is not None and error_code is None:
+            return _json_bytes(
+                {
+                    "schema_version": executor_module.EXECUTION_GATEWAY_RPC_SCHEMA_VERSION,
+                    "status": "OK",
+                    "raw_response_base64": base64.b64encode(raw_response).decode("ascii"),
+                }
+            )
+        return _json_bytes(
+            {
+                "schema_version": executor_module.EXECUTION_GATEWAY_RPC_SCHEMA_VERSION,
+                "status": "ERROR",
+                "error_code": error_code or "OPERATION_FAILED",
+            }
+        )
+
+    def _handle_connection(self, connection: Any) -> None:
+        try:
+            request = json.loads(
+                connection.recv_bytes(
+                    executor_module.MAX_EXECUTION_TRANSPORT_EVENT_BYTES
+                )
+            )
+            if not (
+                isinstance(request, dict)
+                and set(request)
+                == {
+                    "schema_version",
+                    "operation",
+                    "route_binding_sha256",
+                    "client_session_sha256",
+                    "payload",
+                }
+                and request["schema_version"]
+                == executor_module.EXECUTION_GATEWAY_RPC_SCHEMA_VERSION
+                and request["route_binding_sha256"]
+                == TEST_EXECUTION_AUTHORITY["route_binding_sha256"]
+                and request["operation"]
+                in executor_module.REQUIRED_EXECUTION_TRANSPORT_OPERATIONS
+                and isinstance(request["payload"], dict)
+            ):
+                connection.send_bytes(self._response(error_code="INVALID_REQUEST"))
+                return
+            with self._lock:
+                registration = self._registrations.get(
+                    request["client_session_sha256"]
+                )
+            if registration is None:
+                connection.send_bytes(self._response(error_code="UNREGISTERED_SESSION"))
+                return
+            backend, journal = registration
+            payload = _decode_test_authority_rpc_value(request["payload"])
+            if request["operation"] == "bind_execution_dispatch_authority":
+                backend.bind_execution_dispatch_authority(
+                    journal.begin_execution_dispatch,
+                    journal.recover_execution_dispatch,
+                    journal.complete_execution_dispatch,
+                    journal.fence_execution_dispatch,
+                    **payload,
+                )
+                raw_response = b'{"bound":true}'
+            else:
+                method = getattr(backend, request["operation"], None)
+                if not callable(method):
+                    connection.send_bytes(
+                        self._response(error_code="MISSING_OPERATION")
+                    )
+                    return
+                raw_response = method(payload)
+                if not isinstance(raw_response, bytes):
+                    connection.send_bytes(
+                        self._response(error_code="NON_BYTES_RESPONSE")
+                    )
+                    return
+            connection.send_bytes(self._response(raw_response=raw_response))
+        except BaseException as exc:
+            if exc.__class__.__name__ == "SimulatedProcessCrash":
+                error_code = "PROCESS_TERMINATED"
+            elif isinstance(exc, SubmissionRecoveryOutcomeNotFoundError):
+                error_code = "SUBMISSION_RECOVERY_OUTCOME_NOT_FOUND"
+            else:
+                error_code = "OPERATION_FAILED"
+            with contextlib.suppress(Exception):
+                connection.send_bytes(self._response(error_code=error_code))
+        finally:
+            connection.close()
+
+
+_TEST_EXECUTION_GATEWAY_RPC_SERVICE = _TestExecutionGatewayRpcService()
+
+
 def _test_authority_adapter(
     backend: Any,
     *,
@@ -1967,6 +2150,40 @@ def _test_authority_adapter(
 
 def _test_authority_backend(journal: AtomicFileMicroLiveStateJournal) -> Any:
     return _TEST_RISK_DOMAIN_AUTHORITY_RPC_SERVICE.backend(journal.root)
+
+
+def _test_execution_adapter(
+    authorization: VerifiedMicroLiveAuthorization,
+    backend: Any,
+    journal: AtomicFileMicroLiveStateJournal,
+) -> executor_module.DeploymentOwnedExecutionGatewayAdapter:
+    adapter = executor_module.DeploymentOwnedExecutionGatewayAdapter(
+        endpoint=TEST_EXECUTION_RPC_ENDPOINT,
+        credential=TEST_EXECUTION_RPC_CREDENTIAL,
+        service_identity_sha256=authorization.execution_service_identity_sha256,
+        exchange_endpoint_sha256=authorization.execution_exchange_endpoint_sha256,
+        exchange_account_sha256=authorization.execution_exchange_account_sha256,
+        signer_identity_sha256=authorization.execution_signer_identity_sha256,
+        cursor_key_identity_sha256=(
+            authorization.execution_cursor_key_identity_sha256
+        ),
+        clock_identity_sha256=authorization.execution_clock_identity_sha256,
+        settlement_authority_identity_sha256=(
+            authorization.execution_settlement_authority_identity_sha256
+        ),
+        expected_adapter_implementation_sha256=(
+            authorization.execution_adapter_implementation_sha256
+        ),
+        expected_configuration_sha256=(
+            authorization.execution_configuration_sha256
+        ),
+        expected_route_mode=authorization.execution_gateway_route_mode,
+        expected_route_binding_sha256=(
+            authorization.execution_gateway_route_binding_sha256
+        ),
+    )
+    _TEST_EXECUTION_GATEWAY_RPC_SERVICE.register(adapter, backend, journal)
+    return adapter
 
 
 def _new_journal() -> AtomicFileMicroLiveStateJournal:
@@ -2012,6 +2229,8 @@ def _journal_factory_args() -> dict[str, Any]:
         "journal_root": base / "journal",
         "risk_domain_authority_endpoint": TEST_RISK_DOMAIN_RPC_ENDPOINT,
         "risk_domain_authority_credential": TEST_RISK_DOMAIN_RPC_CREDENTIAL,
+        "execution_gateway_endpoint": TEST_EXECUTION_RPC_ENDPOINT,
+        "execution_gateway_credential": TEST_EXECUTION_RPC_CREDENTIAL,
     }
 
 
@@ -2058,11 +2277,46 @@ class MicroLiveExecutor(_StrictMicroLiveExecutor):
             transport.execution_service_binding_sha256 = (
                 executor_module._execution_service_binding_sha256(authorization)
             )
+        exact_journal = journal or _new_journal()
+        adapter = _test_execution_adapter(
+            authorization,
+            transport,
+            exact_journal,
+        )
+        self._test_transport_backend = transport
         super().__init__(
             authorization,
-            transport=transport,
-            journal=journal or _new_journal(),
+            transport=adapter,
+            journal=exact_journal,
         )
+
+    @classmethod
+    def restore(
+        cls,
+        *,
+        authorization: VerifiedMicroLiveAuthorization,
+        transport: Any,
+        journal: AtomicFileMicroLiveStateJournal,
+        raw_state: bytes,
+    ) -> MicroLiveExecutor:
+        if getattr(transport, "_uses_default_execution_service_binding", False):
+            transport.execution_service_binding_sha256 = (
+                executor_module._execution_service_binding_sha256(authorization)
+            )
+        adapter = _test_execution_adapter(authorization, transport, journal)
+        restored = _StrictMicroLiveExecutor.restore.__func__(
+            cls,
+            authorization=authorization,
+            transport=adapter,
+            journal=journal,
+            raw_state=raw_state,
+        )
+        restored._test_transport_backend = transport
+        return restored
+
+    @property
+    def transport(self) -> Any:
+        return self._test_transport_backend
 
     def submit_signal(
         self,
@@ -2083,6 +2337,42 @@ class MicroLiveExecutor(_StrictMicroLiveExecutor):
             operator_heartbeat_ts_ms=operator_heartbeat_ts_ms,
             market_identity_evidence=market_identity_evidence,
         )
+
+
+def _strict_executor(
+    authorization: VerifiedMicroLiveAuthorization,
+    *,
+    transport: Any,
+    journal: AtomicFileMicroLiveStateJournal,
+) -> _StrictMicroLiveExecutor:
+    if getattr(transport, "_uses_default_execution_service_binding", False):
+        transport.execution_service_binding_sha256 = (
+            executor_module._execution_service_binding_sha256(authorization)
+        )
+    return _StrictMicroLiveExecutor(
+        authorization,
+        transport=_test_execution_adapter(authorization, transport, journal),
+        journal=journal,
+    )
+
+
+def _strict_restore(
+    *,
+    authorization: VerifiedMicroLiveAuthorization,
+    transport: Any,
+    journal: AtomicFileMicroLiveStateJournal,
+    raw_state: bytes,
+) -> _StrictMicroLiveExecutor:
+    if getattr(transport, "_uses_default_execution_service_binding", False):
+        transport.execution_service_binding_sha256 = (
+            executor_module._execution_service_binding_sha256(authorization)
+        )
+    return _StrictMicroLiveExecutor.restore(
+        authorization=authorization,
+        transport=_test_execution_adapter(authorization, transport, journal),
+        journal=journal,
+        raw_state=raw_state,
+    )
 
 
 def _record_fill(
@@ -2787,6 +3077,12 @@ class FakeTransport:
                 TEST_EXECUTION_ADAPTER_IMPLEMENTATION_SHA256
             ),
             "configuration_sha256": TEST_EXECUTION_CONFIGURATION_SHA256,
+            "execution_gateway_route_mode": request[
+                "execution_gateway_route_mode"
+            ],
+            "execution_gateway_route_binding_sha256": request[
+                "execution_gateway_route_binding_sha256"
+            ],
             "exchange_endpoint_sha256": TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256,
             "exchange_account_sha256": TEST_EXECUTION_EXCHANGE_ACCOUNT_SHA256,
             "signer_identity_sha256": TEST_EXECUTION_SIGNER_IDENTITY_SHA256,
@@ -4085,6 +4381,14 @@ def _verified(
             TEST_EXECUTION_ADAPTER_IMPLEMENTATION_SHA256
         ),
         execution_configuration_sha256=TEST_EXECUTION_CONFIGURATION_SHA256,
+        execution_gateway_route_mode=str(
+            authorization["execution_service_authority"]["route_mode"]
+        ),
+        execution_gateway_route_binding_sha256=str(
+            authorization["execution_service_authority"][
+                "route_binding_sha256"
+            ]
+        ),
         execution_exchange_endpoint_sha256=(
             TEST_EXECUTION_EXCHANGE_ENDPOINT_SHA256
         ),
@@ -4220,14 +4524,13 @@ def test_current_template_cannot_create_executor(
             repository_root=authorized_fixture["root"],
             evidence_root=authorized_fixture["evidence_root"],
             now_ts_ms=NOW_TS_MS,
-            transport=transport,
             **_journal_factory_args(),
         )
     assert transport.submit_calls == []
     assert transport.cancel_calls == []
 
 
-def test_executor_bundles_no_venue_network_wallet_or_credential_adapter() -> None:
+def test_executor_bundles_only_the_reviewed_local_gateway_boundary() -> None:
     paths = (
         REPO_ROOT
         / "src/bigan/v8/polymarket/residual_promotion_micro_live_authorization.py",
@@ -4258,19 +4561,29 @@ def test_executor_bundles_no_venue_network_wallet_or_credential_adapter() -> Non
         assert imports.isdisjoint(forbidden_modules)
         assert "os.environ" not in source
         assert "getenv(" not in source
+    executor_source = paths[1].read_text(encoding="utf-8")
+    assert "execution gateway adapter is final" in executor_source
+    assert "EXECUTION_GATEWAY_ROUTE_MODE" in executor_source
+    assert auth_module.EXECUTION_GATEWAY_ROUTE_MODE == "deployment_af_unix_rpc"
+    assert "wallet_signer_and_venue_route" in executor_source
 
 
 def test_production_composition_root_owns_concrete_authority_route() -> None:
     signature = inspect.signature(create_micro_live_executor)
     assert "risk_domain_lease" not in signature.parameters
+    assert "transport" not in signature.parameters
     assert {
         "risk_domain_authority_endpoint",
         "risk_domain_authority_credential",
+        "execution_gateway_endpoint",
+        "execution_gateway_credential",
     }.issubset(signature.parameters)
     source = inspect.getsource(create_micro_live_executor)
     assert "DeploymentOwnedRiskDomainAuthorityAdapter(" in source
+    assert "DeploymentOwnedExecutionGatewayAdapter(" in source
     assert "expected_adapter_implementation_sha256" in source
     assert "expected_configuration_sha256" in source
+    assert "expected_route_binding_sha256" in source
 
 
 def test_legacy_local_graph_cannot_create_a_production_capability(
@@ -4286,7 +4599,6 @@ def test_legacy_local_graph_cannot_create_a_production_capability(
             repository_root=authorized_fixture["root"],
             evidence_root=authorized_fixture["evidence_root"],
             now_ts_ms=NOW_TS_MS,
-            transport=transport,
             **_journal_factory_args(),
         )
     assert transport.submit_calls == []
@@ -4309,12 +4621,9 @@ def test_executor_rejects_transport_without_authenticated_execution_binding(
 
     with pytest.raises(
         MicroLiveExecutionError,
-        match=(
-            "required startup operations|one-shot dispatch authority|"
-            "attest_execution_binding"
-        ),
+        match="deployment-owned execution gateway adapter is required",
     ):
-        MicroLiveExecutor(
+        _StrictMicroLiveExecutor(
             verified,
             transport=UnboundedTransport(),
             journal=_new_journal(),
@@ -4459,7 +4768,7 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
     payload = _signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
     raw_signal = _json_bytes(payload["signal_payload"])
     raw_feature = _json_bytes(payload["feature_row"])
-    executor = _StrictMicroLiveExecutor(
+    executor = _strict_executor(
         verified,
         transport=FakeTransport(),
         journal=_new_journal(),
@@ -4503,7 +4812,7 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
         name: raw.decode()
         for name, raw in BASE_PROVIDER_FEATURE_EVIDENCE.items()
     }
-    restored = _StrictMicroLiveExecutor.restore(
+    restored = _strict_restore(
         authorization=verified,
         transport=FakeTransport(),
         journal=executor._journal,
@@ -4552,7 +4861,7 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
     tampered_state["state_sha256"] = canonical_json_sha256(state_core)
     with pytest.raises(MicroLiveExecutionError, match="do not match semantic"):
         tampered_raw_state = _json_bytes(tampered_state)
-        _StrictMicroLiveExecutor.restore(
+        _strict_restore(
             authorization=verified,
             transport=FakeTransport(),
             journal=_journal_with_state(tampered_raw_state),
@@ -4597,14 +4906,14 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
         match="stored provider feature evidence",
     ):
         provider_tampered_raw_state = _json_bytes(provider_tampered_state)
-        _StrictMicroLiveExecutor.restore(
+        _strict_restore(
             authorization=verified,
             transport=FakeTransport(),
             journal=_journal_with_state(provider_tampered_raw_state),
             raw_state=provider_tampered_raw_state,
         )
 
-    parsed = _StrictMicroLiveExecutor(
+    parsed = _strict_executor(
         verified,
         transport=FakeTransport(),
         journal=_new_journal(),
@@ -4619,7 +4928,7 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
             market_identity_evidence=payload["market_identity_evidence"],
         )
 
-    duplicate = _StrictMicroLiveExecutor(
+    duplicate = _strict_executor(
         verified,
         transport=FakeTransport(),
         journal=_new_journal(),
@@ -4635,7 +4944,7 @@ def test_production_signal_boundary_requires_and_replays_exact_raw_bytes(
             market_identity_evidence=payload["market_identity_evidence"],
         )
 
-    overflow = _StrictMicroLiveExecutor(
+    overflow = _strict_executor(
         verified,
         transport=FakeTransport(),
         journal=_new_journal(),
@@ -7042,7 +7351,7 @@ def test_submit_crash_after_exchange_accept_before_result_fsync_recovers_unknown
     journal = _new_journal()
     transport = CrashAfterAcceptedSubmitTransport()
     executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
-    with pytest.raises(SimulatedProcessCrash):
+    with pytest.raises(ExecutionGatewayProcessTerminated):
         executor.submit_signal(
             **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
         )
@@ -7134,11 +7443,16 @@ def test_restore_completes_kill_to_cancel_unknown_without_duplicate_cancel(
 
 
 @pytest.mark.parametrize(
-    ("mode", "expected_cancel_calls", "expected_closed"),
+    ("mode", "expected_cancel_calls", "expected_closed", "expected_exception"),
     (
-        ("prepared_commit", 0, False),
-        ("accepted_before_result", 1, False),
-        ("result_commit", 1, True),
+        ("prepared_commit", 0, False, SimulatedProcessCrash),
+        (
+            "accepted_before_result",
+            1,
+            False,
+            ExecutionGatewayProcessTerminated,
+        ),
+        ("result_commit", 1, True, SimulatedProcessCrash),
     ),
 )
 def test_cancel_crash_boundaries_are_wal_recoverable(
@@ -7146,6 +7460,7 @@ def test_cancel_crash_boundaries_are_wal_recoverable(
     mode: str,
     expected_cancel_calls: int,
     expected_closed: bool,
+    expected_exception: type[BaseException],
 ) -> None:
     verified = _verified(authorized_fixture)
     journal = _crash_after_committed_event_journal(
@@ -7164,7 +7479,7 @@ def test_cancel_crash_boundaries_are_wal_recoverable(
         journal.arm("ORDER_CANCEL_PREPARED")
     elif mode == "result_commit":
         journal.arm("ORDER_CANCELED")
-    with pytest.raises(SimulatedProcessCrash):
+    with pytest.raises(expected_exception):
         executor.engage_kill_switch(
             reason="synthetic_crash_boundary",
             now_ts_ms=NOW_TS_MS + 1,
@@ -7468,7 +7783,7 @@ def test_gateway_replay_after_kill_before_dispatch_consumption_is_fenced(
     transport = CrashBeforeDispatchConsumptionTransport()
     executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
 
-    with pytest.raises(SimulatedProcessCrash):
+    with pytest.raises(ExecutionGatewayProcessTerminated):
         executor.submit_signal(
             **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
         )
@@ -7500,7 +7815,7 @@ def test_gateway_expired_dispatch_capability_fails_closed_before_venue(
     transport = CrashBeforeDispatchConsumptionTransport()
     executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
 
-    with pytest.raises(SimulatedProcessCrash):
+    with pytest.raises(ExecutionGatewayProcessTerminated):
         executor.submit_signal(
             **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
         )
@@ -7526,7 +7841,7 @@ def test_reconciliation_fence_cancels_unconsumed_dispatch_capability(
     transport = CrashBeforeDispatchConsumptionTransport()
     executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
 
-    with pytest.raises(SimulatedProcessCrash):
+    with pytest.raises(ExecutionGatewayProcessTerminated):
         executor.submit_signal(
             **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
         )
@@ -7562,7 +7877,7 @@ def test_abandoned_dispatching_state_remains_in_progress_after_deadline(
     transport = CrashAfterOutboxBeforeVenueTransport()
     executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
 
-    with pytest.raises(SimulatedProcessCrash):
+    with pytest.raises(ExecutionGatewayProcessTerminated):
         executor.submit_signal(
             **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
         )
@@ -7638,7 +7953,7 @@ def test_venue_accept_then_crash_recovers_across_gateway_restart(
         journal=journal,
     )
 
-    with pytest.raises(SimulatedProcessCrash):
+    with pytest.raises(ExecutionGatewayProcessTerminated):
         executor.submit_signal(
             **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
         )
@@ -7696,7 +8011,7 @@ def test_public_restart_recovery_without_venue_outcome_stays_unknown(
         transport=crashed_transport,
         journal=journal,
     )
-    with pytest.raises(SimulatedProcessCrash):
+    with pytest.raises(ExecutionGatewayProcessTerminated):
         executor.submit_signal(
             **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
         )
@@ -7750,7 +8065,7 @@ def test_public_restart_recovery_rejects_tampered_venue_outcome(
         transport=crashed_transport,
         journal=journal,
     )
-    with pytest.raises(SimulatedProcessCrash):
+    with pytest.raises(ExecutionGatewayProcessTerminated):
         executor.submit_signal(
             **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
         )
@@ -7896,7 +8211,7 @@ def test_public_restart_recovery_replays_lost_completion_ack(
         transport=crashed_transport,
         journal=journal,
     )
-    with pytest.raises(SimulatedProcessCrash):
+    with pytest.raises(ExecutionGatewayProcessTerminated):
         executor.submit_signal(
             **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
         )
@@ -8024,7 +8339,7 @@ def test_crash_after_outbox_before_venue_recovers_without_redispatch(
     transport = CrashAfterOutboxBeforeVenueTransport()
     executor = MicroLiveExecutor(verified, transport=transport, journal=journal)
 
-    with pytest.raises(SimulatedProcessCrash):
+    with pytest.raises(ExecutionGatewayProcessTerminated):
         executor.submit_signal(
             **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
         )
@@ -9006,11 +9321,12 @@ def test_missing_required_transport_operation_fails_before_startup_or_venue(
     authorized_fixture: dict[str, Any],
     startup_mode: str,
     missing_operation: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     verified = _verified(authorized_fixture)
     if startup_mode == "restore":
         journal = _new_journal()
-        healthy = _StrictMicroLiveExecutor(
+        healthy = _strict_executor(
             verified,
             transport=FakeTransport(),
             journal=journal,
@@ -9024,31 +9340,31 @@ def test_missing_required_transport_operation_fails_before_startup_or_venue(
 
     authority = _test_authority_backend(journal)
     claim_calls_before = authority.claim_calls
-    delegate = FakeTransport()
+    monkeypatch.setattr(
+        executor_module.DeploymentOwnedExecutionGatewayAdapter,
+        missing_operation,
+        None,
+    )
 
-    class MissingOperationTransport:
+    class CapturingTransport(FakeTransport):
         def __init__(self) -> None:
+            super().__init__()
             self.attestation_calls = 0
-
-        def __getattr__(self, name: str) -> Any:
-            if name == missing_operation:
-                raise AttributeError(name)
-            return getattr(delegate, name)
 
         def attest_execution_binding(self, request: dict[str, Any]) -> bytes:
             self.attestation_calls += 1
-            return delegate.attest_execution_binding(request)
+            return super().attest_execution_binding(request)
 
-    transport = MissingOperationTransport()
+    transport = CapturingTransport()
     with pytest.raises(MicroLiveExecutionError) as exc_info:
         if raw_state is None:
-            _StrictMicroLiveExecutor(
+            _strict_executor(
                 verified,
                 transport=transport,
                 journal=journal,
             )
         else:
-            _StrictMicroLiveExecutor.restore(
+            _strict_restore(
                 authorization=verified,
                 transport=transport,
                 journal=journal,
@@ -9059,13 +9375,13 @@ def test_missing_required_transport_operation_fails_before_startup_or_venue(
     assert missing_operation in str(exc_info.value)
     assert authority.claim_calls == claim_calls_before
     assert transport.attestation_calls == 0
-    assert delegate.submit_calls == []
-    assert delegate.recovery_lookup_calls == []
-    assert delegate.cancel_calls == []
-    assert delegate.lookup_calls == []
-    assert delegate.fill_cursor_calls == []
-    assert delegate.fence_calls == []
-    assert delegate.venue_idempotency_authority.outcomes_by_client_order_id == {}
+    assert transport.submit_calls == []
+    assert transport.recovery_lookup_calls == []
+    assert transport.cancel_calls == []
+    assert transport.lookup_calls == []
+    assert transport.fill_cursor_calls == []
+    assert transport.fence_calls == []
+    assert transport.venue_idempotency_authority.outcomes_by_client_order_id == {}
     if startup_mode == "construction":
         assert journal.state_path.exists() is False
         assert journal.risk_domain_receipt_path.exists() is False
@@ -9096,7 +9412,7 @@ def test_missing_required_authority_operation_fails_before_startup_or_venue(
     verified = _verified(authorized_fixture)
     if startup_mode == "restore":
         healthy_journal = _new_journal()
-        healthy = _StrictMicroLiveExecutor(
+        healthy = _strict_executor(
             verified,
             transport=FakeTransport(),
             journal=healthy_journal,
@@ -9129,13 +9445,13 @@ def test_missing_required_authority_operation_fails_before_startup_or_venue(
     transport = CapturingTransport()
     with pytest.raises(MicroLiveExecutionError) as exc_info:
         if raw_state is None:
-            _StrictMicroLiveExecutor(
+            _strict_executor(
                 verified,
                 transport=transport,
                 journal=journal,
             )
         else:
-            _StrictMicroLiveExecutor.restore(
+            _strict_restore(
                 authorization=verified,
                 transport=transport,
                 journal=journal,
@@ -9220,7 +9536,7 @@ def test_authority_operation_inventory_claim_is_signed_and_authorization_bound(
         MicroLiveExecutionError,
         match="lease signed receipt is invalid",
     ):
-        _StrictMicroLiveExecutor(
+        _strict_executor(
             verified,
             transport=transport,
             journal=journal,
@@ -9379,7 +9695,7 @@ def test_verified_authority_contract_drift_fails_before_construction_effects(
         MicroLiveExecutionError,
         match="authority capability is runtime-mismatched",
     ):
-        _StrictMicroLiveExecutor(
+        _strict_executor(
             verified,
             transport=transport,
             journal=journal,
@@ -9401,7 +9717,7 @@ def test_risk_domain_authority_backend_cannot_be_replaced_after_construction(
     verified = _verified(authorized_fixture)
     journal = _new_journal()
     transport = FakeTransport()
-    _StrictMicroLiveExecutor(
+    _strict_executor(
         verified,
         transport=transport,
         journal=journal,
@@ -9523,7 +9839,7 @@ def test_authorized_route_binding_mismatch_fails_before_startup_or_venue(
         MicroLiveExecutionError,
         match="authority route is authorization-mismatched",
     ):
-        _StrictMicroLiveExecutor(
+        _strict_executor(
             verified,
             transport=transport,
             journal=journal,
@@ -9623,7 +9939,7 @@ def test_execution_operation_inventory_binding_is_signed_and_startup_pinned(
     transport = FakeTransport(execution_binding_overrides={field: value})
 
     with pytest.raises(MicroLiveExecutionError, match="binding attestation"):
-        _StrictMicroLiveExecutor(
+        _strict_executor(
             verified,
             transport=transport,
             journal=journal,
@@ -9675,6 +9991,123 @@ def test_execution_authority_rejects_deployment_runtime_binding_drift(
         match="execution service authority binding is invalid",
     ):
         auth_module._validated_execution_service_authority(authority)
+
+
+def test_raw_execution_authority_rejects_non_deployment_gateway_route() -> None:
+    authority = _test_execution_authority_descriptor()
+    assert auth_module._validated_execution_service_authority(authority) == authority
+    authority["route_mode"] = "in_process_mutable_proxy"
+    with pytest.raises(
+        MicroLiveAuthorizationError,
+        match="execution service authority binding is invalid",
+    ):
+        auth_module._validated_execution_service_authority(authority)
+
+
+def test_deployment_owned_execution_route_derives_and_rechecks_actual_bytes(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    adapter = _test_execution_adapter(verified, FakeTransport(), journal)
+    descriptor = _test_execution_authority_descriptor()
+
+    assert (
+        adapter.adapter_implementation_sha256
+        == descriptor["adapter_implementation_sha256"]
+    )
+    assert adapter.configuration_sha256 == descriptor["configuration_sha256"]
+    assert adapter.route_mode == executor_module.EXECUTION_GATEWAY_ROUTE_MODE
+    assert adapter.route_binding_sha256 == descriptor["route_binding_sha256"]
+    assert "_delegate" not in adapter.__slots__
+    assert "_for_test_backend" not in vars(adapter.__class__)
+    assert "_local_test_backend" not in adapter.__slots__
+    with pytest.raises(
+        AttributeError,
+        match="execution gateway route is immutable",
+    ):
+        adapter._endpoint = "/tmp/mutated-execution-gateway.sock"
+
+    object.__setattr__(
+        adapter,
+        "_endpoint",
+        "/tmp/bypassed-execution-gateway.sock",
+    )
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="execution gateway route changed",
+    ):
+        adapter.assert_runtime_integrity()
+
+
+def test_mutable_execution_proxy_is_rejected_before_startup_or_venue(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    backend = FakeTransport()
+    adapter = _test_execution_adapter(verified, backend, journal)
+    authority_backend = _test_authority_backend(journal)
+
+    class MutableExecutionProxy:
+        def __init__(self) -> None:
+            self.delegate = adapter
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.delegate, name)
+
+    proxy = MutableExecutionProxy()
+    outer_object_id = id(proxy)
+    proxy.delegate = FakeTransport(fail_cancel=True)
+    assert id(proxy) == outer_object_id
+
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="deployment-owned execution gateway adapter is required",
+    ):
+        _StrictMicroLiveExecutor(
+            verified,
+            transport=proxy,
+            journal=journal,
+        )
+
+    assert authority_backend.claim_calls == 0
+    assert backend.submit_calls == []
+    assert backend.cancel_calls == []
+    assert journal.state_path.exists() is False
+    assert journal.risk_domain_receipt_path.exists() is False
+
+
+def test_authorized_execution_route_mismatch_fails_before_startup_or_venue(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    authorization = copy.deepcopy(authorized_fixture["authorization"])
+    authorization["execution_service_authority"][
+        "route_binding_sha256"
+    ] = "0" * 64
+    verified = _verified(
+        authorized_fixture,
+        authorization_override=authorization,
+    )
+    journal = _new_journal()
+    backend = _test_authority_backend(journal)
+    transport = FakeTransport()
+
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="execution gateway adapter implementation/configuration/route mismatch",
+    ):
+        _strict_executor(
+            verified,
+            transport=transport,
+            journal=journal,
+        )
+
+    assert backend.claim_calls == 0
+    assert transport.submit_calls == []
+    assert transport.cancel_calls == []
+    assert journal.state_path.exists() is False
+    assert journal.risk_domain_receipt_path.exists() is False
 
 
 def test_sha_shaped_unsigned_fill_watermark_fails_closed(
@@ -10235,7 +10668,7 @@ def test_external_kill_revokes_every_registered_execution_invocation(
     ] == ["FENCED", "FENCED"]
 
 
-def test_execution_transport_is_immutable_and_attestation_is_not_replayable(
+def test_execution_gateway_has_no_mutable_delegate_and_open_order_still_unwinds(
     authorized_fixture: dict[str, Any],
 ) -> None:
     verified = _verified(authorized_fixture)
@@ -10248,18 +10681,45 @@ def test_execution_transport_is_immutable_and_attestation_is_not_replayable(
             return self.attestation
 
     capturing = CapturingTransport()
-    executor = MicroLiveExecutor(verified, transport=capturing)
+    journal = _new_journal()
+    executor = MicroLiveExecutor(
+        verified,
+        transport=capturing,
+        journal=journal,
+    )
+    acknowledged = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    assert acknowledged["status"] == "ORDER_ACKNOWLEDGED"
     with pytest.raises(AttributeError):
         executor.transport = FakeTransport()  # type: ignore[misc]
     assert capturing.attestation is not None
-    swapped = FakeTransport()
-    executor._transport = swapped
-    with pytest.raises(MicroLiveExecutionError, match="capability changed"):
-        executor.submit_signal(
-            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
-        )
-    assert swapped.submit_calls == []
-    assert executor.reconciliation_snapshot()["kill_switch_active"] is True
+
+    gateway = executor._transport
+    assert gateway.__class__ is executor_module.DeploymentOwnedExecutionGatewayAdapter
+    assert "_for_test_backend" not in vars(gateway.__class__)
+    assert "_local_test_backend" not in gateway.__slots__
+    assert "_delegate" not in gateway.__slots__
+    with pytest.raises(
+        AttributeError,
+        match="execution gateway route is immutable",
+    ):
+        gateway._delegate = FakeTransport()
+    with pytest.raises(
+        AttributeError,
+        match="execution gateway route is immutable",
+    ):
+        gateway._endpoint = "/tmp/rebound-execution-gateway.sock"
+    gateway.assert_runtime_integrity()
+
+    killed = executor.engage_kill_switch(
+        reason="test-execution-gateway-route-remains-authoritative",
+        now_ts_ms=NOW_TS_MS + 1,
+    )
+    assert killed["status"] == "KILL_SWITCH_ENGAGED"
+    assert executor.reconciliation_snapshot()["open_order_count"] == 0
+    assert len(capturing.submit_calls) == 1
+    assert len(capturing.cancel_calls) == 1
 
     class ReplayTransport(FakeTransport):
         def attest_execution_binding(self, request: dict[str, Any]) -> bytes:
