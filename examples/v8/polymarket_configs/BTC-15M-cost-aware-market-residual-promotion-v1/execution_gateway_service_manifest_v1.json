@@ -1,0 +1,140 @@
+{
+  "automatic_authorization_or_launch": false,
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "credential_ownership_contract": {
+    "api_credentials_owner": "gateway_process_only",
+    "credential_file_mode": "0600",
+    "credential_material_over_rpc": false,
+    "private_key_owner": "gateway_process_only",
+    "receipt_signing_key_owner": "gateway_process_only"
+  },
+  "deployment_base_image_manifest_digest": "sha256:a074fac67aa01841fee592d00bae14d25dcaf98ef6e12a683ecceb7e0147e2d1",
+  "concrete_clob_contract_test": {
+    "path": "tests/v8/test_residual_promotion_execution_gateway.py",
+    "sha256": "a7a9eb3078f086adb7ce819b584e18a79f00676b75202475ef5ce3b2d10db01c"
+  },
+  "durability_contract": {
+    "atomic_replace": true,
+    "checked_write_all": true,
+    "collision_safe_same_directory_temporary_file": true,
+    "directory_fsync": true,
+    "dispatched_replay_atomically_persists_terminal_and_venue_outcome": true,
+    "dispatched_replay_enables_cancel_and_fill_cursor_after_restart": true,
+    "dispatched_replay_requires_exact_request_and_prepared_identity": true,
+    "dispatched_replay_zero_additional_venue_submissions": true,
+    "file_fsync_before_replace": true,
+    "fenced_prevenue_rejection_persisted": true,
+    "fenced_rejection_exact_bytes_replayed_after_response_loss": true,
+    "fenced_rejection_restart_replay_is_deterministic": true,
+    "fenced_rejection_uses_current_durable_prepared_identity": true,
+    "fenced_vs_dispatched_status_preserved": true,
+    "last_complete_state_readable_after_injected_failure": true,
+    "prepared_signed_order_persisted_before_venue_write": true,
+    "restart_session_registry_persisted": true,
+    "same_pid_stale_temporary_file_cannot_block_restart": true,
+    "uncommitted_temporary_file_removed_on_caught_failure": true,
+    "venue_recovery_lookup_only": true,
+    "dispatched_not_found_remains_unknown": true
+  },
+  "durable_order_ownership_contract": {
+    "acknowledged_cancel_required": true,
+    "authorization_and_session_identity_exact": true,
+    "business_key_market_and_token_exact": true,
+    "client_order_id_exact": true,
+    "fill_cursor_uses_durable_order_identity": true,
+    "lookup_uses_durable_order_identity": true,
+    "prepared_exchange_order_hash_exact": true,
+    "unknown_or_foreign_order_fails_before_venue_call": true
+  },
+  "execution_gateway_runtime_lock": {
+    "path": "examples/v8/residual_promotion_execution_gateway-linux-x86_64.lock.txt",
+    "sha256": "444b692c476dc48cff1aa3a2eb18970b2addb162502c0277e5bd7d7709b6cdd8"
+  },
+  "frozen_model_runtime_lock": {
+    "path": "examples/v8/residual_promotion_runtime-linux-x86_64.lock.txt",
+    "sha256": "aca8c2e21202f25d9132cf2ef14132bbc12db05c9f775635869f7c501320d335"
+  },
+  "gateway_implementation": {
+    "path": "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
+    "sha256": "e15e609694d668330bca645f600f408040cefdefa7bb47da2e39cfe42daef9f4"
+  },
+  "gateway_process_integration_test": {
+    "path": "tests/v8/test_residual_promotion_micro_live_executor.py",
+    "sha256": "cbc32eab8afca47cf07e9a6a7b155bed63d38931a12b8b738c46636792733b79"
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "model_or_gate_bytes_changed": false,
+  "production_economics_compatible": false,
+  "production_entrypoint": "bigan.v8.polymarket.residual_promotion_execution_gateway.run_production_execution_gateway",
+  "production_types": {
+    "backend": "DeploymentOwnedExecutionGatewayBackend",
+    "receipt_signer": "RsaSha256ReceiptSigner",
+    "server": "DeploymentOwnedExecutionGatewayServer",
+    "venue": "PolymarketClobV2VenueBoundary"
+  },
+  "py_clob_client_v2_source": {
+    "repository": "https://github.com/Polymarket/py-clob-client-v2",
+    "source_commit": "215fc63a8fd6ec3a10c7edb73997c9772d8686d3",
+    "source_requirements_sha256": "c8846755ca05b863fb476eaa29769add5c4305c1c7761cea1640efb234eace8d",
+    "source_setup_sha256": "c6d30329d3555b031048597bfbdf2923e9902350a67d482e7bea9359d0b7c863",
+    "version": "1.1.0"
+  },
+  "py_clob_client_v2_wheel_sbom": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/py_clob_client_v2_wheel_sbom_v1.json",
+    "sha256": "4230d323a9b90720c29f371221d12dad68ea2d7fd11dc608612d9c9f329b93d5"
+  },
+  "runtime_identity_contract": {
+    "api_credentials_identity_derived_at_runtime": true,
+    "exchange_account_derived_from_funder_and_signature_type": true,
+    "exchange_endpoint_derived_from_host_and_chain_id": true,
+    "gateway_implementation_digest_included": true,
+    "signer_identity_derived_from_private_key": true,
+    "venue_configuration_digest_included": true
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-execution-gateway-service-manifest-v1",
+  "security_state": "NOT_INDEPENDENTLY_REVIEWED_NO_GO",
+  "service_deadline_contract": {
+    "authority_client_authentication_and_frame_share_total_deadline": true,
+    "authority_client_timeout_reaps_socket_without_worker_thread": true,
+    "authenticated_handshake_is_bounded": true,
+    "authenticated_payload_receive_is_bounded": true,
+    "complete_frame_header_and_body_share_total_deadline": true,
+    "connection_admission_is_reclaimed_after_partial_frame_timeout": true,
+    "execution_gateway_client_authentication_and_frame_share_total_deadline": true,
+    "execution_gateway_client_deadline_in_configuration_identity": true,
+    "execution_gateway_client_deadline_matches_authorization": true,
+    "execution_gateway_client_deadline_rechecked_before_every_operation": true,
+    "execution_gateway_client_deadline_signed_in_session_binding": true,
+    "execution_gateway_client_timeout_reaps_socket_without_worker_thread": true,
+    "fence_and_cancel_have_reserved_independent_admission": true,
+    "maximum_call_duration_is_service_enforced": true,
+    "mutating_lane_admission_is_retained_until_worker_completion": true,
+    "parked_connection_cannot_block_accept_loop": true,
+    "read_only_lane_admission_is_reclaimed_at_rpc_deadline": true,
+    "read_recovery_cannot_consume_fence_or_cancel_admission": true,
+    "slow_prepare_can_be_fenced_before_dispatch": true,
+    "slow_submit_cannot_block_fence_or_stop": true
+  },
+  "strict_json_duplicate_keys_rejected": true,
+  "venue_economics_transition_authorized": false,
+  "venue_economics_transition_blocker": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/venue_economics_transition_blocker_v1.json",
+    "sha256": "348c4237a1734da5c93eafc36c2b38f0ad260510839a62684dd0326aa25e0d52"
+  },
+  "wallet_signing_allowed": false,
+  "polymarket_write_allowed": false,
+  "capital_at_risk": false
+}

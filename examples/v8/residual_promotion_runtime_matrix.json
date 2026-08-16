@@ -1,0 +1,13 @@
+{
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "deployment_image_manifest_digest": "sha256:a074fac67aa01841fee592d00bae14d25dcaf98ef6e12a683ecceb7e0147e2d1",
+  "implementation": "CPython",
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "numpy_version": "2.4.6",
+  "python_version": "3.12.4",
+  "requirements_lock_sha256": "aca8c2e21202f25d9132cf2ef14132bbc12db05c9f775635869f7c501320d335",
+  "runtime_lock_sha256": "74036bc0c40ca2552e44074310f85ecf807bb51557ffad99eb815f97e6158bcb",
+  "schema_version": "bigan-btc-15m-residual-promotion-runtime-matrix-v2",
+  "scipy_version": "1.17.1",
+  "xgboost_version": "3.2.0"
+}

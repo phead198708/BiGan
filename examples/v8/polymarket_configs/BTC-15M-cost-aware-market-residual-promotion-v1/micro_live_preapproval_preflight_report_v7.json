@@ -1,0 +1,66 @@
+{
+  "automatic_live_unlock": false,
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "capital_at_risk": false,
+  "created_at": "2026-08-11T00:00:00Z",
+  "evidence_file_descriptors": {
+    "operational_rollback": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/operational_rollback_drill_report.json",
+      "sha256": "2ded6e98ba341f755bf3733493f102fe642597524fdf2d6989d422d9f4d7b5fa"
+    }
+  },
+  "evidence_sha256": {
+    "operational_rollback": "d02e7e91073c22331a4b330a2411b44656e774a8ed5438cb03bfe38b3bfde4d9"
+  },
+  "explicit_human_approval_recorded": false,
+  "failed_or_missing_checks": [
+    "fresh_confirmation",
+    "phase6_zero_capital_pipeline",
+    "security_review",
+    "shadow_stability_and_monitoring"
+  ],
+  "fresh_outcomes_accessed": false,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "micro_live_authorized": false,
+  "micro_live_started": false,
+  "phase6_one_percent_live_stage_executed": false,
+  "phase6_zero_capital_pipeline_passed": false,
+  "pnl_accessed": false,
+  "polymarket_write_allowed": false,
+  "preapproval_contract_sha256": "8c54953aa308dddb13a6b9c7b484dd4aa6a56d235f04b203a30646758640cd42",
+  "preflight_only": true,
+  "ready_to_request_micro_live_approval": false,
+  "requested_initial_capital_fraction": 0.01,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-micro-live-preapproval-preflight-v7",
+  "security_review_independent_and_exact_head": false,
+  "security_review_independent_exact_head_and_executor_bound": false,
+  "security_review_protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/security_review_protocol_v2.json",
+    "sha256": "9fcb6172d4bd93848a16c6a31ea0277588c6719e0b903ce97f1f969685afd402"
+  },
+  "settlement_accessed": false,
+  "status": "NO_GO_PREREQUISITES_INCOMPLETE",
+  "technical_checks": {
+    "fresh_confirmation": false,
+    "functional_rollback": true,
+    "operational_rollback": true,
+    "phase6_zero_capital_pipeline": false,
+    "runtime_parity": true,
+    "security_review": false,
+    "shadow_stability_and_monitoring": false
+  },
+  "wallet_signing_allowed": false
+}

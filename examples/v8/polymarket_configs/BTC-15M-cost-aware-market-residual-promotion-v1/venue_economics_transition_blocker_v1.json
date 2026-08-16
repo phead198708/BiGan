@@ -1,0 +1,73 @@
+{
+  "automatic_authorization_or_launch": false,
+  "blocker_status": "GOVERNED_COST_AND_CANDIDATE_TRANSITION_REQUIRED",
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "created_at": "2026-08-16T00:00:00Z",
+  "frozen_inputs": {
+    "calibration_action_adapter": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/calibration_action_adapter.json",
+      "sha256": "e820fbe60635b697ffca831bb07d9c9b5d88e785c09db667514d7f802dc94781"
+    },
+    "candidate_bundle": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/bundle_manifest.json",
+      "sha256": "7a5b872b5a2a010a0868bf7d22fb4bdc39a941dd04464bb53890d34aa1846b3e"
+    },
+    "cost_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_cost_and_action_contract.json",
+      "sha256": "7a2d2f170cd6b042188f8282014dfbfb7d379e49085bd00807aace1881d7bf43"
+    },
+    "prospective_statistical_protocol": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/prospective_statistical_protocol.json",
+      "sha256": "d8b8af9afc2d7d79124e89ec5d92fefea46b1c35b510fbd4612f626df7fac4d1"
+    },
+    "reviewed_head_executor": {
+      "path": "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py",
+      "reviewed_commit": "2bd7a00f78ea07e6973a6ef31ba7b8e2e096608f",
+      "sha256_at_reviewed_commit": "88bffdb7ebcd3d9ee4a9762bd249a59e42ea1379b527e7a1b8775ee975d124ba"
+    }
+  },
+  "incompatibilities": {
+    "dynamic_taker_fee_formula_bound_end_to_end": false,
+    "frozen_fee_per_share_usd": "0.0002",
+    "frozen_quantity": "1",
+    "live_minimum_order_size_observed_in_review": "5",
+    "market_fee_descriptor_observed_in_review": {
+      "exponent": 1,
+      "rate": "0.07",
+      "taker_only": true
+    },
+    "minimum_order_size_satisfied": false,
+    "production_economics_compatible": false,
+    "venue_fee_rounding_bound_end_to_end": false
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "required_governed_transition": {
+    "actual_market_mos_mts_and_fee_descriptor_bound_to_intent": true,
+    "candidate_or_cost_contract_transition_authorization_required": true,
+    "existing_opened_promotion_evidence_reusable": false,
+    "fresh_prospective_evidence_required": true,
+    "full_boundary_to_executor_economics_test_required": true,
+    "loss_cap_compatible_minimum_size_required": true,
+    "single_fee_implementation_across_scorer_evaluator_risk_and_gateway_required": true
+  },
+  "review_source": {
+    "comment_id": 5302701435,
+    "comment_url": "https://github.com/phead198708/BiGan/pull/295#issuecomment-5302701435",
+    "exact_reviewed_commit": "2bd7a00f78ea07e6973a6ef31ba7b8e2e096608f",
+    "pull_request": 295
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-venue-economics-transition-blocker-v1"
+}

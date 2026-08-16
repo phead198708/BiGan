@@ -1,0 +1,110 @@
+{
+  "authorized_report_schema_version": "bigan-btc-15m-residual-promotion-independent-security-review-report-v3",
+  "candidate_bundle": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/bundle_manifest.json",
+    "sha256": "7a5b872b5a2a010a0868bf7d22fb4bdc39a941dd04464bb53890d34aa1846b3e"
+  },
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "capital_at_risk": false,
+  "ci": null,
+  "controls": {
+    "artifact_hash_and_candidate_identity": {
+      "evidence": [],
+      "notes": null,
+      "status": "NOT_REVIEWED"
+    },
+    "audit_log_integrity_and_restart_recovery": {
+      "evidence": [],
+      "notes": null,
+      "status": "NOT_REVIEWED"
+    },
+    "authorization_separation_and_exact_payload_binding": {
+      "evidence": [],
+      "notes": null,
+      "status": "NOT_REVIEWED"
+    },
+    "btc_15m_market_allowlist": {
+      "evidence": [],
+      "notes": null,
+      "status": "NOT_REVIEWED"
+    },
+    "capability_gate_and_frozen_runtime_signal_binding": {
+      "evidence": [],
+      "notes": null,
+      "status": "NOT_REVIEWED"
+    },
+    "conflicting_duplicate_fail_closed": {
+      "evidence": [],
+      "notes": null,
+      "status": "NOT_REVIEWED"
+    },
+    "credential_and_wallet_isolation": {
+      "evidence": [],
+      "notes": null,
+      "status": "NOT_REVIEWED"
+    },
+    "idempotent_order_and_business_identity": {
+      "evidence": [],
+      "notes": null,
+      "status": "NOT_REVIEWED"
+    },
+    "kill_switch_and_operator_heartbeat": {
+      "evidence": [],
+      "notes": null,
+      "status": "NOT_REVIEWED"
+    },
+    "one_percent_cap_and_no_automatic_launch": {
+      "evidence": [],
+      "notes": null,
+      "status": "NOT_REVIEWED"
+    },
+    "order_fill_position_cash_settlement_reconciliation": {
+      "evidence": [],
+      "notes": null,
+      "status": "NOT_REVIEWED"
+    },
+    "rollback_to_no_trade": {
+      "evidence": [],
+      "notes": null,
+      "status": "NOT_REVIEWED"
+    },
+    "write_surface_deny_by_default": {
+      "evidence": [],
+      "notes": null,
+      "status": "NOT_REVIEWED"
+    }
+  },
+  "created_at": "2026-08-11T00:00:00Z",
+  "explicit_human_approval_recorded": false,
+  "findings": null,
+  "implementation_author_logins": [],
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "live_trading_allowed": false,
+  "micro_live_authorized": false,
+  "phase6_zero_capital_authorized": false,
+  "polymarket_write_allowed": false,
+  "reviewed_commit_sha": null,
+  "reviewer": null,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-independent-security-review-template-v3",
+  "scope_manifest": null,
+  "security_review_passed": false,
+  "security_review_protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/security_review_protocol_v2.json",
+    "sha256": "9fcb6172d4bd93848a16c6a31ea0277588c6719e0b903ce97f1f969685afd402"
+  },
+  "template_is_executable": false,
+  "wallet_signing_allowed": false
+}
