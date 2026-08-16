@@ -3933,6 +3933,7 @@ class _ProcessMockVenueBoundary:
         lookup_stalled: Any | None = None,
         release_lookup: Any | None = None,
         lookup_requests: Any | None = None,
+        fill_cursor_open_before_cancel: bool = False,
     ) -> None:
         self.fail_submit = fail_submit
         self.prepare_stalled = prepare_stalled
@@ -3944,12 +3945,16 @@ class _ProcessMockVenueBoundary:
         self.lookup_stalled = lookup_stalled
         self.release_lookup = release_lookup
         self.lookup_requests = lookup_requests
+        self.fill_cursor_open_before_cancel = fill_cursor_open_before_cancel
         self.outcomes: dict[str, bytes] = {}
         self.requests: dict[str, dict[str, Any]] = {}
+        self.canceled_client_order_ids: set[str] = set()
         self.submit_calls = 0
         self.recovery_calls = 0
         self.fence_calls = 0
         self.cancel_calls = 0
+        self.lookup_calls = 0
+        self.fill_cursor_calls = 0
 
     @property
     def runtime_binding(self) -> dict[str, Any]:
@@ -4055,6 +4060,7 @@ class _ProcessMockVenueBoundary:
 
     def cancel(self, request: dict[str, Any]) -> bytes:
         self.cancel_calls += 1
+        self.canceled_client_order_ids.add(request["client_order_id"])
         return _json_bytes(
             {
                 "client_order_id": request["client_order_id"],
@@ -4064,6 +4070,7 @@ class _ProcessMockVenueBoundary:
         )
 
     def lookup(self, request: dict[str, Any]) -> bytes:
+        self.lookup_calls += 1
         submitted = self.requests[request["client_order_id"]]
         if self.lookup_requests is not None:
             self.lookup_requests.put(copy.deepcopy(request))
@@ -4123,8 +4130,16 @@ class _ProcessMockVenueBoundary:
         )
 
     def read_fill_cursor(self, request: dict[str, Any]) -> bytes:
-        submitted = self.requests[request["client_order_id"]]
+        self.fill_cursor_calls += 1
+        submitted = self.requests.get(request["client_order_id"], request)
         observed_at = int(request["request_started_at_ts_ms"])
+        status = (
+            "OPEN"
+            if self.fill_cursor_open_before_cancel
+            and request["client_order_id"] not in self.canceled_client_order_ids
+            else "CANCELED"
+        )
+        effective_at = observed_at if status == "CANCELED" else None
         response = {
             "schema_version": executor_module.EXECUTION_CURSOR_SCHEMA_VERSION,
             "authorization_id": request["authorization_id"],
@@ -4137,14 +4152,14 @@ class _ProcessMockVenueBoundary:
             "exchange_order_id": request["exchange_order_id"],
             "market_id": submitted["market_id"],
             "token_id": submitted["token_id"],
-            "status": "CANCELED",
+            "status": status,
             "observed_at_ts_ms": observed_at,
-            "effective_at_ts_ms": observed_at,
+            "effective_at_ts_ms": effective_at,
             "cumulative_filled_quantity": "0",
-            "final_fill_event_sequence": 0,
-            "final_fill_count": 0,
+            "final_fill_event_sequence": 0 if effective_at is not None else None,
+            "final_fill_count": 0 if effective_at is not None else None,
             "final_fill_watermark": None,
-            "fill_delivery_complete": True,
+            "fill_delivery_complete": effective_at is not None,
             "fill_events": [],
         }
         response["final_fill_watermark"] = (
@@ -4170,6 +4185,7 @@ def _isolated_execution_gateway_process(
     lookup_stalled: Any | None = None,
     release_lookup: Any | None = None,
     lookup_requests: Any | None = None,
+    fill_cursor_open_before_cancel: bool = False,
 ) -> None:
     """Run the exact production server; mock only its outer venue boundary."""
 
@@ -4195,6 +4211,7 @@ def _isolated_execution_gateway_process(
         lookup_stalled=lookup_stalled,
         release_lookup=release_lookup,
         lookup_requests=lookup_requests,
+        fill_cursor_open_before_cancel=fill_cursor_open_before_cancel,
     )
     config = ExecutionGatewayServiceConfig(
         endpoint=endpoint,
@@ -4220,6 +4237,8 @@ def _isolated_execution_gateway_process(
                 "recovery_calls": venue.recovery_calls,
                 "fence_calls": venue.fence_calls,
                 "cancel_calls": venue.cancel_calls,
+                "lookup_calls": venue.lookup_calls,
+                "fill_cursor_calls": venue.fill_cursor_calls,
             }
         )
 
@@ -4484,6 +4503,7 @@ def _cancel_request(submitted: dict[str, Any]) -> dict[str, Any]:
     core = {
         "authorization_id": submitted["authorization_id"],
         "client_order_id": submitted["client_order_id"],
+        "business_key": submitted["business_key"],
         "exchange_order_id": f"exchange-{submitted['client_order_id'][:12]}",
         "market_id": submitted["market_id"],
         "token_id": submitted["token_id"],
@@ -4683,6 +4703,7 @@ def test_stalled_read_lane_cannot_starve_fence_cancel_or_stop(
         lookup_request = {
             "authorization_id": submitted["authorization_id"],
             "client_order_id": submitted["client_order_id"],
+            "business_key": submitted["business_key"],
             "exchange_order_id": f"exchange-{submitted['client_order_id'][:12]}",
             "market_id": submitted["market_id"],
             "token_id": submitted["token_id"],
@@ -4772,6 +4793,166 @@ def test_stalled_read_lane_cannot_starve_fence_cancel_or_stop(
         shutil.rmtree(socket_root)
     assert process_exitcode == 0
     assert final["cancel_calls"] == 1
+
+
+def test_durable_order_ownership_blocks_foreign_cancel_lookup_and_fill(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    context = multiprocessing.get_context("fork")
+    socket_root = Path(tempfile.mkdtemp(prefix="bigan-egw-ownership-", dir="/tmp"))
+    endpoint = str(socket_root / "gateway.sock")
+    credential = b"bigan-order-ownership-gateway-credential-v1"
+    maximum_call_duration_ms = 1_000
+    execution_authority = _test_execution_authority_descriptor(
+        endpoint=endpoint,
+        credential=credential,
+        maximum_call_duration_ms=maximum_call_duration_ms,
+    )
+    ready = context.Event()
+    stop = context.Event()
+    audit = context.Queue()
+    submitted_requests = context.Queue()
+    process = context.Process(
+        target=_isolated_execution_gateway_process,
+        args=(
+            endpoint,
+            credential,
+            execution_authority,
+            False,
+            ready,
+            stop,
+            audit,
+            None,
+            None,
+            submitted_requests,
+        ),
+    )
+    process.start()
+    assert ready.wait(timeout=5)
+    try:
+        owner, submitted = _submitted_process_gateway_executor(
+            authorized_fixture,
+            endpoint=endpoint,
+            credential=credential,
+            execution_authority=execution_authority,
+            submitted_requests=submitted_requests,
+        )
+
+        def changed_cancel(**changes: Any) -> dict[str, Any]:
+            request = _cancel_request(submitted)
+            request.update(changes)
+            core = {
+                key: value
+                for key, value in request.items()
+                if key != "cancel_intent_id"
+            }
+            request["cancel_intent_id"] = canonical_json_sha256(core)
+            return request
+
+        invalid_cancel_requests = (
+            changed_cancel(client_order_id="f" * 64),
+            changed_cancel(exchange_order_id="exchange-foreign-order"),
+            changed_cancel(authorization_id="e" * 64),
+            changed_cancel(business_key="foreign-business-key"),
+            changed_cancel(market_id="0x" + "12" * 32),
+            changed_cancel(token_id="999999"),
+        )
+        for request in invalid_cancel_requests:
+            with pytest.raises(MicroLiveExecutionError):
+                owner._bounded_transport_call(
+                    operation="cancel_order",
+                    request=request,
+                )
+
+        lookup_request = {
+            "authorization_id": submitted["authorization_id"],
+            "client_order_id": submitted["client_order_id"],
+            "business_key": submitted["business_key"],
+            "exchange_order_id": "exchange-foreign-order",
+            "market_id": submitted["market_id"],
+            "token_id": submitted["token_id"],
+            "lookup_purpose": "durable_ownership_regression",
+        }
+        with pytest.raises(MicroLiveExecutionError):
+            owner._bounded_transport_call(
+                operation="lookup_order",
+                request=lookup_request,
+            )
+
+        fill_request = {
+            "authorization_id": submitted["authorization_id"],
+            "execution_service_binding_sha256": (
+                owner._authorization.execution_service_binding_sha256
+            ),
+            "client_order_id": submitted["client_order_id"],
+            "business_key": submitted["business_key"],
+            "exchange_order_id": f"exchange-{submitted['client_order_id'][:12]}",
+            "market_id": submitted["market_id"],
+            "token_id": "999999",
+            "request_started_at_ts_ms": NOW_TS_MS + 1,
+        }
+        with pytest.raises(MicroLiveExecutionError):
+            owner._bounded_transport_call(
+                operation="read_order_fill_cursor",
+                request=fill_request,
+            )
+
+        foreign_authorization = copy.deepcopy(authorized_fixture["authorization"])
+        foreign_authorization["execution_service_authority"] = execution_authority
+        foreign_verified = _verified(
+            authorized_fixture,
+            foreign_authorization,
+            execution_call_duration_ms=maximum_call_duration_ms,
+        )
+        foreign = _StrictMicroLiveExecutor(
+            foreign_verified,
+            transport=_execution_adapter_for_serialized_route(
+                foreign_verified,
+                endpoint=endpoint,
+                credential=credential,
+            ),
+            journal=_new_journal(),
+        )
+        with pytest.raises(MicroLiveExecutionError):
+            foreign._bounded_transport_call(
+                operation="cancel_order",
+                request=_cancel_request(submitted),
+            )
+
+        valid_cancel = json.loads(
+            owner._bounded_transport_call(
+                operation="cancel_order",
+                request=_cancel_request(submitted),
+            )
+        )
+        assert valid_cancel["status"] == "CANCEL_REQUESTED"
+    finally:
+        stop.set()
+        with contextlib.suppress(Exception):
+            wake = Client(endpoint, family="AF_UNIX", authkey=credential)
+            wake.close()
+        process.join(timeout=5)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        final: dict[str, Any] | None = None
+        while True:
+            record = audit.get(timeout=2)
+            if record["operation"] == "FINAL":
+                final = record
+                break
+        audit.close()
+        audit.cancel_join_thread()
+        submitted_requests.close()
+        submitted_requests.cancel_join_thread()
+        process_exitcode = process.exitcode
+        process.close()
+        shutil.rmtree(socket_root)
+    assert process_exitcode == 0
+    assert final is not None
+    assert final["cancel_calls"] == 1
+    assert final["lookup_calls"] == 0
+    assert final["fill_cursor_calls"] == 0
 
 
 def _json(path: Path) -> dict[str, Any]:
@@ -8398,6 +8579,147 @@ def test_serialized_gateway_route_works_in_a_genuinely_separate_process(
         assert "recover_order_submission" in operations
         assert final["recovery_calls"] == 1
         assert final["cancel_calls"] == 1
+
+
+def test_gateway_restart_ignores_stale_temp_and_preserves_owned_cancel(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    context = multiprocessing.get_context("fork")
+    socket_root = Path(tempfile.mkdtemp(prefix="bigan-egw-durable-restart-", dir="/tmp"))
+    endpoint = str(socket_root / "gateway.sock")
+    credential = b"bigan-durable-restart-gateway-credential-v1"
+    execution_authority = _test_execution_authority_descriptor(
+        endpoint=endpoint,
+        credential=credential,
+        maximum_call_duration_ms=_CORRECTNESS_TEST_CALL_DURATION_MS,
+    )
+    authorization = copy.deepcopy(authorized_fixture["authorization"])
+    authorization["execution_service_authority"] = execution_authority
+    verified = _verified(
+        authorized_fixture,
+        authorization,
+        execution_call_duration_ms=_CORRECTNESS_TEST_CALL_DURATION_MS,
+    )
+    journal = _new_journal()
+
+    def stop_gateway(process: Any, stop: Any, audit: Any) -> list[dict[str, Any]]:
+        stop.set()
+        with contextlib.suppress(Exception):
+            wake = Client(endpoint, family="AF_UNIX", authkey=credential)
+            wake.close()
+        process.join(timeout=10)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        assert process.exitcode == 0
+        records: list[dict[str, Any]] = []
+        while True:
+            record = audit.get(timeout=5)
+            records.append(record)
+            if record["operation"] == "FINAL":
+                return records
+
+    first_ready = context.Event()
+    first_stop = context.Event()
+    first_audit = context.Queue()
+    first_process = context.Process(
+        target=_isolated_execution_gateway_process,
+        args=(
+            endpoint,
+            credential,
+            execution_authority,
+            False,
+            first_ready,
+            first_stop,
+            first_audit,
+        ),
+    )
+    first_process.start()
+    assert first_ready.wait(timeout=5)
+    try:
+        executor = _StrictMicroLiveExecutor(
+            verified,
+            transport=_execution_adapter_for_serialized_route(
+                verified,
+                endpoint=endpoint,
+                credential=credential,
+            ),
+            journal=journal,
+        )
+        acknowledged = executor.submit_signal(
+            raw_signal_payload=_json_bytes(
+                _signal(
+                    candidate_bundle_sha256=verified.candidate_bundle_sha256
+                )["signal_payload"]
+            ),
+            raw_feature_row=_json_bytes(BASE_FEATURE_ROW),
+            provider_feature_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
+            now_ts_ms=NOW_TS_MS,
+            operator_heartbeat_ts_ms=NOW_TS_MS,
+            market_identity_evidence=_market_identity_evidence(BASE_SIGNAL_PAYLOAD),
+        )
+        client_order_id = acknowledged["client_order_id"]
+        raw_state = journal.snapshot().raw_state
+        first_records = stop_gateway(first_process, first_stop, first_audit)
+        assert first_records[-1]["submit_calls"] == 1
+
+        stale_temp = socket_root / (
+            f".gateway-state.json.{os.getpid()}.hard-kill.tmp"
+        )
+        stale_temp.write_bytes(b'{"schema_version":"truncated"')
+
+        second_ready = context.Event()
+        second_stop = context.Event()
+        second_audit = context.Queue()
+        second_process = context.Process(
+            target=_isolated_execution_gateway_process,
+            kwargs={
+                "endpoint": endpoint,
+                "credential": credential,
+                "execution_authority": execution_authority,
+                "fail_submit": False,
+                "ready": second_ready,
+                "stop": second_stop,
+                "audit": second_audit,
+                "fill_cursor_open_before_cancel": True,
+            },
+        )
+        second_process.start()
+        assert second_ready.wait(timeout=5)
+        try:
+            restored = _StrictMicroLiveExecutor.restore(
+                authorization=verified,
+                transport=_execution_adapter_for_serialized_route(
+                    verified,
+                    endpoint=endpoint,
+                    credential=credential,
+                ),
+                journal=journal,
+                raw_state=raw_state,
+            )
+            assert restored.reconciliation_snapshot()["open_order_count"] == 1
+            retried = restored.engage_kill_switch(
+                reason="gateway_restart_unwind",
+                now_ts_ms=NOW_TS_MS + 1,
+            )
+            assert retried["canceled_client_order_ids"] == [client_order_id]
+            assert restored.reconciliation_snapshot()["open_order_count"] == 0
+            assert stale_temp.read_bytes() == b'{"schema_version":"truncated"'
+        finally:
+            second_records = stop_gateway(
+                second_process,
+                second_stop,
+                second_audit,
+            )
+        second_final = second_records[-1]
+        assert second_final["cancel_calls"] == 1
+        assert second_final["fill_cursor_calls"] == 1
+    finally:
+        if first_process.is_alive():
+            stop_gateway(first_process, first_stop, first_audit)
+        with contextlib.suppress(FileNotFoundError):
+            Path(endpoint).unlink()
+        shutil.rmtree(socket_root)
 
 
 def test_separate_process_slow_venue_does_not_starve_fence_or_stop(

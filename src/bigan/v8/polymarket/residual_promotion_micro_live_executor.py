@@ -8547,6 +8547,7 @@ class MicroLiveExecutor:
                 cancel_core = {
                     "authorization_id": self._authorization.authorization_id,
                     "client_order_id": order["prepared"]["client_order_id"],
+                    "business_key": order["prepared"]["business_key"],
                     "exchange_order_id": order["acknowledgement"]["exchange_order_id"],
                     "market_id": order["prepared"]["market_id"],
                     "token_id": order["prepared"]["token_id"],
@@ -8836,6 +8837,7 @@ class MicroLiveExecutor:
                         cancel_core = {
                             "authorization_id": self._authorization.authorization_id,
                             "client_order_id": order["prepared"]["client_order_id"],
+                            "business_key": order["prepared"]["business_key"],
                             "exchange_order_id": order["acknowledgement"][
                                 "exchange_order_id"
                             ],
@@ -9433,6 +9435,7 @@ class MicroLiveExecutor:
             expected = {
                 "authorization_id",
                 "client_order_id",
+                "business_key",
                 "exchange_order_id",
                 "market_id",
                 "token_id",
@@ -9448,6 +9451,7 @@ class MicroLiveExecutor:
             if not (
                 payload.get("authorization_id") == self._authorization.authorization_id
                 and _is_sha256(payload.get("client_order_id"))
+                and _is_sha256(payload.get("business_key"))
                 and isinstance(payload.get("exchange_order_id"), str)
                 and payload["exchange_order_id"]
                 and isinstance(payload.get("market_id"), str)
@@ -10461,6 +10465,7 @@ class MicroLiveExecutor:
                         or order["cancel_prepared"] is not None
                         or order["closed_status"] is not None
                         or payload.get("client_order_id") != prepared["client_order_id"]
+                        or payload.get("business_key") != prepared["business_key"]
                         or payload.get("exchange_order_id")
                         != acknowledgement["exchange_order_id"]
                         or payload.get("market_id") != prepared["market_id"]

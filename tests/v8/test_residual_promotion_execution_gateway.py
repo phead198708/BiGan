@@ -5,12 +5,15 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import os
+import stat
 from pathlib import Path
 from typing import Any
 
 import pytest
 from eth_account import Account
 
+from bigan.v8.polymarket import residual_promotion_execution_gateway as gateway_module
 from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.residual_promotion_execution_gateway import (
     ExecutionGatewayError,
@@ -468,3 +471,98 @@ def test_concrete_runtime_binding_rejects_every_identity_drift_before_service(
             tmp_path / "wrong-endpoint",
             host="https://not-polymarket.invalid",
         )
+
+
+def test_durable_gateway_state_write_all_handles_short_regular_file_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = (tmp_path / "gateway-state.json").resolve()
+    state = gateway_module._DurableGatewayState(state_path)
+    state.value["sessions"]["a" * 64] = {"registered": True}
+    original_write = os.write
+    write_count = 0
+
+    def short_write(descriptor: int, raw: bytes) -> int:
+        nonlocal write_count
+        write_count += 1
+        return original_write(descriptor, raw[: min(7, len(raw))])
+
+    monkeypatch.setattr(os, "write", short_write)
+    state.flush()
+
+    assert write_count > 1
+    assert json.loads(state_path.read_bytes()) == state.value
+    assert not list(tmp_path.glob(f".{state_path.name}.{os.getpid()}.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "failure_boundary",
+    ("write", "file_fsync", "replace", "directory_fsync"),
+)
+def test_durable_gateway_state_faults_preserve_complete_state_and_clean_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_boundary: str,
+) -> None:
+    state_path = (tmp_path / f"gateway-state-{failure_boundary}.json").resolve()
+    state = gateway_module._DurableGatewayState(state_path)
+    baseline = state_path.read_bytes()
+    state.value["sessions"]["b" * 64] = {"registered": True}
+    original_write = os.write
+    original_fsync = os.fsync
+    original_replace = os.replace
+
+    def injected_write(descriptor: int, raw: bytes) -> int:
+        if failure_boundary == "write":
+            raise OSError("injected durable-state write failure")
+        return original_write(descriptor, raw)
+
+    def injected_fsync(descriptor: int) -> None:
+        is_directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+        if failure_boundary == "file_fsync" and not is_directory:
+            raise OSError("injected durable-state file fsync failure")
+        if failure_boundary == "directory_fsync" and is_directory:
+            raise OSError("injected durable-state directory fsync failure")
+        original_fsync(descriptor)
+
+    def injected_replace(source: Path, destination: Path) -> None:
+        if failure_boundary == "replace":
+            raise OSError("injected durable-state replace failure")
+        original_replace(source, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "write", injected_write)
+        patch.setattr(os, "fsync", injected_fsync)
+        patch.setattr(os, "replace", injected_replace)
+        with pytest.raises(OSError, match="injected durable-state"):
+            state.flush()
+
+    assert not list(tmp_path.glob(f".{state_path.name}.{os.getpid()}.*.tmp"))
+    if failure_boundary == "directory_fsync":
+        assert json.loads(state_path.read_bytes()) == state.value
+    else:
+        assert state_path.read_bytes() == baseline
+    reopened = gateway_module._DurableGatewayState(state_path)
+    reopened.value["sessions"]["c" * 64] = {"registered": True}
+    reopened.flush()
+    assert json.loads(state_path.read_bytes()) == reopened.value
+
+
+def test_same_pid_stale_unique_temp_cannot_block_restart_or_next_flush(
+    tmp_path: Path,
+) -> None:
+    state_path = (tmp_path / "gateway-state.json").resolve()
+    state = gateway_module._DurableGatewayState(state_path)
+    state.value["sessions"]["d" * 64] = {"registered": True}
+    state.flush()
+    stale = tmp_path / f".{state_path.name}.{os.getpid()}.hard-kill.tmp"
+    stale.write_bytes(b'{"truncated":')
+    stale.chmod(0o600)
+
+    restarted = gateway_module._DurableGatewayState(state_path)
+    restarted.value["sessions"]["e" * 64] = {"registered": True}
+    restarted.flush()
+
+    assert stale.read_bytes() == b'{"truncated":'
+    assert json.loads(state_path.read_bytes()) == restarted.value

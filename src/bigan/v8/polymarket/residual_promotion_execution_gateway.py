@@ -21,6 +21,7 @@ import queue
 import select
 import stat
 import struct
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -36,7 +37,7 @@ SERVICE_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-gateway-service-v1"
 )
 STATE_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-gateway-state-v3"
+    "bigan-btc-15m-residual-promotion-execution-gateway-state-v4"
 )
 VENUE_BOUNDARY_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-polymarket-clob-v2-boundary-v2"
@@ -1108,6 +1109,18 @@ class PolymarketClobV2VenueBoundary:
 class _DurableGatewayState:
     """Single-writer, atomic, fsync-backed service state."""
 
+    _MAP_FIELDS = (
+        "sessions",
+        "requests",
+        "request_owners",
+        "preparation_reservations",
+        "prepared",
+        "venue_lifecycle_base64",
+        "venue_outcomes_base64",
+        "dispatch_receipts_base64",
+        "terminal_receipts_base64",
+    )
+
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
         if not self.path.is_absolute():
@@ -1117,7 +1130,11 @@ class _DurableGatewayState:
         if self.path.exists():
             raw = self.path.read_bytes()
             value, _, _ = executor._raw_json_object(raw, "gateway durable state")
-            if value.get("schema_version") != STATE_SCHEMA_VERSION:
+            if not (
+                value.get("schema_version") == STATE_SCHEMA_VERSION
+                and set(value) == {"schema_version", *self._MAP_FIELDS}
+                and all(isinstance(value[field], dict) for field in self._MAP_FIELDS)
+            ):
                 raise ExecutionGatewayError("gateway durable state schema is invalid")
             self.value = value
         else:
@@ -1125,6 +1142,7 @@ class _DurableGatewayState:
                 "schema_version": STATE_SCHEMA_VERSION,
                 "sessions": {},
                 "requests": {},
+                "request_owners": {},
                 "preparation_reservations": {},
                 "prepared": {},
                 "venue_lifecycle_base64": {},
@@ -1134,26 +1152,58 @@ class _DurableGatewayState:
             }
             self.flush()
 
+    @staticmethod
+    def _write_all(descriptor: int, raw: bytes) -> None:
+        offset = 0
+        while offset < len(raw):
+            written = os.write(descriptor, raw[offset:])
+            if not (
+                isinstance(written, int)
+                and not isinstance(written, bool)
+                and 0 < written <= len(raw) - offset
+            ):
+                raise ExecutionGatewayError(
+                    "gateway durable state write was incomplete"
+                )
+            offset += written
+
+    def _fsync_parent(self) -> None:
+        directory = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
     def flush(self) -> None:
         with self._lock:
             raw = _json_bytes(self.value)
-            temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-            descriptor = os.open(
-                temporary,
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                0o600,
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{self.path.name}.{os.getpid()}.",
+                suffix=".tmp",
+                dir=self.path.parent,
             )
+            temporary = Path(temporary_name)
+            committed = False
             try:
-                os.write(descriptor, raw)
+                self._write_all(descriptor, raw)
                 os.fsync(descriptor)
-            finally:
                 os.close(descriptor)
-            os.replace(temporary, self.path)
-            directory = os.open(self.path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+                descriptor = -1
+                os.replace(temporary, self.path)
+                committed = True
+                self._fsync_parent()
+            except BaseException:
+                if descriptor >= 0:
+                    with contextlib.suppress(BaseException):
+                        os.close(descriptor)
+                if not committed:
+                    with contextlib.suppress(FileNotFoundError):
+                        temporary.unlink()
+                    # Persist cleanup where possible without hiding the
+                    # original write/fsync/replace failure.
+                    with contextlib.suppress(BaseException):
+                        self._fsync_parent()
+                raise
 
 
 def _validated_venue_runtime_binding(
@@ -1380,6 +1430,120 @@ class DeploymentOwnedExecutionGatewayBackend:
             public_key_exponent=self.config.risk_public_key_exponent,
         )
 
+    def _session_owner_sha256(
+        self,
+        client_session_binding: Mapping[str, Any],
+    ) -> str:
+        if self._identity is None:
+            raise ExecutionGatewayError("gateway dispatch authority is unbound")
+        binding = copy.deepcopy(dict(client_session_binding))
+        if not (
+            executor._valid_execution_gateway_session_binding(binding)
+            and binding["authorization_id"] == self._identity[0]
+            and binding["risk_domain_id"] == self._identity[1]
+            and binding["risk_domain_authority_binding_sha256"]
+            == self._identity[2]
+            and binding["authorization_expires_at_ts_ms"] == self._identity[3]
+            and binding["execution_gateway_route_binding_sha256"]
+            == self.config.execution_authority["route_binding_sha256"]
+        ):
+            raise ExecutionGatewayError(
+                "gateway client session ownership is invalid"
+            )
+        # A restored executor receives a fresh client-instance nonce but keeps
+        # the same authorization, risk domain, journal epoch/namespace, and
+        # exact routes.  Ownership is stable across that governed restart and
+        # cannot cross into a different session lineage.
+        binding.pop("client_instance_nonce_sha256")
+        return executor.canonical_json_sha256(binding)
+
+    def _durable_owned_order(
+        self,
+        request: Mapping[str, Any],
+        *,
+        client_session_binding: Mapping[str, Any],
+        acknowledged_required: bool,
+        prepared_required: bool = True,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        owner_sha256 = self._session_owner_sha256(client_session_binding)
+        key = str(request.get("client_order_id", ""))
+        with self._state_lock:
+            original = copy.deepcopy(self.state.value["requests"].get(key))
+            prepared = copy.deepcopy(self.state.value["prepared"].get(key))
+            stored_owner = self.state.value["request_owners"].get(key)
+            encoded_outcome = self.state.value["venue_outcomes_base64"].get(key)
+        if not (
+            isinstance(original, Mapping)
+            and stored_owner == owner_sha256
+        ):
+            raise ExecutionGatewayError(
+                "gateway order is outside durable session ownership"
+            )
+        for field in (
+            "authorization_id",
+            "client_order_id",
+            "business_key",
+            "market_id",
+            "token_id",
+        ):
+            if request.get(field) != original.get(field):
+                raise ExecutionGatewayError(
+                    "gateway durable order identity is mismatched"
+                )
+        authentication = original.get("execution_authentication")
+        if not (
+            isinstance(authentication, Mapping)
+            and authentication.get("authorization_id") == original["authorization_id"]
+            and authentication.get("risk_domain_id")
+            == client_session_binding["risk_domain_id"]
+            and authentication.get("operation") == "submit_order"
+        ):
+            raise ExecutionGatewayError(
+                "gateway durable order authority is mismatched"
+            )
+        if prepared is None and not prepared_required:
+            return dict(original), None
+        if not (
+            isinstance(prepared, Mapping)
+            and prepared.get("client_order_id") == key
+            and prepared.get("exact_request_sha256")
+            == executor.canonical_json_sha256(original)
+            and isinstance(prepared.get("order_hash"), str)
+            and prepared["order_hash"]
+        ):
+            raise ExecutionGatewayError(
+                "gateway durable prepared order identity is mismatched"
+            )
+        if "exchange_order_id" in request and (
+            request.get("exchange_order_id") != prepared["order_hash"]
+        ):
+            raise ExecutionGatewayError(
+                "gateway durable exchange order identity is mismatched"
+            )
+        if acknowledged_required:
+            try:
+                raw_outcome = base64.b64decode(encoded_outcome, validate=True)
+                outcome, _, _ = executor._raw_json_object(
+                    raw_outcome,
+                    "gateway durable venue outcome",
+                    maximum_bytes=executor.MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ExecutionGatewayError(
+                    "gateway durable order acknowledgement is absent"
+                ) from exc
+            if not (
+                outcome.get("status") == "ACCEPTED"
+                and outcome.get("client_order_id") == key
+                and outcome.get("exchange_order_id") == prepared["order_hash"]
+                and outcome.get("market_id") == original["market_id"]
+                and outcome.get("token_id") == original["token_id"]
+            ):
+                raise ExecutionGatewayError(
+                    "gateway durable order is not acknowledged"
+                )
+        return dict(original), dict(prepared)
+
     def _complete(
         self,
         key: str,
@@ -1496,9 +1660,15 @@ class DeploymentOwnedExecutionGatewayBackend:
             }
         )
 
-    def submit_order(self, request: Mapping[str, Any]) -> bytes:
+    def submit_order(
+        self,
+        request: Mapping[str, Any],
+        *,
+        client_session_binding: Mapping[str, Any],
+    ) -> bytes:
         with self._submit_lock:
             proof = self._proof(request)
+            owner_sha256 = self._session_owner_sha256(client_session_binding)
             if self._dispatch_begin is None:
                 raise ExecutionGatewayError("gateway dispatch begin is unbound")
             key = str(request["client_order_id"])
@@ -1506,9 +1676,14 @@ class DeploymentOwnedExecutionGatewayBackend:
             exact_request_sha256 = executor.canonical_json_sha256(exact_request)
             with self._state_lock:
                 existing_request = self.state.value["requests"].get(key)
+                existing_owner = self.state.value["request_owners"].get(key)
                 if existing_request is not None and existing_request != exact_request:
                     raise ExecutionGatewayError(
                         "gateway preparation reservation identity conflicts"
+                    )
+                if existing_owner is not None and existing_owner != owner_sha256:
+                    raise ExecutionGatewayError(
+                        "gateway preparation reservation owner conflicts"
                     )
                 reservation = self.state.value["preparation_reservations"].get(key)
                 if reservation is None:
@@ -1528,6 +1703,7 @@ class DeploymentOwnedExecutionGatewayBackend:
                         "gateway preparation reservation is not dispatchable"
                     )
                 self.state.value["requests"][key] = exact_request
+                self.state.value["request_owners"][key] = owner_sha256
                 prepared = copy.deepcopy(self.state.value["prepared"].get(key))
                 self.state.flush()
 
@@ -1643,12 +1819,21 @@ class DeploymentOwnedExecutionGatewayBackend:
             self._complete(key, raw_dispatch, raw_response)
             return self._authenticated_response(request, raw_response)
 
-    def recover_order_submission(self, request: Mapping[str, Any]) -> bytes:
+    def recover_order_submission(
+        self,
+        request: Mapping[str, Any],
+        *,
+        client_session_binding: Mapping[str, Any],
+    ) -> bytes:
         self._proof(request)
         key = str(request["client_order_id"])
-        with self._state_lock:
-            prepared = copy.deepcopy(self.state.value["prepared"].get(key))
-        if not isinstance(prepared, Mapping):
+        _, prepared = self._durable_owned_order(
+            request,
+            client_session_binding=client_session_binding,
+            acknowledged_required=False,
+            prepared_required=False,
+        )
+        if prepared is None:
             raise executor.SubmissionRecoveryOutcomeNotFoundError(
                 "gateway has no durable prepared submission"
             )
@@ -1682,16 +1867,41 @@ class DeploymentOwnedExecutionGatewayBackend:
             self.state.flush()
         return self._authenticated_response(request, raw_response)
 
-    def cancel_order(self, request: Mapping[str, Any]) -> bytes:
-        return self._authenticated_response(request, self.venue.cancel(request))
+    def cancel_order(
+        self,
+        request: Mapping[str, Any],
+        *,
+        client_session_binding: Mapping[str, Any],
+    ) -> bytes:
+        original, prepared = self._durable_owned_order(
+            request,
+            client_session_binding=client_session_binding,
+            acknowledged_required=True,
+        )
+        assert prepared is not None
+        venue_request = {
+            **dict(request),
+            "exchange_order_id": prepared["order_hash"],
+            "quantity": original["quantity"],
+            "limit_price": original["limit_price"],
+        }
+        return self._authenticated_response(
+            request,
+            self.venue.cancel(venue_request),
+        )
 
-    def lookup_order(self, request: Mapping[str, Any]) -> bytes:
-        key = str(request["client_order_id"])
-        with self._state_lock:
-            original = copy.deepcopy(self.state.value["requests"].get(key))
-            prepared = copy.deepcopy(self.state.value["prepared"].get(key))
-        if not isinstance(original, Mapping) or not isinstance(prepared, Mapping):
-            raise ExecutionGatewayError("gateway lookup identity is not durable")
+    def lookup_order(
+        self,
+        request: Mapping[str, Any],
+        *,
+        client_session_binding: Mapping[str, Any],
+    ) -> bytes:
+        original, prepared = self._durable_owned_order(
+            request,
+            client_session_binding=client_session_binding,
+            acknowledged_required=False,
+        )
+        assert prepared is not None
         venue_request = {
             **dict(request),
             "exchange_order_id": prepared["order_hash"],
@@ -1703,14 +1913,42 @@ class DeploymentOwnedExecutionGatewayBackend:
             self.venue.lookup(venue_request),
         )
 
-    def read_order_fill_cursor(self, request: Mapping[str, Any]) -> bytes:
-        raw = self.venue.read_fill_cursor(request)
+    def read_order_fill_cursor(
+        self,
+        request: Mapping[str, Any],
+        *,
+        client_session_binding: Mapping[str, Any],
+    ) -> bytes:
+        original, prepared = self._durable_owned_order(
+            request,
+            client_session_binding=client_session_binding,
+            acknowledged_required=True,
+        )
+        assert prepared is not None
+        venue_request = {
+            **dict(request),
+            "exchange_order_id": prepared["order_hash"],
+            "quantity": original["quantity"],
+            "limit_price": original["limit_price"],
+        }
+        raw = self.venue.read_fill_cursor(venue_request)
         value, _, _ = executor._raw_json_object(raw, "venue fill cursor")
         payload_sha256 = executor.canonical_json_sha256(value)
         return self._signed({**value, "cursor_payload_sha256": payload_sha256})
 
-    def fence_order_invocation(self, request: Mapping[str, Any]) -> bytes:
+    def fence_order_invocation(
+        self,
+        request: Mapping[str, Any],
+        *,
+        client_session_binding: Mapping[str, Any],
+    ) -> bytes:
         key = str(request["client_order_id"])
+        self._durable_owned_order(
+            request,
+            client_session_binding=client_session_binding,
+            acknowledged_required=False,
+            prepared_required=False,
+        )
         with self._dispatch_transition_lock:
             with self._state_lock:
                 submitted = copy.deepcopy(self.state.value["requests"].get(key))
@@ -1787,6 +2025,16 @@ class DeploymentOwnedExecutionGatewayServer:
     _RECOVERY_LANE_OPERATIONS = frozenset({"recover_order_submission"})
     _CANCEL_LANE_OPERATIONS = frozenset({"cancel_order"})
     _FENCE_LANE_OPERATIONS = frozenset({"fence_order_invocation"})
+    _ORDER_OWNERSHIP_OPERATIONS = frozenset(
+        {
+            "submit_order",
+            "recover_order_submission",
+            "cancel_order",
+            "lookup_order",
+            "read_order_fill_cursor",
+            "fence_order_invocation",
+        }
+    )
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         del kwargs
@@ -2118,10 +2366,26 @@ class DeploymentOwnedExecutionGatewayServer:
                     )
                 else:
                     method = getattr(self.backend, operation)
+                    session_binding = copy.deepcopy(
+                        verified["client_session_binding"]
+                    )
+                    if operation in self._ORDER_OWNERSHIP_OPERATIONS:
+
+                        def call() -> bytes:
+                            return method(
+                                payload,
+                                client_session_binding=session_binding,
+                            )
+
+                    else:
+
+                        def call() -> bytes:
+                            return method(payload)
+
                     raw_response = self._invoke_with_deadline(
                         operation=operation,
                         deadline=deadline,
-                        call=lambda: method(payload),
+                        call=call,
                     )
             connection.send_bytes(_rpc_response(raw_response=raw_response))
             if audit is not None:
