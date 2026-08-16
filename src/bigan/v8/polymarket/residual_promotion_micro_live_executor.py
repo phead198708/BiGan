@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import errno
 import fcntl
 import hashlib
 import hmac
@@ -21,8 +22,12 @@ import os
 import platform
 import queue
 import re
+import select
+import socket
 import stat
+import struct
 import threading
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -662,6 +667,132 @@ def deployment_owned_risk_domain_authority_route_binding_sha256(
     )
 
 
+class _DeadlineBoundAfUnixFrameClient:
+    """Minimal multiprocessing-frame client with one abortable total deadline."""
+
+    def __init__(self, endpoint: str, *, maximum_duration_ms: int) -> None:
+        if not (
+            isinstance(maximum_duration_ms, int)
+            and not isinstance(maximum_duration_ms, bool)
+            and maximum_duration_ms > 0
+        ):
+            raise MicroLiveExecutionError(
+                "risk-domain authority RPC deadline is invalid"
+            )
+        self._deadline = time.monotonic() + maximum_duration_ms / 1_000
+        self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._socket.setblocking(False)
+        try:
+            result = self._socket.connect_ex(endpoint)
+            if result not in {
+                0,
+                errno.EINPROGRESS,
+                errno.EALREADY,
+                errno.EWOULDBLOCK,
+            }:
+                raise OSError(result, os.strerror(result))
+            if result != 0:
+                self._wait(read=False, write=True)
+                socket_error = self._socket.getsockopt(
+                    socket.SOL_SOCKET,
+                    socket.SO_ERROR,
+                )
+                if socket_error:
+                    raise OSError(socket_error, os.strerror(socket_error))
+        except BaseException:
+            self.close()
+            raise
+
+    def _remaining_seconds(self) -> float:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise MicroLiveExecutionError(
+                "risk-domain authority RPC exceeded its deadline"
+            )
+        return remaining
+
+    def _wait(self, *, read: bool, write: bool) -> None:
+        readable, writable, exceptional = select.select(
+            [self._socket] if read else [],
+            [self._socket] if write else [],
+            [self._socket],
+            self._remaining_seconds(),
+        )
+        if exceptional:
+            raise OSError("risk-domain authority RPC socket failed")
+        if not (readable or writable):
+            raise MicroLiveExecutionError(
+                "risk-domain authority RPC exceeded its deadline"
+            )
+
+    def _send_all(self, raw: bytes) -> None:
+        view = memoryview(raw)
+        while view:
+            self._wait(read=False, write=True)
+            try:
+                sent = self._socket.send(view)
+            except (BlockingIOError, InterruptedError):
+                continue
+            if sent <= 0:
+                raise OSError("risk-domain authority RPC socket closed while sending")
+            view = view[sent:]
+
+    def _recv_exact(self, size: int) -> bytes:
+        if size == 0:
+            return b""
+        chunks: list[bytes] = []
+        remaining = size
+        while remaining:
+            self._wait(read=True, write=False)
+            try:
+                chunk = self._socket.recv(remaining)
+            except (BlockingIOError, InterruptedError):
+                continue
+            if not chunk:
+                raise EOFError
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def send_bytes(
+        self,
+        buffer: bytes | bytearray | memoryview,
+        offset: int = 0,
+        size: int | None = None,
+    ) -> None:
+        view = memoryview(buffer)
+        selected_size = len(view) - offset if size is None else size
+        if not (
+            isinstance(offset, int)
+            and not isinstance(offset, bool)
+            and isinstance(selected_size, int)
+            and not isinstance(selected_size, bool)
+            and 0 <= offset <= len(view)
+            and 0 <= selected_size <= len(view) - offset
+        ):
+            raise ValueError("risk-domain authority RPC frame slice is invalid")
+        payload = bytes(view[offset : offset + selected_size])
+        if len(payload) > 0x7FFF_FFFF:
+            header = struct.pack("!iQ", -1, len(payload))
+        else:
+            header = struct.pack("!i", len(payload))
+        self._send_all(header + payload)
+
+    def recv_bytes(self, maxlength: int | None = None) -> bytes:
+        size = struct.unpack("!i", self._recv_exact(4))[0]
+        if size == -1:
+            size = struct.unpack("!Q", self._recv_exact(8))[0]
+        if size < 0:
+            raise OSError("risk-domain authority RPC frame length is invalid")
+        if maxlength is not None and size > maxlength:
+            raise OSError("risk-domain authority RPC frame exceeds its limit")
+        return self._recv_exact(size)
+
+    def close(self) -> None:
+        with suppress(OSError):
+            self._socket.close()
+
+
 class DeploymentOwnedRiskDomainAuthorityAdapter:
     """Exact immutable AF_UNIX client owned by the reviewed composition root."""
 
@@ -842,12 +973,19 @@ class DeploymentOwnedRiskDomainAuthorityAdapter:
                 "payload": _risk_domain_rpc_value(kwargs),
             }
         )
-        connection = multiprocessing.connection.Client(
+        connection = _DeadlineBoundAfUnixFrameClient(
             self._endpoint,
-            family="AF_UNIX",
-            authkey=self._credential,
+            maximum_duration_ms=MAX_AUTHORITY_CALL_DURATION_MS,
         )
         try:
+            multiprocessing.connection.answer_challenge(
+                connection,
+                self._credential,
+            )
+            multiprocessing.connection.deliver_challenge(
+                connection,
+                self._credential,
+            )
             connection.send_bytes(request)
             return connection.recv_bytes(MAX_EXECUTION_TRANSPORT_EVENT_BYTES)
         finally:
@@ -2429,6 +2567,21 @@ class AtomicFileMicroLiveStateJournal:
             raise MicroLiveExecutionError(
                 f"external authority operation {authority_operation} is absent"
             )
+        if (
+            self._risk_domain_lease.__class__
+            is DeploymentOwnedRiskDomainAuthorityAdapter
+        ):
+            # The production adapter owns one nonblocking AF_UNIX socket and
+            # enforces authentication, frame send, and complete response under
+            # the same total deadline.  Invoke it synchronously so no outer
+            # daemon thread or connection survives a timeout.
+            value = method(**copy.deepcopy(kwargs))
+            if not isinstance(value, bytes):
+                raise MicroLiveExecutionError(
+                    "external authority operation "
+                    f"{authority_operation} returned non-bytes"
+                )
+            return value
         completed = threading.Event()
         results: queue.SimpleQueue[tuple[bool, Any]] = queue.SimpleQueue()
 
@@ -3332,8 +3485,10 @@ class MicroLiveOrderTransport(Protocol):
         """Prove a timed-out submit can no longer create a later side effect.
 
         Returning ``side_effects_fenced=true`` is an adapter-level durable
-        guarantee, not a point-in-time lookup.  The executor obtains it before
-        the only authoritative post-timeout lookup.
+        guarantee, not a point-in-time lookup.  The signed response preserves
+        whether dispatch was durably FENCED before it began or had already
+        reached DISPATCHED.  Only the former may carry a deterministic durable
+        REJECTED disposition without a venue lookup.
         """
 
 
@@ -7148,13 +7303,17 @@ class MicroLiveExecutor:
                     maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
                 )
             )
-            self._validate_submission_fence_response(
+            validated_fence = self._validate_submission_fence_response(
                 prepared=prepared,
                 response=fence_response,
             )
             raw_lookup_response = (
                 recovered_response
                 if recovered_response is not None
+                else validated_fence["raw_fenced_rejection_json"].encode(
+                    "utf-8"
+                )
+                if validated_fence["dispatch_fence_status"] == "FENCED"
                 else self._bounded_transport_call(
                     operation="lookup_order",
                     request=lookup_request,
@@ -8973,14 +9132,20 @@ class MicroLiveExecutor:
         *,
         prepared: Mapping[str, Any],
         response: Mapping[str, Any],
-    ) -> None:
+    ) -> dict[str, Any]:
         expected_keys = {
             "authorization_id",
             "client_order_id",
             "transport_invocation_id",
             "side_effects_fenced",
+            "dispatch_fence_status",
+            "raw_fenced_rejection_json",
+            "fenced_rejection_sha256",
         }
-        if not (
+        fence_status = response.get("dispatch_fence_status")
+        raw_rejection_json = response.get("raw_fenced_rejection_json")
+        rejection_sha256 = response.get("fenced_rejection_sha256")
+        base_valid = (
             set(response) == expected_keys
             and response.get("authorization_id")
             == self._authorization.authorization_id
@@ -8988,10 +9153,48 @@ class MicroLiveExecutor:
             and response.get("transport_invocation_id")
             == prepared["transport_invocation_id"]
             and response.get("side_effects_fenced") is True
-        ):
+            and fence_status in {"FENCED", "DISPATCHED"}
+        )
+        if not base_valid:
             raise MicroLiveExecutionError(
                 "submission invocation is not durably fenced"
             )
+        if fence_status == "DISPATCHED":
+            if raw_rejection_json is not None or rejection_sha256 is not None:
+                raise MicroLiveExecutionError(
+                    "dispatched submission carried a fenced rejection"
+                )
+            return {
+                "dispatch_fence_status": "DISPATCHED",
+                "raw_fenced_rejection_json": None,
+            }
+        if not (
+            isinstance(raw_rejection_json, str)
+            and raw_rejection_json
+            and _is_sha256(rejection_sha256)
+            and hashlib.sha256(raw_rejection_json.encode("utf-8")).hexdigest()
+            == rejection_sha256
+        ):
+            raise MicroLiveExecutionError(
+                "fenced submission rejection evidence is invalid"
+            )
+        rejection, canonical_rejection_json, _ = _raw_json_object(
+            raw_rejection_json.encode("utf-8"),
+            "fenced submission rejection",
+            maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+        )
+        disposition = self._validate_submission_response(prepared, rejection)
+        if not (
+            disposition["status"] == "REJECTED"
+            and canonical_rejection_json == raw_rejection_json
+        ):
+            raise MicroLiveExecutionError(
+                "fenced submission rejection disposition is invalid"
+            )
+        return {
+            "dispatch_fence_status": "FENCED",
+            "raw_fenced_rejection_json": raw_rejection_json,
+        }
 
     def _append_event(
         self,
@@ -9543,6 +9746,34 @@ class MicroLiveExecutor:
                 "stored submission invocation fence response",
                 maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
             )
+            fence_status = fence_response.get("dispatch_fence_status")
+            raw_fenced_rejection_json = fence_response.get(
+                "raw_fenced_rejection_json"
+            )
+            fenced_rejection_sha256 = fence_response.get(
+                "fenced_rejection_sha256"
+            )
+            fenced_rejection_matches = False
+            if fence_status == "FENCED" and isinstance(
+                raw_fenced_rejection_json, str
+            ):
+                try:
+                    fenced_rejection = _stored_raw_json_object(
+                        raw_fenced_rejection_json,
+                        fenced_rejection_sha256,
+                        "stored fenced submission rejection",
+                        maximum_bytes=MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+                    )
+                except MicroLiveExecutionError:
+                    fenced_rejection = None
+                fenced_rejection_matches = (
+                    fenced_rejection == response and response.get("status") == "REJECTED"
+                )
+            elif fence_status == "DISPATCHED":
+                fenced_rejection_matches = (
+                    raw_fenced_rejection_json is None
+                    and fenced_rejection_sha256 is None
+                )
             accepted_quantity = _positive_decimal(
                 response.get("accepted_quantity"),
                 "reconciled accepted quantity",
@@ -9579,6 +9810,9 @@ class MicroLiveExecutor:
                     "client_order_id",
                     "transport_invocation_id",
                     "side_effects_fenced",
+                    "dispatch_fence_status",
+                    "raw_fenced_rejection_json",
+                    "fenced_rejection_sha256",
                 }
                 and fence_response.get("authorization_id")
                 == self._authorization.authorization_id
@@ -9587,6 +9821,8 @@ class MicroLiveExecutor:
                 and fence_response.get("transport_invocation_id")
                 == payload.get("transport_invocation_id")
                 and fence_response.get("side_effects_fenced") is True
+                and fence_status in {"FENCED", "DISPATCHED"}
+                and fenced_rejection_matches
             ):
                 raise MicroLiveExecutionError(
                     "submission reconciliation payload is invalid"

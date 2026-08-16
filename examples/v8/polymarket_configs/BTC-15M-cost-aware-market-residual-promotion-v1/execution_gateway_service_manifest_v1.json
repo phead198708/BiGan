@@ -11,7 +11,7 @@
   "deployment_base_image_manifest_digest": "sha256:a074fac67aa01841fee592d00bae14d25dcaf98ef6e12a683ecceb7e0147e2d1",
   "concrete_clob_contract_test": {
     "path": "tests/v8/test_residual_promotion_execution_gateway.py",
-    "sha256": "a4203f0e53f36f341c94da4537580348adc1a8f086c35b545de5b97859402f24"
+    "sha256": "a7a9eb3078f086adb7ce819b584e18a79f00676b75202475ef5ce3b2d10db01c"
   },
   "durability_contract": {
     "atomic_replace": true,
@@ -19,12 +19,15 @@
     "collision_safe_same_directory_temporary_file": true,
     "directory_fsync": true,
     "file_fsync_before_replace": true,
+    "fenced_prevenue_rejection_persisted": true,
+    "fenced_vs_dispatched_status_preserved": true,
     "last_complete_state_readable_after_injected_failure": true,
     "prepared_signed_order_persisted_before_venue_write": true,
     "restart_session_registry_persisted": true,
     "same_pid_stale_temporary_file_cannot_block_restart": true,
     "uncommitted_temporary_file_removed_on_caught_failure": true,
-    "venue_recovery_lookup_only": true
+    "venue_recovery_lookup_only": true,
+    "dispatched_not_found_remains_unknown": true
   },
   "durable_order_ownership_contract": {
     "acknowledged_cancel_required": true,
@@ -46,11 +49,11 @@
   },
   "gateway_implementation": {
     "path": "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-    "sha256": "d7a5c43957b02295a1dc226648d9503caf71ccbf8ac449471725219d0846d6ac"
+    "sha256": "00550941d91d2c75fab40ded00e88ee43ad347f8f38365d4f2edd16f2f644ab8"
   },
   "gateway_process_integration_test": {
     "path": "tests/v8/test_residual_promotion_micro_live_executor.py",
-    "sha256": "d940cd38b41773376b3bcf4edcd74407f66225e744400791b945dd023a4c7de1"
+    "sha256": "6e2533a6c6d82db9431618a97daeded0e3f05f03e3c7e6e857d6be2e3b91b720"
   },
   "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
   "model_or_gate_bytes_changed": false,
@@ -97,6 +100,8 @@
   "schema_version": "bigan-btc-15m-residual-promotion-execution-gateway-service-manifest-v1",
   "security_state": "NOT_INDEPENDENTLY_REVIEWED_NO_GO",
   "service_deadline_contract": {
+    "authority_client_authentication_and_frame_share_total_deadline": true,
+    "authority_client_timeout_reaps_socket_without_worker_thread": true,
     "authenticated_handshake_is_bounded": true,
     "authenticated_payload_receive_is_bounded": true,
     "complete_frame_header_and_body_share_total_deadline": true,

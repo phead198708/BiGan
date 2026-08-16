@@ -37,7 +37,7 @@ SERVICE_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-gateway-service-v1"
 )
 STATE_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-gateway-state-v4"
+    "bigan-btc-15m-residual-promotion-execution-gateway-state-v5"
 )
 VENUE_BOUNDARY_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-polymarket-clob-v2-boundary-v2"
@@ -865,7 +865,12 @@ class PolymarketClobV2VenueBoundary:
         )
 
     def lookup(self, request: Mapping[str, Any]) -> bytes:
-        raw = self._client.get_order(str(request["exchange_order_id"]))
+        try:
+            raw = self._client.get_order(str(request["exchange_order_id"]))
+        except BaseException as exc:  # third-party exception taxonomy is unstable
+            raise ExecutionGatewayError(
+                "venue order lookup failed closed"
+            ) from exc
         if not isinstance(raw, Mapping):
             raise ExecutionGatewayError("venue order lookup response is invalid")
         return self._normalized_lookup_response(
@@ -1118,6 +1123,7 @@ class _DurableGatewayState:
         "venue_lifecycle_base64",
         "venue_outcomes_base64",
         "dispatch_receipts_base64",
+        "fenced_rejections_base64",
         "terminal_receipts_base64",
     )
 
@@ -1148,6 +1154,7 @@ class _DurableGatewayState:
                 "venue_lifecycle_base64": {},
                 "venue_outcomes_base64": {},
                 "dispatch_receipts_base64": {},
+                "fenced_rejections_base64": {},
                 "terminal_receipts_base64": {},
             }
             self.flush()
@@ -1943,7 +1950,7 @@ class DeploymentOwnedExecutionGatewayBackend:
         client_session_binding: Mapping[str, Any],
     ) -> bytes:
         key = str(request["client_order_id"])
-        self._durable_owned_order(
+        original, prepared = self._durable_owned_order(
             request,
             client_session_binding=client_session_binding,
             acknowledged_required=False,
@@ -1973,12 +1980,72 @@ class DeploymentOwnedExecutionGatewayBackend:
                 ],
             )
         fence, _, _ = executor._raw_json_object(raw_fence, "dispatch fence")
+        fence_status = fence.get("status")
+        if fence_status not in {"FENCED", "DISPATCHED", "IN_PROGRESS"}:
+            raise ExecutionGatewayError("gateway dispatch fence status is invalid")
+        raw_fenced_rejection: bytes | None = None
+        if fence_status == "FENCED":
+            # A PREPARING reservation can be fenced before the venue has
+            # produced signed order bytes.  Such a command provably never
+            # crossed the dispatch boundary, so bind its terminal rejection
+            # to a deterministic non-venue identity.  Once preparation has
+            # completed, retain the actual prepared order hash instead.
+            fenced_exchange_order_id = (
+                prepared["order_hash"]
+                if prepared is not None
+                else f"fenced-before-venue-{key}"
+            )
+            raw_fenced_rejection = _json_bytes(
+                {
+                    "client_order_id": original["client_order_id"],
+                    "exchange_order_id": fenced_exchange_order_id,
+                    "status": "REJECTED",
+                    "market_id": original["market_id"],
+                    "token_id": original["token_id"],
+                    "accepted_quantity": original["quantity"],
+                    "limit_price": original["limit_price"],
+                }
+            )
+            encoded_rejection = base64.b64encode(raw_fenced_rejection).decode(
+                "ascii"
+            )
+            with self._state_lock:
+                existing_rejection = self.state.value[
+                    "fenced_rejections_base64"
+                ].get(key)
+                if existing_rejection not in {None, encoded_rejection}:
+                    raise ExecutionGatewayError(
+                        "gateway fenced rejection identity conflicts"
+                    )
+                self.state.value["fenced_rejections_base64"][key] = (
+                    encoded_rejection
+                )
+                reservation = self.state.value[
+                    "preparation_reservations"
+                ].get(key)
+                if not isinstance(reservation, Mapping):
+                    raise ExecutionGatewayError(
+                        "gateway fenced rejection reservation is absent"
+                    )
+                reservation["status"] = "FENCED"
+                self.state.flush()
         response = _json_bytes(
             {
                 "authorization_id": request["authorization_id"],
                 "client_order_id": request["client_order_id"],
                 "transport_invocation_id": request["transport_invocation_id"],
-                "side_effects_fenced": fence["status"] in {"FENCED", "DISPATCHED"},
+                "side_effects_fenced": fence_status in {"FENCED", "DISPATCHED"},
+                "dispatch_fence_status": fence_status,
+                "raw_fenced_rejection_json": (
+                    raw_fenced_rejection.decode("utf-8")
+                    if raw_fenced_rejection is not None
+                    else None
+                ),
+                "fenced_rejection_sha256": (
+                    _sha256(raw_fenced_rejection)
+                    if raw_fenced_rejection is not None
+                    else None
+                ),
             }
         )
         return self._authenticated_response(request, response)

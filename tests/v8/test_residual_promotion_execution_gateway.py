@@ -248,6 +248,32 @@ def test_concrete_boundary_post_recovery_cancel_and_fill_contract(
     assert terminal_cancel["fill_delivery_complete"] is True
 
 
+def test_concrete_boundary_404_is_absent_only_for_recovery_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boundary = _boundary(tmp_path)
+    request = _request()
+
+    def not_found(_: str) -> None:
+        raise RuntimeError("404 order not found")
+
+    monkeypatch.setattr(boundary._client, "get_order", not_found)
+
+    # The pre-fence recovery probe may honestly report no venue effect.
+    assert boundary.lookup_submission(_prepared(request), request) is None
+
+    # An ordinary lifecycle lookup occurs only after DISPATCHED is known.  Its
+    # 404 must remain an unresolved failure rather than synthesize rejection.
+    with pytest.raises(ExecutionGatewayError, match="lookup failed closed"):
+        boundary.lookup(
+            {
+                **request,
+                "exchange_order_id": ORDER_HASH,
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "trade_status",
     (

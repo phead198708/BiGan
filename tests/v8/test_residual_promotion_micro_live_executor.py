@@ -3536,12 +3536,41 @@ class FakeTransport:
             "FENCED",
             "DISPATCHED",
         }
+        raw_fenced_rejection = (
+            _json_bytes(
+                {
+                    "client_order_id": submitted["client_order_id"],
+                    "exchange_order_id": (
+                        self.fixed_exchange_order_id
+                        or f"exchange-{submitted['client_order_id'][:12]}"
+                    ),
+                    "status": "REJECTED",
+                    "market_id": submitted["market_id"],
+                    "token_id": submitted["token_id"],
+                    "accepted_quantity": submitted["quantity"],
+                    "limit_price": submitted["limit_price"],
+                }
+            )
+            if dispatch_fence["status"] == "FENCED"
+            else None
+        )
         response = _json_bytes(
             {
                 "authorization_id": request["authorization_id"],
                 "client_order_id": request["client_order_id"],
                 "transport_invocation_id": request["transport_invocation_id"],
                 "side_effects_fenced": side_effects_fenced,
+                "dispatch_fence_status": dispatch_fence["status"],
+                "raw_fenced_rejection_json": (
+                    raw_fenced_rejection.decode("utf-8")
+                    if raw_fenced_rejection is not None
+                    else None
+                ),
+                "fenced_rejection_sha256": (
+                    hashlib.sha256(raw_fenced_rejection).hexdigest()
+                    if raw_fenced_rejection is not None
+                    else None
+                ),
             }
         )
         return self._authenticated_operation_response(request, response)
@@ -3643,6 +3672,12 @@ class CrashAfterAcceptedSubmitTransport(FakeTransport):
         raise SimulatedProcessCrash
 
 
+class OrdinaryLookupNotFoundTransport(FakeTransport):
+    def lookup_order(self, request: dict[str, Any]) -> bytes:
+        self.lookup_calls.append(copy.deepcopy(request))
+        raise RuntimeError("synthetic ordinary venue lookup 404 not found")
+
+
 class CrashAfterOutboxBeforeVenueTransport(FakeTransport):
     def submit_order(self, request: dict[str, Any]) -> bytes:
         self._consume_dispatch_before_venue(request)
@@ -3738,6 +3773,10 @@ class CrashBeforeDispatchConsumptionTransport(FakeTransport):
 
     def submit_order(self, request: dict[str, Any]) -> bytes:
         self.pending_request = copy.deepcopy(request)
+        with self._venue_lock:
+            self._outbox_requests_by_key[request["client_order_id"]] = (
+                copy.deepcopy(request)
+            )
         raise SimulatedProcessCrash
 
 
@@ -4166,6 +4205,86 @@ class _ProcessMockVenueBoundary:
             executor_module._expected_final_fill_watermark(response)
         )
         return _json_bytes(response)
+
+
+def _stalled_authority_auth_process(
+    endpoint: str,
+    connection_count: int,
+    ready: Any,
+) -> None:
+    """Accept raw AF_UNIX clients without beginning the auth handshake."""
+
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(endpoint)
+    listener.listen(connection_count)
+    handlers: list[threading.Thread] = []
+
+    def handle(connection: socket.socket) -> None:
+        try:
+            with contextlib.suppress(OSError):
+                while connection.recv(4_096):
+                    pass
+        finally:
+            connection.close()
+
+    ready.set()
+    try:
+        for index in range(connection_count):
+            connection, _ = listener.accept()
+            handler = threading.Thread(
+                target=handle,
+                args=(connection,),
+                name=f"stalled-authority-auth-{index}",
+            )
+            handler.start()
+            handlers.append(handler)
+        for handler in handlers:
+            handler.join(timeout=5)
+    finally:
+        listener.close()
+        with contextlib.suppress(FileNotFoundError):
+            Path(endpoint).unlink()
+
+
+def _partial_authority_response_process(
+    endpoint: str,
+    credential: bytes,
+    fragment: bytes,
+    connection_count: int,
+    ready: Any,
+) -> None:
+    """Authenticate requests, then stall each client on an incomplete frame."""
+
+    listener = Listener(endpoint, family="AF_UNIX", authkey=credential)
+    handlers: list[threading.Thread] = []
+
+    def handle(connection: Any) -> None:
+        try:
+            connection.recv_bytes(executor_module.MAX_EXECUTION_TRANSPORT_EVENT_BYTES)
+            os.write(connection.fileno(), fragment)
+            with contextlib.suppress(OSError):
+                while os.read(connection.fileno(), 4_096):
+                    pass
+        finally:
+            connection.close()
+
+    ready.set()
+    try:
+        for index in range(connection_count):
+            connection = listener.accept()
+            handler = threading.Thread(
+                target=handle,
+                args=(connection,),
+                name=f"partial-authority-response-{index}",
+            )
+            handler.start()
+            handlers.append(handler)
+        for handler in handlers:
+            handler.join(timeout=5)
+    finally:
+        listener.close()
+        with contextlib.suppress(FileNotFoundError):
+            Path(endpoint).unlink()
 
 
 def _isolated_execution_gateway_process(
@@ -4645,6 +4764,202 @@ def test_authenticated_partial_frame_is_closed_and_reclaims_all_slots(
         for record in records
         if record["operation"] == "invalid"
     ) == DeploymentOwnedExecutionGatewayServer._MAXIMUM_CONCURRENT_CONNECTIONS
+
+
+def test_repeated_partial_authority_responses_reap_client_resources_before_safety_ops(
+    authorized_fixture: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    context = multiprocessing.get_context("fork")
+    deadline_ms = 60
+    calls_per_fragment = 4
+    monkeypatch.setattr(
+        executor_module,
+        "MAX_AUTHORITY_CALL_DURATION_MS",
+        deadline_ms,
+    )
+
+    for fragment_name, fragment in (
+        ("authentication", None),
+        ("header", b"\x00"),
+        ("body", struct.pack("!i", 64) + b"{"),
+    ):
+        socket_root = Path(
+            tempfile.mkdtemp(prefix=f"bigan-authority-{fragment_name}-", dir="/tmp")
+        )
+        endpoint = str(socket_root / "authority.sock")
+        credential = (
+            f"partial-authority-{fragment_name}-credential-v1-secure"
+        ).encode("ascii")
+        ready = context.Event()
+        process = context.Process(
+            target=(
+                _stalled_authority_auth_process
+                if fragment is None
+                else _partial_authority_response_process
+            ),
+            args=(
+                (endpoint, calls_per_fragment, ready)
+                if fragment is None
+                else (
+                    endpoint,
+                    credential,
+                    fragment,
+                    calls_per_fragment,
+                    ready,
+                )
+            ),
+        )
+        process.start()
+        assert ready.wait(timeout=5)
+        implementation_sha256 = (
+            executor_module.deployment_owned_risk_domain_authority_adapter_implementation_sha256()
+        )
+        configuration_sha256 = (
+            executor_module.deployment_owned_risk_domain_authority_configuration_sha256(
+                endpoint=endpoint,
+                credential=credential,
+                service_identity_sha256=TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256,
+                tenant_id=TEST_RISK_DOMAIN_TENANT_ID,
+                key_identity_sha256=TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+            )
+        )
+        route_binding_sha256 = (
+            executor_module.deployment_owned_risk_domain_authority_route_binding_sha256(
+                endpoint=endpoint,
+                credential=credential,
+                service_identity_sha256=TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256,
+                tenant_id=TEST_RISK_DOMAIN_TENANT_ID,
+                key_identity_sha256=TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+                adapter_implementation_sha256=implementation_sha256,
+                configuration_sha256=configuration_sha256,
+            )
+        )
+        authority = executor_module.DeploymentOwnedRiskDomainAuthorityAdapter(
+            endpoint=endpoint,
+            credential=credential,
+            service_identity_sha256=TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256,
+            tenant_id=TEST_RISK_DOMAIN_TENANT_ID,
+            key_identity_sha256=TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+            expected_adapter_implementation_sha256=implementation_sha256,
+            expected_configuration_sha256=configuration_sha256,
+            expected_route_mode=auth_module.RISK_DOMAIN_AUTHORITY_ROUTE_MODE,
+            expected_route_binding_sha256=route_binding_sha256,
+        )
+        journal = AtomicFileMicroLiveStateJournal(
+            tmp_path / f"partial-{fragment_name}-journal",
+            risk_domain_lease=authority,
+        )
+        baseline_threads = threading.active_count()
+        baseline_fds = len(os.listdir("/dev/fd"))
+        try:
+            for invocation in range(calls_per_fragment):
+                started = time.monotonic()
+                with pytest.raises(
+                    MicroLiveExecutionError,
+                    match="authority RPC exceeded its deadline",
+                ):
+                    journal._bounded_authority_call(
+                        "claim_risk_domain",
+                        invocation=invocation,
+                    )
+                assert time.monotonic() - started < deadline_ms / 1_000 + 0.5
+            assert threading.active_count() == baseline_threads
+            assert len(os.listdir("/dev/fd")) <= baseline_fds + 1
+        finally:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+            assert process.exitcode == 0
+            process.close()
+            shutil.rmtree(socket_root)
+
+    # Restore the normal test allowance and prove safety-critical operations
+    # still traverse a healthy process boundary after all deadline aborts.
+    monkeypatch.setattr(
+        executor_module,
+        "MAX_AUTHORITY_CALL_DURATION_MS",
+        _CORRECTNESS_TEST_CALL_DURATION_MS,
+    )
+    gateway_root = Path(
+        tempfile.mkdtemp(prefix="bigan-authority-recovery-gateway-", dir="/tmp")
+    )
+    gateway_endpoint = str(gateway_root / "gateway.sock")
+    gateway_credential = b"authority-recovery-gateway-credential-v1"
+    execution_authority = _test_execution_authority_descriptor(
+        endpoint=gateway_endpoint,
+        credential=gateway_credential,
+        maximum_call_duration_ms=3_000,
+    )
+    ready = context.Event()
+    stop = context.Event()
+    audit = context.Queue()
+    submitted_requests = context.Queue()
+    gateway_process = context.Process(
+        target=_isolated_execution_gateway_process,
+        args=(
+            gateway_endpoint,
+            gateway_credential,
+            execution_authority,
+            False,
+            ready,
+            stop,
+            audit,
+            None,
+            None,
+            submitted_requests,
+        ),
+    )
+    gateway_process.start()
+    assert ready.wait(timeout=5)
+    records: list[dict[str, Any]] = []
+    try:
+        micro_live_executor, submitted = _submitted_process_gateway_executor(
+            authorized_fixture,
+            endpoint=gateway_endpoint,
+            credential=gateway_credential,
+            execution_authority=execution_authority,
+            submitted_requests=submitted_requests,
+        )
+        fence = json.loads(
+            micro_live_executor._bounded_transport_call(
+                operation="fence_order_invocation",
+                request=_fence_request(submitted),
+            )
+        )
+        cancel = json.loads(
+            micro_live_executor._bounded_transport_call(
+                operation="cancel_order",
+                request=_cancel_request(submitted),
+            )
+        )
+        assert fence["side_effects_fenced"] is True
+        assert fence["dispatch_fence_status"] == "DISPATCHED"
+        assert cancel["status"] == "CANCEL_REQUESTED"
+        stop.set()
+        gateway_process.join(timeout=3)
+        assert not gateway_process.is_alive()
+    finally:
+        stop.set()
+        if gateway_process.is_alive():
+            gateway_process.terminate()
+            gateway_process.join(timeout=5)
+        while True:
+            record = audit.get(timeout=2)
+            records.append(record)
+            if record["operation"] == "FINAL":
+                break
+        audit.close()
+        audit.cancel_join_thread()
+        submitted_requests.close()
+        submitted_requests.cancel_join_thread()
+        gateway_exitcode = gateway_process.exitcode
+        gateway_process.close()
+        shutil.rmtree(gateway_root)
+    assert gateway_exitcode == 0
+    assert records[-1]["operation"] == "FINAL"
 
 
 def test_stalled_read_lane_cannot_starve_fence_cancel_or_stop(
@@ -5678,7 +5993,6 @@ def test_executor_bundles_only_the_reviewed_local_gateway_boundary() -> None:
         "httpx",
         "py_clob_client",
         "requests",
-        "socket",
         "urllib",
         "web3",
     }
@@ -5696,6 +6010,11 @@ def test_executor_bundles_only_the_reviewed_local_gateway_boundary() -> None:
             )
         }
         assert imports.isdisjoint(forbidden_modules)
+        if path.name == "residual_promotion_micro_live_executor.py":
+            assert source.count("socket.socket(") == 1
+            assert "socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)" in source
+            assert "socket.AF_INET" not in source
+            assert "socket.AF_INET6" not in source
         assert "os.environ" not in source
         assert "getenv(" not in source
     executor_source = paths[1].read_text(encoding="utf-8")
@@ -8828,6 +9147,9 @@ def test_separate_process_slow_venue_does_not_starve_fence_or_stop(
             # The venue call is already in progress, so the authority must
             # respond promptly but must not falsely claim it was fenced.
             "side_effects_fenced": False,
+            "dispatch_fence_status": "IN_PROGRESS",
+            "raw_fenced_rejection_json": None,
+            "fenced_rejection_sha256": None,
         }
         stop.set()
         process.join(timeout=3)
@@ -8966,11 +9288,28 @@ def test_separate_process_slow_prepare_is_fenced_before_dispatch_and_stop(
             )
         )
         assert time.monotonic() - started < 0.75
+        raw_rejection = _json_bytes(
+            {
+                "client_order_id": preparing["client_order_id"],
+                "exchange_order_id": (
+                    "fenced-before-venue-"
+                    f"{preparing['client_order_id']}"
+                ),
+                "status": "REJECTED",
+                "market_id": preparing["market_id"],
+                "token_id": preparing["token_id"],
+                "accepted_quantity": preparing["quantity"],
+                "limit_price": preparing["limit_price"],
+            }
+        )
         assert fence == {
             "authorization_id": preparing["authorization_id"],
             "client_order_id": preparing["client_order_id"],
             "transport_invocation_id": preparing["transport_invocation_id"],
             "side_effects_fenced": True,
+            "dispatch_fence_status": "FENCED",
+            "raw_fenced_rejection_json": raw_rejection.decode("utf-8"),
+            "fenced_rejection_sha256": hashlib.sha256(raw_rejection).hexdigest(),
         }
         stop.set()
         process.join(timeout=3)
@@ -9567,6 +9906,149 @@ def test_reconciliation_fence_cancels_unconsumed_dispatch_capability(
 
     assert transport.submit_calls == []
     assert transport._venue_outcomes_by_key == {}
+
+
+def test_fenced_prevenue_404_reconciles_rejected_across_restart(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    crashed_transport = CrashBeforeDispatchConsumptionTransport()
+    executor = MicroLiveExecutor(
+        verified,
+        transport=crashed_transport,
+        journal=journal,
+    )
+
+    with pytest.raises(ExecutionGatewayProcessTerminated):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    assert crashed_transport.pending_request is not None
+    pending = copy.deepcopy(crashed_transport.pending_request)
+    original_lease = _test_authority_backend(journal)
+    assert isinstance(original_lease, _TestDurableRiskDomainLease)
+    fresh_journal = AtomicFileMicroLiveStateJournal(
+        journal.root,
+        risk_domain_lease=_test_authority_adapter(
+            _TestDurableRiskDomainLease(original_lease.authority_root),
+            journal_root=journal.root,
+        ),
+    )
+    fresh_transport = FakeTransport(
+        venue_idempotency_authority=(
+            crashed_transport.venue_idempotency_authority
+        )
+    )
+    fresh_transport._outbox_requests_by_key[pending["client_order_id"]] = pending
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=fresh_transport,
+        journal=fresh_journal,
+        raw_state=executor.export_state_bytes(),
+    )
+
+    reconciled = restored.reconcile_unknown_submission(
+        client_order_id=pending["client_order_id"],
+        now_ts_ms=NOW_TS_MS + 1,
+    )
+
+    assert reconciled["status"] == "ORDER_SUBMISSION_RECONCILED_REJECTED"
+    assert reconciled["kill_switch_active"] is True
+    assert fresh_transport.recovery_lookup_calls != []
+    assert fresh_transport.fence_calls != []
+    assert fresh_transport.lookup_calls == []
+    assert fresh_transport.submit_calls == []
+    assert fresh_transport._venue_outcomes_by_key == {}
+    snapshot = restored.reconciliation_snapshot()
+    assert snapshot["open_order_count"] == 0
+    second_restart = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=fresh_transport,
+        journal=fresh_journal,
+        raw_state=restored.export_state_bytes(),
+    )
+    assert second_restart.reconciliation_snapshot() == snapshot
+
+
+def test_dispatched_404_remains_unknown_across_restart(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    journal = _new_journal()
+    crashed_transport = CrashAfterAcceptedSubmitTransport()
+    executor = MicroLiveExecutor(
+        verified,
+        transport=crashed_transport,
+        journal=journal,
+    )
+
+    with pytest.raises(ExecutionGatewayProcessTerminated):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    client_order_id = next(
+        event["payload"]["client_order_id"]
+        for event in executor.events
+        if event["event_type"] == "ORDER_PREPARED"
+    )
+    pending = copy.deepcopy(
+        crashed_transport._outbox_requests_by_key[client_order_id]
+    )
+    del crashed_transport.venue_idempotency_authority.outcomes_by_client_order_id[
+        client_order_id
+    ]
+    original_lease = _test_authority_backend(journal)
+    assert isinstance(original_lease, _TestDurableRiskDomainLease)
+    fresh_journal = AtomicFileMicroLiveStateJournal(
+        journal.root,
+        risk_domain_lease=_test_authority_adapter(
+            _TestDurableRiskDomainLease(original_lease.authority_root),
+            journal_root=journal.root,
+        ),
+    )
+    fresh_transport = OrdinaryLookupNotFoundTransport(
+        venue_idempotency_authority=(
+            crashed_transport.venue_idempotency_authority
+        )
+    )
+    fresh_transport._outbox_requests_by_key[client_order_id] = pending
+    restored = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=fresh_transport,
+        journal=fresh_journal,
+        raw_state=executor.export_state_bytes(),
+    )
+
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="unknown submission reconciliation failed closed",
+    ):
+        restored.reconcile_unknown_submission(
+            client_order_id=client_order_id,
+            now_ts_ms=NOW_TS_MS + 1,
+        )
+
+    assert len(fresh_transport.recovery_lookup_calls) == 1
+    assert len(fresh_transport.fence_calls) == 1
+    assert len(fresh_transport.lookup_calls) == 1
+    assert not any(
+        event["event_type"] == "ORDER_SUBMISSION_RECONCILED"
+        for event in restored.events
+    )
+    snapshot = restored.reconciliation_snapshot()
+    assert snapshot["kill_switch_active"] is True
+    assert snapshot["open_order_count"] == 0
+    unresolved = restored._reconcile_view()["orders"][client_order_id]
+    assert unresolved["submission_unknown"] is True
+    assert unresolved["closed_status"] is None
+    second_restart = MicroLiveExecutor.restore(
+        authorization=verified,
+        transport=fresh_transport,
+        journal=fresh_journal,
+        raw_state=restored.export_state_bytes(),
+    )
+    assert second_restart.reconciliation_snapshot() == snapshot
 
 
 def test_abandoned_dispatching_state_remains_in_progress_after_deadline(
