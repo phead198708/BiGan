@@ -670,15 +670,24 @@ def deployment_owned_risk_domain_authority_route_binding_sha256(
 class _DeadlineBoundAfUnixFrameClient:
     """Minimal multiprocessing-frame client with one abortable total deadline."""
 
-    def __init__(self, endpoint: str, *, maximum_duration_ms: int) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        *,
+        maximum_duration_ms: int,
+        operation_label: str = "risk-domain authority RPC",
+    ) -> None:
         if not (
             isinstance(maximum_duration_ms, int)
             and not isinstance(maximum_duration_ms, bool)
             and maximum_duration_ms > 0
+            and isinstance(operation_label, str)
+            and operation_label
         ):
             raise MicroLiveExecutionError(
-                "risk-domain authority RPC deadline is invalid"
+                "AF_UNIX RPC deadline configuration is invalid"
             )
+        self._operation_label = operation_label
         self._deadline = time.monotonic() + maximum_duration_ms / 1_000
         self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._socket.setblocking(False)
@@ -707,7 +716,7 @@ class _DeadlineBoundAfUnixFrameClient:
         remaining = self._deadline - time.monotonic()
         if remaining <= 0:
             raise MicroLiveExecutionError(
-                "risk-domain authority RPC exceeded its deadline"
+                f"{self._operation_label} exceeded its deadline"
             )
         return remaining
 
@@ -719,10 +728,10 @@ class _DeadlineBoundAfUnixFrameClient:
             self._remaining_seconds(),
         )
         if exceptional:
-            raise OSError("risk-domain authority RPC socket failed")
+            raise OSError(f"{self._operation_label} socket failed")
         if not (readable or writable):
             raise MicroLiveExecutionError(
-                "risk-domain authority RPC exceeded its deadline"
+                f"{self._operation_label} exceeded its deadline"
             )
 
     def _send_all(self, raw: bytes) -> None:
@@ -734,7 +743,9 @@ class _DeadlineBoundAfUnixFrameClient:
             except (BlockingIOError, InterruptedError):
                 continue
             if sent <= 0:
-                raise OSError("risk-domain authority RPC socket closed while sending")
+                raise OSError(
+                    f"{self._operation_label} socket closed while sending"
+                )
             view = view[sent:]
 
     def _recv_exact(self, size: int) -> bytes:
@@ -770,7 +781,7 @@ class _DeadlineBoundAfUnixFrameClient:
             and 0 <= offset <= len(view)
             and 0 <= selected_size <= len(view) - offset
         ):
-            raise ValueError("risk-domain authority RPC frame slice is invalid")
+            raise ValueError(f"{self._operation_label} frame slice is invalid")
         payload = bytes(view[offset : offset + selected_size])
         if len(payload) > 0x7FFF_FFFF:
             header = struct.pack("!iQ", -1, len(payload))
@@ -783,9 +794,9 @@ class _DeadlineBoundAfUnixFrameClient:
         if size == -1:
             size = struct.unpack("!Q", self._recv_exact(8))[0]
         if size < 0:
-            raise OSError("risk-domain authority RPC frame length is invalid")
+            raise OSError(f"{self._operation_label} frame length is invalid")
         if maxlength is not None and size > maxlength:
-            raise OSError("risk-domain authority RPC frame exceeds its limit")
+            raise OSError(f"{self._operation_label} frame exceeds its limit")
         return self._recv_exact(size)
 
     def close(self) -> None:
@@ -3837,6 +3848,7 @@ class DeploymentOwnedExecutionGatewayAdapter:
         "_endpoint",
         "_exchange_account_sha256",
         "_exchange_endpoint_sha256",
+        "_maximum_call_duration_ms",
         "_route_binding_sha256",
         "_route_mode",
         "_sealed",
@@ -3870,6 +3882,7 @@ class DeploymentOwnedExecutionGatewayAdapter:
         cursor_key_identity_sha256: str,
         clock_identity_sha256: str,
         settlement_authority_identity_sha256: str,
+        maximum_call_duration_ms: int,
         expected_adapter_implementation_sha256: str,
         expected_configuration_sha256: str,
         expected_route_mode: str,
@@ -3915,6 +3928,9 @@ class DeploymentOwnedExecutionGatewayAdapter:
             and configuration_sha256 == expected_configuration_sha256
             and expected_route_mode == EXECUTION_GATEWAY_ROUTE_MODE
             and route_binding_sha256 == expected_route_binding_sha256
+            and isinstance(maximum_call_duration_ms, int)
+            and not isinstance(maximum_call_duration_ms, bool)
+            and 1 <= maximum_call_duration_ms <= MAX_TRANSPORT_CALL_DURATION_MS
         ):
             raise MicroLiveExecutionError(
                 "execution gateway adapter implementation/configuration/route mismatch"
@@ -3936,6 +3952,11 @@ class DeploymentOwnedExecutionGatewayAdapter:
         object.__setattr__(self, "_configuration_sha256", configuration_sha256)
         object.__setattr__(self, "_route_mode", EXECUTION_GATEWAY_ROUTE_MODE)
         object.__setattr__(self, "_route_binding_sha256", route_binding_sha256)
+        object.__setattr__(
+            self,
+            "_maximum_call_duration_ms",
+            maximum_call_duration_ms,
+        )
         object.__setattr__(self, "_client_session_sha256", None)
         object.__setattr__(
             self,
@@ -3965,6 +3986,11 @@ class DeploymentOwnedExecutionGatewayAdapter:
     def route_binding_sha256(self) -> str:
         self.assert_runtime_integrity()
         return self._route_binding_sha256
+
+    @property
+    def maximum_call_duration_ms(self) -> int:
+        self.assert_runtime_integrity()
+        return self._maximum_call_duration_ms
 
     @property
     def client_session_sha256(self) -> str:
@@ -4173,6 +4199,11 @@ class DeploymentOwnedExecutionGatewayAdapter:
             and self._route_mode == EXECUTION_GATEWAY_ROUTE_MODE
             and self._computed_route_binding_sha256() == self._route_binding_sha256
             and _is_sha256(self._client_instance_nonce_sha256)
+            and isinstance(self._maximum_call_duration_ms, int)
+            and not isinstance(self._maximum_call_duration_ms, bool)
+            and 1
+            <= self._maximum_call_duration_ms
+            <= MAX_TRANSPORT_CALL_DURATION_MS
             and (session_unbound or session_bound)
         ):
             raise MicroLiveExecutionError(
@@ -4213,23 +4244,36 @@ class DeploymentOwnedExecutionGatewayAdapter:
                 }
             )
         raw_request = _canonical_json_bytes(envelope)
+        connection = _DeadlineBoundAfUnixFrameClient(
+            self._endpoint,
+            maximum_duration_ms=self._maximum_call_duration_ms,
+            operation_label="execution gateway RPC",
+        )
         try:
-            connection = multiprocessing.connection.Client(
-                self._endpoint,
-                family="AF_UNIX",
-                authkey=self._credential,
+            multiprocessing.connection.answer_challenge(
+                connection,
+                self._credential,
             )
-            try:
-                connection.send_bytes(raw_request)
-                raw_response = connection.recv_bytes(
-                    MAX_EXECUTION_TRANSPORT_EVENT_BYTES
-                )
-            finally:
-                connection.close()
+            multiprocessing.connection.deliver_challenge(
+                connection,
+                self._credential,
+            )
+            connection.send_bytes(raw_request)
+            raw_response = connection.recv_bytes(
+                MAX_EXECUTION_TRANSPORT_EVENT_BYTES
+            )
+        except MicroLiveExecutionError as exc:
+            if str(exc) == "execution gateway RPC exceeded its deadline":
+                raise MicroLiveExecutionError(
+                    "execution gateway RPC exceeded the mandatory transport deadline"
+                ) from exc
+            raise
         except (EOFError, OSError) as exc:
             raise MicroLiveExecutionError(
                 "execution gateway RPC failed closed"
             ) from exc
+        finally:
+            connection.close()
         response, _, _ = _raw_json_object(
             raw_response,
             "execution gateway RPC response",
@@ -5176,6 +5220,9 @@ def create_micro_live_executor(
         settlement_authority_identity_sha256=(
             verified.execution_settlement_authority_identity_sha256
         ),
+        maximum_call_duration_ms=(
+            verified.execution_maximum_call_duration_ms
+        ),
         expected_adapter_implementation_sha256=(
             verified.execution_adapter_implementation_sha256
         ),
@@ -5335,6 +5382,8 @@ class MicroLiveExecutor:
             == self._authorization.execution_gateway_route_mode
             and transport.route_binding_sha256
             == self._authorization.execution_gateway_route_binding_sha256
+            and transport.maximum_call_duration_ms
+            == self._authorization.execution_maximum_call_duration_ms
         ):
             raise MicroLiveExecutionError(
                 "deployment-owned execution gateway route is authorization-mismatched"
@@ -5708,30 +5757,10 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 f"{operation} is absent from the authenticated execution service"
             )
-        completed = threading.Event()
-        result_queue: queue.SimpleQueue[tuple[bool, Any]] = queue.SimpleQueue()
-
-        def invoke() -> None:
-            try:
-                result_queue.put((True, method(copy.deepcopy(outbound_request))))
-            except BaseException as exc:  # propagate crash injection and transport faults
-                result_queue.put((False, exc))
-            finally:
-                completed.set()
-
-        worker = threading.Thread(
-            target=invoke,
-            name=f"micro-live-{operation}",
-            daemon=True,
-        )
-        worker.start()
-        if not completed.wait(self._maximum_transport_call_duration_ms / 1_000):
-            raise MicroLiveExecutionError(
-                f"{operation} exceeded the mandatory transport deadline"
-            )
-        succeeded, value = result_queue.get_nowait()
-        if not succeeded:
-            raise value
+        # The exact production adapter owns an abortable connect/auth/frame
+        # deadline.  Invoke it synchronously so timeout can never abandon a
+        # credential-bearing worker thread or AF_UNIX socket.
+        value = method(copy.deepcopy(outbound_request))
         if not isinstance(value, bytes):
             raise MicroLiveExecutionError(
                 f"{operation} did not return exact raw bytes"
@@ -5813,32 +5842,9 @@ class MicroLiveExecutor:
             raise MicroLiveExecutionError(
                 "authenticated execution gateway lacks lookup-only recovery"
             )
-        completed = threading.Event()
-        result_queue: queue.SimpleQueue[tuple[bool, Any]] = queue.SimpleQueue()
-
-        def invoke() -> None:
-            try:
-                result_queue.put(
-                    (True, method(copy.deepcopy(recovered_request)))
-                )
-            except BaseException as exc:
-                result_queue.put((False, exc))
-            finally:
-                completed.set()
-
-        worker = threading.Thread(
-            target=invoke,
-            name="micro-live-recover-order-submission",
-            daemon=True,
-        )
-        worker.start()
-        if not completed.wait(self._maximum_transport_call_duration_ms / 1_000):
-            raise MicroLiveExecutionError(
-                "recover_order_submission exceeded the mandatory transport deadline"
-            )
-        succeeded, value = result_queue.get_nowait()
-        if not succeeded:
-            raise value
+        # Recovery uses the same caller-owned, authorization-bound RPC
+        # deadline as every other gateway route; no timeout worker survives.
+        value = method(copy.deepcopy(recovered_request))
         if not isinstance(value, bytes):
             raise MicroLiveExecutionError(
                 "recover_order_submission did not return exact raw bytes"

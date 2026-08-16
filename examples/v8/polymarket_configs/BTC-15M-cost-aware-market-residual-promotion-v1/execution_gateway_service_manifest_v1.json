@@ -20,6 +20,9 @@
     "directory_fsync": true,
     "file_fsync_before_replace": true,
     "fenced_prevenue_rejection_persisted": true,
+    "fenced_rejection_exact_bytes_replayed_after_response_loss": true,
+    "fenced_rejection_restart_replay_is_deterministic": true,
+    "fenced_rejection_uses_current_durable_prepared_identity": true,
     "fenced_vs_dispatched_status_preserved": true,
     "last_complete_state_readable_after_injected_failure": true,
     "prepared_signed_order_persisted_before_venue_write": true,
@@ -49,11 +52,11 @@
   },
   "gateway_implementation": {
     "path": "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-    "sha256": "00550941d91d2c75fab40ded00e88ee43ad347f8f38365d4f2edd16f2f644ab8"
+    "sha256": "53e519ddcb29b10e3c0b1a6575b1f4f599fc2bebd5d36357a846cba449c146c8"
   },
   "gateway_process_integration_test": {
     "path": "tests/v8/test_residual_promotion_micro_live_executor.py",
-    "sha256": "6e2533a6c6d82db9431618a97daeded0e3f05f03e3c7e6e857d6be2e3b91b720"
+    "sha256": "7dd395dba371a1fce54c5b24e9ba152ff4afe1342ded8f511d10f94179bfd57c"
   },
   "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
   "model_or_gate_bytes_changed": false,
@@ -106,6 +109,9 @@
     "authenticated_payload_receive_is_bounded": true,
     "complete_frame_header_and_body_share_total_deadline": true,
     "connection_admission_is_reclaimed_after_partial_frame_timeout": true,
+    "execution_gateway_client_authentication_and_frame_share_total_deadline": true,
+    "execution_gateway_client_deadline_matches_authorization": true,
+    "execution_gateway_client_timeout_reaps_socket_without_worker_thread": true,
     "fence_and_cancel_have_reserved_independent_admission": true,
     "maximum_call_duration_is_service_enforced": true,
     "mutating_lane_admission_is_retained_until_worker_completion": true,

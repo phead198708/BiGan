@@ -2232,6 +2232,9 @@ def _test_execution_adapter(
         settlement_authority_identity_sha256=(
             authorization.execution_settlement_authority_identity_sha256
         ),
+        maximum_call_duration_ms=(
+            authorization.execution_maximum_call_duration_ms
+        ),
         expected_adapter_implementation_sha256=(
             authorization.execution_adapter_implementation_sha256
         ),
@@ -2467,6 +2470,9 @@ def _execution_adapter_for_serialized_route(
         ),
         settlement_authority_identity_sha256=(
             authorization.execution_settlement_authority_identity_sha256
+        ),
+        maximum_call_duration_ms=(
+            authorization.execution_maximum_call_duration_ms
         ),
         expected_adapter_implementation_sha256=(
             authorization.execution_adapter_implementation_sha256
@@ -4632,6 +4638,44 @@ def _cancel_request(submitted: dict[str, Any]) -> dict[str, Any]:
     return {**core, "cancel_intent_id": canonical_json_sha256(core)}
 
 
+def _unattested_execution_adapter(
+    authority: dict[str, Any],
+    *,
+    endpoint: str,
+    credential: bytes,
+) -> executor_module.DeploymentOwnedExecutionGatewayAdapter:
+    adapter = executor_module.DeploymentOwnedExecutionGatewayAdapter(
+        endpoint=endpoint,
+        credential=credential,
+        service_identity_sha256=authority["service_identity_sha256"],
+        exchange_endpoint_sha256=authority["exchange_endpoint_sha256"],
+        exchange_account_sha256=authority["exchange_account_sha256"],
+        signer_identity_sha256=authority["signer_identity_sha256"],
+        cursor_key_identity_sha256=authority["cursor_key_identity_sha256"],
+        clock_identity_sha256=authority["clock_identity_sha256"],
+        settlement_authority_identity_sha256=authority[
+            "settlement_authority_identity_sha256"
+        ],
+        maximum_call_duration_ms=authority["maximum_call_duration_ms"],
+        expected_adapter_implementation_sha256=authority[
+            "adapter_implementation_sha256"
+        ],
+        expected_configuration_sha256=authority["configuration_sha256"],
+        expected_route_mode=authority["route_mode"],
+        expected_route_binding_sha256=authority["route_binding_sha256"],
+    )
+    adapter.bind_client_session(
+        authorization_id="a" * 64,
+        risk_domain_id="b" * 64,
+        journal_namespace_id="c" * 64,
+        journal_epoch="d" * 64,
+        risk_domain_authority_binding_sha256="e" * 64,
+        dispatch_authority_route_sha256="f" * 64,
+        authorization_expires_at_ts_ms=NOW_TS_MS + 60_000,
+    )
+    return adapter
+
+
 @pytest.mark.parametrize("partial_frame", ["header", "body"])
 def test_authenticated_partial_frame_is_closed_and_reclaims_all_slots(
     authorized_fixture: dict[str, Any],
@@ -4960,6 +5004,168 @@ def test_repeated_partial_authority_responses_reap_client_resources_before_safet
         shutil.rmtree(gateway_root)
     assert gateway_exitcode == 0
     assert records[-1]["operation"] == "FINAL"
+
+
+def test_repeated_partial_gateway_responses_reap_client_resources_before_safety_ops(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    context = multiprocessing.get_context("fork")
+    deadline_ms = 60
+    calls_per_fragment = 4
+
+    for fragment_name, fragment in (
+        ("authentication", None),
+        ("header", b"\x00"),
+        ("body", struct.pack("!i", 64) + b"{"),
+    ):
+        socket_root = Path(
+            tempfile.mkdtemp(prefix=f"bigan-gateway-{fragment_name}-", dir="/tmp")
+        )
+        endpoint = str(socket_root / "gateway.sock")
+        credential = (
+            f"partial-gateway-{fragment_name}-credential-v1-secure"
+        ).encode("ascii")
+        ready = context.Event()
+        process = context.Process(
+            target=(
+                _stalled_authority_auth_process
+                if fragment is None
+                else _partial_authority_response_process
+            ),
+            args=(
+                (endpoint, calls_per_fragment, ready)
+                if fragment is None
+                else (
+                    endpoint,
+                    credential,
+                    fragment,
+                    calls_per_fragment,
+                    ready,
+                )
+            ),
+        )
+        process.start()
+        assert ready.wait(timeout=5)
+        authority = _test_execution_authority_descriptor(
+            endpoint=endpoint,
+            credential=credential,
+            maximum_call_duration_ms=deadline_ms,
+        )
+        adapter = _unattested_execution_adapter(
+            authority,
+            endpoint=endpoint,
+            credential=credential,
+        )
+        baseline_threads = threading.active_count()
+        baseline_fds = len(os.listdir("/dev/fd"))
+        try:
+            for _ in range(calls_per_fragment):
+                started = time.monotonic()
+                with pytest.raises(
+                    MicroLiveExecutionError,
+                    match="gateway RPC exceeded the mandatory transport deadline",
+                ):
+                    adapter.attest_execution_binding({})
+                assert time.monotonic() - started < deadline_ms / 1_000 + 0.5
+            assert threading.active_count() == baseline_threads
+            assert len(os.listdir("/dev/fd")) <= baseline_fds + 1
+        finally:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+            assert process.exitcode == 0
+            process.close()
+            shutil.rmtree(socket_root)
+
+    # A healthy concrete boundary remains usable after every aborted client
+    # socket: recovery, fence, and cancel all complete in the same process.
+    socket_root = Path(
+        tempfile.mkdtemp(prefix="bigan-gateway-client-recovery-", dir="/tmp")
+    )
+    endpoint = str(socket_root / "gateway.sock")
+    credential = b"gateway-client-recovery-credential-v1"
+    execution_authority = _test_execution_authority_descriptor(
+        endpoint=endpoint,
+        credential=credential,
+        maximum_call_duration_ms=1_000,
+    )
+    ready = context.Event()
+    stop = context.Event()
+    audit = context.Queue()
+    submitted_requests = context.Queue()
+    process = context.Process(
+        target=_isolated_execution_gateway_process,
+        args=(
+            endpoint,
+            credential,
+            execution_authority,
+            False,
+            ready,
+            stop,
+            audit,
+            None,
+            None,
+            submitted_requests,
+        ),
+    )
+    process.start()
+    assert ready.wait(timeout=5)
+    try:
+        micro_live_executor, submitted = _submitted_process_gateway_executor(
+            authorized_fixture,
+            endpoint=endpoint,
+            credential=credential,
+            execution_authority=execution_authority,
+            submitted_requests=submitted_requests,
+        )
+        prepared = next(
+            event["payload"]
+            for event in micro_live_executor.events
+            if event["event_type"] == "ORDER_PREPARED"
+        )
+        recovered = json.loads(
+            micro_live_executor._bounded_submission_recovery_call(
+                prepared=prepared,
+            )
+        )
+        fence = json.loads(
+            micro_live_executor._bounded_transport_call(
+                operation="fence_order_invocation",
+                request=_fence_request(submitted),
+            )
+        )
+        cancel = json.loads(
+            micro_live_executor._bounded_transport_call(
+                operation="cancel_order",
+                request=_cancel_request(submitted),
+            )
+        )
+        assert recovered["status"] == "ACCEPTED"
+        assert fence["side_effects_fenced"] is True
+        assert cancel["status"] == "CANCEL_REQUESTED"
+    finally:
+        stop.set()
+        if process.is_alive():
+            process.join(timeout=3)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        while True:
+            record = audit.get(timeout=2)
+            if record["operation"] == "FINAL":
+                final = record
+                break
+        audit.close()
+        audit.cancel_join_thread()
+        submitted_requests.close()
+        submitted_requests.cancel_join_thread()
+        process_exitcode = process.exitcode
+        process.close()
+        shutil.rmtree(socket_root)
+    assert process_exitcode == 0
+    assert final["recovery_calls"] >= 1
+    assert final["cancel_calls"] == 1
 
 
 def test_stalled_read_lane_cannot_starve_fence_cancel_or_stop(
@@ -9341,6 +9547,213 @@ def test_separate_process_slow_prepare_is_fenced_before_dispatch_and_stop(
     assert final["submit_calls"] == 0
     assert submit_errors
     assert isinstance(submit_errors[0], MicroLiveExecutionError)
+
+
+def test_fence_rereads_prepared_state_and_replays_lost_response_across_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = str(tmp_path / "gateway.sock")
+    credential = b"fence-reread-gateway-credential-v1-secure"
+    credential_path = tmp_path / "gateway-rpc.credential"
+    exponent_path = tmp_path / "gateway-receipt-private-exponent.hex"
+    state_path = tmp_path / "gateway-state.json"
+    credential_path.write_bytes(credential)
+    exponent_path.write_text(
+        TEST_RISK_DOMAIN_PRIVATE_EXPONENT_HEX,
+        encoding="ascii",
+    )
+    credential_path.chmod(0o600)
+    exponent_path.chmod(0o600)
+    execution_authority = _test_execution_authority_descriptor(
+        endpoint=endpoint,
+        credential=credential,
+        maximum_call_duration_ms=1_000,
+    )
+    config = ExecutionGatewayServiceConfig(
+        endpoint=endpoint,
+        rpc_credential_path=str(credential_path),
+        receipt_private_exponent_path=str(exponent_path),
+        state_path=str(state_path),
+        execution_authority=execution_authority,
+        risk_lease_id=auth_module.TRUSTED_RISK_DOMAIN_LEASE_ID,
+        risk_service_identity_sha256=TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256,
+        risk_tenant_id=TEST_RISK_DOMAIN_TENANT_ID,
+        risk_key_identity_sha256=TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+        risk_public_key_modulus_hex=TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
+        risk_public_key_exponent=65_537,
+    )
+    venue = _ProcessMockVenueBoundary(fail_submit=False)
+    server = DeploymentOwnedExecutionGatewayServer(config, venue=venue)
+    authorization_id = "a" * 64
+    risk_domain_id = "b" * 64
+    risk_authority_sha256 = "c" * 64
+    expires_at_ts_ms = NOW_TS_MS + 60_000
+
+    def bind(backend: Any) -> None:
+        backend.bind_execution_dispatch_authority(
+            lambda **_: b"{}",
+            lambda **_: b"{}",
+            lambda *_: b"{}",
+            lambda **_: _json_bytes({"status": "FENCED"}),
+            authorization_id=authorization_id,
+            risk_domain_id=risk_domain_id,
+            risk_domain_authority_binding_sha256=risk_authority_sha256,
+            authorization_expires_at_ts_ms=expires_at_ts_ms,
+        )
+
+    bind(server.backend)
+    client_order_id = "d" * 64
+    session_binding = {
+        "schema_version": executor_module.EXECUTION_GATEWAY_SESSION_SCHEMA_VERSION,
+        "client_instance_nonce_sha256": "e" * 64,
+        "authorization_id": authorization_id,
+        "risk_domain_id": risk_domain_id,
+        "journal_namespace_id": "f" * 64,
+        "journal_epoch": "1" * 64,
+        "execution_gateway_route_binding_sha256": execution_authority[
+            "route_binding_sha256"
+        ],
+        "risk_domain_authority_binding_sha256": risk_authority_sha256,
+        "dispatch_authority_route_sha256": "2" * 64,
+        "authorization_expires_at_ts_ms": expires_at_ts_ms,
+    }
+    original = {
+        "authorization_id": authorization_id,
+        "client_order_id": client_order_id,
+        "business_key": "btc-15m-fence-reread",
+        "market_id": "market-fence-reread",
+        "token_id": "token-fence-reread",
+        "quantity": "1",
+        "limit_price": "0.5",
+        "execution_authentication": {
+            "authorization_id": authorization_id,
+            "risk_domain_id": risk_domain_id,
+            "operation": "submit_order",
+            "execution_outbox_command_sha256": "3" * 64,
+        },
+    }
+    exact_request_sha256 = canonical_json_sha256(original)
+    owner_sha256 = server.backend._session_owner_sha256(session_binding)
+    with server.backend._state_lock:
+        server.state.value["requests"][client_order_id] = copy.deepcopy(original)
+        server.state.value["request_owners"][client_order_id] = owner_sha256
+        server.state.value["preparation_reservations"][client_order_id] = {
+            "exact_request_sha256": exact_request_sha256,
+            "status": "PREPARING",
+        }
+        server.state.flush()
+    fence_request = {
+        "authorization_id": authorization_id,
+        "client_order_id": client_order_id,
+        "business_key": original["business_key"],
+        "market_id": original["market_id"],
+        "token_id": original["token_id"],
+        "transport_invocation_id": "4" * 64,
+        "execution_authentication": {
+            "authorization_id": authorization_id,
+            "execution_service_binding_sha256": canonical_json_sha256(
+                execution_authority
+            ),
+            "exchange_endpoint_sha256": execution_authority[
+                "exchange_endpoint_sha256"
+            ],
+            "exchange_account_sha256": execution_authority[
+                "exchange_account_sha256"
+            ],
+            "signer_identity_sha256": execution_authority[
+                "signer_identity_sha256"
+            ],
+            "operation": "fence_order_invocation",
+            "request_nonce_sha256": "5" * 64,
+            "request_core_sha256": "6" * 64,
+            "risk_domain_id": risk_domain_id,
+            "risk_domain_authority_binding_sha256": risk_authority_sha256,
+            "execution_invocation_fence_receipt_sha256": None,
+        },
+    }
+    snapshot_seen = threading.Event()
+    release_snapshot = threading.Event()
+    original_owned_order = server.backend._durable_owned_order
+
+    def pause_after_stale_snapshot(*args: Any, **kwargs: Any) -> Any:
+        result = original_owned_order(*args, **kwargs)
+        assert result[1] is None
+        snapshot_seen.set()
+        assert release_snapshot.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(
+        server.backend,
+        "_durable_owned_order",
+        pause_after_stale_snapshot,
+    )
+    responses: list[bytes] = []
+    failures: list[BaseException] = []
+
+    def fence() -> None:
+        try:
+            responses.append(
+                server.backend.fence_order_invocation(
+                    fence_request,
+                    client_session_binding=session_binding,
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    worker = threading.Thread(target=fence)
+    worker.start()
+    assert snapshot_seen.wait(timeout=5)
+    order_hash = f"exchange-{client_order_id[:12]}"
+    with server.backend._state_lock:
+        server.state.value["prepared"][client_order_id] = {
+            "schema_version": "test-prepared-venue-submission-v1",
+            "client_order_id": client_order_id,
+            "exact_request_sha256": exact_request_sha256,
+            "order_hash": order_hash,
+        }
+        server.state.value["preparation_reservations"][client_order_id][
+            "status"
+        ] = "PREPARED"
+        server.state.flush()
+    release_snapshot.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert failures == []
+    assert len(responses) == 1
+    monkeypatch.setattr(
+        server.backend,
+        "_durable_owned_order",
+        original_owned_order,
+    )
+    first_response = responses[0]
+    first_receipt = json.loads(first_response)
+    first_fence = json.loads(first_receipt["raw_response_json"])
+    first_rejection = json.loads(first_fence["raw_fenced_rejection_json"])
+    assert first_rejection["exchange_order_id"] == order_hash
+
+    # Simulate loss of the first response: the caller never consumes it.  Both
+    # an in-process retry and a fresh backend over the same durable state must
+    # return the identical signed response without any venue write.
+    retry_response = server.backend.fence_order_invocation(
+        fence_request,
+        client_session_binding=session_binding,
+    )
+    assert retry_response == first_response
+    restarted_venue = _ProcessMockVenueBoundary(fail_submit=False)
+    restarted = DeploymentOwnedExecutionGatewayServer(
+        config,
+        venue=restarted_venue,
+    )
+    bind(restarted.backend)
+    restarted_response = restarted.backend.fence_order_invocation(
+        fence_request,
+        client_session_binding=session_binding,
+    )
+    assert restarted_response == first_response
+    assert venue.submit_calls == 0
+    assert restarted_venue.submit_calls == 0
 
 
 @pytest.mark.parametrize(

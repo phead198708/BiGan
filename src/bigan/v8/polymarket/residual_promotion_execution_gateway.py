@@ -1950,18 +1950,20 @@ class DeploymentOwnedExecutionGatewayBackend:
         client_session_binding: Mapping[str, Any],
     ) -> bytes:
         key = str(request["client_order_id"])
-        original, prepared = self._durable_owned_order(
+        original, _ = self._durable_owned_order(
             request,
             client_session_binding=client_session_binding,
             acknowledged_required=False,
             prepared_required=False,
         )
+        raw_fenced_rejection: bytes | None = None
         with self._dispatch_transition_lock:
             with self._state_lock:
                 submitted = copy.deepcopy(self.state.value["requests"].get(key))
                 reservation = self.state.value["preparation_reservations"].get(key)
                 if not (
                     isinstance(submitted, Mapping)
+                    and submitted == original
                     and isinstance(reservation, Mapping)
                     and reservation.get("exact_request_sha256")
                     == executor.canonical_json_sha256(submitted)
@@ -1979,56 +1981,106 @@ class DeploymentOwnedExecutionGatewayBackend:
                     "execution_outbox_command_sha256"
                 ],
             )
-        fence, _, _ = executor._raw_json_object(raw_fence, "dispatch fence")
-        fence_status = fence.get("status")
-        if fence_status not in {"FENCED", "DISPATCHED", "IN_PROGRESS"}:
-            raise ExecutionGatewayError("gateway dispatch fence status is invalid")
-        raw_fenced_rejection: bytes | None = None
-        if fence_status == "FENCED":
-            # A PREPARING reservation can be fenced before the venue has
-            # produced signed order bytes.  Such a command provably never
-            # crossed the dispatch boundary, so bind its terminal rejection
-            # to a deterministic non-venue identity.  Once preparation has
-            # completed, retain the actual prepared order hash instead.
-            fenced_exchange_order_id = (
-                prepared["order_hash"]
-                if prepared is not None
-                else f"fenced-before-venue-{key}"
-            )
-            raw_fenced_rejection = _json_bytes(
-                {
-                    "client_order_id": original["client_order_id"],
-                    "exchange_order_id": fenced_exchange_order_id,
-                    "status": "REJECTED",
-                    "market_id": original["market_id"],
-                    "token_id": original["token_id"],
-                    "accepted_quantity": original["quantity"],
-                    "limit_price": original["limit_price"],
-                }
-            )
-            encoded_rejection = base64.b64encode(raw_fenced_rejection).decode(
-                "ascii"
-            )
-            with self._state_lock:
-                existing_rejection = self.state.value[
-                    "fenced_rejections_base64"
-                ].get(key)
-                if existing_rejection not in {None, encoded_rejection}:
-                    raise ExecutionGatewayError(
-                        "gateway fenced rejection identity conflicts"
+            fence, _, _ = executor._raw_json_object(raw_fence, "dispatch fence")
+            fence_status = fence.get("status")
+            if fence_status not in {"FENCED", "DISPATCHED", "IN_PROGRESS"}:
+                raise ExecutionGatewayError("gateway dispatch fence status is invalid")
+            if fence_status == "FENCED":
+                # Reread the prepared bytes and any prior terminal rejection
+                # together while the submit/fence transition remains excluded.
+                # A lost first response must replay the exact durable bytes;
+                # it must never recompute an identity from a stale snapshot.
+                with self._state_lock:
+                    current_prepared = copy.deepcopy(
+                        self.state.value["prepared"].get(key)
                     )
-                self.state.value["fenced_rejections_base64"][key] = (
-                    encoded_rejection
-                )
-                reservation = self.state.value[
-                    "preparation_reservations"
-                ].get(key)
-                if not isinstance(reservation, Mapping):
-                    raise ExecutionGatewayError(
-                        "gateway fenced rejection reservation is absent"
-                    )
-                reservation["status"] = "FENCED"
-                self.state.flush()
+                    if current_prepared is not None and not (
+                        isinstance(current_prepared, Mapping)
+                        and current_prepared.get("client_order_id") == key
+                        and current_prepared.get("exact_request_sha256")
+                        == executor.canonical_json_sha256(submitted)
+                        and isinstance(current_prepared.get("order_hash"), str)
+                        and current_prepared["order_hash"]
+                    ):
+                        raise ExecutionGatewayError(
+                            "gateway fenced prepared identity is invalid"
+                        )
+                    synthetic_exchange_order_id = f"fenced-before-venue-{key}"
+                    allowed_exchange_order_ids = {synthetic_exchange_order_id}
+                    if current_prepared is not None:
+                        allowed_exchange_order_ids.add(
+                            str(current_prepared["order_hash"])
+                        )
+                    expected_rejection_fields = {
+                        "client_order_id": original["client_order_id"],
+                        "status": "REJECTED",
+                        "market_id": original["market_id"],
+                        "token_id": original["token_id"],
+                        "accepted_quantity": original["quantity"],
+                        "limit_price": original["limit_price"],
+                    }
+                    existing_rejection = self.state.value[
+                        "fenced_rejections_base64"
+                    ].get(key)
+                    if existing_rejection is not None:
+                        try:
+                            raw_fenced_rejection = base64.b64decode(
+                                existing_rejection,
+                                validate=True,
+                            )
+                            rejection, canonical_rejection, _ = (
+                                executor._raw_json_object(
+                                    raw_fenced_rejection,
+                                    "gateway durable fenced rejection",
+                                )
+                            )
+                        except (
+                            TypeError,
+                            ValueError,
+                            executor.MicroLiveExecutionError,
+                        ) as exc:
+                            raise ExecutionGatewayError(
+                                "gateway durable fenced rejection is invalid"
+                            ) from exc
+                        if not (
+                            raw_fenced_rejection
+                            == canonical_rejection.encode("utf-8")
+                            and set(rejection)
+                            == {*expected_rejection_fields, "exchange_order_id"}
+                            and all(
+                                rejection.get(field) == value
+                                for field, value in expected_rejection_fields.items()
+                            )
+                            and rejection.get("exchange_order_id")
+                            in allowed_exchange_order_ids
+                        ):
+                            raise ExecutionGatewayError(
+                                "gateway durable fenced rejection is identity-mismatched"
+                            )
+                    else:
+                        fenced_exchange_order_id = (
+                            str(current_prepared["order_hash"])
+                            if current_prepared is not None
+                            else synthetic_exchange_order_id
+                        )
+                        raw_fenced_rejection = _json_bytes(
+                            {
+                                **expected_rejection_fields,
+                                "exchange_order_id": fenced_exchange_order_id,
+                            }
+                        )
+                        self.state.value["fenced_rejections_base64"][key] = (
+                            base64.b64encode(raw_fenced_rejection).decode("ascii")
+                        )
+                    reservation = self.state.value[
+                        "preparation_reservations"
+                    ].get(key)
+                    if not isinstance(reservation, Mapping):
+                        raise ExecutionGatewayError(
+                            "gateway fenced rejection reservation is absent"
+                        )
+                    reservation["status"] = "FENCED"
+                    self.state.flush()
         response = _json_bytes(
             {
                 "authorization_id": request["authorization_id"],
