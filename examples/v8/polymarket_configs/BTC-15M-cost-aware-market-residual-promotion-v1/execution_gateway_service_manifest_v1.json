@@ -30,11 +30,11 @@
   },
   "gateway_implementation": {
     "path": "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-    "sha256": "7bcfe7127ad428579865df3d59ee9fb64de2caff06e525546850073ad04c27ec"
+    "sha256": "120a938807403bc8aa763ab4ba97ebb1ef6244035de66b815c99e98f10191c4f"
   },
   "gateway_process_integration_test": {
     "path": "tests/v8/test_residual_promotion_micro_live_executor.py",
-    "sha256": "aa78dcbda66d470e62b0e0d486f5b550a57e7018d2f3f025c0958306eebb5ed6"
+    "sha256": "441b6aa34e6c25778132d07d9c45ccc7c3be8db539fe778696dd6ce30e546c98"
   },
   "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
   "model_or_gate_bytes_changed": false,
@@ -83,9 +83,14 @@
   "service_deadline_contract": {
     "authenticated_handshake_is_bounded": true,
     "authenticated_payload_receive_is_bounded": true,
+    "complete_frame_header_and_body_share_total_deadline": true,
+    "connection_admission_is_reclaimed_after_partial_frame_timeout": true,
+    "fence_and_cancel_have_reserved_independent_admission": true,
     "maximum_call_duration_is_service_enforced": true,
+    "mutating_lane_admission_is_retained_until_worker_completion": true,
     "parked_connection_cannot_block_accept_loop": true,
-    "safety_operations_use_independent_lane": true,
+    "read_only_lane_admission_is_reclaimed_at_rpc_deadline": true,
+    "read_recovery_cannot_consume_fence_or_cancel_admission": true,
     "slow_prepare_can_be_fenced_before_dispatch": true,
     "slow_submit_cannot_block_fence_or_stop": true
   },

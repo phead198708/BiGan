@@ -11,8 +11,10 @@ import inspect
 import json
 import multiprocessing
 import os
+import queue
 import shutil
 import socket
+import struct
 import tempfile
 import threading
 import time
@@ -3928,6 +3930,9 @@ class _ProcessMockVenueBoundary:
         submit_stalled: Any | None = None,
         release_submit: Any | None = None,
         submitted_requests: Any | None = None,
+        lookup_stalled: Any | None = None,
+        release_lookup: Any | None = None,
+        lookup_requests: Any | None = None,
     ) -> None:
         self.fail_submit = fail_submit
         self.prepare_stalled = prepare_stalled
@@ -3936,6 +3941,9 @@ class _ProcessMockVenueBoundary:
         self.submit_stalled = submit_stalled
         self.release_submit = release_submit
         self.submitted_requests = submitted_requests
+        self.lookup_stalled = lookup_stalled
+        self.release_lookup = release_lookup
+        self.lookup_requests = lookup_requests
         self.outcomes: dict[str, bytes] = {}
         self.requests: dict[str, dict[str, Any]] = {}
         self.submit_calls = 0
@@ -4057,6 +4065,16 @@ class _ProcessMockVenueBoundary:
 
     def lookup(self, request: dict[str, Any]) -> bytes:
         submitted = self.requests[request["client_order_id"]]
+        if self.lookup_requests is not None:
+            self.lookup_requests.put(copy.deepcopy(request))
+        if self.lookup_stalled is not None:
+            self.lookup_stalled.set()
+            try:
+                released = self.release_lookup.get(timeout=10)
+            except (AttributeError, queue.Empty):
+                released = False
+            if released is not True:
+                raise RuntimeError("synthetic venue lookup stall was not released")
         status = (
             "CANCELED"
             if request.get("lookup_purpose") == "cancel_reconciliation"
@@ -4149,6 +4167,9 @@ def _isolated_execution_gateway_process(
     prepare_stalled: Any | None = None,
     release_prepare: Any | None = None,
     preparing_requests: Any | None = None,
+    lookup_stalled: Any | None = None,
+    release_lookup: Any | None = None,
+    lookup_requests: Any | None = None,
 ) -> None:
     """Run the exact production server; mock only its outer venue boundary."""
 
@@ -4171,6 +4192,9 @@ def _isolated_execution_gateway_process(
         submit_stalled=submit_stalled,
         release_submit=release_submit,
         submitted_requests=submitted_requests,
+        lookup_stalled=lookup_stalled,
+        release_lookup=release_lookup,
+        lookup_requests=lookup_requests,
     )
     config = ExecutionGatewayServiceConfig(
         endpoint=endpoint,
@@ -4398,6 +4422,356 @@ def authorized_fixture(tmp_path_factory: pytest.TempPathFactory) -> dict[str, An
         "authorization": authorization,
         "now_ts_ms": NOW_TS_MS,
     }
+
+
+def _submitted_process_gateway_executor(
+    authorized_fixture: dict[str, Any],
+    *,
+    endpoint: str,
+    credential: bytes,
+    execution_authority: dict[str, Any],
+    submitted_requests: Any,
+) -> tuple[_StrictMicroLiveExecutor, dict[str, Any]]:
+    authorization = copy.deepcopy(authorized_fixture["authorization"])
+    authorization["execution_service_authority"] = execution_authority
+    verified = _verified(
+        authorized_fixture,
+        authorization,
+        execution_call_duration_ms=int(
+            execution_authority["maximum_call_duration_ms"]
+        ),
+    )
+    micro_live_executor = _StrictMicroLiveExecutor(
+        verified,
+        transport=_execution_adapter_for_serialized_route(
+            verified,
+            endpoint=endpoint,
+            credential=credential,
+        ),
+        journal=_new_journal(),
+    )
+    result = micro_live_executor.submit_signal(
+        raw_signal_payload=_json_bytes(
+            _signal(
+                candidate_bundle_sha256=verified.candidate_bundle_sha256
+            )["signal_payload"]
+        ),
+        raw_feature_row=_json_bytes(BASE_FEATURE_ROW),
+        provider_feature_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
+        now_ts_ms=NOW_TS_MS,
+        operator_heartbeat_ts_ms=NOW_TS_MS,
+        market_identity_evidence=_market_identity_evidence(BASE_SIGNAL_PAYLOAD),
+    )
+    assert result["status"] == "ORDER_ACKNOWLEDGED"
+    return micro_live_executor, submitted_requests.get(timeout=5)
+
+
+def _fence_request(submitted: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: submitted[key]
+        for key in (
+            "authorization_id",
+            "client_order_id",
+            "business_key",
+            "market_id",
+            "token_id",
+            "transport_invocation_id",
+        )
+    }
+
+
+def _cancel_request(submitted: dict[str, Any]) -> dict[str, Any]:
+    core = {
+        "authorization_id": submitted["authorization_id"],
+        "client_order_id": submitted["client_order_id"],
+        "exchange_order_id": f"exchange-{submitted['client_order_id'][:12]}",
+        "market_id": submitted["market_id"],
+        "token_id": submitted["token_id"],
+        "reason": "deadline_admission_regression",
+        "requested_at_ts_ms": NOW_TS_MS + 1,
+    }
+    return {**core, "cancel_intent_id": canonical_json_sha256(core)}
+
+
+@pytest.mark.parametrize("partial_frame", ["header", "body"])
+def test_authenticated_partial_frame_is_closed_and_reclaims_all_slots(
+    authorized_fixture: dict[str, Any],
+    partial_frame: str,
+) -> None:
+    context = multiprocessing.get_context("fork")
+    socket_root = Path(tempfile.mkdtemp(prefix="bigan-egw-partial-", dir="/tmp"))
+    endpoint = str(socket_root / "gateway.sock")
+    credential = b"bigan-partial-frame-gateway-credential-v1"
+    maximum_call_duration_ms = 3_000
+    execution_authority = _test_execution_authority_descriptor(
+        endpoint=endpoint,
+        credential=credential,
+        maximum_call_duration_ms=maximum_call_duration_ms,
+    )
+    ready = context.Event()
+    stop = context.Event()
+    audit = context.Queue()
+    submitted_requests = context.Queue()
+    process = context.Process(
+        target=_isolated_execution_gateway_process,
+        args=(
+            endpoint,
+            credential,
+            execution_authority,
+            False,
+            ready,
+            stop,
+            audit,
+            None,
+            None,
+            submitted_requests,
+        ),
+    )
+    process.start()
+    assert ready.wait(timeout=5)
+    stalled_connections: list[Any] = []
+    try:
+        micro_live_executor, submitted = _submitted_process_gateway_executor(
+            authorized_fixture,
+            endpoint=endpoint,
+            credential=credential,
+            execution_authority=execution_authority,
+            submitted_requests=submitted_requests,
+        )
+        fragment = (
+            b"\x00"
+            if partial_frame == "header"
+            else struct.pack("!i", 64) + b"{"
+        )
+        saturation_started = time.monotonic()
+        for _ in range(
+            DeploymentOwnedExecutionGatewayServer._MAXIMUM_CONCURRENT_CONNECTIONS
+        ):
+            connection = Client(endpoint, family="AF_UNIX", authkey=credential)
+            os.write(connection.fileno(), fragment)
+            stalled_connections.append(connection)
+        assert time.monotonic() - saturation_started < (
+            maximum_call_duration_ms / 1_000
+        )
+
+        expected_deadline = {
+            "schema_version": executor_module.EXECUTION_GATEWAY_RPC_SCHEMA_VERSION,
+            "status": "ERROR",
+            "error_code": "DEADLINE_EXCEEDED",
+        }
+        for connection in stalled_connections:
+            assert connection.poll(maximum_call_duration_ms / 1_000 + 1)
+            assert json.loads(
+                connection.recv_bytes(
+                    executor_module.MAX_EXECUTION_TRANSPORT_EVENT_BYTES
+                )
+            ) == expected_deadline
+            assert connection.poll(1)
+            with pytest.raises((EOFError, OSError)):
+                connection.recv_bytes(
+                    executor_module.MAX_EXECUTION_TRANSPORT_EVENT_BYTES
+                )
+
+        safety_started = time.monotonic()
+        fence = json.loads(
+            micro_live_executor._bounded_transport_call(
+                operation="fence_order_invocation",
+                request=_fence_request(submitted),
+            )
+        )
+        cancel = json.loads(
+            micro_live_executor._bounded_transport_call(
+                operation="cancel_order",
+                request=_cancel_request(submitted),
+            )
+        )
+        assert time.monotonic() - safety_started < (
+            maximum_call_duration_ms / 1_000
+        )
+        assert fence["client_order_id"] == submitted["client_order_id"]
+        assert fence["side_effects_fenced"] is True
+        assert cancel["status"] == "CANCEL_REQUESTED"
+
+        stop_started = time.monotonic()
+        stop.set()
+        process.join(timeout=maximum_call_duration_ms / 1_000)
+        assert not process.is_alive()
+        assert time.monotonic() - stop_started < (
+            maximum_call_duration_ms / 1_000
+        )
+    finally:
+        for connection in stalled_connections:
+            connection.close()
+        stop.set()
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        records: list[dict[str, Any]] = []
+        while True:
+            record = audit.get(timeout=2)
+            records.append(record)
+            if record["operation"] == "FINAL":
+                break
+        audit.close()
+        audit.cancel_join_thread()
+        submitted_requests.close()
+        submitted_requests.cancel_join_thread()
+        process_exitcode = process.exitcode
+        process.close()
+        shutil.rmtree(socket_root)
+    assert process_exitcode == 0
+    assert sum(
+        record["status"] == "DEADLINE_EXCEEDED"
+        for record in records
+        if record["operation"] == "invalid"
+    ) == DeploymentOwnedExecutionGatewayServer._MAXIMUM_CONCURRENT_CONNECTIONS
+
+
+def test_stalled_read_lane_cannot_starve_fence_cancel_or_stop(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    context = multiprocessing.get_context("fork")
+    socket_root = Path(tempfile.mkdtemp(prefix="bigan-egw-read-lane-", dir="/tmp"))
+    endpoint = str(socket_root / "gateway.sock")
+    credential = b"bigan-read-lane-gateway-credential-v1"
+    maximum_call_duration_ms = 1_000
+    execution_authority = _test_execution_authority_descriptor(
+        endpoint=endpoint,
+        credential=credential,
+        maximum_call_duration_ms=maximum_call_duration_ms,
+    )
+    ready = context.Event()
+    stop = context.Event()
+    audit = context.Queue()
+    submitted_requests = context.Queue()
+    lookup_stalled = context.Event()
+    release_lookup = context.Queue()
+    lookup_requests = context.Queue()
+    process = context.Process(
+        target=_isolated_execution_gateway_process,
+        args=(
+            endpoint,
+            credential,
+            execution_authority,
+            False,
+            ready,
+            stop,
+            audit,
+            None,
+            None,
+            submitted_requests,
+            None,
+            None,
+            None,
+            lookup_stalled,
+            release_lookup,
+            lookup_requests,
+        ),
+    )
+    process.start()
+    assert ready.wait(timeout=5)
+    workers: list[threading.Thread] = []
+    lookup_errors: list[BaseException] = []
+    try:
+        micro_live_executor, submitted = _submitted_process_gateway_executor(
+            authorized_fixture,
+            endpoint=endpoint,
+            credential=credential,
+            execution_authority=execution_authority,
+            submitted_requests=submitted_requests,
+        )
+        lookup_request = {
+            "authorization_id": submitted["authorization_id"],
+            "client_order_id": submitted["client_order_id"],
+            "exchange_order_id": f"exchange-{submitted['client_order_id'][:12]}",
+            "market_id": submitted["market_id"],
+            "token_id": submitted["token_id"],
+            "lookup_purpose": "read_lane_saturation_regression",
+        }
+
+        def lookup() -> None:
+            try:
+                micro_live_executor._bounded_transport_call(
+                    operation="lookup_order",
+                    request=lookup_request,
+                )
+            except BaseException as exc:
+                lookup_errors.append(exc)
+
+        for _ in range(DeploymentOwnedExecutionGatewayServer._READ_LANE_CAPACITY):
+            worker = threading.Thread(target=lookup, daemon=True)
+            workers.append(worker)
+            worker.start()
+        assert lookup_stalled.wait(timeout=5)
+        for _ in range(DeploymentOwnedExecutionGatewayServer._READ_LANE_CAPACITY):
+            lookup_requests.get(timeout=5)
+        for worker in workers:
+            worker.join(timeout=maximum_call_duration_ms / 1_000 + 2)
+            assert not worker.is_alive()
+        assert len(lookup_errors) == (
+            DeploymentOwnedExecutionGatewayServer._READ_LANE_CAPACITY
+        )
+        assert all(
+            isinstance(error, MicroLiveExecutionError)
+            for error in lookup_errors
+        )
+
+        safety_started = time.monotonic()
+        fence = json.loads(
+            micro_live_executor._bounded_transport_call(
+                operation="fence_order_invocation",
+                request=_fence_request(submitted),
+            )
+        )
+        cancel = json.loads(
+            micro_live_executor._bounded_transport_call(
+                operation="cancel_order",
+                request=_cancel_request(submitted),
+            )
+        )
+        assert time.monotonic() - safety_started < (
+            maximum_call_duration_ms / 1_000
+        )
+        assert fence["client_order_id"] == submitted["client_order_id"]
+        assert fence["side_effects_fenced"] is True
+        assert cancel["status"] == "CANCEL_REQUESTED"
+
+        for _ in range(DeploymentOwnedExecutionGatewayServer._READ_LANE_CAPACITY):
+            release_lookup.put(True)
+        stop_started = time.monotonic()
+        stop.set()
+        process.join(timeout=maximum_call_duration_ms / 1_000)
+        assert not process.is_alive()
+        assert time.monotonic() - stop_started < (
+            maximum_call_duration_ms / 1_000
+        )
+    finally:
+        for _ in range(DeploymentOwnedExecutionGatewayServer._READ_LANE_CAPACITY):
+            release_lookup.put(True)
+        stop.set()
+        for worker in workers:
+            worker.join(timeout=2)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        while True:
+            record = audit.get(timeout=2)
+            if record["operation"] == "FINAL":
+                final = record
+                break
+        audit.close()
+        audit.cancel_join_thread()
+        submitted_requests.close()
+        submitted_requests.cancel_join_thread()
+        lookup_requests.close()
+        lookup_requests.cancel_join_thread()
+        release_lookup.close()
+        release_lookup.cancel_join_thread()
+        process_exitcode = process.exitcode
+        process.close()
+        shutil.rmtree(socket_root)
+    assert process_exitcode == 0
+    assert final["cancel_calls"] == 1
 
 
 def _json(path: Path) -> dict[str, Any]:

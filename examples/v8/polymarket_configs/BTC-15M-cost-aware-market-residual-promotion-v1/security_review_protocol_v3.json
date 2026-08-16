@@ -9,7 +9,7 @@
   "created_at": "2026-08-15T00:00:00Z",
   "execution_gateway_service_manifest": {
     "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json",
-    "sha256": "998e774db4fbe598b5c56e89f51716054f3ec0c6db16755359620bdd17833d20"
+    "sha256": "76f6695c668fe7b32e4a5b20130b6c24ca972a0c50a3fc2cfe746c4c024dab8b"
   },
   "execution_safety_contract": {
     "maximum_future_initial_capital_fraction": 0.01,

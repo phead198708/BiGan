@@ -18,7 +18,9 @@ import json
 import multiprocessing.connection
 import os
 import queue
+import select
 import stat
+import struct
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -1768,18 +1770,23 @@ class DeploymentOwnedExecutionGatewayServer:
     """Final authenticated AF_UNIX server with a durable session registry."""
 
     _MAXIMUM_CONCURRENT_CONNECTIONS = 64
-    _SAFETY_LANE_OPERATIONS = frozenset(
+    _READ_LANE_CAPACITY = 16
+    _CONTROL_LANE_OPERATIONS = frozenset(
         {
             "attest_execution_binding",
             "bind_execution_dispatch_authority",
-            "read_trusted_time",
-            "recover_order_submission",
-            "cancel_order",
-            "lookup_order",
-            "read_order_fill_cursor",
-            "fence_order_invocation",
         }
     )
+    _READ_LANE_OPERATIONS = frozenset(
+        {
+            "read_trusted_time",
+            "lookup_order",
+            "read_order_fill_cursor",
+        }
+    )
+    _RECOVERY_LANE_OPERATIONS = frozenset({"recover_order_submission"})
+    _CANCEL_LANE_OPERATIONS = frozenset({"cancel_order"})
+    _FENCE_LANE_OPERATIONS = frozenset({"fence_order_invocation"})
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         del kwargs
@@ -1816,7 +1823,13 @@ class DeploymentOwnedExecutionGatewayServer:
             self._MAXIMUM_CONCURRENT_CONNECTIONS
         )
         self._submit_lane = threading.BoundedSemaphore(1)
-        self._safety_lane = threading.BoundedSemaphore(16)
+        self._control_lane = threading.BoundedSemaphore(4)
+        self._read_lane = threading.BoundedSemaphore(self._READ_LANE_CAPACITY)
+        self._recovery_lane = threading.BoundedSemaphore(4)
+        # Fence and cancel admission is reserved.  Neither operation can be
+        # queued behind network-backed lookup/recovery work.
+        self._cancel_lane = threading.BoundedSemaphore(1)
+        self._fence_lane = threading.BoundedSemaphore(1)
         self._active_handlers: set[threading.Thread] = set()
         self._active_handlers_lock = threading.Lock()
 
@@ -1836,6 +1849,21 @@ class DeploymentOwnedExecutionGatewayServer:
             )
         return remaining
 
+    def _lane_for_operation(self, operation: str) -> threading.BoundedSemaphore:
+        if operation == "submit_order":
+            return self._submit_lane
+        if operation in self._CONTROL_LANE_OPERATIONS:
+            return self._control_lane
+        if operation in self._READ_LANE_OPERATIONS:
+            return self._read_lane
+        if operation in self._RECOVERY_LANE_OPERATIONS:
+            return self._recovery_lane
+        if operation in self._CANCEL_LANE_OPERATIONS:
+            return self._cancel_lane
+        if operation in self._FENCE_LANE_OPERATIONS:
+            return self._fence_lane
+        raise ExecutionGatewayError("execution gateway operation has no lane")
+
     def _invoke_with_deadline(
         self,
         *,
@@ -1844,20 +1872,17 @@ class DeploymentOwnedExecutionGatewayServer:
         call: Callable[[], bytes],
     ) -> bytes:
         result: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
-        lane = (
-            self._safety_lane
-            if operation in self._SAFETY_LANE_OPERATIONS
-            else self._submit_lane
-        )
+        lane = self._lane_for_operation(operation)
+        acquired = lane.acquire(timeout=self._remaining_seconds(deadline))
+        if not acquired:
+            raise ExecutionGatewayDeadlineExceeded(
+                "execution gateway service lane is unavailable"
+            )
+
+        caller_reclaims_lane = operation in self._READ_LANE_OPERATIONS
 
         def invoke() -> None:
-            acquired = False
             try:
-                acquired = lane.acquire(timeout=self._remaining_seconds(deadline))
-                if not acquired:
-                    raise ExecutionGatewayDeadlineExceeded(
-                        "execution gateway service lane is unavailable"
-                    )
                 value = call()
                 with contextlib.suppress(queue.Full):
                     result.put_nowait(("OK", value))
@@ -1865,20 +1890,33 @@ class DeploymentOwnedExecutionGatewayServer:
                 with contextlib.suppress(queue.Full):
                     result.put_nowait(("ERROR", exc))
             finally:
-                if acquired:
+                if not caller_reclaims_lane:
                     lane.release()
 
-        threading.Thread(
-            target=invoke,
-            name=f"execution-gateway-{operation}",
-            daemon=True,
-        ).start()
+        started = False
         try:
-            status, value = result.get(timeout=self._remaining_seconds(deadline))
-        except queue.Empty as exc:
-            raise ExecutionGatewayDeadlineExceeded(
-                "execution gateway service operation timed out"
-            ) from exc
+            worker = threading.Thread(
+                target=invoke,
+                name=f"execution-gateway-{operation}",
+                daemon=True,
+            )
+            worker.start()
+            started = True
+            try:
+                status, value = result.get(
+                    timeout=self._remaining_seconds(deadline)
+                )
+            except queue.Empty as exc:
+                raise ExecutionGatewayDeadlineExceeded(
+                    "execution gateway service operation timed out"
+                ) from exc
+        finally:
+            if caller_reclaims_lane or not started:
+                # Read-only admission belongs to the deadline-bound caller,
+                # not to an abandoned backend worker.  Mutating operations
+                # retain their isolated lane until the worker exits, so a late
+                # side effect cannot overlap another same-class mutation.
+                lane.release()
         if status != "OK":
             raise value
         if not isinstance(value, bytes):
@@ -1930,6 +1968,69 @@ class DeploymentOwnedExecutionGatewayServer:
                 "execution gateway authentication failed closed"
             ) from outcome
 
+    def _read_exact_with_deadline(
+        self,
+        connection: Any,
+        *,
+        byte_count: int,
+        deadline: float,
+    ) -> bytes:
+        chunks: list[bytes] = []
+        remaining_bytes = byte_count
+        descriptor = connection.fileno()
+        while remaining_bytes:
+            try:
+                readable, _, _ = select.select(
+                    [descriptor],
+                    [],
+                    [],
+                    self._remaining_seconds(deadline),
+                )
+            except InterruptedError:
+                continue
+            if not readable:
+                raise ExecutionGatewayDeadlineExceeded(
+                    "execution gateway request payload timed out"
+                )
+            chunk = os.read(descriptor, remaining_bytes)
+            if not chunk:
+                raise EOFError("execution gateway request payload ended early")
+            chunks.append(chunk)
+            remaining_bytes -= len(chunk)
+        return b"".join(chunks)
+
+    def _recv_bytes_with_deadline(
+        self,
+        connection: Any,
+        *,
+        maximum_bytes: int,
+        deadline: float,
+    ) -> bytes:
+        """Read one complete multiprocessing frame under the RPC deadline."""
+
+        header = self._read_exact_with_deadline(
+            connection,
+            byte_count=4,
+            deadline=deadline,
+        )
+        (message_size,) = struct.unpack("!i", header)
+        if message_size == -1:
+            extended_header = self._read_exact_with_deadline(
+                connection,
+                byte_count=8,
+                deadline=deadline,
+            )
+            (message_size,) = struct.unpack("!Q", extended_header)
+        if message_size < 0 or message_size > maximum_bytes:
+            raise ExecutionGatewayError(
+                "execution gateway request payload size is invalid"
+            )
+        return self._read_exact_with_deadline(
+            connection,
+            byte_count=message_size,
+            deadline=deadline,
+        )
+
     def _handle_connection(
         self,
         connection: Any,
@@ -1939,12 +2040,10 @@ class DeploymentOwnedExecutionGatewayServer:
     ) -> None:
         operation = "invalid"
         try:
-            if not connection.poll(self._remaining_seconds(deadline)):
-                raise ExecutionGatewayDeadlineExceeded(
-                    "execution gateway request payload timed out"
-                )
-            raw_request = connection.recv_bytes(
-                executor.MAX_EXECUTION_TRANSPORT_EVENT_BYTES
+            raw_request = self._recv_bytes_with_deadline(
+                connection,
+                maximum_bytes=executor.MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+                deadline=deadline,
             )
             request, _, _ = executor._raw_json_object(
                 raw_request,
