@@ -18,6 +18,10 @@
     "checked_write_all": true,
     "collision_safe_same_directory_temporary_file": true,
     "directory_fsync": true,
+    "dispatched_replay_atomically_persists_terminal_and_venue_outcome": true,
+    "dispatched_replay_enables_cancel_and_fill_cursor_after_restart": true,
+    "dispatched_replay_requires_exact_request_and_prepared_identity": true,
+    "dispatched_replay_zero_additional_venue_submissions": true,
     "file_fsync_before_replace": true,
     "fenced_prevenue_rejection_persisted": true,
     "fenced_rejection_exact_bytes_replayed_after_response_loss": true,
@@ -52,11 +56,11 @@
   },
   "gateway_implementation": {
     "path": "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-    "sha256": "53e519ddcb29b10e3c0b1a6575b1f4f599fc2bebd5d36357a846cba449c146c8"
+    "sha256": "e15e609694d668330bca645f600f408040cefdefa7bb47da2e39cfe42daef9f4"
   },
   "gateway_process_integration_test": {
     "path": "tests/v8/test_residual_promotion_micro_live_executor.py",
-    "sha256": "7dd395dba371a1fce54c5b24e9ba152ff4afe1342ded8f511d10f94179bfd57c"
+    "sha256": "cbc32eab8afca47cf07e9a6a7b155bed63d38931a12b8b738c46636792733b79"
   },
   "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
   "model_or_gate_bytes_changed": false,
@@ -110,7 +114,10 @@
     "complete_frame_header_and_body_share_total_deadline": true,
     "connection_admission_is_reclaimed_after_partial_frame_timeout": true,
     "execution_gateway_client_authentication_and_frame_share_total_deadline": true,
+    "execution_gateway_client_deadline_in_configuration_identity": true,
     "execution_gateway_client_deadline_matches_authorization": true,
+    "execution_gateway_client_deadline_rechecked_before_every_operation": true,
+    "execution_gateway_client_deadline_signed_in_session_binding": true,
     "execution_gateway_client_timeout_reaps_socket_without_worker_thread": true,
     "fence_and_cancel_have_reserved_independent_admission": true,
     "maximum_call_duration_is_service_enforced": true,

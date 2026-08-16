@@ -347,6 +347,7 @@ def _test_execution_authority_descriptor(
             settlement_authority_identity_sha256=(
                 TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256
             ),
+            maximum_call_duration_ms=maximum_call_duration_ms,
         )
     )
     route_binding_sha256 = (
@@ -362,6 +363,7 @@ def _test_execution_authority_descriptor(
             settlement_authority_identity_sha256=(
                 TEST_SETTLEMENT_AUTHORITY_IDENTITY_SHA256
             ),
+            maximum_call_duration_ms=maximum_call_duration_ms,
             adapter_implementation_sha256=adapter_implementation_sha256,
             configuration_sha256=configuration_sha256,
         )
@@ -2087,11 +2089,23 @@ class _TestExecutionGatewayRpcService:
                     executor_module.MAX_EXECUTION_TRANSPORT_EVENT_BYTES
                 )
             )
+            with self._lock:
+                route_backend = (
+                    self._pending_backends[-1]
+                    if request.get("operation") == "attest_execution_binding"
+                    and self._pending_backends
+                    else self._registrations.get(request.get("client_session_sha256"))
+                )
+            expected_route_binding_sha256 = (
+                None
+                if route_backend is None
+                else route_backend.execution_authority.get("route_binding_sha256")
+            )
             try:
                 executor_module.verify_execution_gateway_rpc_session(
                     request,
-                    expected_route_binding_sha256=(
-                        TEST_EXECUTION_AUTHORITY["route_binding_sha256"]
+                    expected_route_binding_sha256=str(
+                        expected_route_binding_sha256
                     ),
                     public_key_modulus_hex=(
                         TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX
@@ -2218,6 +2232,12 @@ def _test_execution_adapter(
     *,
     register_backend: bool = True,
 ) -> executor_module.DeploymentOwnedExecutionGatewayAdapter:
+    if getattr(backend, "_uses_default_execution_service_binding", False):
+        backend.execution_authority = _test_execution_authority_descriptor(
+            maximum_call_duration_ms=(
+                authorization.execution_maximum_call_duration_ms
+            )
+        )
     adapter = executor_module.DeploymentOwnedExecutionGatewayAdapter(
         endpoint=TEST_EXECUTION_RPC_ENDPOINT,
         credential=TEST_EXECUTION_RPC_CREDENTIAL,
@@ -5965,6 +5985,14 @@ def _verified(
     )
     risk_domain_authority = dict(authorization["risk_domain_lease_authority"])
     execution_authority = dict(authorization["execution_service_authority"])
+    if (
+        execution_authority == TEST_EXECUTION_AUTHORITY
+        and execution_call_duration_ms
+        != execution_authority["maximum_call_duration_ms"]
+    ):
+        execution_authority = _test_execution_authority_descriptor(
+            maximum_call_duration_ms=execution_call_duration_ms
+        )
     capability = VerifiedMicroLiveAuthorization(
         authorization_id=authorization["authorization_id"],
         authorization_payload_sha256=hashlib.sha256(
@@ -6032,12 +6060,10 @@ def _verified(
             "configuration_sha256"
         ],
         execution_gateway_route_mode=str(
-            authorization["execution_service_authority"]["route_mode"]
+            execution_authority["route_mode"]
         ),
         execution_gateway_route_binding_sha256=str(
-            authorization["execution_service_authority"][
-                "route_binding_sha256"
-            ]
+            execution_authority["route_binding_sha256"]
         ),
         execution_exchange_endpoint_sha256=(
             execution_authority["exchange_endpoint_sha256"]
@@ -6064,7 +6090,7 @@ def _verified(
             "public_key_exponent"
         ],
         execution_maximum_clock_skew_ms=int(
-            authorization["execution_service_authority"]["maximum_clock_skew_ms"]
+            execution_authority["maximum_clock_skew_ms"]
         ),
         execution_maximum_call_duration_ms=execution_call_duration_ms,
         deployment_runtime_lock_sha256=(
@@ -9617,6 +9643,7 @@ def test_fence_rereads_prepared_state_and_replays_lost_response_across_restart(
         "risk_domain_authority_binding_sha256": risk_authority_sha256,
         "dispatch_authority_route_sha256": "2" * 64,
         "authorization_expires_at_ts_ms": expires_at_ts_ms,
+        "maximum_call_duration_ms": 1_000,
     }
     original = {
         "authorization_id": authorization_id,
@@ -9754,6 +9781,233 @@ def test_fence_rereads_prepared_state_and_replays_lost_response_across_restart(
     assert restarted_response == first_response
     assert venue.submit_calls == 0
     assert restarted_venue.submit_calls == 0
+
+
+def test_dispatched_submit_replay_repairs_terminal_and_venue_outcome_atomically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = str(tmp_path / "gateway.sock")
+    credential = b"terminal-replay-gateway-credential-v1-secure"
+    credential_path = tmp_path / "gateway-rpc.credential"
+    exponent_path = tmp_path / "gateway-receipt-private-exponent.hex"
+    state_path = tmp_path / "gateway-state.json"
+    credential_path.write_bytes(credential)
+    exponent_path.write_text(
+        TEST_RISK_DOMAIN_PRIVATE_EXPONENT_HEX,
+        encoding="ascii",
+    )
+    credential_path.chmod(0o600)
+    exponent_path.chmod(0o600)
+    execution_authority = _test_execution_authority_descriptor(
+        endpoint=endpoint,
+        credential=credential,
+        maximum_call_duration_ms=1_000,
+    )
+    config = ExecutionGatewayServiceConfig(
+        endpoint=endpoint,
+        rpc_credential_path=str(credential_path),
+        receipt_private_exponent_path=str(exponent_path),
+        state_path=str(state_path),
+        execution_authority=execution_authority,
+        risk_lease_id=auth_module.TRUSTED_RISK_DOMAIN_LEASE_ID,
+        risk_service_identity_sha256=TEST_RISK_DOMAIN_SERVICE_IDENTITY_SHA256,
+        risk_tenant_id=TEST_RISK_DOMAIN_TENANT_ID,
+        risk_key_identity_sha256=TEST_RISK_DOMAIN_KEY_IDENTITY_SHA256,
+        risk_public_key_modulus_hex=TEST_RISK_DOMAIN_PUBLIC_MODULUS_HEX,
+        risk_public_key_exponent=65_537,
+    )
+    authorization_id = "a" * 64
+    risk_domain_id = "b" * 64
+    risk_authority_sha256 = "c" * 64
+    expires_at_ts_ms = NOW_TS_MS + 60_000
+    client_order_id = "d" * 64
+    session_binding = {
+        "schema_version": executor_module.EXECUTION_GATEWAY_SESSION_SCHEMA_VERSION,
+        "client_instance_nonce_sha256": "e" * 64,
+        "authorization_id": authorization_id,
+        "risk_domain_id": risk_domain_id,
+        "journal_namespace_id": "f" * 64,
+        "journal_epoch": "1" * 64,
+        "execution_gateway_route_binding_sha256": execution_authority[
+            "route_binding_sha256"
+        ],
+        "risk_domain_authority_binding_sha256": risk_authority_sha256,
+        "dispatch_authority_route_sha256": "2" * 64,
+        "authorization_expires_at_ts_ms": expires_at_ts_ms,
+        "maximum_call_duration_ms": 1_000,
+    }
+    execution_service_binding_sha256 = canonical_json_sha256(execution_authority)
+    submit_request = {
+        "authorization_id": authorization_id,
+        "client_order_id": client_order_id,
+        "business_key": "btc-15m-terminal-replay",
+        "market_id": "market-terminal-replay",
+        "token_id": "token-terminal-replay",
+        "quantity": "1",
+        "limit_price": "0.5",
+        "transport_invocation_id": "3" * 64,
+        "execution_authentication": {
+            "authorization_id": authorization_id,
+            "risk_domain_id": risk_domain_id,
+            "operation": "submit_order",
+            "execution_service_binding_sha256": execution_service_binding_sha256,
+            "exchange_endpoint_sha256": execution_authority[
+                "exchange_endpoint_sha256"
+            ],
+            "exchange_account_sha256": execution_authority[
+                "exchange_account_sha256"
+            ],
+            "signer_identity_sha256": execution_authority[
+                "signer_identity_sha256"
+            ],
+            "request_nonce_sha256": "4" * 64,
+            "execution_invocation_fence_receipt_sha256": "5" * 64,
+            "execution_outbox_command_sha256": "6" * 64,
+            "raw_execution_outbox_acceptance_receipt_json": "{}",
+            "execution_outbox_acceptance_receipt_sha256": hashlib.sha256(
+                b"{}"
+            ).hexdigest(),
+            "dispatch_deadline_ts_ms": NOW_TS_MS + 30_000,
+            "authorization_expires_at_ts_ms": expires_at_ts_ms,
+        },
+    }
+    raw_outcome = _json_bytes(
+        {
+            "client_order_id": client_order_id,
+            "exchange_order_id": f"exchange-{client_order_id[:12]}",
+            "status": "ACCEPTED",
+            "market_id": submit_request["market_id"],
+            "token_id": submit_request["token_id"],
+            "accepted_quantity": submit_request["quantity"],
+            "limit_price": submit_request["limit_price"],
+        }
+    )
+    terminal = _json_bytes(
+        {
+            "status": "DISPATCHED",
+            "raw_outcome_json": raw_outcome.decode("utf-8"),
+            "outcome_sha256": hashlib.sha256(raw_outcome).hexdigest(),
+        }
+    )
+    dispatching = _json_bytes({"status": "DISPATCHING"})
+    authority_completed = threading.Event()
+
+    def complete_dispatch(_dispatch: bytes, outcome: bytes) -> bytes:
+        assert outcome == raw_outcome
+        authority_completed.set()
+        return terminal
+
+    venue = _ProcessMockVenueBoundary(fail_submit=False)
+    first = DeploymentOwnedExecutionGatewayServer(config, venue=venue)
+    first.backend.bind_execution_dispatch_authority(
+        lambda *_args, **_kwargs: dispatching,
+        lambda **_kwargs: terminal,
+        complete_dispatch,
+        lambda **_kwargs: _json_bytes({"status": "IN_PROGRESS"}),
+        authorization_id=authorization_id,
+        risk_domain_id=risk_domain_id,
+        risk_domain_authority_binding_sha256=risk_authority_sha256,
+        authorization_expires_at_ts_ms=expires_at_ts_ms,
+    )
+    monkeypatch.setattr(
+        first.backend,
+        "_proof",
+        lambda _request: {"outbox_acceptance_receipt_json": "{}"},
+    )
+    durable_flush = first.state.flush
+    crash_injected = False
+
+    def crash_after_authority_complete() -> None:
+        nonlocal crash_injected
+        if authority_completed.is_set() and not crash_injected:
+            crash_injected = True
+            raise SimulatedProcessCrash(
+                "authority completed before gateway terminal flush"
+            )
+        durable_flush()
+
+    monkeypatch.setattr(first.state, "flush", crash_after_authority_complete)
+    with pytest.raises(SimulatedProcessCrash):
+        first.backend.submit_order(
+            submit_request,
+            client_session_binding=session_binding,
+        )
+    assert authority_completed.is_set()
+    assert venue.submit_calls == 1
+
+    restarted_venue = _ProcessMockVenueBoundary(fail_submit=False)
+    restarted = DeploymentOwnedExecutionGatewayServer(
+        config,
+        venue=restarted_venue,
+    )
+    assert client_order_id not in restarted.state.value["terminal_receipts_base64"]
+    assert client_order_id not in restarted.state.value["venue_outcomes_base64"]
+    restarted.backend.bind_execution_dispatch_authority(
+        lambda *_args, **_kwargs: terminal,
+        lambda **_kwargs: terminal,
+        lambda *_args, **_kwargs: terminal,
+        lambda **_kwargs: terminal,
+        authorization_id=authorization_id,
+        risk_domain_id=risk_domain_id,
+        risk_domain_authority_binding_sha256=risk_authority_sha256,
+        authorization_expires_at_ts_ms=expires_at_ts_ms,
+    )
+    monkeypatch.setattr(
+        restarted.backend,
+        "_proof",
+        lambda _request: {"outbox_acceptance_receipt_json": "{}"},
+    )
+
+    replayed_ack = restarted.backend.submit_order(
+        submit_request,
+        client_session_binding=session_binding,
+    )
+    assert json.loads(replayed_ack)["raw_response_json"] == raw_outcome.decode(
+        "utf-8"
+    )
+    assert restarted_venue.submit_calls == 0
+    persisted = json.loads(state_path.read_bytes())
+    assert base64.b64decode(
+        persisted["terminal_receipts_base64"][client_order_id],
+        validate=True,
+    ) == terminal
+    assert base64.b64decode(
+        persisted["venue_outcomes_base64"][client_order_id],
+        validate=True,
+    ) == raw_outcome
+
+    operation_authentication = {
+        **submit_request["execution_authentication"],
+        "operation": "cancel_order",
+    }
+    cancel_request = {
+        "authorization_id": authorization_id,
+        "client_order_id": client_order_id,
+        "business_key": submit_request["business_key"],
+        "market_id": submit_request["market_id"],
+        "token_id": submit_request["token_id"],
+        "execution_authentication": operation_authentication,
+    }
+    cancel_receipt = restarted.backend.cancel_order(
+        cancel_request,
+        client_session_binding=session_binding,
+    )
+    assert json.loads(json.loads(cancel_receipt)["raw_response_json"])["status"] == (
+        "CANCEL_REQUESTED"
+    )
+    fill_request = {
+        **cancel_request,
+        "request_started_at_ts_ms": NOW_TS_MS + 1,
+        "execution_service_binding_sha256": execution_service_binding_sha256,
+    }
+    fill_cursor = restarted.backend.read_order_fill_cursor(
+        fill_request,
+        client_session_binding=session_binding,
+    )
+    assert json.loads(fill_cursor)["client_order_id"] == client_order_id
+    assert restarted_venue.cancel_calls == 1
+    assert restarted_venue.fill_cursor_calls == 1
 
 
 @pytest.mark.parametrize(
@@ -12616,7 +12870,9 @@ def test_deployment_owned_execution_route_derives_and_rechecks_actual_bytes(
         journal,
         register_backend=False,
     )
-    descriptor = _test_execution_authority_descriptor()
+    descriptor = _test_execution_authority_descriptor(
+        maximum_call_duration_ms=verified.execution_maximum_call_duration_ms
+    )
 
     assert (
         adapter.adapter_implementation_sha256
@@ -12644,6 +12900,86 @@ def test_deployment_owned_execution_route_derives_and_rechecks_actual_bytes(
         match="execution gateway route changed",
     ):
         adapter.assert_runtime_integrity()
+
+
+def test_in_range_gateway_deadline_mutation_blocks_open_order_cancel_before_rpc(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    backend = FakeTransport()
+    executor = MicroLiveExecutor(
+        verified,
+        transport=backend,
+        journal=_new_journal(),
+    )
+    acknowledged = executor.submit_signal(
+        **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+    )
+    assert acknowledged["status"] == "ORDER_ACKNOWLEDGED"
+    adapter = executor._transport
+    mutated_duration_ms = verified.execution_maximum_call_duration_ms - 1
+    assert mutated_duration_ms > 0
+    object.__setattr__(
+        adapter,
+        "_maximum_call_duration_ms",
+        mutated_duration_ms,
+    )
+
+    result = executor.engage_kill_switch(
+        reason="deadline-binding-cancel-test",
+        now_ts_ms=NOW_TS_MS + 1,
+    )
+
+    assert result["canceled_client_order_ids"] == []
+    assert len(result["unknown_cancel_client_order_ids"]) == 1
+    assert len(backend.submit_calls) == 1
+    assert backend.cancel_calls == []
+    assert any(
+        event["event_type"] == "ORDER_CANCEL_UNKNOWN"
+        and event["payload"]["error_type"] == "MicroLiveExecutionError"
+        for event in executor.events
+    )
+
+
+def test_in_range_gateway_deadline_mutation_blocks_recovery_before_rpc(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    verified = _verified(authorized_fixture)
+    backend = FakeTransport(fail_submit=True)
+    executor = MicroLiveExecutor(
+        verified,
+        transport=backend,
+        journal=_new_journal(),
+    )
+    with pytest.raises(MicroLiveExecutionError, match="submission became unknown"):
+        executor.submit_signal(
+            **_signal(candidate_bundle_sha256=verified.candidate_bundle_sha256)
+        )
+    client_order_id = backend.submit_calls[0]["client_order_id"]
+    adapter = executor._transport
+    object.__setattr__(
+        adapter,
+        "_maximum_call_duration_ms",
+        verified.execution_maximum_call_duration_ms - 1,
+    )
+
+    with pytest.raises(
+        MicroLiveExecutionError,
+        match="unknown submission reconciliation failed closed",
+    ):
+        executor.reconcile_unknown_submission(
+            client_order_id=client_order_id,
+            now_ts_ms=NOW_TS_MS + 1,
+        )
+
+    assert len(backend.submit_calls) == 1
+    assert backend.recovery_lookup_calls == []
+    assert backend.fence_calls == []
+    assert any(
+        event["event_type"] == "ORDER_SUBMISSION_RECONCILIATION_FAILED"
+        and event["payload"]["error_type"] == "MicroLiveExecutionError"
+        for event in executor.events
+    )
 
 
 def test_two_signed_gateway_sessions_cannot_be_swapped_before_venue(

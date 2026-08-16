@@ -132,7 +132,7 @@ EXECUTION_GATEWAY_RPC_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-gateway-rpc-v1"
 )
 EXECUTION_GATEWAY_SESSION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-gateway-session-v1"
+    "bigan-btc-15m-residual-promotion-execution-gateway-session-v2"
 )
 DISPATCH_AUTHORITY_ROUTE_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-dispatch-authority-route-v1"
@@ -3558,6 +3558,7 @@ def deployment_owned_execution_gateway_configuration_sha256(
     cursor_key_identity_sha256: str,
     clock_identity_sha256: str,
     settlement_authority_identity_sha256: str,
+    maximum_call_duration_ms: int,
 ) -> str:
     """Derive one immutable venue, account, signer, cursor, and clock route."""
 
@@ -3568,6 +3569,14 @@ def deployment_owned_execution_gateway_configuration_sha256(
         )
     if not isinstance(credential, bytes) or len(credential) < 32:
         raise MicroLiveExecutionError("execution gateway RPC credential is invalid")
+    if not (
+        isinstance(maximum_call_duration_ms, int)
+        and not isinstance(maximum_call_duration_ms, bool)
+        and 1 <= maximum_call_duration_ms <= MAX_TRANSPORT_CALL_DURATION_MS
+    ):
+        raise MicroLiveExecutionError(
+            "execution gateway maximum call duration is invalid"
+        )
     identities = _execution_gateway_route_identities(
         service_identity_sha256=service_identity_sha256,
         exchange_endpoint_sha256=exchange_endpoint_sha256,
@@ -3585,6 +3594,7 @@ def deployment_owned_execution_gateway_configuration_sha256(
             "endpoint": str(endpoint_path),
             "family": "AF_UNIX",
             "credential_identity_sha256": hashlib.sha256(credential).hexdigest(),
+            "maximum_call_duration_ms": maximum_call_duration_ms,
             **identities,
             "required_operations_sha256": (
                 REQUIRED_EXECUTION_TRANSPORT_OPERATIONS_SHA256
@@ -3606,6 +3616,7 @@ def deployment_owned_execution_gateway_route_binding_sha256(
     cursor_key_identity_sha256: str,
     clock_identity_sha256: str,
     settlement_authority_identity_sha256: str,
+    maximum_call_duration_ms: int,
     adapter_implementation_sha256: str,
     configuration_sha256: str,
 ) -> str:
@@ -3624,6 +3635,7 @@ def deployment_owned_execution_gateway_route_binding_sha256(
             settlement_authority_identity_sha256=(
                 settlement_authority_identity_sha256
             ),
+            maximum_call_duration_ms=maximum_call_duration_ms,
         )
     )
     if not (
@@ -3652,6 +3664,7 @@ def deployment_owned_execution_gateway_route_binding_sha256(
             "endpoint": str(Path(endpoint)),
             "family": "AF_UNIX",
             "credential_identity_sha256": hashlib.sha256(credential).hexdigest(),
+            "maximum_call_duration_ms": maximum_call_duration_ms,
             **identities,
             "route_mode": EXECUTION_GATEWAY_ROUTE_MODE,
             "route_semantics": EXECUTION_GATEWAY_RPC_ROUTE_SEMANTICS,
@@ -3671,6 +3684,7 @@ def _valid_execution_gateway_session_binding(value: Any) -> bool:
         "risk_domain_authority_binding_sha256",
         "dispatch_authority_route_sha256",
         "authorization_expires_at_ts_ms",
+        "maximum_call_duration_ms",
     }:
         return False
     return bool(
@@ -3691,6 +3705,11 @@ def _valid_execution_gateway_session_binding(value: Any) -> bool:
         and isinstance(value.get("authorization_expires_at_ts_ms"), int)
         and not isinstance(value.get("authorization_expires_at_ts_ms"), bool)
         and int(value["authorization_expires_at_ts_ms"]) > 0
+        and isinstance(value.get("maximum_call_duration_ms"), int)
+        and not isinstance(value.get("maximum_call_duration_ms"), bool)
+        and 1
+        <= int(value["maximum_call_duration_ms"])
+        <= MAX_TRANSPORT_CALL_DURATION_MS
     )
 
 
@@ -3904,6 +3923,7 @@ class DeploymentOwnedExecutionGatewayAdapter:
                 settlement_authority_identity_sha256=(
                     settlement_authority_identity_sha256
                 ),
+                maximum_call_duration_ms=maximum_call_duration_ms,
             )
         )
         route_binding_sha256 = (
@@ -3919,6 +3939,7 @@ class DeploymentOwnedExecutionGatewayAdapter:
                 settlement_authority_identity_sha256=(
                     settlement_authority_identity_sha256
                 ),
+                maximum_call_duration_ms=maximum_call_duration_ms,
                 adapter_implementation_sha256=implementation_sha256,
                 configuration_sha256=configuration_sha256,
             )
@@ -4043,6 +4064,7 @@ class DeploymentOwnedExecutionGatewayAdapter:
                 dispatch_authority_route_sha256
             ),
             "authorization_expires_at_ts_ms": authorization_expires_at_ts_ms,
+            "maximum_call_duration_ms": self._maximum_call_duration_ms,
         }
         if not _valid_execution_gateway_session_binding(binding):
             raise MicroLiveExecutionError(
@@ -4115,6 +4137,7 @@ class DeploymentOwnedExecutionGatewayAdapter:
             settlement_authority_identity_sha256=(
                 self._settlement_authority_identity_sha256
             ),
+            maximum_call_duration_ms=self._maximum_call_duration_ms,
         )
 
     def _computed_route_binding_sha256(self) -> str:
@@ -4130,6 +4153,7 @@ class DeploymentOwnedExecutionGatewayAdapter:
             settlement_authority_identity_sha256=(
                 self._settlement_authority_identity_sha256
             ),
+            maximum_call_duration_ms=self._maximum_call_duration_ms,
             adapter_implementation_sha256=self._adapter_implementation_sha256,
             configuration_sha256=self._configuration_sha256,
         )
@@ -5887,6 +5911,8 @@ class MicroLiveExecutor:
             == self._authorization.execution_gateway_route_mode
             and self._transport.route_binding_sha256
             == self._authorization.execution_gateway_route_binding_sha256
+            and self._transport.maximum_call_duration_ms
+            == self._authorization.execution_maximum_call_duration_ms
             and isinstance(self._expected_client_session_binding, dict)
             and _valid_execution_gateway_session_binding(
                 self._expected_client_session_binding
@@ -5913,6 +5939,10 @@ class MicroLiveExecutor:
             == dispatch_authority_route_sha256(
                 self._dispatch_authority_route
             )
+            and self._expected_client_session_binding[
+                "maximum_call_duration_ms"
+            ]
+            == self._authorization.execution_maximum_call_duration_ms
         ):
             raise MicroLiveExecutionError(
                 "authenticated execution transport session changed after construction"

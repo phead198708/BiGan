@@ -285,6 +285,7 @@ class ExecutionGatewayServiceConfig:
                 settlement_authority_identity_sha256=authority[
                     "settlement_authority_identity_sha256"
                 ],
+                maximum_call_duration_ms=authority["maximum_call_duration_ms"],
             )
         )
         route_binding_sha256 = (
@@ -302,6 +303,7 @@ class ExecutionGatewayServiceConfig:
                 settlement_authority_identity_sha256=authority[
                     "settlement_authority_identity_sha256"
                 ],
+                maximum_call_duration_ms=authority["maximum_call_duration_ms"],
                 adapter_implementation_sha256=adapter_implementation_sha256,
                 configuration_sha256=configuration_sha256,
             )
@@ -1453,6 +1455,8 @@ class DeploymentOwnedExecutionGatewayBackend:
             and binding["authorization_expires_at_ts_ms"] == self._identity[3]
             and binding["execution_gateway_route_binding_sha256"]
             == self.config.execution_authority["route_binding_sha256"]
+            and binding["maximum_call_duration_ms"]
+            == self.config.execution_authority["maximum_call_duration_ms"]
         ):
             raise ExecutionGatewayError(
                 "gateway client session ownership is invalid"
@@ -1551,6 +1555,74 @@ class DeploymentOwnedExecutionGatewayBackend:
                 )
         return dict(original), dict(prepared)
 
+    def _validated_submit_outcome(self, key: str, raw_response: bytes) -> bytes:
+        """Bind an authority-carried outcome to the exact durable submit request."""
+
+        with self._state_lock:
+            request = copy.deepcopy(self.state.value["requests"].get(key))
+            prepared = copy.deepcopy(self.state.value["prepared"].get(key))
+        if not (
+            isinstance(request, Mapping)
+            and isinstance(prepared, Mapping)
+            and prepared.get("client_order_id") == key
+            and prepared.get("exact_request_sha256")
+            == executor.canonical_json_sha256(request)
+            and isinstance(prepared.get("order_hash"), str)
+            and prepared["order_hash"]
+        ):
+            raise ExecutionGatewayError(
+                "gateway terminal outcome has no exact durable submission"
+            )
+        try:
+            canonical_response = executor.verify_recovered_submission_outcome(
+                request,
+                raw_response,
+            )
+            outcome, _, _ = executor._raw_json_object(
+                canonical_response,
+                "gateway terminal venue outcome",
+                maximum_bytes=executor.MAX_EXECUTION_TRANSPORT_EVENT_BYTES,
+            )
+        except executor.MicroLiveExecutionError as exc:
+            raise ExecutionGatewayError(
+                "gateway terminal venue outcome is request-mismatched"
+            ) from exc
+        if not (
+            canonical_response == raw_response
+            and outcome["exchange_order_id"] == prepared["order_hash"]
+        ):
+            raise ExecutionGatewayError(
+                "gateway terminal venue outcome is preparation-mismatched"
+            )
+        return canonical_response
+
+    def _persist_terminal_outcome(
+        self,
+        key: str,
+        terminal: bytes,
+        raw_response: bytes,
+    ) -> bytes:
+        """Atomically repair/store all local evidence needed after an ACK."""
+
+        canonical_response = self._validated_submit_outcome(key, raw_response)
+        with self._state_lock:
+            reservation = self.state.value["preparation_reservations"].get(key)
+            if not (
+                isinstance(reservation, Mapping)
+                and reservation.get("status") == "DISPATCHING"
+            ):
+                raise ExecutionGatewayError(
+                    "gateway terminal outcome reservation is not dispatching"
+                )
+            self.state.value["terminal_receipts_base64"][key] = base64.b64encode(
+                terminal
+            ).decode("ascii")
+            self.state.value["venue_outcomes_base64"][key] = base64.b64encode(
+                canonical_response
+            ).decode("ascii")
+            self.state.flush()
+        return canonical_response
+
     def _complete(
         self,
         key: str,
@@ -1559,15 +1631,9 @@ class DeploymentOwnedExecutionGatewayBackend:
     ) -> bytes:
         if self._dispatch_complete is None:
             raise ExecutionGatewayError("gateway dispatch completion is unbound")
-        terminal = self._dispatch_complete(dispatch_receipt, raw_response)
-        with self._state_lock:
-            self.state.value["terminal_receipts_base64"][key] = base64.b64encode(
-                terminal
-            ).decode("ascii")
-            self.state.value["venue_outcomes_base64"][key] = base64.b64encode(
-                raw_response
-            ).decode("ascii")
-            self.state.flush()
+        canonical_response = self._validated_submit_outcome(key, raw_response)
+        terminal = self._dispatch_complete(dispatch_receipt, canonical_response)
+        self._persist_terminal_outcome(key, terminal, canonical_response)
         return terminal
 
     def _persist_venue_lifecycle(
@@ -1796,13 +1862,21 @@ class DeploymentOwnedExecutionGatewayBackend:
                     "gateway dispatch receipt",
                 )
                 if dispatch["status"] == "DISPATCHED":
-                    raw_response = dispatch["raw_outcome_json"].encode("utf-8")
-                    with self._state_lock:
-                        self.state.value["terminal_receipts_base64"][key] = (
-                            base64.b64encode(raw_dispatch).decode("ascii")
+                    raw_outcome_json = dispatch.get("raw_outcome_json")
+                    if not (
+                        isinstance(raw_outcome_json, str)
+                        and raw_outcome_json
+                        and dispatch.get("outcome_sha256")
+                        == _sha256(raw_outcome_json.encode("utf-8"))
+                    ):
+                        raise ExecutionGatewayError(
+                            "gateway dispatched outcome evidence is invalid"
                         )
-                        reservation["status"] = "DISPATCHING"
-                        self.state.flush()
+                    raw_response = self._persist_terminal_outcome(
+                        key,
+                        raw_dispatch,
+                        raw_outcome_json.encode("utf-8"),
+                    )
                     return self._authenticated_response(request, raw_response)
                 if dispatch["status"] == "IN_PROGRESS":
                     raise ExecutionGatewayError(
@@ -1864,14 +1938,7 @@ class DeploymentOwnedExecutionGatewayBackend:
             ],
             raw_outcome=raw_response,
         )
-        with self._state_lock:
-            self.state.value["terminal_receipts_base64"][key] = base64.b64encode(
-                terminal
-            ).decode("ascii")
-            self.state.value["venue_outcomes_base64"][key] = base64.b64encode(
-                raw_response
-            ).decode("ascii")
-            self.state.flush()
+        self._persist_terminal_outcome(key, terminal, raw_response)
         return self._authenticated_response(request, raw_response)
 
     def cancel_order(
@@ -2430,6 +2497,13 @@ class DeploymentOwnedExecutionGatewayServer:
                 ),
             )
             operation = str(verified["operation"])
+            if (
+                verified["client_session_binding"]["maximum_call_duration_ms"]
+                != self.config.execution_authority["maximum_call_duration_ms"]
+            ):
+                raise ExecutionGatewayError(
+                    "gateway session deadline is not authorization-bound"
+                )
             session_sha256 = str(verified["client_session_sha256"])
             payload = _decode_rpc_value(verified["payload"])
             if operation == "attest_execution_binding":
