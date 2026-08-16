@@ -34,7 +34,7 @@ SERVICE_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-execution-gateway-service-v1"
 )
 STATE_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-execution-gateway-state-v2"
+    "bigan-btc-15m-residual-promotion-execution-gateway-state-v3"
 )
 VENUE_BOUNDARY_SCHEMA_VERSION = (
     "bigan-btc-15m-residual-promotion-polymarket-clob-v2-boundary-v2"
@@ -972,12 +972,16 @@ class PolymarketClobV2VenueBoundary:
                 "MATCHED",
                 "MINED",
                 "CONFIRMED",
+                "TRADE_STATUS_MATCHED",
+                "TRADE_STATUS_MINED",
+                "TRADE_STATUS_CONFIRMED",
             }:
                 raise ExecutionGatewayError(
                     "authoritative venue trade is not an executed fill"
                 )
+            is_taker = str(trade.get("taker_order_id") or "") == order_id
             leg: Mapping[str, Any] = trade
-            if str(trade.get("taker_order_id") or "") != order_id:
+            if not is_taker:
                 maker_orders = trade.get("maker_orders")
                 if not isinstance(maker_orders, list):
                     raise ExecutionGatewayError("venue maker trade legs are absent")
@@ -1011,28 +1015,29 @@ class PolymarketClobV2VenueBoundary:
                     )
                 )
                 price = Decimal(str(leg.get("price") or trade.get("price")))
-                fee_value = (
-                    leg.get("fee_usd")
-                    or leg.get("fee")
-                    or trade.get("fee_usd")
-                    or trade.get("fee")
-                )
+                fee_value = leg.get("fee_usd")
+                if fee_value is None:
+                    fee_value = leg.get("fee")
+                if is_taker and fee_value is None:
+                    fee_value = trade.get("fee_usd")
+                if is_taker and fee_value is None:
+                    fee_value = trade.get("fee")
                 if fee_value is not None:
                     fee = Decimal(str(fee_value))
+                elif not is_taker:
+                    # The active V2 market contract declares taker-only fees.
+                    # A maker leg must not inherit the top-level taker fee.
+                    fee = Decimal("0")
                 else:
-                    fee_rate_bps = Decimal(
-                        str(
-                            leg.get("fee_rate_bps")
-                            if leg.get("fee_rate_bps") is not None
-                            else trade.get("fee_rate_bps")
-                        )
+                    # `fee_rate_bps` alone is insufficient for the current V2
+                    # dynamic-fee contract: role, market fee descriptor, the
+                    # p*(1-p) term, and five-decimal venue rounding are all
+                    # material.  Until the frozen candidate/cost transition is
+                    # separately authorized, require the authoritative
+                    # absolute taker fee instead of fabricating economics.
+                    raise ValueError(
+                        "absolute taker fee is required by the frozen contract"
                     )
-                    if not Decimal("0") <= fee_rate_bps <= Decimal("10000"):
-                        raise ValueError("fee_rate_bps outside contract bounds")
-                    # CTF Exchange v2 validates absolute collateral fees
-                    # against cashValue * feeRateBps / 10_000.  For a BUY
-                    # fill, cashValue is matched shares * execution price.
-                    fee = quantity * price * fee_rate_bps / Decimal("10000")
             except Exception as exc:
                 raise ExecutionGatewayError(
                     "authoritative venue trade economics are incomplete"
@@ -1118,6 +1123,7 @@ class _DurableGatewayState:
                 "schema_version": STATE_SCHEMA_VERSION,
                 "sessions": {},
                 "requests": {},
+                "preparation_reservations": {},
                 "prepared": {},
                 "venue_lifecycle_base64": {},
                 "venue_outcomes_base64": {},
@@ -1225,6 +1231,7 @@ class DeploymentOwnedExecutionGatewayBackend:
         self.signer = signer
         self._state_lock = threading.RLock()
         self._submit_lock = threading.Lock()
+        self._dispatch_transition_lock = threading.Lock()
         self._dispatch_begin: Callable[..., bytes] | None = None
         self._dispatch_recover: Callable[..., bytes] | None = None
         self._dispatch_complete: Callable[..., bytes] | None = None
@@ -1493,43 +1500,142 @@ class DeploymentOwnedExecutionGatewayBackend:
             if self._dispatch_begin is None:
                 raise ExecutionGatewayError("gateway dispatch begin is unbound")
             key = str(request["client_order_id"])
-            raw_dispatch = self._dispatch_begin(
-                proof["outbox_acceptance_receipt_json"].encode("utf-8"),
-                venue_idempotency_key=key,
-                venue_idempotency_scope=executor.VENUE_IDEMPOTENCY_SCOPE,
-                dispatch_deadline_ts_ms=request["execution_authentication"][
-                    "dispatch_deadline_ts_ms"
-                ],
-                authorization_expires_at_ts_ms=request["execution_authentication"][
-                    "authorization_expires_at_ts_ms"
-                ],
-            )
-            dispatch, _, _ = executor._raw_json_object(
-                raw_dispatch,
-                "gateway dispatch receipt",
-            )
-            if dispatch["status"] == "DISPATCHED":
-                raw_response = dispatch["raw_outcome_json"].encode("utf-8")
+            exact_request = copy.deepcopy(dict(request))
+            exact_request_sha256 = executor.canonical_json_sha256(exact_request)
+            with self._state_lock:
+                existing_request = self.state.value["requests"].get(key)
+                if existing_request is not None and existing_request != exact_request:
+                    raise ExecutionGatewayError(
+                        "gateway preparation reservation identity conflicts"
+                    )
+                reservation = self.state.value["preparation_reservations"].get(key)
+                if reservation is None:
+                    reservation = {
+                        "exact_request_sha256": exact_request_sha256,
+                        "status": "PREPARING",
+                    }
+                    self.state.value["preparation_reservations"][key] = reservation
+                if not (
+                    isinstance(reservation, Mapping)
+                    and reservation.get("exact_request_sha256")
+                    == exact_request_sha256
+                    and reservation.get("status")
+                    in {"PREPARING", "PREPARED", "DISPATCHING"}
+                ):
+                    raise ExecutionGatewayError(
+                        "gateway preparation reservation is not dispatchable"
+                    )
+                self.state.value["requests"][key] = exact_request
+                prepared = copy.deepcopy(self.state.value["prepared"].get(key))
+                self.state.flush()
+
+            # Order construction may query the venue or wallet.  It must never
+            # hold the state lock or consume the externally fenceable dispatch
+            # grant while it is in progress.
+            if prepared is None:
+                candidate = self.venue.prepare_submission(request)
+                if not isinstance(candidate, Mapping):
+                    raise ExecutionGatewayError(
+                        "prepared venue submission is invalid"
+                    )
+                prepared = copy.deepcopy(dict(candidate))
+                if not (
+                    prepared.get("client_order_id") == key
+                    and prepared.get("exact_request_sha256")
+                    == exact_request_sha256
+                    and isinstance(prepared.get("order_hash"), str)
+                    and prepared["order_hash"]
+                ):
+                    raise ExecutionGatewayError(
+                        "prepared venue submission identity is mismatched"
+                    )
                 with self._state_lock:
-                    self.state.value["terminal_receipts_base64"][key] = (
+                    reservation = self.state.value[
+                        "preparation_reservations"
+                    ].get(key)
+                    if not (
+                        isinstance(reservation, Mapping)
+                        and reservation.get("exact_request_sha256")
+                        == exact_request_sha256
+                        and reservation.get("status") == "PREPARING"
+                    ):
+                        raise ExecutionGatewayError(
+                            "gateway preparation was fenced before dispatch"
+                        )
+                    self.state.value["prepared"][key] = prepared
+                    reservation["status"] = "PREPARED"
+                    self.state.flush()  # signed bytes precede every venue write
+            elif not (
+                isinstance(prepared, Mapping)
+                and prepared.get("client_order_id") == key
+                and prepared.get("exact_request_sha256") == exact_request_sha256
+                and isinstance(prepared.get("order_hash"), str)
+                and prepared["order_hash"]
+            ):
+                raise ExecutionGatewayError(
+                    "durable prepared venue submission is mismatched"
+                )
+
+            # Serialize the final local fence check with consumption of the
+            # authority dispatch grant.  A fence arriving while preparation is
+            # stalled wins; after the grant is consumed it honestly reports an
+            # in-progress side effect instead of claiming a false fence.
+            with self._dispatch_transition_lock:
+                with self._state_lock:
+                    reservation = self.state.value[
+                        "preparation_reservations"
+                    ].get(key)
+                    if not (
+                        isinstance(reservation, Mapping)
+                        and reservation.get("exact_request_sha256")
+                        == exact_request_sha256
+                        and reservation.get("status")
+                        in {"PREPARED", "DISPATCHING"}
+                    ):
+                        raise ExecutionGatewayError(
+                            "gateway preparation is not dispatchable"
+                        )
+                raw_dispatch = self._dispatch_begin(
+                    proof["outbox_acceptance_receipt_json"].encode("utf-8"),
+                    venue_idempotency_key=key,
+                    venue_idempotency_scope=executor.VENUE_IDEMPOTENCY_SCOPE,
+                    dispatch_deadline_ts_ms=request["execution_authentication"][
+                        "dispatch_deadline_ts_ms"
+                    ],
+                    authorization_expires_at_ts_ms=request[
+                        "execution_authentication"
+                    ]["authorization_expires_at_ts_ms"],
+                )
+                dispatch, _, _ = executor._raw_json_object(
+                    raw_dispatch,
+                    "gateway dispatch receipt",
+                )
+                if dispatch["status"] == "DISPATCHED":
+                    raw_response = dispatch["raw_outcome_json"].encode("utf-8")
+                    with self._state_lock:
+                        self.state.value["terminal_receipts_base64"][key] = (
+                            base64.b64encode(raw_dispatch).decode("ascii")
+                        )
+                        reservation["status"] = "DISPATCHING"
+                        self.state.flush()
+                    return self._authenticated_response(request, raw_response)
+                if dispatch["status"] == "IN_PROGRESS":
+                    raise ExecutionGatewayError(
+                        "gateway dispatch is in progress; recovery is required"
+                    )
+                if dispatch["status"] != "DISPATCHING":
+                    with self._state_lock:
+                        reservation["status"] = "FENCED"
+                        self.state.flush()
+                    raise ExecutionGatewayError(
+                        "gateway dispatch is not permitted"
+                    )
+                with self._state_lock:
+                    self.state.value["dispatch_receipts_base64"][key] = (
                         base64.b64encode(raw_dispatch).decode("ascii")
                     )
+                    reservation["status"] = "DISPATCHING"
                     self.state.flush()
-                return self._authenticated_response(request, raw_response)
-            if dispatch["status"] != "DISPATCHING":
-                raise ExecutionGatewayError("gateway dispatch is not permitted")
-            with self._state_lock:
-                self.state.value["requests"][key] = copy.deepcopy(dict(request))
-                self.state.value["dispatch_receipts_base64"][key] = (
-                    base64.b64encode(raw_dispatch).decode("ascii")
-                )
-                prepared = self.state.value["prepared"].get(key)
-                if prepared is None:
-                    prepared = copy.deepcopy(
-                        dict(self.venue.prepare_submission(request))
-                    )
-                    self.state.value["prepared"][key] = prepared
-                self.state.flush()  # signed bytes precede the network side effect
             outcome = self.venue.submit_prepared(prepared, request)
             raw_response = self._persist_venue_lifecycle(key, outcome)
             self._complete(key, raw_dispatch, raw_response)
@@ -1603,16 +1709,29 @@ class DeploymentOwnedExecutionGatewayBackend:
 
     def fence_order_invocation(self, request: Mapping[str, Any]) -> bytes:
         key = str(request["client_order_id"])
-        with self._state_lock:
-            submitted = copy.deepcopy(self.state.value["requests"].get(key))
-        if not isinstance(submitted, Mapping) or self._dispatch_fence is None:
-            raise ExecutionGatewayError("gateway dispatch fence is unbound")
-        raw_fence = self._dispatch_fence(
-            transport_invocation_id=request["transport_invocation_id"],
-            outbox_command_sha256=submitted["execution_authentication"][
-                "execution_outbox_command_sha256"
-            ],
-        )
+        with self._dispatch_transition_lock:
+            with self._state_lock:
+                submitted = copy.deepcopy(self.state.value["requests"].get(key))
+                reservation = self.state.value["preparation_reservations"].get(key)
+                if not (
+                    isinstance(submitted, Mapping)
+                    and isinstance(reservation, Mapping)
+                    and reservation.get("exact_request_sha256")
+                    == executor.canonical_json_sha256(submitted)
+                    and reservation.get("status")
+                    in {"PREPARING", "PREPARED", "DISPATCHING", "FENCED"}
+                    and self._dispatch_fence is not None
+                ):
+                    raise ExecutionGatewayError("gateway dispatch fence is unbound")
+                if reservation["status"] in {"PREPARING", "PREPARED"}:
+                    reservation["status"] = "FENCED"
+                    self.state.flush()
+            raw_fence = self._dispatch_fence(
+                transport_invocation_id=request["transport_invocation_id"],
+                outbox_command_sha256=submitted["execution_authentication"][
+                    "execution_outbox_command_sha256"
+                ],
+            )
         fence, _, _ = executor._raw_json_object(raw_fence, "dispatch fence")
         response = _json_bytes(
             {
@@ -1766,9 +1885,59 @@ class DeploymentOwnedExecutionGatewayServer:
             raise ExecutionGatewayError("gateway backend returned non-byte response")
         return value
 
-    def _handle_connection(self, connection: Any, audit: Any | None) -> None:
+    def _authenticate_connection_with_deadline(
+        self,
+        connection: Any,
+        *,
+        credential: bytes,
+        deadline: float,
+    ) -> None:
+        result: queue.Queue[BaseException | None] = queue.Queue(maxsize=1)
+
+        def authenticate() -> None:
+            try:
+                multiprocessing.connection.deliver_challenge(
+                    connection,
+                    credential,
+                )
+                multiprocessing.connection.answer_challenge(
+                    connection,
+                    credential,
+                )
+            except BaseException as exc:
+                with contextlib.suppress(queue.Full):
+                    result.put_nowait(exc)
+            else:
+                with contextlib.suppress(queue.Full):
+                    result.put_nowait(None)
+
+        threading.Thread(
+            target=authenticate,
+            name="execution-gateway-authentication",
+            daemon=True,
+        ).start()
+        try:
+            outcome = result.get(timeout=self._remaining_seconds(deadline))
+        except queue.Empty as exc:
+            # Closing the connection interrupts the abandoned authentication
+            # worker without allowing it to occupy an admission slot forever.
+            connection.close()
+            raise ExecutionGatewayDeadlineExceeded(
+                "execution gateway authentication timed out"
+            ) from exc
+        if outcome is not None:
+            raise ExecutionGatewayError(
+                "execution gateway authentication failed closed"
+            ) from outcome
+
+    def _handle_connection(
+        self,
+        connection: Any,
+        audit: Any | None,
+        *,
+        deadline: float,
+    ) -> None:
         operation = "invalid"
-        deadline = time.monotonic() + self._maximum_call_duration_seconds
         try:
             if not connection.poll(self._remaining_seconds(deadline)):
                 raise ExecutionGatewayDeadlineExceeded(
@@ -1884,10 +2053,41 @@ class DeploymentOwnedExecutionGatewayServer:
         finally:
             connection.close()
 
-    def _run_connection_handler(self, connection: Any, audit: Any | None) -> None:
+    def _run_connection_handler(
+        self,
+        connection: Any,
+        audit: Any | None,
+        credential: bytes,
+    ) -> None:
+        deadline = time.monotonic() + self._maximum_call_duration_seconds
         try:
-            self._handle_connection(connection, audit)
+            self._authenticate_connection_with_deadline(
+                connection,
+                credential=credential,
+                deadline=deadline,
+            )
+            self._handle_connection(
+                connection,
+                audit,
+                deadline=deadline,
+            )
+        except ExecutionGatewayDeadlineExceeded:
+            if audit is not None:
+                audit.put(
+                    {"operation": "authentication", "status": "DEADLINE_EXCEEDED"}
+                )
+        except BaseException as exc:
+            if audit is not None:
+                audit.put(
+                    {
+                        "operation": "authentication",
+                        "status": "ERROR",
+                        "error": exc.__class__.__name__,
+                    }
+                )
         finally:
+            with contextlib.suppress(BaseException):
+                connection.close()
             with self._active_handlers_lock:
                 self._active_handlers.discard(threading.current_thread())
             self._connection_slots.release()
@@ -1912,7 +2112,9 @@ class DeploymentOwnedExecutionGatewayServer:
             str(endpoint),
             family="AF_UNIX",
             backlog=16,
-            authkey=credential,
+            # Authentication runs in the admitted handler so a raw client
+            # cannot block the single accept loop before a deadline exists.
+            authkey=None,
         )
         raw_socket = listener._listener._socket
         raw_socket.settimeout(
@@ -1936,7 +2138,7 @@ class DeploymentOwnedExecutionGatewayServer:
                     continue
                 handler = threading.Thread(
                     target=self._run_connection_handler,
-                    args=(connection, audit),
+                    args=(connection, audit, credential),
                     name="execution-gateway-connection",
                     daemon=True,
                 )

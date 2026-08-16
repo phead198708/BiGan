@@ -11,7 +11,7 @@
   "deployment_base_image_manifest_digest": "sha256:a074fac67aa01841fee592d00bae14d25dcaf98ef6e12a683ecceb7e0147e2d1",
   "concrete_clob_contract_test": {
     "path": "tests/v8/test_residual_promotion_execution_gateway.py",
-    "sha256": "a69a0e18f111efa2e628d4477373daa847f7c40f6e8486be93315ecfe8b2a1c1"
+    "sha256": "bdf7bba68b595d7b6681120ff847a01af9c0f9b67c1e1ce86f6b8df90bbbfd87"
   },
   "durability_contract": {
     "atomic_replace": true,
@@ -30,14 +30,15 @@
   },
   "gateway_implementation": {
     "path": "src/bigan/v8/polymarket/residual_promotion_execution_gateway.py",
-    "sha256": "8ca15ff40556b491476315939a8ae8650bc22d7952713ab1c31be5dab6b22348"
+    "sha256": "7bcfe7127ad428579865df3d59ee9fb64de2caff06e525546850073ad04c27ec"
   },
   "gateway_process_integration_test": {
     "path": "tests/v8/test_residual_promotion_micro_live_executor.py",
-    "sha256": "28ec83c12f17213bb4235792b37da9728fc9c5a5821fd4451db55ea7bd5bb3a5"
+    "sha256": "aa78dcbda66d470e62b0e0d486f5b550a57e7018d2f3f025c0958306eebb5ed6"
   },
   "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
   "model_or_gate_bytes_changed": false,
+  "production_economics_compatible": false,
   "production_entrypoint": "bigan.v8.polymarket.residual_promotion_execution_gateway.run_production_execution_gateway",
   "production_types": {
     "backend": "DeploymentOwnedExecutionGatewayBackend",
@@ -80,13 +81,20 @@
   "schema_version": "bigan-btc-15m-residual-promotion-execution-gateway-service-manifest-v1",
   "security_state": "NOT_INDEPENDENTLY_REVIEWED_NO_GO",
   "service_deadline_contract": {
+    "authenticated_handshake_is_bounded": true,
     "authenticated_payload_receive_is_bounded": true,
     "maximum_call_duration_is_service_enforced": true,
     "parked_connection_cannot_block_accept_loop": true,
     "safety_operations_use_independent_lane": true,
+    "slow_prepare_can_be_fenced_before_dispatch": true,
     "slow_submit_cannot_block_fence_or_stop": true
   },
   "strict_json_duplicate_keys_rejected": true,
+  "venue_economics_transition_authorized": false,
+  "venue_economics_transition_blocker": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/venue_economics_transition_blocker_v1.json",
+    "sha256": "348c4237a1734da5c93eafc36c2b38f0ad260510839a62684dd0326aa25e0d52"
+  },
   "wallet_signing_allowed": false,
   "polymarket_write_allowed": false,
   "capital_at_risk": false

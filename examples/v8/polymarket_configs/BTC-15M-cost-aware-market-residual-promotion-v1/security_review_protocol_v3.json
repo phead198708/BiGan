@@ -9,7 +9,7 @@
   "created_at": "2026-08-15T00:00:00Z",
   "execution_gateway_service_manifest": {
     "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/execution_gateway_service_manifest_v1.json",
-    "sha256": "420b0153145e5f2765616f06a61687554ecff9f0aafe5530325570017fe7a736"
+    "sha256": "998e774db4fbe598b5c56e89f51716054f3ec0c6db16755359620bdd17833d20"
   },
   "execution_safety_contract": {
     "maximum_future_initial_capital_fraction": 0.01,
@@ -183,7 +183,8 @@
     "security_review_validator": "src/bigan/v8/polymarket/residual_promotion_security_review.py",
     "security_review_validator_v2": "src/bigan/v8/polymarket/residual_promotion_security_review_v2.py",
     "security_review_validator_v3": "src/bigan/v8/polymarket/residual_promotion_security_review_v3.py",
-    "separate_micro_live_executor": "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py"
+    "separate_micro_live_executor": "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py",
+    "venue_economics_transition_blocker": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/venue_economics_transition_blocker_v1.json"
   },
   "review_independence_contract": {
     "exact_reviewed_commit_required": true,
@@ -225,11 +226,13 @@
     "exact_gateway_implementation_config_image_evidence_required": true,
     "legacy_v2_report_sufficient": false,
     "process_test_mocks_only_outer_venue_boundary": true,
+    "production_economics_compatible": false,
     "runtime_identity_derived_from_gateway_venue_api_account_and_signer": true,
     "service_enforced_deadlines_and_independent_safety_lane_required": true,
     "strict_raw_json_parser_required": true,
     "v2_protocol_bytes_preserved": true,
-    "v2_scope_and_controls_preserved": true
+    "v2_scope_and_controls_preserved": true,
+    "venue_economics_governed_transition_required": true
   },
   "supersedes_security_review_protocol": {
     "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/security_review_protocol_v2.json",
@@ -237,6 +240,6 @@
   },
   "validator_implementation": {
     "path": "src/bigan/v8/polymarket/residual_promotion_security_review_v3.py",
-    "sha256": "2f8564568dd1f1a81f4fc95f2cb6243314e745f4c864d829e2f79c224bbd1568"
+    "sha256": "512c4f9053371fa85e1bc14f7a8da33966a90e2e93dc33613d8508923c78cc2b"
   }
 }

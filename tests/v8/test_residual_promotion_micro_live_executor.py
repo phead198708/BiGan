@@ -12,6 +12,7 @@ import json
 import multiprocessing
 import os
 import shutil
+import socket
 import tempfile
 import threading
 import time
@@ -3921,11 +3922,17 @@ class _ProcessMockVenueBoundary:
         self,
         *,
         fail_submit: bool,
+        prepare_stalled: Any | None = None,
+        release_prepare: Any | None = None,
+        preparing_requests: Any | None = None,
         submit_stalled: Any | None = None,
         release_submit: Any | None = None,
         submitted_requests: Any | None = None,
     ) -> None:
         self.fail_submit = fail_submit
+        self.prepare_stalled = prepare_stalled
+        self.release_prepare = release_prepare
+        self.preparing_requests = preparing_requests
         self.submit_stalled = submit_stalled
         self.release_submit = release_submit
         self.submitted_requests = submitted_requests
@@ -3956,6 +3963,12 @@ class _ProcessMockVenueBoundary:
         }
 
     def prepare_submission(self, request: dict[str, Any]) -> dict[str, Any]:
+        if self.preparing_requests is not None:
+            self.preparing_requests.put(copy.deepcopy(request))
+        if self.prepare_stalled is not None:
+            self.prepare_stalled.set()
+            if self.release_prepare is None or not self.release_prepare.wait(timeout=10):
+                raise RuntimeError("synthetic venue preparation stall was not released")
         return {
             "schema_version": "test-prepared-venue-submission-v1",
             "client_order_id": request["client_order_id"],
@@ -4133,6 +4146,9 @@ def _isolated_execution_gateway_process(
     submit_stalled: Any | None = None,
     release_submit: Any | None = None,
     submitted_requests: Any | None = None,
+    prepare_stalled: Any | None = None,
+    release_prepare: Any | None = None,
+    preparing_requests: Any | None = None,
 ) -> None:
     """Run the exact production server; mock only its outer venue boundary."""
 
@@ -4149,6 +4165,9 @@ def _isolated_execution_gateway_process(
     exponent_path.chmod(0o600)
     venue = _ProcessMockVenueBoundary(
         fail_submit=fail_submit,
+        prepare_stalled=prepare_stalled,
+        release_prepare=release_prepare,
+        preparing_requests=preparing_requests,
         submit_stalled=submit_stalled,
         release_submit=release_submit,
         submitted_requests=submitted_requests,
@@ -4270,7 +4289,7 @@ def test_production_gateway_configuration_and_strict_json_fail_closed(
         drifted.validated()
 
 
-def test_separate_process_parked_authenticated_connection_cannot_starve_service(
+def test_separate_process_raw_preauth_connection_cannot_starve_service(
     tmp_path: Path,
 ) -> None:
     context = multiprocessing.get_context("fork")
@@ -4299,7 +4318,8 @@ def test_separate_process_parked_authenticated_connection_cannot_starve_service(
     )
     process.start()
     assert ready.wait(timeout=5)
-    parked = Client(endpoint, family="AF_UNIX", authkey=credential)
+    parked = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    parked.connect(endpoint)
     try:
         started = time.monotonic()
         probe = Client(endpoint, family="AF_UNIX", authkey=credential)
@@ -8137,6 +8157,153 @@ def test_separate_process_slow_venue_does_not_starve_fence_or_stop(
             Path(endpoint).unlink()
         shutil.rmtree(socket_root)
     assert process_exitcode == 0
+    assert submit_errors
+    assert isinstance(submit_errors[0], MicroLiveExecutionError)
+
+
+def test_separate_process_slow_prepare_is_fenced_before_dispatch_and_stop(
+    authorized_fixture: dict[str, Any],
+) -> None:
+    context = multiprocessing.get_context("fork")
+    socket_root = Path(tempfile.mkdtemp(prefix="bigan-egw-prepare-", dir="/tmp"))
+    endpoint = str(socket_root / "gateway.sock")
+    credential = b"bigan-stalled-prepare-gateway-credential-v1"
+    maximum_call_duration_ms = 1_000
+    execution_authority = _test_execution_authority_descriptor(
+        endpoint=endpoint,
+        credential=credential,
+        maximum_call_duration_ms=maximum_call_duration_ms,
+    )
+    authorization = copy.deepcopy(authorized_fixture["authorization"])
+    authorization["execution_service_authority"] = execution_authority
+    verified = _verified(
+        authorized_fixture,
+        authorization,
+        execution_call_duration_ms=maximum_call_duration_ms,
+    )
+    ready = context.Event()
+    stop = context.Event()
+    prepare_stalled = context.Event()
+    audit = context.Queue()
+    preparing_requests = context.Queue()
+    process = context.Process(
+        target=_isolated_execution_gateway_process,
+        args=(
+            endpoint,
+            credential,
+            execution_authority,
+            False,
+            ready,
+            stop,
+            audit,
+            None,
+            None,
+            None,
+            prepare_stalled,
+            None,
+            preparing_requests,
+        ),
+    )
+    process.start()
+    assert ready.wait(timeout=5)
+    executor = _StrictMicroLiveExecutor(
+        verified,
+        transport=_execution_adapter_for_serialized_route(
+            verified,
+            endpoint=endpoint,
+            credential=credential,
+        ),
+        journal=_new_journal(),
+    )
+    submit_errors: list[BaseException] = []
+
+    def submit() -> None:
+        try:
+            executor.submit_signal(
+                raw_signal_payload=_json_bytes(
+                    _signal(
+                        candidate_bundle_sha256=(
+                            verified.candidate_bundle_sha256
+                        )
+                    )["signal_payload"]
+                ),
+                raw_feature_row=_json_bytes(BASE_FEATURE_ROW),
+                provider_feature_evidence=BASE_PROVIDER_FEATURE_EVIDENCE,
+                now_ts_ms=NOW_TS_MS,
+                operator_heartbeat_ts_ms=NOW_TS_MS,
+                market_identity_evidence=_market_identity_evidence(
+                    BASE_SIGNAL_PAYLOAD
+                ),
+            )
+        except BaseException as exc:
+            submit_errors.append(exc)
+
+    worker = threading.Thread(target=submit, daemon=True)
+    worker.start()
+    try:
+        assert prepare_stalled.wait(timeout=5)
+        preparing = preparing_requests.get(timeout=5)
+        session_probe_started = time.monotonic()
+        trusted_completion, _, _ = executor._verified_trusted_completion(
+            request_started_at_ts_ms=NOW_TS_MS,
+            operation="lookup_order",
+            response_sha256="f" * 64,
+        )
+        assert time.monotonic() - session_probe_started < 0.75
+        assert trusted_completion >= NOW_TS_MS
+        fence_request = {
+            key: preparing[key]
+            for key in (
+                "authorization_id",
+                "client_order_id",
+                "business_key",
+                "market_id",
+                "token_id",
+                "transport_invocation_id",
+            )
+        }
+        started = time.monotonic()
+        fence = json.loads(
+            executor._bounded_transport_call(
+                operation="fence_order_invocation",
+                request=fence_request,
+            )
+        )
+        assert time.monotonic() - started < 0.75
+        assert fence == {
+            "authorization_id": preparing["authorization_id"],
+            "client_order_id": preparing["client_order_id"],
+            "transport_invocation_id": preparing["transport_invocation_id"],
+            "side_effects_fenced": True,
+        }
+        stop.set()
+        process.join(timeout=3)
+        assert not process.is_alive()
+    finally:
+        stop.set()
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        final: dict[str, Any] | None = None
+        while True:
+            record = audit.get(timeout=2)
+            if record["operation"] == "FINAL":
+                final = record
+                break
+        audit.close()
+        audit.cancel_join_thread()
+        preparing_requests.close()
+        preparing_requests.cancel_join_thread()
+        process_exitcode = process.exitcode
+        process.close()
+        with contextlib.suppress(FileNotFoundError):
+            Path(endpoint).unlink()
+        shutil.rmtree(socket_root)
+    assert process_exitcode == 0
+    assert final is not None
+    assert final["submit_calls"] == 0
     assert submit_errors
     assert isinstance(submit_errors[0], MicroLiveExecutionError)
 

@@ -188,9 +188,9 @@ def test_concrete_boundary_post_recovery_cancel_and_fill_contract(
         "asset_id": request["token_id"],
         "side": "BUY",
         "size": "4",
-        "fee_rate_bps": "100",
+        "fee_usd": "0.07",
         "price": "0.5",
-        "status": "MATCHED",
+        "status": "TRADE_STATUS_CONFIRMED",
         "match_time": "1752500000",
         "maker_orders": [],
     }
@@ -230,7 +230,7 @@ def test_concrete_boundary_post_recovery_cancel_and_fill_contract(
     partial = json.loads(boundary.read_fill_cursor(cursor_request))
     assert partial["status"] == "OPEN"
     assert partial["cumulative_filled_quantity"] == "4"
-    assert partial["fill_events"][0]["fee_usd"] == "0.02"
+    assert partial["fill_events"][0]["fee_usd"] == "0.07"
 
     lookup.update({"status": "matched", "size_matched": "10"})
     trade["size"] = "10"
@@ -243,6 +243,181 @@ def test_concrete_boundary_post_recovery_cancel_and_fill_contract(
     terminal_cancel = json.loads(boundary.read_fill_cursor(cursor_request))
     assert terminal_cancel["status"] == "CANCELED"
     assert terminal_cancel["fill_delivery_complete"] is True
+
+
+@pytest.mark.parametrize(
+    "trade_status",
+    (
+        "MATCHED",
+        "MINED",
+        "CONFIRMED",
+        "TRADE_STATUS_MATCHED",
+        "TRADE_STATUS_MINED",
+        "TRADE_STATUS_CONFIRMED",
+    ),
+)
+def test_concrete_boundary_accepts_exact_documented_trade_status_families(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    trade_status: str,
+) -> None:
+    boundary = _boundary(tmp_path / trade_status.lower())
+    request = _request()
+    monkeypatch.setattr(
+        boundary._client,
+        "get_order",
+        lambda *_: {
+            "id": ORDER_HASH,
+            "status": "matched",
+            "original_size": "10",
+            "size_matched": "10",
+            "associate_trades": ["trade-status"],
+        },
+    )
+    monkeypatch.setattr(
+        boundary._client,
+        "get_trades",
+        lambda *_: [
+            {
+                "id": "trade-status",
+                "taker_order_id": ORDER_HASH,
+                "market": MARKET_ID,
+                "asset_id": request["token_id"],
+                "size": "10",
+                "price": "0.5",
+                "fee_usd": "0.175",
+                "status": trade_status,
+                "match_time": "1752500000",
+                "maker_orders": [],
+            }
+        ],
+    )
+    cursor = json.loads(
+        boundary.read_fill_cursor(
+            {
+                "authorization_id": request["authorization_id"],
+                "execution_service_binding_sha256": "e" * 64,
+                "request_started_at_ts_ms": 1_752_500_001_000,
+                "client_order_id": request["client_order_id"],
+                "exchange_order_id": ORDER_HASH,
+                "market_id": request["market_id"],
+                "token_id": request["token_id"],
+            }
+        )
+    )
+    assert cursor["status"] == "FILLED"
+    assert cursor["fill_events"][0]["fee_usd"] == "0.175"
+
+
+@pytest.mark.parametrize(
+    "trade_status",
+    ("RETRYING", "FAILED", "TRADE_STATUS_RETRYING", "TRADE_STATUS_FAILED"),
+)
+def test_concrete_boundary_rejects_nonexecuted_trade_statuses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    trade_status: str,
+) -> None:
+    boundary = _boundary(tmp_path / trade_status.lower())
+    request = _request()
+    monkeypatch.setattr(
+        boundary._client,
+        "get_order",
+        lambda *_: {
+            "id": ORDER_HASH,
+            "status": "matched",
+            "original_size": "10",
+            "size_matched": "10",
+            "associate_trades": ["trade-status"],
+        },
+    )
+    monkeypatch.setattr(
+        boundary._client,
+        "get_trades",
+        lambda *_: [
+            {
+                "id": "trade-status",
+                "taker_order_id": ORDER_HASH,
+                "market": MARKET_ID,
+                "asset_id": request["token_id"],
+                "size": "10",
+                "price": "0.5",
+                "fee_usd": "0.175",
+                "status": trade_status,
+                "match_time": "1752500000",
+                "maker_orders": [],
+            }
+        ],
+    )
+    with pytest.raises(ExecutionGatewayError, match="not an executed fill"):
+        boundary.read_fill_cursor(
+            {
+                "authorization_id": request["authorization_id"],
+                "execution_service_binding_sha256": "e" * 64,
+                "request_started_at_ts_ms": 1_752_500_001_000,
+                "client_order_id": request["client_order_id"],
+                "exchange_order_id": ORDER_HASH,
+                "market_id": request["market_id"],
+                "token_id": request["token_id"],
+            }
+        )
+
+
+def test_concrete_boundary_separates_maker_fee_and_fails_closed_on_bps_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boundary = _boundary(tmp_path)
+    request = _request()
+    order = {
+        "id": ORDER_HASH,
+        "status": "matched",
+        "original_size": "10",
+        "size_matched": "10",
+        "associate_trades": ["trade-role"],
+    }
+    trade = {
+        "id": "trade-role",
+        "taker_order_id": "0x" + "ef" * 32,
+        "market": MARKET_ID,
+        "asset_id": "other-token",
+        "size": "10",
+        "price": "0.5",
+        "fee_usd": "0.175",
+        "fee_rate_bps": "700",
+        "status": "TRADE_STATUS_CONFIRMED",
+        "match_time": "1752500000",
+        "maker_orders": [
+            {
+                "order_id": ORDER_HASH,
+                "asset_id": request["token_id"],
+                "matched_amount": "10",
+                "price": "0.5",
+            }
+        ],
+    }
+    monkeypatch.setattr(boundary._client, "get_order", lambda *_: order)
+    monkeypatch.setattr(boundary._client, "get_trades", lambda *_: [trade])
+    cursor_request = {
+        "authorization_id": request["authorization_id"],
+        "execution_service_binding_sha256": "e" * 64,
+        "request_started_at_ts_ms": 1_752_500_001_000,
+        "client_order_id": request["client_order_id"],
+        "exchange_order_id": ORDER_HASH,
+        "market_id": request["market_id"],
+        "token_id": request["token_id"],
+    }
+    maker = json.loads(boundary.read_fill_cursor(cursor_request))
+    assert maker["fill_events"][0]["fee_usd"] == "0"
+
+    trade["taker_order_id"] = ORDER_HASH
+    trade["asset_id"] = request["token_id"]
+    trade.pop("fee_usd")
+    with pytest.raises(
+        ExecutionGatewayError,
+        match="authoritative venue trade economics are incomplete",
+    ):
+        boundary.read_fill_cursor(cursor_request)
 
 
 def test_concrete_runtime_binding_rejects_every_identity_drift_before_service(

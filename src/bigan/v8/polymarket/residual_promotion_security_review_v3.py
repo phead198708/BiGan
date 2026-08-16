@@ -52,6 +52,9 @@ GATEWAY_MANIFEST_REPOSITORY_PATH = (
 CLOB_WHEEL_SBOM_REPOSITORY_PATH = (
     f"{CONFIG_REPOSITORY_PATH}/py_clob_client_v2_wheel_sbom_v1.json"
 )
+VENUE_ECONOMICS_BLOCKER_REPOSITORY_PATH = (
+    f"{CONFIG_REPOSITORY_PATH}/venue_economics_transition_blocker_v1.json"
+)
 
 REQUIRED_SCOPE_COMPONENT_PATHS = {
     **v2.REQUIRED_SCOPE_COMPONENT_PATHS,
@@ -60,6 +63,9 @@ REQUIRED_SCOPE_COMPONENT_PATHS = {
     "production_execution_gateway": GATEWAY_REPOSITORY_PATH,
     "production_execution_gateway_manifest": GATEWAY_MANIFEST_REPOSITORY_PATH,
     "py_clob_client_v2_wheel_sbom": CLOB_WHEEL_SBOM_REPOSITORY_PATH,
+    "venue_economics_transition_blocker": (
+        VENUE_ECONOMICS_BLOCKER_REPOSITORY_PATH
+    ),
 }
 
 _GATEWAY_CONTROL_IDS = {
@@ -263,6 +269,83 @@ def validate_py_clob_client_v2_wheel_sbom(
             )
 
 
+def validate_venue_economics_transition_blocker(
+    blocker: Mapping[str, Any],
+    *,
+    repository_root: Path | str,
+) -> None:
+    """Keep the frozen candidate NO-GO until a separately governed transition."""
+
+    root = Path(repository_root).resolve()
+    frozen = blocker.get("frozen_inputs")
+    reviewed_executor = (
+        frozen.get("reviewed_head_executor")
+        if isinstance(frozen, Mapping)
+        else None
+    )
+    expected_incompatibilities = {
+        "dynamic_taker_fee_formula_bound_end_to_end": False,
+        "frozen_fee_per_share_usd": "0.0002",
+        "frozen_quantity": "1",
+        "live_minimum_order_size_observed_in_review": "5",
+        "market_fee_descriptor_observed_in_review": {
+            "exponent": 1,
+            "rate": "0.07",
+            "taker_only": True,
+        },
+        "minimum_order_size_satisfied": False,
+        "production_economics_compatible": False,
+        "venue_fee_rounding_bound_end_to_end": False,
+    }
+    expected_transition = {
+        "actual_market_mos_mts_and_fee_descriptor_bound_to_intent": True,
+        "candidate_or_cost_contract_transition_authorization_required": True,
+        "existing_opened_promotion_evidence_reusable": False,
+        "fresh_prospective_evidence_required": True,
+        "full_boundary_to_executor_economics_test_required": True,
+        "loss_cap_compatible_minimum_size_required": True,
+        "single_fee_implementation_across_scorer_evaluator_risk_and_gateway_required": True,
+    }
+    if not (
+        blocker.get("schema_version")
+        == "bigan-btc-15m-residual-promotion-venue-economics-transition-blocker-v1"
+        and blocker.get("lineage_id") == LINEAGE_ID
+        and blocker.get("candidate_id") == CANDIDATE_ID
+        and blocker.get("blocker_status")
+        == "GOVERNED_COST_AND_CANDIDATE_TRANSITION_REQUIRED"
+        and blocker.get("automatic_authorization_or_launch") is False
+        and blocker.get("incompatibilities") == expected_incompatibilities
+        and blocker.get("required_governed_transition") == expected_transition
+        and blocker.get("safety") == SAFETY
+        and isinstance(frozen, Mapping)
+        and isinstance(reviewed_executor, Mapping)
+        and reviewed_executor.get("path")
+        == "src/bigan/v8/polymarket/residual_promotion_micro_live_executor.py"
+        and reviewed_executor.get("reviewed_commit")
+        == "2bd7a00f78ea07e6973a6ef31ba7b8e2e096608f"
+        and reviewed_executor.get("sha256_at_reviewed_commit")
+        == "88bffdb7ebcd3d9ee4a9762bd249a59e42ea1379b527e7a1b8775ee975d124ba"
+    ):
+        raise SecurityReviewV3Error("venue economics transition blocker is invalid")
+    descriptors = {
+        "calibration_action_adapter": (
+            f"{CONFIG_REPOSITORY_PATH}/candidate_bundle/calibration_action_adapter.json"
+        ),
+        "candidate_bundle": (
+            f"{CONFIG_REPOSITORY_PATH}/candidate_bundle/bundle_manifest.json"
+        ),
+        "cost_contract": (
+            "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/"
+            "moe_cost_and_action_contract.json"
+        ),
+        "prospective_statistical_protocol": (
+            f"{CONFIG_REPOSITORY_PATH}/prospective_statistical_protocol.json"
+        ),
+    }
+    for name, path in descriptors.items():
+        _descriptor(root, frozen.get(name), expected_path=path)
+
+
 def validate_security_review_protocol_v3(
     protocol: Mapping[str, Any],
     *,
@@ -296,6 +379,8 @@ def validate_security_review_protocol_v3(
         "exact_deployed_wheel_source_sbom_required": True,
         "exact_gateway_implementation_config_image_evidence_required": True,
         "process_test_mocks_only_outer_venue_boundary": True,
+        "production_economics_compatible": False,
+        "venue_economics_governed_transition_required": True,
         "legacy_v2_report_sufficient": False,
         "candidate_model_or_gate_change": False,
     }
@@ -340,6 +425,27 @@ def validate_security_review_protocol_v3(
         root,
         protocol.get("execution_gateway_service_manifest"),
         expected_path=GATEWAY_MANIFEST_REPOSITORY_PATH,
+    )
+    gateway_manifest = _json(root / GATEWAY_MANIFEST_REPOSITORY_PATH)
+    if not (
+        gateway_manifest.get("security_state")
+        == "NOT_INDEPENDENTLY_REVIEWED_NO_GO"
+        and gateway_manifest.get("production_economics_compatible") is False
+        and gateway_manifest.get("venue_economics_transition_authorized") is False
+        and gateway_manifest.get("model_or_gate_bytes_changed") is False
+        and gateway_manifest.get("safety") == SAFETY
+    ):
+        raise SecurityReviewV3Error(
+            "execution gateway economics state is not fail-closed"
+        )
+    _descriptor(
+        root,
+        gateway_manifest.get("venue_economics_transition_blocker"),
+        expected_path=VENUE_ECONOMICS_BLOCKER_REPOSITORY_PATH,
+    )
+    validate_venue_economics_transition_blocker(
+        _json(root / VENUE_ECONOMICS_BLOCKER_REPOSITORY_PATH),
+        repository_root=root,
     )
     _descriptor(
         root,
@@ -390,6 +496,7 @@ def validate_security_review_template_v4(
         "gateway_deployment_image_manifest_digest": None,
         "gateway_credential_ownership_attestation_sha256": None,
         "gateway_process_integration_test_sha256": None,
+        "venue_economics_transition_authorization_sha256": None,
     }
     if not (
         template.get("schema_version") == TEMPLATE_SCHEMA_VERSION

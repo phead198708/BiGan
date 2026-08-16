@@ -8,7 +8,7 @@
   "polymarket_write_allowed": false,
   "protocol": {
     "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/security_review_protocol_v3.json",
-    "sha256": "e973d3ae4bb55848d195b0495950ec6154a1242623fd318e8083491fa74764a1"
+    "sha256": "31d78a209f17099e5794469be276e87d0f1b0774e72a3e03f0a93da0b1428996"
   },
   "required_evidence": {
     "exact_head_ci_run_url": null,
@@ -18,7 +18,8 @@
     "gateway_process_integration_test_sha256": null,
     "gateway_service_configuration_sha256": null,
     "independent_review_payload_sha256": null,
-    "independent_reviewer_github_login": null
+    "independent_reviewer_github_login": null,
+    "venue_economics_transition_authorization_sha256": null
   },
   "review_state": "NOT_REVIEWED",
   "safety": {

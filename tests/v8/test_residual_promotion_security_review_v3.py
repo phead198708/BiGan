@@ -22,10 +22,12 @@ from bigan.v8.polymarket.residual_promotion_security_review_v3 import (
     REQUIRED_CONTROL_EVIDENCE_PATHS,
     TEMPLATE_REPOSITORY_PATH,
     V2_PROTOCOL_REPOSITORY_PATH,
+    VENUE_ECONOMICS_BLOCKER_REPOSITORY_PATH,
     SecurityReviewV3Error,
     validate_py_clob_client_v2_wheel_sbom,
     validate_security_review_protocol_v3,
     validate_security_review_template_v4,
+    validate_venue_economics_transition_blocker,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -70,6 +72,7 @@ def test_v3_protocol_and_v4_template_validate_without_unlocking_safety() -> None
         PROTOCOL_REPOSITORY_PATH,
         TEMPLATE_REPOSITORY_PATH,
         GATEWAY_MANIFEST_REPOSITORY_PATH,
+        VENUE_ECONOMICS_BLOCKER_REPOSITORY_PATH,
     ):
         _assert_sidecar(path)
 
@@ -96,6 +99,8 @@ def test_gateway_manifest_hashes_exact_production_graph() -> None:
     assert manifest["security_state"] == "NOT_INDEPENDENTLY_REVIEWED_NO_GO"
     assert manifest["safety"] == SAFETY
     assert manifest["model_or_gate_bytes_changed"] is False
+    assert manifest["production_economics_compatible"] is False
+    assert manifest["venue_economics_transition_authorized"] is False
     assert manifest["production_entrypoint"].endswith(
         ".run_production_execution_gateway"
     )
@@ -106,6 +111,7 @@ def test_gateway_manifest_hashes_exact_production_graph() -> None:
         manifest["execution_gateway_runtime_lock"],
         manifest["frozen_model_runtime_lock"],
         manifest["py_clob_client_v2_wheel_sbom"],
+        manifest["venue_economics_transition_blocker"],
     ):
         assert sha256_file(ROOT / descriptor["path"]) == descriptor["sha256"]
     assert manifest["credential_ownership_contract"] == {
@@ -124,6 +130,30 @@ def test_gateway_manifest_hashes_exact_production_graph() -> None:
         "venue_configuration_digest_included": True,
     }
     assert all(manifest["service_deadline_contract"].values())
+
+
+def test_venue_economics_mismatch_is_hash_bound_and_fails_closed() -> None:
+    blocker = _json(VENUE_ECONOMICS_BLOCKER_REPOSITORY_PATH)
+    validate_venue_economics_transition_blocker(
+        blocker,
+        repository_root=ROOT,
+    )
+    assert blocker["blocker_status"] == (
+        "GOVERNED_COST_AND_CANDIDATE_TRANSITION_REQUIRED"
+    )
+    assert blocker["incompatibilities"]["production_economics_compatible"] is False
+    assert blocker["required_governed_transition"][
+        "existing_opened_promotion_evidence_reusable"
+    ] is False
+    _assert_sidecar(VENUE_ECONOMICS_BLOCKER_REPOSITORY_PATH)
+
+    changed = copy.deepcopy(blocker)
+    changed["incompatibilities"]["production_economics_compatible"] = True
+    with pytest.raises(SecurityReviewV3Error, match="transition blocker is invalid"):
+        validate_venue_economics_transition_blocker(
+            changed,
+            repository_root=ROOT,
+        )
 
 
 def test_exact_deployed_clob_wheel_sources_match_frozen_sbom() -> None:
