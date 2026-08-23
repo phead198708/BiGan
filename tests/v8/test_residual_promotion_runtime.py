@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from bigan.v8.polymarket.challenge_development_lane import sha256_file
-from bigan.v8.polymarket.residual_promotion_release_readiness_v6 import (
+from bigan.v8.polymarket.residual_promotion_release_readiness_v7 import (
     CONTRACT_REPOSITORY_PATH,
 )
 from bigan.v8.polymarket.residual_promotion_v1 import (
@@ -25,7 +25,7 @@ def _json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_v6_contract_loads_the_exact_frozen_candidate_runtime() -> None:
+def test_v7_contract_loads_the_exact_frozen_candidate_runtime() -> None:
     contract = _json(REPO_ROOT / CONTRACT_REPOSITORY_PATH)
     descriptor = dict(contract["candidate_bundle"])
     manifest = REPO_ROOT / descriptor["path"]

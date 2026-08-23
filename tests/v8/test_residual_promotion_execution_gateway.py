@@ -1,0 +1,594 @@
+"""Concrete pinned-CLOB contract tests for the production gateway boundary."""
+
+from __future__ import annotations
+
+import base64
+import copy
+import json
+import os
+import stat
+from pathlib import Path
+from typing import Any
+
+import pytest
+from eth_account import Account
+
+from bigan.v8.polymarket import residual_promotion_execution_gateway as gateway_module
+from bigan.v8.polymarket.contracts import canonical_json_sha256
+from bigan.v8.polymarket.residual_promotion_execution_gateway import (
+    ExecutionGatewayError,
+    PolymarketClobV2VenueBoundary,
+    VenueOrderOutcome,
+    _validated_venue_runtime_binding,
+)
+
+PRIVATE_KEY = (
+    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+)
+SECOND_PRIVATE_KEY = (
+    "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+)
+ORDER_HASH = "0x" + "ab" * 32
+MARKET_ID = "0x" + "cd" * 32
+
+
+def _private_file(path: Path, content: str) -> str:
+    path.write_text(content, encoding="ascii")
+    path.chmod(0o600)
+    return str(path)
+
+
+def _boundary(
+    tmp_path: Path,
+    *,
+    private_key: str = PRIVATE_KEY,
+    funder: str | None = None,
+    api_key: str = "gateway-api-key",
+    host: str = "https://clob.polymarket.com",
+) -> PolymarketClobV2VenueBoundary:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    signer = Account.from_key(private_key).address
+    key_path = _private_file(tmp_path / f"key-{api_key}.txt", private_key)
+    credentials = {
+        "api_key": api_key,
+        "api_secret": base64.urlsafe_b64encode(b"secret-secret-secret").decode(),
+        "api_passphrase": "gateway-passphrase",
+    }
+    credentials_path = tmp_path / f"credentials-{api_key}.json"
+    credentials_path.write_text(
+        json.dumps(credentials, sort_keys=True, separators=(",", ":")),
+        encoding="ascii",
+    )
+    credentials_path.chmod(0o600)
+    return PolymarketClobV2VenueBoundary(
+        private_key_path=key_path,
+        api_credentials_path=str(credentials_path),
+        host=host,
+        chain_id=137,
+        signature_type=0,
+        funder=funder or signer,
+        maximum_call_duration_ms=250,
+    )
+
+
+def _request() -> dict[str, Any]:
+    return {
+        "authorization_id": "a" * 64,
+        "client_order_id": "b" * 64,
+        "market_id": MARKET_ID,
+        "token_id": "123",
+        "quantity": "10",
+        "limit_price": "0.5",
+    }
+
+
+def _prepared(request: dict[str, Any]) -> dict[str, Any]:
+    signer = Account.from_key(PRIVATE_KEY).address
+    return {
+        "schema_version": (
+            "bigan-btc-15m-residual-promotion-polymarket-clob-v2-boundary-v2"
+        ),
+        "client_order_id": request["client_order_id"],
+        "exact_request_sha256": canonical_json_sha256(request),
+        "order_hash": ORDER_HASH,
+        "signed_order": {
+            "salt": "1",
+            "maker": signer,
+            "signer": signer,
+            "tokenId": request["token_id"],
+            "makerAmount": "5000000",
+            "takerAmount": "10000000",
+            "side": 0,
+            "signatureType": 0,
+            "timestamp": "1752500000000",
+            "metadata": "0x" + "00" * 32,
+            "builder": "0x" + "00" * 32,
+            "expiration": "0",
+            "signature": "0x01",
+        },
+        "order_type": "GTC",
+    }
+
+
+@pytest.mark.parametrize(
+    "venue_status",
+    (
+        pytest.param("live", id="resting-order"),
+        pytest.param("matched", id="matched-order"),
+    ),
+)
+def test_concrete_boundary_maps_successful_pinned_submission_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    venue_status: str,
+) -> None:
+    boundary = _boundary(tmp_path)
+    request = _request()
+    raw = {
+        "success": True,
+        "errorMsg": "",
+        "orderID": ORDER_HASH,
+        "status": venue_status,
+        "takingAmount": "10000000",
+        "makingAmount": "5000000",
+    }
+    monkeypatch.setattr(boundary._client, "post_order", lambda *_: raw)
+    outcome = boundary.submit_prepared(_prepared(request), request)
+    assert isinstance(outcome, VenueOrderOutcome)
+    normalized = json.loads(outcome.normalized_response)
+    assert normalized["status"] == "ACCEPTED"
+    assert normalized["exchange_order_id"] == ORDER_HASH
+    assert json.loads(outcome.raw_venue_response) == raw
+
+
+def test_concrete_boundary_rejects_contradictory_and_maps_rejected_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boundary = _boundary(tmp_path)
+    request = _request()
+    rejected = {
+        "success": False,
+        "errorMsg": "insufficient balance",
+        "orderID": "",
+        "status": "rejected",
+    }
+    monkeypatch.setattr(boundary._client, "post_order", lambda *_: rejected)
+    outcome = boundary.submit_prepared(_prepared(request), request)
+    assert json.loads(outcome.normalized_response)["status"] == "REJECTED"
+
+    contradictory = {**rejected, "success": True, "status": "live"}
+    monkeypatch.setattr(boundary._client, "post_order", lambda *_: contradictory)
+    with pytest.raises(ExecutionGatewayError, match="contradictory"):
+        boundary.submit_prepared(_prepared(request), request)
+
+
+def test_concrete_boundary_post_recovery_cancel_and_fill_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boundary = _boundary(tmp_path)
+    request = _request()
+    live = {
+        "success": True,
+        "errorMsg": "",
+        "orderID": ORDER_HASH,
+        "status": "live",
+        "takingAmount": "10000000",
+        "makingAmount": "5000000",
+    }
+    lookup = {
+        "id": ORDER_HASH,
+        "status": "live",
+        "original_size": "10",
+        "size_matched": "4",
+        "associate_trades": ["trade-1"],
+    }
+    trade = {
+        "id": "trade-1",
+        "taker_order_id": ORDER_HASH,
+        "market": MARKET_ID,
+        "asset_id": request["token_id"],
+        "side": "BUY",
+        "size": "4",
+        "fee_usd": "0.07",
+        "price": "0.5",
+        "status": "TRADE_STATUS_CONFIRMED",
+        "match_time": "1752500000",
+        "maker_orders": [],
+    }
+    monkeypatch.setattr(boundary._client, "post_order", lambda *_: live)
+    monkeypatch.setattr(boundary._client, "get_order", lambda *_: lookup)
+    monkeypatch.setattr(boundary._client, "get_trades", lambda *_: [trade])
+    monkeypatch.setattr(
+        boundary._client,
+        "cancel_order",
+        lambda *_: {"canceled": [ORDER_HASH], "not_canceled": {}},
+    )
+
+    placed = boundary.submit_prepared(_prepared(request), request)
+    recovered = boundary.lookup_submission(_prepared(request), request)
+    assert json.loads(placed.normalized_response)["status"] == "ACCEPTED"
+    assert recovered is not None
+    assert json.loads(recovered.normalized_response)["status"] == "ACCEPTED"
+    canceled = json.loads(
+        boundary.cancel(
+            {
+                "client_order_id": request["client_order_id"],
+                "exchange_order_id": ORDER_HASH,
+            }
+        )
+    )
+    assert canceled["status"] == "CANCEL_REQUESTED"
+
+    cursor_request = {
+        "authorization_id": request["authorization_id"],
+        "execution_service_binding_sha256": "e" * 64,
+        "request_started_at_ts_ms": 1_752_500_001_000,
+        "client_order_id": request["client_order_id"],
+        "exchange_order_id": ORDER_HASH,
+        "market_id": request["market_id"],
+        "token_id": request["token_id"],
+    }
+    partial = json.loads(boundary.read_fill_cursor(cursor_request))
+    assert partial["status"] == "OPEN"
+    assert partial["cumulative_filled_quantity"] == "4"
+    assert partial["fill_events"][0]["fee_usd"] == "0.07"
+
+    lookup.update({"status": "matched", "size_matched": "10"})
+    trade["size"] = "10"
+    full = json.loads(boundary.read_fill_cursor(cursor_request))
+    assert full["status"] == "FILLED"
+    assert full["fill_delivery_complete"] is True
+
+    lookup.update({"status": "canceled", "size_matched": "4"})
+    trade["size"] = "4"
+    terminal_cancel = json.loads(boundary.read_fill_cursor(cursor_request))
+    assert terminal_cancel["status"] == "CANCELED"
+    assert terminal_cancel["fill_delivery_complete"] is True
+
+
+def test_concrete_boundary_404_is_absent_only_for_recovery_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boundary = _boundary(tmp_path)
+    request = _request()
+
+    def not_found(_: str) -> None:
+        raise RuntimeError("404 order not found")
+
+    monkeypatch.setattr(boundary._client, "get_order", not_found)
+
+    # The pre-fence recovery probe may honestly report no venue effect.
+    assert boundary.lookup_submission(_prepared(request), request) is None
+
+    # An ordinary lifecycle lookup occurs only after DISPATCHED is known.  Its
+    # 404 must remain an unresolved failure rather than synthesize rejection.
+    with pytest.raises(ExecutionGatewayError, match="lookup failed closed"):
+        boundary.lookup(
+            {
+                **request,
+                "exchange_order_id": ORDER_HASH,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "trade_status",
+    (
+        "MATCHED",
+        "MINED",
+        "CONFIRMED",
+        "TRADE_STATUS_MATCHED",
+        "TRADE_STATUS_MINED",
+        "TRADE_STATUS_CONFIRMED",
+    ),
+)
+def test_concrete_boundary_accepts_exact_documented_trade_status_families(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    trade_status: str,
+) -> None:
+    boundary = _boundary(tmp_path / trade_status.lower())
+    request = _request()
+    monkeypatch.setattr(
+        boundary._client,
+        "get_order",
+        lambda *_: {
+            "id": ORDER_HASH,
+            "status": "matched",
+            "original_size": "10",
+            "size_matched": "10",
+            "associate_trades": ["trade-status"],
+        },
+    )
+    monkeypatch.setattr(
+        boundary._client,
+        "get_trades",
+        lambda *_: [
+            {
+                "id": "trade-status",
+                "taker_order_id": ORDER_HASH,
+                "market": MARKET_ID,
+                "asset_id": request["token_id"],
+                "size": "10",
+                "price": "0.5",
+                "fee_usd": "0.175",
+                "status": trade_status,
+                "match_time": "1752500000",
+                "maker_orders": [],
+            }
+        ],
+    )
+    cursor = json.loads(
+        boundary.read_fill_cursor(
+            {
+                "authorization_id": request["authorization_id"],
+                "execution_service_binding_sha256": "e" * 64,
+                "request_started_at_ts_ms": 1_752_500_001_000,
+                "client_order_id": request["client_order_id"],
+                "exchange_order_id": ORDER_HASH,
+                "market_id": request["market_id"],
+                "token_id": request["token_id"],
+            }
+        )
+    )
+    assert cursor["status"] == "FILLED"
+    assert cursor["fill_events"][0]["fee_usd"] == "0.175"
+
+
+@pytest.mark.parametrize(
+    "trade_status",
+    ("RETRYING", "FAILED", "TRADE_STATUS_RETRYING", "TRADE_STATUS_FAILED"),
+)
+def test_concrete_boundary_rejects_nonexecuted_trade_statuses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    trade_status: str,
+) -> None:
+    boundary = _boundary(tmp_path / trade_status.lower())
+    request = _request()
+    monkeypatch.setattr(
+        boundary._client,
+        "get_order",
+        lambda *_: {
+            "id": ORDER_HASH,
+            "status": "matched",
+            "original_size": "10",
+            "size_matched": "10",
+            "associate_trades": ["trade-status"],
+        },
+    )
+    monkeypatch.setattr(
+        boundary._client,
+        "get_trades",
+        lambda *_: [
+            {
+                "id": "trade-status",
+                "taker_order_id": ORDER_HASH,
+                "market": MARKET_ID,
+                "asset_id": request["token_id"],
+                "size": "10",
+                "price": "0.5",
+                "fee_usd": "0.175",
+                "status": trade_status,
+                "match_time": "1752500000",
+                "maker_orders": [],
+            }
+        ],
+    )
+    with pytest.raises(ExecutionGatewayError, match="not an executed fill"):
+        boundary.read_fill_cursor(
+            {
+                "authorization_id": request["authorization_id"],
+                "execution_service_binding_sha256": "e" * 64,
+                "request_started_at_ts_ms": 1_752_500_001_000,
+                "client_order_id": request["client_order_id"],
+                "exchange_order_id": ORDER_HASH,
+                "market_id": request["market_id"],
+                "token_id": request["token_id"],
+            }
+        )
+
+
+def test_concrete_boundary_separates_maker_fee_and_fails_closed_on_bps_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boundary = _boundary(tmp_path)
+    request = _request()
+    order = {
+        "id": ORDER_HASH,
+        "status": "matched",
+        "original_size": "10",
+        "size_matched": "10",
+        "associate_trades": ["trade-role"],
+    }
+    trade = {
+        "id": "trade-role",
+        "taker_order_id": "0x" + "ef" * 32,
+        "market": MARKET_ID,
+        "asset_id": "other-token",
+        "size": "10",
+        "price": "0.5",
+        "fee_usd": "0.175",
+        "fee_rate_bps": "700",
+        "status": "TRADE_STATUS_CONFIRMED",
+        "match_time": "1752500000",
+        "maker_orders": [
+            {
+                "order_id": ORDER_HASH,
+                "asset_id": request["token_id"],
+                "matched_amount": "10",
+                "price": "0.5",
+            }
+        ],
+    }
+    monkeypatch.setattr(boundary._client, "get_order", lambda *_: order)
+    monkeypatch.setattr(boundary._client, "get_trades", lambda *_: [trade])
+    cursor_request = {
+        "authorization_id": request["authorization_id"],
+        "execution_service_binding_sha256": "e" * 64,
+        "request_started_at_ts_ms": 1_752_500_001_000,
+        "client_order_id": request["client_order_id"],
+        "exchange_order_id": ORDER_HASH,
+        "market_id": request["market_id"],
+        "token_id": request["token_id"],
+    }
+    maker = json.loads(boundary.read_fill_cursor(cursor_request))
+    assert maker["fill_events"][0]["fee_usd"] == "0"
+
+    trade["taker_order_id"] = ORDER_HASH
+    trade["asset_id"] = request["token_id"]
+    trade.pop("fee_usd")
+    with pytest.raises(
+        ExecutionGatewayError,
+        match="authoritative venue trade economics are incomplete",
+    ):
+        boundary.read_fill_cursor(cursor_request)
+
+
+def test_concrete_runtime_binding_rejects_every_identity_drift_before_service(
+    tmp_path: Path,
+) -> None:
+    boundary = _boundary(tmp_path / "correct")
+    binding = dict(boundary.runtime_binding)
+    authority = {
+        "service_identity_sha256": binding["service_identity_sha256"],
+        "exchange_endpoint_sha256": binding["exchange_endpoint_sha256"],
+        "exchange_account_sha256": binding["exchange_account_sha256"],
+        "signer_identity_sha256": binding["signer_identity_sha256"],
+    }
+    assert _validated_venue_runtime_binding(boundary, authority) == binding
+
+    class DriftedVenue:
+        def __init__(self, value: dict[str, Any]) -> None:
+            self.runtime_binding = value
+
+    for field in (
+        "gateway_implementation_sha256",
+        "venue_configuration_sha256",
+        "api_credentials_identity_sha256",
+        "exchange_endpoint_sha256",
+        "exchange_account_sha256",
+        "signer_identity_sha256",
+    ):
+        drifted = copy.deepcopy(binding)
+        drifted[field] = "0" * 64
+        with pytest.raises(ExecutionGatewayError, match="identity is mismatched"):
+            _validated_venue_runtime_binding(DriftedVenue(drifted), authority)
+
+    wrong_key = _boundary(
+        tmp_path / "wrong-key",
+        private_key=SECOND_PRIVATE_KEY,
+    )
+    wrong_funder = _boundary(
+        tmp_path / "wrong-funder",
+        funder="0x" + "11" * 20,
+    )
+    wrong_api = _boundary(tmp_path / "wrong-api", api_key="other-api-key")
+    for drifted_boundary in (wrong_key, wrong_funder, wrong_api):
+        with pytest.raises(ExecutionGatewayError, match="identity is mismatched"):
+            _validated_venue_runtime_binding(drifted_boundary, authority)
+
+    with pytest.raises(ExecutionGatewayError, match="configuration is invalid"):
+        _boundary(
+            tmp_path / "wrong-endpoint",
+            host="https://not-polymarket.invalid",
+        )
+
+
+def test_durable_gateway_state_write_all_handles_short_regular_file_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = (tmp_path / "gateway-state.json").resolve()
+    state = gateway_module._DurableGatewayState(state_path)
+    state.value["sessions"]["a" * 64] = {"registered": True}
+    original_write = os.write
+    write_count = 0
+
+    def short_write(descriptor: int, raw: bytes) -> int:
+        nonlocal write_count
+        write_count += 1
+        return original_write(descriptor, raw[: min(7, len(raw))])
+
+    monkeypatch.setattr(os, "write", short_write)
+    state.flush()
+
+    assert write_count > 1
+    assert json.loads(state_path.read_bytes()) == state.value
+    assert not list(tmp_path.glob(f".{state_path.name}.{os.getpid()}.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "failure_boundary",
+    ("write", "file_fsync", "replace", "directory_fsync"),
+)
+def test_durable_gateway_state_faults_preserve_complete_state_and_clean_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_boundary: str,
+) -> None:
+    state_path = (tmp_path / f"gateway-state-{failure_boundary}.json").resolve()
+    state = gateway_module._DurableGatewayState(state_path)
+    baseline = state_path.read_bytes()
+    state.value["sessions"]["b" * 64] = {"registered": True}
+    original_write = os.write
+    original_fsync = os.fsync
+    original_replace = os.replace
+
+    def injected_write(descriptor: int, raw: bytes) -> int:
+        if failure_boundary == "write":
+            raise OSError("injected durable-state write failure")
+        return original_write(descriptor, raw)
+
+    def injected_fsync(descriptor: int) -> None:
+        is_directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+        if failure_boundary == "file_fsync" and not is_directory:
+            raise OSError("injected durable-state file fsync failure")
+        if failure_boundary == "directory_fsync" and is_directory:
+            raise OSError("injected durable-state directory fsync failure")
+        original_fsync(descriptor)
+
+    def injected_replace(source: Path, destination: Path) -> None:
+        if failure_boundary == "replace":
+            raise OSError("injected durable-state replace failure")
+        original_replace(source, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "write", injected_write)
+        patch.setattr(os, "fsync", injected_fsync)
+        patch.setattr(os, "replace", injected_replace)
+        with pytest.raises(OSError, match="injected durable-state"):
+            state.flush()
+
+    assert not list(tmp_path.glob(f".{state_path.name}.{os.getpid()}.*.tmp"))
+    if failure_boundary == "directory_fsync":
+        assert json.loads(state_path.read_bytes()) == state.value
+    else:
+        assert state_path.read_bytes() == baseline
+    reopened = gateway_module._DurableGatewayState(state_path)
+    reopened.value["sessions"]["c" * 64] = {"registered": True}
+    reopened.flush()
+    assert json.loads(state_path.read_bytes()) == reopened.value
+
+
+def test_same_pid_stale_unique_temp_cannot_block_restart_or_next_flush(
+    tmp_path: Path,
+) -> None:
+    state_path = (tmp_path / "gateway-state.json").resolve()
+    state = gateway_module._DurableGatewayState(state_path)
+    state.value["sessions"]["d" * 64] = {"registered": True}
+    state.flush()
+    stale = tmp_path / f".{state_path.name}.{os.getpid()}.hard-kill.tmp"
+    stale.write_bytes(b'{"truncated":')
+    stale.chmod(0o600)
+
+    restarted = gateway_module._DurableGatewayState(state_path)
+    restarted.value["sessions"]["e" * 64] = {"registered": True}
+    restarted.flush()
+
+    assert stale.read_bytes() == b'{"truncated":'
+    assert json.loads(state_path.read_bytes()) == restarted.value

@@ -6,8 +6,11 @@ wallet.  The currently committed template is intentionally rejected.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import re
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,11 +20,11 @@ from typing import Any
 
 from bigan.v8.polymarket.challenge_development_lane import sha256_file
 from bigan.v8.polymarket.contracts import canonical_json_sha256
-from bigan.v8.polymarket.residual_promotion_release_readiness_v6 import (
+from bigan.v8.polymarket.residual_promotion_release_readiness_v7 import (
     ASSESSMENT_SCHEMA_VERSION,
     CONTRACT_REPOSITORY_PATH,
-    assess_micro_live_preapproval_v6,
-    validate_release_readiness_contract_v6,
+    assess_micro_live_preapproval_v7,
+    validate_release_readiness_contract_v7,
 )
 from bigan.v8.polymarket.residual_promotion_v1 import (
     CANDIDATE_ID,
@@ -32,10 +35,10 @@ from bigan.v8.polymarket.residual_promotion_v1 import (
 )
 
 AUTHORIZATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v1"
+    "bigan-btc-15m-residual-promotion-explicit-micro-live-authorization-v8"
 )
 HUMAN_ATTESTATION_SCHEMA_VERSION = (
-    "bigan-btc-15m-residual-promotion-human-micro-live-attestation-v1"
+    "bigan-btc-15m-residual-promotion-human-micro-live-attestation-v2"
 )
 IMPLEMENTATION_REPOSITORY_PATH = (
     "src/bigan/v8/polymarket/residual_promotion_micro_live_authorization.py"
@@ -47,7 +50,7 @@ CANDIDATE_BUNDLE_REPOSITORY_PATH = (
     f"{CONFIG_REPOSITORY_PATH}/candidate_bundle/bundle_manifest.json"
 )
 AUTHORIZATION_TEMPLATE_REPOSITORY_PATH = (
-    f"{CONFIG_REPOSITORY_PATH}/micro_live_authorization_template_v6.json"
+    f"{CONFIG_REPOSITORY_PATH}/micro_live_authorization_template_v7.json"
 )
 MAXIMUM_INITIAL_CAPITAL_FRACTION = Decimal("0.01")
 MAXIMUM_AUTHORIZATION_DURATION_MS = 86_400_000
@@ -57,6 +60,78 @@ MARKET_ALLOWLIST = ("BTC-15M",)
 ALLOWED_ACTIONS = ("BUY_UP_HOLD", "BUY_DOWN_HOLD")
 ISSUE_NUMBER = 264
 TRUSTED_APPROVER_LOGINS = ("phead198708",)
+CURRENT_AUTHORIZATION_GATE_STATE = (
+    "NO_GO_LEGACY_LOCAL_PROVENANCE_AND_DEPLOYMENT_CLOSURE_INCOMPLETE"
+)
+REQUIRED_SUCCESSOR_DEPLOYMENT_COMPONENTS = (
+    "deployment_composition_root",
+    "concrete_exchange_transport",
+    "signer_wallet_boundary",
+    "durable_single_writer_journal",
+    "external_durable_monotonic_risk_domain_lease",
+    "trusted_clock_source",
+    "official_settlement_authority",
+    "independent_watchdog_scheduler",
+    "independent_emergency_kill_channel",
+    "bounded_transport_deadlines",
+    "deployment_configuration",
+    "deployment_artifact",
+    "trusted_release_service_attestation",
+    "owner_authenticated_capital_approval",
+)
+MAX_AUTHORIZATION_JSON_BYTES = 1_048_576
+TRUSTED_RISK_DOMAIN_LEASE_ID = (
+    "8f8095ecb36c141825baa4791f640c013dc581cc7042ea4747edf164c24fe7a8"
+)
+RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION = (
+    "bigan-btc-15m-residual-promotion-risk-domain-authority-operations-v1"
+)
+REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS = (
+    "claim_risk_domain",
+    "advance_risk_domain_high_water",
+    "persist_risk_domain_kill",
+    "register_execution_invocation",
+    "commit_execution_outbox_command",
+    "recover_execution_outbox_command",
+    "begin_execution_dispatch",
+    "complete_execution_dispatch",
+    "recover_execution_dispatch",
+    "fence_execution_dispatch",
+)
+REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256 = canonical_json_sha256(
+    {
+        "schema_version": RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION,
+        "required_operations": list(REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS),
+    }
+)
+RISK_DOMAIN_KILL_SEMANTICS = (
+    "irreversible_kill_atomically_fences_all_active_or_dispatchable_invocations"
+)
+RISK_DOMAIN_OUTBOX_RECOVERY_SEMANTICS = (
+    "signed_exact_committed_outbox_without_dispatch_bearer_capability"
+)
+RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS = (
+    "terminalize_exact_venue_outcome_for_consumed_single_use_dispatch_grant"
+)
+RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS = (
+    "lookup_only_terminalization_from_durable_grant_without_second_dispatch"
+)
+RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS = (
+    "fence_only_not_started_dispatch_else_report_terminal_or_in_progress"
+)
+RISK_DOMAIN_AUTHORITY_ROUTE_MODE = "deployment_af_unix_rpc"
+EXECUTION_GATEWAY_ROUTE_MODE = "deployment_af_unix_rpc"
+DEPLOYMENT_RUNTIME_LOCK_SHA256 = (
+    "74036bc0c40ca2552e44074310f85ecf807bb51557ffad99eb815f97e6158bcb"
+)
+DEPLOYMENT_REQUIREMENTS_LOCK_SHA256 = (
+    "aca8c2e21202f25d9132cf2ef14132bbc12db05c9f775635869f7c501320d335"
+)
+DEPLOYMENT_IMAGE_MANIFEST_DIGEST = (
+    "sha256:a074fac67aa01841fee592d00bae14d25dcaf98ef6e12a683ecceb7e0147e2d1"
+)
+MAX_EVIDENCE_JSON_BYTES = 16_777_216
+MAX_JSON_DEPTH = 32
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMENT_URL = re.compile(
     r"^https://github\.com/phead198708/BiGan/issues/264"
@@ -76,15 +151,53 @@ class MicroLiveAuthorizationError(ValueError):
     """Raised when a future micro-live authorization is incomplete or forged."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class VerifiedMicroLiveAuthorization:
     """Capability returned only after the full authorization graph validates."""
 
     authorization_id: str
     authorization_payload_sha256: str
     candidate_bundle_sha256: str
+    risk_domain_lease_id: str
+    risk_domain_lease_service_identity_sha256: str
+    risk_domain_lease_tenant_id: str
+    risk_domain_lease_key_identity_sha256: str
+    risk_domain_lease_public_key_modulus_hex: str
+    risk_domain_lease_public_key_exponent: int
+    risk_domain_authority_adapter_implementation_sha256: str
+    risk_domain_authority_configuration_sha256: str
+    risk_domain_authority_route_mode: str
+    risk_domain_authority_route_binding_sha256: str
+    risk_domain_authority_operation_inventory_schema_version: str
+    risk_domain_authority_required_operations: tuple[str, ...]
+    risk_domain_authority_required_operations_sha256: str
+    risk_domain_authority_kill_semantics: str
+    risk_domain_authority_outbox_recovery_semantics: str
+    risk_domain_authority_dispatch_completion_semantics: str
+    risk_domain_authority_dispatch_recovery_semantics: str
+    risk_domain_authority_dispatch_fence_semantics: str
+    risk_domain_authority_binding_sha256: str
+    execution_service_identity_sha256: str
+    execution_adapter_implementation_sha256: str
+    execution_configuration_sha256: str
+    execution_gateway_route_mode: str
+    execution_gateway_route_binding_sha256: str
+    execution_exchange_endpoint_sha256: str
+    execution_exchange_account_sha256: str
+    execution_signer_identity_sha256: str
+    execution_cursor_key_identity_sha256: str
+    execution_clock_identity_sha256: str
+    execution_settlement_authority_identity_sha256: str
+    execution_public_key_modulus_hex: str
+    execution_public_key_exponent: int
+    execution_maximum_clock_skew_ms: int
+    execution_maximum_call_duration_ms: int
+    deployment_runtime_lock_sha256: str
+    deployment_requirements_lock_sha256: str
+    deployment_image_manifest_digest: str
     capital_base_usd: Decimal
     maximum_notional_usd: Decimal
+    maximum_realized_loss_usd: Decimal
     maximum_open_orders: int
     authorized_at_ts_ms: int
     expires_at_ts_ms: int
@@ -93,20 +206,32 @@ class VerifiedMicroLiveAuthorization:
     market_allowlist: tuple[str, ...]
     allowed_actions: tuple[str, ...]
     runtime: ResidualPromotionRuntime
+    _capability_sha256: str
     _seal: object
 
 
+_VERIFIED_CAPABILITIES: dict[
+    int,
+    tuple[weakref.ReferenceType[VerifiedMicroLiveAuthorization], str],
+] = {}
+
+
 def verify_micro_live_authorization(
-    authorization: Mapping[str, Any],
+    raw_authorization: bytes,
     *,
     repository_root: Path | str,
     evidence_root: Path | str,
     now_ts_ms: int,
 ) -> VerifiedMicroLiveAuthorization:
-    """Verify the exact evidence graph and explicit human 1% approval."""
+    """Verify strict raw authorization bytes and the complete evidence graph."""
 
     root = Path(repository_root).resolve()
     evidence_base = Path(evidence_root).resolve()
+    authorization = _decode_json_object_bytes(
+        raw_authorization,
+        "micro-live authorization",
+        maximum_bytes=MAX_AUTHORIZATION_JSON_BYTES,
+    )
     if isinstance(now_ts_ms, bool) or not isinstance(now_ts_ms, int) or now_ts_ms <= 0:
         raise MicroLiveAuthorizationError("authorization verification time is invalid")
     expected_keys = {
@@ -117,6 +242,8 @@ def verify_micro_live_authorization(
         "authorization_id",
         "supersedes_template",
         "candidate_bundle",
+        "risk_domain_lease_authority",
+        "execution_service_authority",
         "preapproval_contract",
         "required_evidence",
         "evidence_payload_sha256",
@@ -124,6 +251,7 @@ def verify_micro_live_authorization(
         "capital_base_usd",
         "requested_initial_capital_fraction",
         "maximum_notional_usd",
+        "maximum_realized_loss_usd",
         "maximum_open_orders",
         "market_allowlist",
         "allowed_actions",
@@ -151,10 +279,15 @@ def verify_micro_live_authorization(
         and authorization.get("candidate_id") == CANDIDATE_ID
     ):
         raise MicroLiveAuthorizationError("micro-live authorization identity is invalid")
+    raise MicroLiveAuthorizationError(
+        "legacy local review and owner-approval provenance is non-authorizing; "
+        "an externally authenticated successor deployment-closure protocol is required; "
+        f"gate_state={CURRENT_AUTHORIZATION_GATE_STATE}"
+    )
 
     template = _verified_repository_json(root, AUTHORIZATION_TEMPLATE_REPOSITORY_PATH)
     contract = _verified_repository_json(root, CONTRACT_REPOSITORY_PATH)
-    validate_release_readiness_contract_v6(contract, repository_root=root)
+    validate_release_readiness_contract_v7(contract, repository_root=root)
     _verify_repository_descriptor(
         root,
         dict(authorization.get("supersedes_template") or {}),
@@ -171,6 +304,12 @@ def verify_micro_live_authorization(
         expected_path=CONTRACT_REPOSITORY_PATH,
     )
     candidate_sha = dict(authorization["candidate_bundle"])["sha256"]
+    risk_domain_lease_authority = _validated_risk_domain_lease_authority(
+        authorization.get("risk_domain_lease_authority")
+    )
+    execution_service_authority = _validated_execution_service_authority(
+        authorization.get("execution_service_authority")
+    )
     if not (
         dict(contract.get("candidate_bundle") or {})
         == dict(authorization["candidate_bundle"])
@@ -208,12 +347,16 @@ def verify_micro_live_authorization(
     maximum_notional = _positive_decimal(
         authorization.get("maximum_notional_usd"), "maximum notional"
     )
+    maximum_realized_loss = _positive_decimal(
+        authorization.get("maximum_realized_loss_usd"), "maximum realized loss"
+    )
     maximum_open_orders = authorization.get("maximum_open_orders")
     authorized_at = authorization.get("authorized_at_ts_ms")
     expires_at = authorization.get("expires_at_ts_ms")
     if not (
         fraction == MAXIMUM_INITIAL_CAPITAL_FRACTION
         and maximum_notional == capital_base * fraction
+        and maximum_realized_loss <= maximum_notional
         and isinstance(maximum_open_orders, int)
         and not isinstance(maximum_open_orders, bool)
         and 1 <= maximum_open_orders <= 10
@@ -255,6 +398,7 @@ def verify_micro_live_authorization(
         "capital_base_usd": str(capital_base),
         "requested_initial_capital_fraction": str(fraction),
         "maximum_notional_usd": str(maximum_notional),
+        "maximum_realized_loss_usd": str(maximum_realized_loss),
         "maximum_open_orders": maximum_open_orders,
         "market_allowlist": list(MARKET_ALLOWLIST),
         "allowed_actions": list(ALLOWED_ACTIONS),
@@ -263,6 +407,8 @@ def verify_micro_live_authorization(
         "maximum_signal_age_ms": MAXIMUM_SIGNAL_AGE_MS,
         "maximum_operator_heartbeat_age_ms": MAXIMUM_OPERATOR_HEARTBEAT_AGE_MS,
         "approval_issue_number": ISSUE_NUMBER,
+        "risk_domain_lease_authority": risk_domain_lease_authority,
+        "execution_service_authority": execution_service_authority,
     }
     authorization_id = canonical_json_sha256(identity)
     if authorization.get("authorization_id") != authorization_id:
@@ -275,6 +421,7 @@ def verify_micro_live_authorization(
         expires_at_ts_ms=int(expires_at),
         capital_base_usd=capital_base,
         maximum_notional_usd=maximum_notional,
+        maximum_realized_loss_usd=maximum_realized_loss,
         maximum_open_orders=int(maximum_open_orders),
     )
     if not (
@@ -291,12 +438,122 @@ def verify_micro_live_authorization(
     ):
         raise MicroLiveAuthorizationError("micro-live authorization state is not explicit")
 
-    return VerifiedMicroLiveAuthorization(
+    capability = VerifiedMicroLiveAuthorization(
         authorization_id=authorization_id,
-        authorization_payload_sha256=canonical_json_sha256(dict(authorization)),
+        authorization_payload_sha256=hashlib.sha256(raw_authorization).hexdigest(),
         candidate_bundle_sha256=str(candidate_sha),
+        risk_domain_lease_id=str(risk_domain_lease_authority["lease_id"]),
+        risk_domain_lease_service_identity_sha256=str(
+            risk_domain_lease_authority["service_identity_sha256"]
+        ),
+        risk_domain_lease_tenant_id=str(
+            risk_domain_lease_authority["tenant_id"]
+        ),
+        risk_domain_lease_key_identity_sha256=str(
+            risk_domain_lease_authority["key_identity_sha256"]
+        ),
+        risk_domain_lease_public_key_modulus_hex=str(
+            risk_domain_lease_authority["public_key_modulus_hex"]
+        ),
+        risk_domain_lease_public_key_exponent=int(
+            risk_domain_lease_authority["public_key_exponent"]
+        ),
+        risk_domain_authority_adapter_implementation_sha256=str(
+            risk_domain_lease_authority["adapter_implementation_sha256"]
+        ),
+        risk_domain_authority_configuration_sha256=str(
+            risk_domain_lease_authority["configuration_sha256"]
+        ),
+        risk_domain_authority_route_mode=str(
+            risk_domain_lease_authority["route_mode"]
+        ),
+        risk_domain_authority_route_binding_sha256=str(
+            risk_domain_lease_authority["route_binding_sha256"]
+        ),
+        risk_domain_authority_operation_inventory_schema_version=str(
+            risk_domain_lease_authority["operation_inventory_schema_version"]
+        ),
+        risk_domain_authority_required_operations=tuple(
+            risk_domain_lease_authority["required_operations"]
+        ),
+        risk_domain_authority_required_operations_sha256=str(
+            risk_domain_lease_authority["required_operations_sha256"]
+        ),
+        risk_domain_authority_kill_semantics=str(
+            risk_domain_lease_authority["kill_semantics"]
+        ),
+        risk_domain_authority_outbox_recovery_semantics=str(
+            risk_domain_lease_authority["outbox_recovery_semantics"]
+        ),
+        risk_domain_authority_dispatch_completion_semantics=str(
+            risk_domain_lease_authority["dispatch_completion_semantics"]
+        ),
+        risk_domain_authority_dispatch_recovery_semantics=str(
+            risk_domain_lease_authority["dispatch_recovery_semantics"]
+        ),
+        risk_domain_authority_dispatch_fence_semantics=str(
+            risk_domain_lease_authority["dispatch_fence_semantics"]
+        ),
+        risk_domain_authority_binding_sha256=str(
+            risk_domain_lease_authority["authority_binding_sha256"]
+        ),
+        execution_service_identity_sha256=str(
+            execution_service_authority["service_identity_sha256"]
+        ),
+        execution_adapter_implementation_sha256=str(
+            execution_service_authority["adapter_implementation_sha256"]
+        ),
+        execution_configuration_sha256=str(
+            execution_service_authority["configuration_sha256"]
+        ),
+        execution_gateway_route_mode=str(
+            execution_service_authority["route_mode"]
+        ),
+        execution_gateway_route_binding_sha256=str(
+            execution_service_authority["route_binding_sha256"]
+        ),
+        execution_exchange_endpoint_sha256=str(
+            execution_service_authority["exchange_endpoint_sha256"]
+        ),
+        execution_exchange_account_sha256=str(
+            execution_service_authority["exchange_account_sha256"]
+        ),
+        execution_signer_identity_sha256=str(
+            execution_service_authority["signer_identity_sha256"]
+        ),
+        execution_cursor_key_identity_sha256=str(
+            execution_service_authority["cursor_key_identity_sha256"]
+        ),
+        execution_clock_identity_sha256=str(
+            execution_service_authority["clock_identity_sha256"]
+        ),
+        execution_settlement_authority_identity_sha256=str(
+            execution_service_authority["settlement_authority_identity_sha256"]
+        ),
+        execution_public_key_modulus_hex=str(
+            execution_service_authority["public_key_modulus_hex"]
+        ),
+        execution_public_key_exponent=int(
+            execution_service_authority["public_key_exponent"]
+        ),
+        execution_maximum_clock_skew_ms=int(
+            execution_service_authority["maximum_clock_skew_ms"]
+        ),
+        execution_maximum_call_duration_ms=int(
+            execution_service_authority["maximum_call_duration_ms"]
+        ),
+        deployment_runtime_lock_sha256=str(
+            execution_service_authority["deployment_runtime_lock_sha256"]
+        ),
+        deployment_requirements_lock_sha256=str(
+            execution_service_authority["deployment_requirements_lock_sha256"]
+        ),
+        deployment_image_manifest_digest=str(
+            execution_service_authority["deployment_image_manifest_digest"]
+        ),
         capital_base_usd=capital_base,
         maximum_notional_usd=maximum_notional,
+        maximum_realized_loss_usd=maximum_realized_loss,
         maximum_open_orders=int(maximum_open_orders),
         authorized_at_ts_ms=int(authorized_at),
         expires_at_ts_ms=int(expires_at),
@@ -305,14 +562,202 @@ def verify_micro_live_authorization(
         market_allowlist=MARKET_ALLOWLIST,
         allowed_actions=ALLOWED_ACTIONS,
         runtime=runtime,
+        _capability_sha256="",
         _seal=_VERIFICATION_SEAL,
     )
+    capability_sha256 = _capability_integrity_sha256(capability)
+    object.__setattr__(capability, "_capability_sha256", capability_sha256)
+    _register_verified_capability(capability, capability_sha256)
+    return capability
 
 
 def authorization_capability_is_verified(value: VerifiedMicroLiveAuthorization) -> bool:
     """Return whether a capability came from this verifier."""
 
-    return isinstance(value, VerifiedMicroLiveAuthorization) and value._seal is _VERIFICATION_SEAL
+    if not (
+        isinstance(value, VerifiedMicroLiveAuthorization)
+        and value._seal is _VERIFICATION_SEAL
+    ):
+        return False
+    registered = _VERIFIED_CAPABILITIES.get(id(value))
+    if registered is None or registered[0]() is not value:
+        return False
+    try:
+        actual_sha256 = _capability_integrity_sha256(value)
+    except Exception:
+        return False
+    return (
+        value._capability_sha256 == registered[1]
+        and actual_sha256 == registered[1]
+    )
+
+
+def _register_verified_capability(
+    capability: VerifiedMicroLiveAuthorization,
+    capability_sha256: str,
+) -> None:
+    capability_id = id(capability)
+
+    def discard(reference: weakref.ReferenceType[VerifiedMicroLiveAuthorization]) -> None:
+        registered = _VERIFIED_CAPABILITIES.get(capability_id)
+        if registered is not None and registered[0] is reference:
+            _VERIFIED_CAPABILITIES.pop(capability_id, None)
+
+    reference = weakref.ref(capability, discard)
+    _VERIFIED_CAPABILITIES[capability_id] = (reference, capability_sha256)
+
+
+def _capability_integrity_sha256(
+    capability: VerifiedMicroLiveAuthorization,
+) -> str:
+    runtime = capability.runtime
+    residual_model_bytes = bytes(runtime.residual_booster.save_raw(raw_format="ubj"))
+    logit_model_bytes = bytes(runtime.logit_booster.save_raw(raw_format="ubj"))
+    loaded_residual_model_sha256 = hashlib.sha256(residual_model_bytes).hexdigest()
+    loaded_logit_model_sha256 = hashlib.sha256(logit_model_bytes).hexdigest()
+    if not (
+        loaded_residual_model_sha256 == runtime.residual_model_sha256
+        and loaded_logit_model_sha256 == runtime.logit_model_sha256
+    ):
+        raise ValueError("loaded micro-live model bytes do not match the frozen runtime")
+    payload = {
+        "schema_version": "verified-micro-live-authorization-capability-v8",
+        "authorization_id": capability.authorization_id,
+        "authorization_payload_sha256": capability.authorization_payload_sha256,
+        "candidate_bundle_sha256": capability.candidate_bundle_sha256,
+        "risk_domain_lease_id": capability.risk_domain_lease_id,
+        "risk_domain_lease_service_identity_sha256": (
+            capability.risk_domain_lease_service_identity_sha256
+        ),
+        "risk_domain_lease_tenant_id": capability.risk_domain_lease_tenant_id,
+        "risk_domain_lease_key_identity_sha256": (
+            capability.risk_domain_lease_key_identity_sha256
+        ),
+        "risk_domain_lease_public_key_modulus_hex": (
+            capability.risk_domain_lease_public_key_modulus_hex
+        ),
+        "risk_domain_lease_public_key_exponent": (
+            capability.risk_domain_lease_public_key_exponent
+        ),
+        "risk_domain_authority_adapter_implementation_sha256": (
+            capability.risk_domain_authority_adapter_implementation_sha256
+        ),
+        "risk_domain_authority_configuration_sha256": (
+            capability.risk_domain_authority_configuration_sha256
+        ),
+        "risk_domain_authority_route_mode": (
+            capability.risk_domain_authority_route_mode
+        ),
+        "risk_domain_authority_route_binding_sha256": (
+            capability.risk_domain_authority_route_binding_sha256
+        ),
+        "risk_domain_authority_operation_inventory_schema_version": (
+            capability.risk_domain_authority_operation_inventory_schema_version
+        ),
+        "risk_domain_authority_required_operations": list(
+            capability.risk_domain_authority_required_operations
+        ),
+        "risk_domain_authority_required_operations_sha256": (
+            capability.risk_domain_authority_required_operations_sha256
+        ),
+        "risk_domain_authority_kill_semantics": (
+            capability.risk_domain_authority_kill_semantics
+        ),
+        "risk_domain_authority_outbox_recovery_semantics": (
+            capability.risk_domain_authority_outbox_recovery_semantics
+        ),
+        "risk_domain_authority_dispatch_completion_semantics": (
+            capability.risk_domain_authority_dispatch_completion_semantics
+        ),
+        "risk_domain_authority_dispatch_recovery_semantics": (
+            capability.risk_domain_authority_dispatch_recovery_semantics
+        ),
+        "risk_domain_authority_dispatch_fence_semantics": (
+            capability.risk_domain_authority_dispatch_fence_semantics
+        ),
+        "risk_domain_authority_binding_sha256": (
+            capability.risk_domain_authority_binding_sha256
+        ),
+        "execution_service_identity_sha256": (
+            capability.execution_service_identity_sha256
+        ),
+        "execution_adapter_implementation_sha256": (
+            capability.execution_adapter_implementation_sha256
+        ),
+        "execution_configuration_sha256": (
+            capability.execution_configuration_sha256
+        ),
+        "execution_gateway_route_mode": capability.execution_gateway_route_mode,
+        "execution_gateway_route_binding_sha256": (
+            capability.execution_gateway_route_binding_sha256
+        ),
+        "execution_exchange_endpoint_sha256": (
+            capability.execution_exchange_endpoint_sha256
+        ),
+        "execution_exchange_account_sha256": (
+            capability.execution_exchange_account_sha256
+        ),
+        "execution_signer_identity_sha256": (
+            capability.execution_signer_identity_sha256
+        ),
+        "execution_cursor_key_identity_sha256": (
+            capability.execution_cursor_key_identity_sha256
+        ),
+        "execution_clock_identity_sha256": (
+            capability.execution_clock_identity_sha256
+        ),
+        "execution_settlement_authority_identity_sha256": (
+            capability.execution_settlement_authority_identity_sha256
+        ),
+        "execution_public_key_modulus_hex": (
+            capability.execution_public_key_modulus_hex
+        ),
+        "execution_public_key_exponent": (
+            capability.execution_public_key_exponent
+        ),
+        "execution_maximum_clock_skew_ms": (
+            capability.execution_maximum_clock_skew_ms
+        ),
+        "execution_maximum_call_duration_ms": (
+            capability.execution_maximum_call_duration_ms
+        ),
+        "deployment_runtime_lock_sha256": (
+            capability.deployment_runtime_lock_sha256
+        ),
+        "deployment_requirements_lock_sha256": (
+            capability.deployment_requirements_lock_sha256
+        ),
+        "deployment_image_manifest_digest": (
+            capability.deployment_image_manifest_digest
+        ),
+        "capital_base_usd": str(capability.capital_base_usd),
+        "maximum_notional_usd": str(capability.maximum_notional_usd),
+        "maximum_realized_loss_usd": str(capability.maximum_realized_loss_usd),
+        "maximum_open_orders": capability.maximum_open_orders,
+        "authorized_at_ts_ms": capability.authorized_at_ts_ms,
+        "expires_at_ts_ms": capability.expires_at_ts_ms,
+        "maximum_signal_age_ms": capability.maximum_signal_age_ms,
+        "maximum_operator_heartbeat_age_ms": (
+            capability.maximum_operator_heartbeat_age_ms
+        ),
+        "market_allowlist": list(capability.market_allowlist),
+        "allowed_actions": list(capability.allowed_actions),
+        "runtime_object_id": id(runtime),
+        "runtime": {
+            "candidate_id": runtime.candidate_id,
+            "lineage_id": runtime.lineage_id,
+            "manifest_sha256": runtime.manifest_sha256,
+            "residual_model_sha256": runtime.residual_model_sha256,
+            "logit_model_sha256": runtime.logit_model_sha256,
+            "adapter_sha256": runtime.adapter_sha256,
+            "maximum_decision_lag_ms": runtime.maximum_decision_lag_ms,
+            "maximum_source_age_ms": runtime.maximum_source_age_ms,
+            "coefficients": list(runtime.coefficients),
+            "loaded_residual_model_sha256": loaded_residual_model_sha256,
+            "loaded_logit_model_sha256": loaded_logit_model_sha256,
+        },
+    }
+    return canonical_json_sha256(payload)
 
 
 def _load_and_reconcile_evidence(
@@ -355,7 +800,7 @@ def _load_and_reconcile_evidence(
             raise MicroLiveAuthorizationError(
                 f"micro-live evidence binding mismatch: {authorization_name}"
             )
-    expected = assess_micro_live_preapproval_v6(
+    expected = assess_micro_live_preapproval_v7(
         contract=contract,
         evidence=evidence_payloads,
         repository_root=repository_root,
@@ -393,6 +838,7 @@ def _validate_human_approval(
     expires_at_ts_ms: int,
     capital_base_usd: Decimal,
     maximum_notional_usd: Decimal,
+    maximum_realized_loss_usd: Decimal,
     maximum_open_orders: int,
 ) -> None:
     if set(approval) != {
@@ -433,6 +879,7 @@ def _validate_human_approval(
         f"APPROVE {LINEAGE_ID} MICRO-LIVE authorization_id={authorization_id} "
         f"capital_base_usd={capital_base_usd} "
         f"maximum_notional_usd={maximum_notional_usd} "
+        f"maximum_realized_loss_usd={maximum_realized_loss_usd} "
         f"maximum_open_orders={maximum_open_orders} capital_fraction=0.01 "
         f"expires_at_ts_ms={expires_at_ts_ms}"
     )
@@ -529,12 +976,280 @@ def _verified_evidence_json(
 
 def _load_json(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        if path.stat().st_size > MAX_EVIDENCE_JSON_BYTES:
+            raise MicroLiveAuthorizationError(
+                "micro-live JSON evidence exceeds byte limit"
+            )
+        return _decode_json_object_bytes(
+            path.read_bytes(),
+            "micro-live JSON evidence",
+            maximum_bytes=MAX_EVIDENCE_JSON_BYTES,
+        )
+    except (OSError, MicroLiveAuthorizationError) as exc:
         raise MicroLiveAuthorizationError("micro-live JSON evidence is invalid") from exc
+
+
+def _decode_json_object_bytes(
+    raw: Any,
+    label: str,
+    *,
+    maximum_bytes: int = MAX_EVIDENCE_JSON_BYTES,
+) -> dict[str, Any]:
+    if (
+        not isinstance(raw, bytes)
+        or not raw
+        or len(raw) > maximum_bytes
+    ):
+        raise MicroLiveAuthorizationError(f"{label} raw bytes are invalid")
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json,
+        )
+        _validate_finite_json_tree(value)
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise MicroLiveAuthorizationError(f"{label} is not strict JSON") from exc
     if not isinstance(value, dict):
-        raise MicroLiveAuthorizationError("micro-live JSON evidence root must be an object")
+        raise MicroLiveAuthorizationError(f"{label} root must be an object")
     return value
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def _reject_nonfinite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _validate_finite_json_tree(value: Any, *, depth: int = 0) -> None:
+    if depth > MAX_JSON_DEPTH:
+        raise ValueError("decoded JSON exceeds maximum nesting depth")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("decoded JSON contains a non-finite number")
+    if isinstance(value, Mapping):
+        for item in value.values():
+            _validate_finite_json_tree(item, depth=depth + 1)
+    elif isinstance(value, list):
+        for item in value:
+            _validate_finite_json_tree(item, depth=depth + 1)
+
+
+def compute_risk_domain_authority_binding_sha256(
+    authority: Mapping[str, Any],
+) -> str:
+    """Hash one complete externally attested authority capability contract."""
+
+    return canonical_json_sha256(
+        {
+            "lease_id": authority.get("lease_id"),
+            "service_identity_sha256": authority.get("service_identity_sha256"),
+            "tenant_id": authority.get("tenant_id"),
+            "key_identity_sha256": authority.get("key_identity_sha256"),
+            "signature_algorithm": authority.get("signature_algorithm"),
+            "public_key_modulus_hex": authority.get("public_key_modulus_hex"),
+            "public_key_exponent": authority.get("public_key_exponent"),
+            "adapter_implementation_sha256": authority.get(
+                "adapter_implementation_sha256"
+            ),
+            "configuration_sha256": authority.get("configuration_sha256"),
+            "route_mode": authority.get("route_mode"),
+            "route_binding_sha256": authority.get("route_binding_sha256"),
+            "operation_inventory_schema_version": authority.get(
+                "operation_inventory_schema_version"
+            ),
+            "required_operations": list(authority.get("required_operations") or []),
+            "required_operations_sha256": authority.get(
+                "required_operations_sha256"
+            ),
+            "kill_semantics": authority.get("kill_semantics"),
+            "outbox_recovery_semantics": authority.get(
+                "outbox_recovery_semantics"
+            ),
+            "dispatch_completion_semantics": authority.get(
+                "dispatch_completion_semantics"
+            ),
+            "dispatch_recovery_semantics": authority.get(
+                "dispatch_recovery_semantics"
+            ),
+            "dispatch_fence_semantics": authority.get(
+                "dispatch_fence_semantics"
+            ),
+        }
+    )
+
+
+def _validated_risk_domain_lease_authority(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise MicroLiveAuthorizationError(
+            "risk-domain lease authority binding is absent"
+        )
+    authority = dict(value)
+    if set(authority) != {
+        "lease_id",
+        "service_identity_sha256",
+        "tenant_id",
+        "key_identity_sha256",
+        "signature_algorithm",
+        "public_key_modulus_hex",
+        "public_key_exponent",
+        "adapter_implementation_sha256",
+        "configuration_sha256",
+        "route_mode",
+        "route_binding_sha256",
+        "operation_inventory_schema_version",
+        "required_operations",
+        "required_operations_sha256",
+        "kill_semantics",
+        "outbox_recovery_semantics",
+        "dispatch_completion_semantics",
+        "dispatch_recovery_semantics",
+        "dispatch_fence_semantics",
+        "authority_binding_sha256",
+    }:
+        raise MicroLiveAuthorizationError(
+            "risk-domain lease authority binding schema is invalid"
+        )
+    modulus = authority.get("public_key_modulus_hex")
+    exponent = authority.get("public_key_exponent")
+    expected_key_identity = canonical_json_sha256(
+        {
+            "signature_algorithm": "RSASSA-PKCS1-v1_5-SHA256",
+            "public_key_modulus_hex": modulus,
+            "public_key_exponent": exponent,
+        }
+    )
+    if not (
+        _is_sha256(authority.get("lease_id"))
+        and authority["lease_id"] == TRUSTED_RISK_DOMAIN_LEASE_ID
+        and _is_sha256(authority.get("service_identity_sha256"))
+        and isinstance(authority.get("tenant_id"), str)
+        and bool(authority["tenant_id"])
+        and authority.get("signature_algorithm")
+        == "RSASSA-PKCS1-v1_5-SHA256"
+        and isinstance(modulus, str)
+        and re.fullmatch(r"[0-9a-f]{512}", modulus) is not None
+        and int(modulus, 16).bit_length() == 2_048
+        and int(modulus, 16) % 2 == 1
+        and exponent == 65_537
+        and authority.get("key_identity_sha256") == expected_key_identity
+        and _is_sha256(authority.get("adapter_implementation_sha256"))
+        and _is_sha256(authority.get("configuration_sha256"))
+        and authority.get("route_mode") == RISK_DOMAIN_AUTHORITY_ROUTE_MODE
+        and _is_sha256(authority.get("route_binding_sha256"))
+        and authority.get("operation_inventory_schema_version")
+        == RISK_DOMAIN_AUTHORITY_OPERATION_INVENTORY_SCHEMA_VERSION
+        and authority.get("required_operations")
+        == list(REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS)
+        and authority.get("required_operations_sha256")
+        == REQUIRED_RISK_DOMAIN_AUTHORITY_OPERATIONS_SHA256
+        and authority.get("kill_semantics") == RISK_DOMAIN_KILL_SEMANTICS
+        and authority.get("outbox_recovery_semantics")
+        == RISK_DOMAIN_OUTBOX_RECOVERY_SEMANTICS
+        and authority.get("dispatch_completion_semantics")
+        == RISK_DOMAIN_DISPATCH_COMPLETION_SEMANTICS
+        and authority.get("dispatch_recovery_semantics")
+        == RISK_DOMAIN_DISPATCH_RECOVERY_SEMANTICS
+        and authority.get("dispatch_fence_semantics")
+        == RISK_DOMAIN_DISPATCH_FENCE_SEMANTICS
+        and authority.get("authority_binding_sha256")
+        == compute_risk_domain_authority_binding_sha256(authority)
+    ):
+        raise MicroLiveAuthorizationError(
+            "risk-domain lease authority binding is invalid"
+        )
+    return authority
+
+
+def _validated_execution_service_authority(value: Any) -> dict[str, Any]:
+    """Validate the pinned adapter, endpoint, signer, cursor, and clock authority."""
+
+    if not isinstance(value, Mapping):
+        raise MicroLiveAuthorizationError(
+            "execution service authority binding is absent"
+        )
+    authority = dict(value)
+    expected_keys = {
+        "service_identity_sha256",
+        "adapter_implementation_sha256",
+        "configuration_sha256",
+        "route_mode",
+        "route_binding_sha256",
+        "exchange_endpoint_sha256",
+        "exchange_account_sha256",
+        "signer_identity_sha256",
+        "cursor_key_identity_sha256",
+        "clock_identity_sha256",
+        "settlement_authority_identity_sha256",
+        "signature_algorithm",
+        "public_key_modulus_hex",
+        "public_key_exponent",
+        "maximum_clock_skew_ms",
+        "maximum_call_duration_ms",
+        "deployment_runtime_lock_sha256",
+        "deployment_requirements_lock_sha256",
+        "deployment_image_manifest_digest",
+    }
+    if set(authority) != expected_keys:
+        raise MicroLiveAuthorizationError(
+            "execution service authority binding schema is invalid"
+        )
+    modulus = authority.get("public_key_modulus_hex")
+    exponent = authority.get("public_key_exponent")
+    expected_key_identity = canonical_json_sha256(
+        {
+            "signature_algorithm": "RSASSA-PKCS1-v1_5-SHA256",
+            "public_key_modulus_hex": modulus,
+            "public_key_exponent": exponent,
+        }
+    )
+    identity_fields = (
+        "service_identity_sha256",
+        "adapter_implementation_sha256",
+        "configuration_sha256",
+        "exchange_endpoint_sha256",
+        "exchange_account_sha256",
+        "signer_identity_sha256",
+        "clock_identity_sha256",
+        "settlement_authority_identity_sha256",
+    )
+    maximum_clock_skew_ms = authority.get("maximum_clock_skew_ms")
+    maximum_call_duration_ms = authority.get("maximum_call_duration_ms")
+    if not (
+        all(_is_sha256(authority.get(field)) for field in identity_fields)
+        and authority.get("route_mode") == EXECUTION_GATEWAY_ROUTE_MODE
+        and _is_sha256(authority.get("route_binding_sha256"))
+        and authority.get("cursor_key_identity_sha256") == expected_key_identity
+        and authority.get("signature_algorithm")
+        == "RSASSA-PKCS1-v1_5-SHA256"
+        and isinstance(modulus, str)
+        and re.fullmatch(r"[0-9a-f]{512}", modulus) is not None
+        and int(modulus, 16).bit_length() == 2_048
+        and int(modulus, 16) % 2 == 1
+        and exponent == 65_537
+        and isinstance(maximum_clock_skew_ms, int)
+        and not isinstance(maximum_clock_skew_ms, bool)
+        and 0 <= maximum_clock_skew_ms <= 1_000
+        and isinstance(maximum_call_duration_ms, int)
+        and not isinstance(maximum_call_duration_ms, bool)
+        and 1 <= maximum_call_duration_ms <= 1_000
+        and authority.get("deployment_runtime_lock_sha256")
+        == DEPLOYMENT_RUNTIME_LOCK_SHA256
+        and authority.get("deployment_requirements_lock_sha256")
+        == DEPLOYMENT_REQUIREMENTS_LOCK_SHA256
+        and authority.get("deployment_image_manifest_digest")
+        == DEPLOYMENT_IMAGE_MANIFEST_DIGEST
+    ):
+        raise MicroLiveAuthorizationError(
+            "execution service authority binding is invalid"
+        )
+    return authority
 
 
 def _positive_decimal(value: Any, label: str) -> Decimal:
@@ -568,6 +1283,8 @@ def _is_sha256(value: Any) -> bool:
 __all__ = [
     "ALLOWED_ACTIONS",
     "AUTHORIZATION_SCHEMA_VERSION",
+    "CURRENT_AUTHORIZATION_GATE_STATE",
+    "EXECUTION_GATEWAY_ROUTE_MODE",
     "HUMAN_ATTESTATION_SCHEMA_VERSION",
     "IMPLEMENTATION_REPOSITORY_PATH",
     "MARKET_ALLOWLIST",
@@ -575,6 +1292,9 @@ __all__ = [
     "MAXIMUM_OPERATOR_HEARTBEAT_AGE_MS",
     "MAXIMUM_SIGNAL_AGE_MS",
     "MicroLiveAuthorizationError",
+    "RISK_DOMAIN_AUTHORITY_ROUTE_MODE",
+    "REQUIRED_SUCCESSOR_DEPLOYMENT_COMPONENTS",
+    "TRUSTED_RISK_DOMAIN_LEASE_ID",
     "TRUSTED_APPROVER_LOGINS",
     "VerifiedMicroLiveAuthorization",
     "authorization_capability_is_verified",

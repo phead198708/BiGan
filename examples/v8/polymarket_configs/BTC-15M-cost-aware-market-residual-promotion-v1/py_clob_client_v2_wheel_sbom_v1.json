@@ -1,0 +1,329 @@
+{
+  "automatic_authorization_or_launch": false,
+  "capital_at_risk": false,
+  "deployment_lock": {
+    "path": "examples/v8/residual_promotion_execution_gateway-linux-x86_64.lock.txt",
+    "sha256": "444b692c476dc48cff1aa3a2eb18970b2addb162502c0277e5bd7d7709b6cdd8"
+  },
+  "distribution_name": "py-clob-client-v2",
+  "distribution_version": "1.1.0",
+  "files": [
+    {
+      "path": "examples/__init__.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "examples/abi/__init__.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "examples/abi/ctf_abi.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "057fa983e323cde96952043e3093c319e10923f791bdb496710a3d5f3836b1b4",
+      "size_bytes": 3765
+    },
+    {
+      "path": "examples/abi/usdc_abi.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "567eda71ff19a36c6f62027c3c8614436d2cab5b67ce0b76e2693212b8d71b0c",
+      "size_bytes": 3224
+    },
+    {
+      "path": "py_clob_client_v2-1.1.0.dist-info/METADATA",
+      "review_scope": "distribution_metadata",
+      "sha256": "702be8fb4160690494621b14b9f2426d137489207929d2c1aca4fe26092f2799",
+      "size_bytes": 3564
+    },
+    {
+      "path": "py_clob_client_v2-1.1.0.dist-info/RECORD",
+      "review_scope": "distribution_metadata",
+      "sha256": "2bd51634ab0b65ce80bcc6d8e459c18b95f5e3d4894084673803e0ec9506f18a",
+      "size_bytes": 4627
+    },
+    {
+      "path": "py_clob_client_v2-1.1.0.dist-info/WHEEL",
+      "review_scope": "distribution_metadata",
+      "sha256": "4a63b1614ee9ccd281a804af409ec38d7dd719417dda5ac684c6f747afe28aa2",
+      "size_bytes": 91
+    },
+    {
+      "path": "py_clob_client_v2-1.1.0.dist-info/licenses/LICENSE",
+      "review_scope": "license",
+      "sha256": "1579b08d05547bc573b4cf032a4c252850e1af16d84270dd08ee3924ae5ccf0e",
+      "size_bytes": 1067
+    },
+    {
+      "path": "py_clob_client_v2-1.1.0.dist-info/top_level.txt",
+      "review_scope": "distribution_metadata",
+      "sha256": "36ceeff04f056e253792f1108b11dbb18f827361be9d38056990652d6ec2cb3f",
+      "size_bytes": 27
+    },
+    {
+      "path": "py_clob_client_v2/__init__.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "c185dc9860c5f98d211fac8380ca43fb0f68dca6c46cf8448a023552180474e8",
+      "size_bytes": 2160
+    },
+    {
+      "path": "py_clob_client_v2/client.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "66604f43bf37f8482f3f50674b9f3e3834ff13ef83722c00c69520e37052bd3a",
+      "size_bytes": 45794
+    },
+    {
+      "path": "py_clob_client_v2/clob_types.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "1eaab86968594bdaa58c20e1bec33c789149441ee1e4e0164922f361f83a8060",
+      "size_bytes": 11097
+    },
+    {
+      "path": "py_clob_client_v2/config.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "2b914b1e643fac9afb3056ec6959e3736ca4b4c7a24b593fce26949a86d4bf2a",
+      "size_bytes": 1496
+    },
+    {
+      "path": "py_clob_client_v2/constants.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "f0fe967703ed3e78d38e3eabe8ce546fe1c0074b2d74a599fd0d76d659075df8",
+      "size_bytes": 941
+    },
+    {
+      "path": "py_clob_client_v2/endpoints.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "f75a6ea6fdd22b7b327556ea24e028976d0e1f5b4c57739bb25546218e2d40dc",
+      "size_bytes": 2981
+    },
+    {
+      "path": "py_clob_client_v2/exceptions.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "de8eec61c1ad1b41de0fb642236395b130fc71424d0642ef75c65f5eeb051d30",
+      "size_bytes": 854
+    },
+    {
+      "path": "py_clob_client_v2/fees.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "f121783c0492cd2ea3c68dd9e765ae37885b53c5662c02668c22f8f6a64df591",
+      "size_bytes": 1322
+    },
+    {
+      "path": "py_clob_client_v2/headers/__init__.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "0bcd0c8a9d8bfe4d22391690f5a5a8b0bccfa48c905127dc457e0b9f6df089db",
+      "size_bytes": 194
+    },
+    {
+      "path": "py_clob_client_v2/headers/headers.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "247ed046706cdb5407116297b9d676b81326c1b4cfa81dc76029096d7eaead0d",
+      "size_bytes": 1978
+    },
+    {
+      "path": "py_clob_client_v2/http_helpers/__init__.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "8deb526d1c3e1955b9352aa47d93ba980fd643120a84815e681d4598c2a74912",
+      "size_bytes": 426
+    },
+    {
+      "path": "py_clob_client_v2/http_helpers/helpers.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "7192a252e73d9d3e6daf0d45c003e237191e9b9cbfad4fb6797d86b2ce98bfe9",
+      "size_bytes": 7418
+    },
+    {
+      "path": "py_clob_client_v2/order_builder/__init__.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "9582323b342ffc4f3f14ff4491de469d5f5b1f2d0c0cb79267f4c11edd99e02c",
+      "size_bytes": 200
+    },
+    {
+      "path": "py_clob_client_v2/order_builder/builder.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "cb5d2499da246ec713840ac0c490b5d7cf80e6bef68ff51e6f43fe8e1f231e82",
+      "size_bytes": 12822
+    },
+    {
+      "path": "py_clob_client_v2/order_builder/constants.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "1c3fa98bc87c944650b463be961e3504d7fda3ee1b8d4e3dea37ec73649fe33a",
+      "size_bytes": 26
+    },
+    {
+      "path": "py_clob_client_v2/order_builder/helpers.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "cb33f32aa9a96fde06c6d21ea4e978b9ab11342a13fd331df98f21a46eabeb7e",
+      "size_bytes": 629
+    },
+    {
+      "path": "py_clob_client_v2/order_utils/__init__.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "67022a95dcd02a6a865c6fd7537a81555a09f56afee04aec9a7614a56f2a512c",
+      "size_bytes": 379
+    },
+    {
+      "path": "py_clob_client_v2/order_utils/abi/__init__.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "py_clob_client_v2/order_utils/abi/abis.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "48c337056274d7c193f8c00a598d0b89b6a1afe586f48836982cfd638e0f1fc8",
+      "size_bytes": 41383
+    },
+    {
+      "path": "py_clob_client_v2/order_utils/exchange_order_builder_v1.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "658f8b5f3da2c37f96acb35a879890edaccd61a8cc2355e9172196149accf246",
+      "size_bytes": 3909
+    },
+    {
+      "path": "py_clob_client_v2/order_utils/exchange_order_builder_v2.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "967329219b8b46445a186dc157344ee47752b4552277f55d7f4e768df9c38dd3",
+      "size_bytes": 8665
+    },
+    {
+      "path": "py_clob_client_v2/order_utils/model/__init__.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "99381ba715bf84619d0aa1b8a0933ff300c1a0f736014d2c708d00dc1cb258ef",
+      "size_bytes": 549
+    },
+    {
+      "path": "py_clob_client_v2/order_utils/model/ctf_exchange_v1_typed_data.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "f9f93910f955fb460ae6deed0eae2bd816feab28ededd0bcff9bb448888db911",
+      "size_bytes": 863
+    },
+    {
+      "path": "py_clob_client_v2/order_utils/model/ctf_exchange_v2_typed_data.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "f44400ec80d946bea28bb1a86eb36783bee4eaf27556e1430a6c96e8ad024b9c",
+      "size_bytes": 820
+    },
+    {
+      "path": "py_clob_client_v2/order_utils/model/order_data_v1.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "ca375fa94bb2fbb84027be28338e4c27bc01a4e843fc51a7611e0e77bb135170",
+      "size_bytes": 1853
+    },
+    {
+      "path": "py_clob_client_v2/order_utils/model/order_data_v2.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "30de6da40c7e859bab404c7df4ef7b25d0145d01a013d6d510d96cce78b6dfe9",
+      "size_bytes": 1914
+    },
+    {
+      "path": "py_clob_client_v2/order_utils/model/side.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "e80ca422674b7474a11dd3355789cea0ddbdf0a43b67b5fac74cce8f55318a75",
+      "size_bytes": 127
+    },
+    {
+      "path": "py_clob_client_v2/order_utils/model/signature_type_v1.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "a2c5049d075ad08d935017a9009e1fe43aa0ace166650e6a90636ef5372cfe9f",
+      "size_bytes": 389
+    },
+    {
+      "path": "py_clob_client_v2/order_utils/model/signature_type_v2.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "d3fdff84053c32d1bdf124c5878df13702fd514cadc0154246cb9e89c67ec95f",
+      "size_bytes": 498
+    },
+    {
+      "path": "py_clob_client_v2/order_utils/utils.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "688e680bbf583b2eeb83d3be4df3046e06d6a5ecc917b2d361a2313a652b413c",
+      "size_bytes": 131
+    },
+    {
+      "path": "py_clob_client_v2/rfq/__init__.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "2b1b93c3ad398b385e26b781f0042d492ea9af3c64e00b72fe79d7304c6b54ad",
+      "size_bytes": 1335
+    },
+    {
+      "path": "py_clob_client_v2/rfq/rfq_client.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "c54b4451ead2865653453991b220fa5354ec6eca65c8bf745caa38dd0d6c564e",
+      "size_bytes": 18611
+    },
+    {
+      "path": "py_clob_client_v2/rfq/rfq_helpers.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "61370002373d0315e71e5c5d24eed63f73f1cc348204bfc1cf60306d77166b60",
+      "size_bytes": 4532
+    },
+    {
+      "path": "py_clob_client_v2/rfq/rfq_types.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "b1755af6f6de468258a29bebea99874bba42c7441a3f29290c8cea184b5c1400",
+      "size_bytes": 9880
+    },
+    {
+      "path": "py_clob_client_v2/signer.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "f88744ae444648dc453cd3b30034ed83361f881787710ec215cd7a21f83e793d",
+      "size_bytes": 583
+    },
+    {
+      "path": "py_clob_client_v2/signing/__init__.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "ef6dd71de75f1d2444ca0dd1f7e5a99442101f9e1fc147eeb2d78e775032ab61",
+      "size_bytes": 145
+    },
+    {
+      "path": "py_clob_client_v2/signing/eip712.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "1b90239be1e465635361117eca2bfccc8f441ce8da65d6d67c5dc6277720b829",
+      "size_bytes": 877
+    },
+    {
+      "path": "py_clob_client_v2/signing/hmac.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "c5f05f5e89e9472f5f42281385b68985a0f9018763383d94f66d30e1c63b84e4",
+      "size_bytes": 784
+    },
+    {
+      "path": "py_clob_client_v2/signing/model.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "b227794f9b9878183658efc482ee3f33a295bd04624c52a7b875332c119421ea",
+      "size_bytes": 191
+    },
+    {
+      "path": "py_clob_client_v2/utilities.py",
+      "review_scope": "reviewed_python_source",
+      "sha256": "cca58cd949fada89eab0508c8a451953319d7bba9311a104c827494749a800a6",
+      "size_bytes": 2303
+    }
+  ],
+  "informational_upstream_source": {
+    "commit": "215fc63a8fd6ec3a10c7edb73997c9772d8686d3",
+    "repository": "https://github.com/Polymarket/py-clob-client-v2"
+  },
+  "polymarket_write_allowed": false,
+  "review_scope_semantics": {
+    "actual_deployed_wheel_bytes_are_authoritative": true,
+    "all_wheel_python_sources_are_enumerated": true,
+    "installed_byte_drift_fails_closed": true,
+    "installer_mutable_record_excluded_from_installed_byte_equality": true,
+    "missing_or_extra_python_source_fails_closed": true,
+    "reproducible_source_to_wheel_equivalence_claimed": false,
+    "upstream_source_commit_is_informational_only": true
+  },
+  "schema_version": "bigan-py-clob-client-v2-wheel-sbom-v1",
+  "wallet_signing_allowed": false,
+  "wheel_file_count": 49,
+  "wheel_filename": "py_clob_client_v2-1.1.0-py3-none-any.whl",
+  "wheel_files_manifest_sha256": "ce13e61337f32be684084f69b5e3a3d532486ccea61a0ccc0ba9fb5fb671c47f",
+  "wheel_python_source_count": 44,
+  "wheel_sha256": "421dc851ffad5028850dc332a7388863fe854f125b30bf3aa9d3333fb8cd1eeb",
+  "wheel_size_bytes": 50416,
+  "wheel_tag": "py3-none-any"
+}

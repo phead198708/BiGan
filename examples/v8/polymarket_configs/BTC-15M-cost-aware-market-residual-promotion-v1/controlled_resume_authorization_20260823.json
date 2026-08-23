@@ -1,0 +1,59 @@
+{
+  "authorization_consumed_by_ledger_advance": true,
+  "authorization_scope": "one_exact_outcome_blind_collector_resume",
+  "authorization_source": "user_message_2026-08-23_allow_continue_collection",
+  "capital_at_risk": false,
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "collector_decisions_changed": false,
+  "collector_resume_authorized": true,
+  "created_at": "2026-08-23T08:32:32Z",
+  "exact_resume_boundary": {
+    "attempts_consumed": 109,
+    "ledger_sha256": "23937d23ecd4ad7335d6d79dee11d7101fffc682a6b81bb28e4a03159314f481",
+    "progress_sha256": "c62005ea38350ea34db3d529c52885545efe81fae878d5af2c6831a0443ac11a",
+    "quality_valid_market_count": 97
+  },
+  "fresh_outcomes_opened": false,
+  "frozen_candidate_bundle_sha256": "7a5b872b5a2a010a0868bf7d22fb4bdc39a941dd04464bb53890d34aa1846b3e",
+  "frozen_collection_authorization_sha256": "ce1e218b641484eda713b84704b727ed0d720d01eaaff8056bca01a42dd109b7",
+  "frozen_collector_protocol_sha256": "b9fb1291297d597b6e3bb35f409f4de198c4d87c2a9c2d79947a19649415be7a",
+  "gates_thresholds_costs_baseline_population_changed": false,
+  "implementation": {
+    "path": "src/bigan/v8/polymarket/residual_promotion_controlled_resume.py",
+    "sha256": "31f37aa8d65a9a03989fca052fe4cf086e8a88865d99449741222de14158c8f7"
+  },
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "live_trading_allowed": false,
+  "maximum_attempts": 3000,
+  "model_bytes_changed": false,
+  "original_collector_cli": {
+    "path": "examples/v8/run_residual_promotion_v1_collector.py",
+    "sha256": "af2fcd7dcec87ebbc2960e3853e947ea0b628a4f1add50da50090342f8ad43ff"
+  },
+  "outcomes_accessed": false,
+  "pnl_accessed": false,
+  "polymarket_write_allowed": false,
+  "resume_cli": {
+    "path": "examples/v8/run_residual_promotion_v1_controlled_resume.py",
+    "sha256": "a209d6af584095b13f6ef67be09081cb066d80dad8f0351667bdc4788e957d97"
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-controlled-resume-authorization-v1",
+  "service_root": "/Volumes/BIGAN_PROMOTION_V1/BiGan-Promotion-v1-Collection-v2",
+  "settlement_accessed": false,
+  "target_quality_valid_market_count": 2500,
+  "wallet_signing_allowed": false,
+  "zero_capital_read_only": true
+}
