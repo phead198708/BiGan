@@ -56,6 +56,7 @@ from .phase4_policy import (
     soft_force_exit_deferred,
     volatility_gate_passed,
 )
+from .polymarket_oms import OrderResult, PolymarketOMS
 from .position_manager import Position, PositionManager, PositionSleeve
 from .reconciliation import (
     StalePositionReconciliation,
@@ -97,9 +98,11 @@ __all__ = [
     "ExecutionCashLeg",
     "InsufficientBalanceError",
     "OrderStatus",
+    "OrderResult",
     "Phase4EntryPolicy",
     "Phase4GateEvaluation",
     "PolymarketCashFlow",
+    "PolymarketOMS",
     "Position",
     "PositionManager",
     "PositionSleeve",

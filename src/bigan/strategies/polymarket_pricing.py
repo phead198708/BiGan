@@ -2,7 +2,8 @@
 
 Combines a Black-Scholes cash-or-nothing probability (with an OFI drift
 adjustment), oracle TWAP effective-strike magnification, and fractional
-Kelly sizing. Tail seconds of a window are hard-blocked from new entries.
+Kelly sizing. Both YES and NO asks are scored; the larger qualifying edge
+wins. Tail seconds of a window hard-block every new entry.
 """
 
 from __future__ import annotations
@@ -40,7 +41,12 @@ class MarketWindow:
 
 @dataclass(frozen=True, slots=True)
 class PricingSignal:
-    """定价与信号输出快照"""
+    """定价与信号输出快照。
+
+    ``model_prob`` / ``market_price`` / ``edge`` are the selected side
+    (YES on HOLD). ``ev`` is the selected-side expected return rate
+    ``(p / ask) - 1``, or ``0.0`` when the engine does not trade.
+    """
 
     ts_ms: int
     window_id: str
@@ -81,7 +87,7 @@ def effective_strike(
 
 
 class PolymarketPricingEngine:
-    """5m/15m binary win-probability, edge, and 1/4-Kelly sizer."""
+    """5m/15m binary win-probability, two-sided edge, and 1/4-Kelly sizer."""
 
     __slots__ = (
         "ofi_gamma",
@@ -195,9 +201,17 @@ class PolymarketPricingEngine:
         yes_ask_price: float,
         no_ask_price: float,
     ) -> PricingSignal:
+        """Score YES and NO asks and emit the better qualifying trade.
+
+        Tail seconds (``remaining_ms <= tail_cutoff_ms``) force ``HOLD``
+        even when either side has a large edge. Kelly sizing and ``ev``
+        use the selected probability and ask; ``ev`` is the expected
+        return rate ``(p / ask) - 1``, or ``0.0`` on HOLD.
+        """
+
         spot = _finite_float("spot_price", spot_price)
         yes_ask = _finite_float("yes_ask_price", yes_ask_price)
-        _finite_float("no_ask_price", no_ask_price)
+        no_ask = _finite_float("no_ask_price", no_ask_price)
         vol = _finite_float("volatility_annualized", volatility_annualized)
         ts_ms = int(current_ts_ms)
         k_eff = self.effective_strike(
@@ -206,35 +220,55 @@ class PolymarketPricingEngine:
             twap_weight=twap_weight,
         )
         remaining_ms = int(window.end_ts_ms) - ts_ms
-        model_prob = self.calculate_probability(
+        p_yes = self.calculate_probability(
             spot_price=spot,
             effective_strike=k_eff,
             time_to_expiry_sec=remaining_ms / 1000.0,
             volatility_annualized=vol,
             z_ofi=z_ofi,
         )
-        edge = model_prob - yes_ask
+        p_no = 1.0 - p_yes
+        yes_edge = p_yes - yes_ask
+        no_edge = p_no - no_ask
         in_tail = remaining_ms <= self.tail_cutoff_ms
         min_edge = self._min_edge_for(window.window_type)
-        buy_yes = (not in_tail) and edge >= min_edge
-        size = (
-            self.kelly_fraction * _binary_kelly(model_prob, yes_ask)
-            if buy_yes
-            else 0.0
-        )
-        if not math.isfinite(size) or size <= 0.0:
-            size = 0.0
-            buy_yes = False
+
+        direction = SignalDirection.HOLD
+        selected_p = p_yes
+        selected_ask = yes_ask
+        selected_edge = yes_edge
+        if not in_tail:
+            if yes_edge >= min_edge and yes_edge >= no_edge:
+                direction = SignalDirection.BUY_YES
+            elif no_edge >= min_edge and no_edge > yes_edge:
+                direction = SignalDirection.BUY_NO
+                selected_p = p_no
+                selected_ask = no_ask
+                selected_edge = no_edge
+
+        size = 0.0
+        ev = 0.0
+        if direction is not SignalDirection.HOLD:
+            size = self.kelly_fraction * _binary_kelly(selected_p, selected_ask)
+            if not math.isfinite(size) or size <= 0.0:
+                size = 0.0
+                direction = SignalDirection.HOLD
+                selected_p = p_yes
+                selected_ask = yes_ask
+                selected_edge = yes_edge
+            else:
+                ev = _expected_return_rate(selected_p, selected_ask)
+
         return PricingSignal(
             ts_ms=ts_ms,
             window_id=window.window_id,
             spot_price=spot,
             effective_strike=k_eff,
-            model_prob=model_prob,
-            market_price=yes_ask,
-            edge=edge,
-            ev=edge,
-            direction=SignalDirection.BUY_YES if buy_yes else SignalDirection.HOLD,
+            model_prob=selected_p,
+            market_price=selected_ask,
+            edge=selected_edge,
+            ev=ev,
+            direction=direction,
             recommended_size_pct=size,
         )
 
@@ -278,6 +312,17 @@ def _norm_cdf(x: float) -> float:
     if not math.isfinite(x):
         return 1.0 if x > 0.0 else 0.0
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _expected_return_rate(probability: float, ask: float) -> float:
+    """Expected ROI of a $1 binary bought at ``ask``: ``(p / ask) - 1``."""
+
+    if not math.isfinite(probability) or not math.isfinite(ask) or ask <= 0.0:
+        return 0.0
+    ev = probability / ask - 1.0
+    if not math.isfinite(ev):
+        return 0.0
+    return ev
 
 
 def _binary_kelly(probability: float, price: float) -> float:

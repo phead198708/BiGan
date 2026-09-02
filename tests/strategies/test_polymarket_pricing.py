@@ -125,6 +125,34 @@ def test_twap_effective_strike_magnification() -> None:
     assert signal.effective_strike > window.strike_price
 
 
+def _spot_for_yes_probability(
+    engine: PolymarketPricingEngine,
+    *,
+    strike: float,
+    time_to_expiry_sec: float,
+    volatility_annualized: float,
+    target: float,
+    z_ofi: float = 0.0,
+) -> float:
+    lo = strike * 0.5
+    hi = strike * 1.5
+    mid = strike
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        prob = engine.calculate_probability(
+            spot_price=mid,
+            effective_strike=strike,
+            time_to_expiry_sec=time_to_expiry_sec,
+            volatility_annualized=volatility_annualized,
+            z_ofi=z_ofi,
+        )
+        if prob < target:
+            lo = mid
+        else:
+            hi = mid
+    return mid
+
+
 def test_tail_cutoff_safety() -> None:
     engine = PolymarketPricingEngine()
     window = _window("5m", strike_price=100_000.0)
@@ -139,6 +167,19 @@ def test_tail_cutoff_safety() -> None:
     assert signal.edge == pytest.approx(0.20, abs=1e-6)
     assert signal.direction is SignalDirection.HOLD
     assert signal.recommended_size_pct == 0.0
+    assert signal.ev == 0.0
+
+    blocked_no = _signal(
+        engine,
+        window,
+        current_ts_ms=window.end_ts_ms - 10_000,
+        spot_price=80_000.0,
+        yes_ask_price=0.20,
+        no_ask_price=0.70,
+    )
+    assert blocked_no.direction is SignalDirection.HOLD
+    assert blocked_no.recommended_size_pct == 0.0
+    assert blocked_no.ev == 0.0
 
 
 def test_window_edge_thresholds() -> None:
@@ -186,15 +227,104 @@ def test_kelly_zero_position_on_negative_ev() -> None:
         engine,
         window,
         current_ts_ms=300_000,
-        spot_price=window.strike_price * 0.98,
+        spot_price=window.strike_price,
         yes_ask_price=0.90,
-        no_ask_price=0.10,
+        no_ask_price=0.90,
     )
     assert signal.model_prob < signal.market_price
     assert signal.edge < 0.0
-    assert signal.ev < 0.0
+    assert signal.ev == 0.0
     assert signal.direction is SignalDirection.HOLD
     assert signal.recommended_size_pct == 0.0
+
+
+def test_buy_no_signal_trigger() -> None:
+    engine = PolymarketPricingEngine()
+    strike = 100_000.0
+    remaining_ms = 120_000
+    spot = _spot_for_yes_probability(
+        engine,
+        strike=strike,
+        time_to_expiry_sec=remaining_ms / 1000.0,
+        volatility_annualized=0.60,
+        target=0.20,
+    )
+    p_yes = engine.calculate_probability(
+        spot_price=spot,
+        effective_strike=strike,
+        time_to_expiry_sec=remaining_ms / 1000.0,
+        volatility_annualized=0.60,
+        z_ofi=0.0,
+    )
+    assert p_yes == pytest.approx(0.20, abs=1e-4)
+
+    signal = _signal(
+        engine,
+        _window("15m", strike_price=strike),
+        current_ts_ms=900_000 - remaining_ms,
+        spot_price=spot,
+        yes_ask_price=0.50,
+        no_ask_price=0.70,
+    )
+    assert signal.direction is SignalDirection.BUY_NO
+    assert signal.model_prob == pytest.approx(1.0 - p_yes, abs=1e-4)
+    assert signal.market_price == pytest.approx(0.70)
+    assert signal.edge == pytest.approx(0.10, abs=1e-3)
+    assert signal.recommended_size_pct > 0.0
+
+
+def test_ev_calculation() -> None:
+    engine = PolymarketPricingEngine()
+    strike = 100_000.0
+    remaining_ms = 120_000
+    p_yes = engine.calculate_probability(
+        spot_price=strike,
+        effective_strike=strike,
+        time_to_expiry_sec=remaining_ms / 1000.0,
+        volatility_annualized=0.60,
+        z_ofi=0.0,
+    )
+    yes_ask = p_yes - 0.10
+    assert 0.0 < yes_ask < 1.0
+    buy_yes = _signal(
+        engine,
+        _window("15m", strike_price=strike),
+        current_ts_ms=900_000 - remaining_ms,
+        spot_price=strike,
+        yes_ask_price=yes_ask,
+        no_ask_price=0.99,
+    )
+    assert buy_yes.direction is SignalDirection.BUY_YES
+    assert buy_yes.ev == pytest.approx(p_yes / yes_ask - 1.0)
+    assert buy_yes.ev != pytest.approx(buy_yes.edge)
+
+    spot_no = _spot_for_yes_probability(
+        engine,
+        strike=strike,
+        time_to_expiry_sec=remaining_ms / 1000.0,
+        volatility_annualized=0.60,
+        target=0.20,
+    )
+    p_yes_no = engine.calculate_probability(
+        spot_price=spot_no,
+        effective_strike=strike,
+        time_to_expiry_sec=remaining_ms / 1000.0,
+        volatility_annualized=0.60,
+        z_ofi=0.0,
+    )
+    no_ask = 0.70
+    buy_no = _signal(
+        engine,
+        _window("15m", strike_price=strike),
+        current_ts_ms=900_000 - remaining_ms,
+        spot_price=spot_no,
+        yes_ask_price=0.50,
+        no_ask_price=no_ask,
+    )
+    p_no = 1.0 - p_yes_no
+    assert buy_no.direction is SignalDirection.BUY_NO
+    assert buy_no.ev == pytest.approx(p_no / no_ask - 1.0)
+    assert buy_no.ev != pytest.approx(buy_no.edge)
 
 
 def test_expired_window_is_deterministic() -> None:
