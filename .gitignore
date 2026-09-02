@@ -21,8 +21,8 @@ venv/
 env/
 ENV/
 
-# Data — never committed
-data/
+# Data — never committed (repo-root dumps only; keep src/bigan/data and tests/data)
+/data/
 *.parquet
 *.ndjson
 *.ndjson.gz
