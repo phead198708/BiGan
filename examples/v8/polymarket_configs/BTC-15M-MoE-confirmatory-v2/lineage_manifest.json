@@ -1,0 +1,85 @@
+{
+  "architecture_type": "deterministic_regime_router_with_conditional_experts_and_global_fallback",
+  "attempt_cap_ready": true,
+  "candidate_bundle": {
+    "artifact_graph": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_artifact_graph.json",
+      "sha256": "265ecd1b62bd5489099b37b09df9e65a6bbf62a4fe1b293a2b8a73d1951cf205"
+    },
+    "bundle_hash": "fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807",
+    "model_manifest": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_model_manifest.json",
+      "sha256": "e23c365d200181df0d4dfa3b3c458ff0eeccbacf52372b7a7448c34450ac77b0"
+    }
+  },
+  "candidate_id": "mixture_of_experts",
+  "confirmatory_design_ready": true,
+  "created_at": "2026-07-30T09:00:00+00:00",
+  "genesis_decision": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/lineage_genesis_decision.json",
+    "sha256": "934f9fff2f5dbd003959b1e161538d94da1088d4422caac3810d1ad5379f244d"
+  },
+  "implementation_base_commit": "a37320d4f8aa8ccb8176132def6429c1127758ba",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "parent_lineage_id": "BTC-15M-regime-adaptive-v1",
+  "parent_result_commit": "fd848defad7874db5decc96b9ef2de07e8007b1e",
+  "protocols": {
+    "authorization_template": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_fresh_collection_authorization_template.json",
+      "sha256": "e00bd99e8719fc9775f56ee4cb661d3b3550fb307503399999d74384a83ef88d"
+    },
+    "collection_quality_rate_analysis": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_quality_rate_analysis.json",
+      "sha256": "6abe9f28c68f91944601a53d34b972e0de618a96c4292f66f0ee66d94da13097"
+    },
+    "collector": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_collector_protocol.json",
+      "sha256": "ddbdd51fe169f878e9cf0058163603e8899fbfce0818a328ed42095cca5d6312"
+    },
+    "confirmatory": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_protocol.json",
+      "sha256": "e89c57201e3a92779ecdf2a9a0ee694832e6bef5b58333e87880f827f8ce2a80"
+    },
+    "power_analysis": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_power_analysis.json",
+      "sha256": "ffb31eb6d6b91e3d5dd52971088103d3b905a73fd66c26eda239cbec3b1fddde"
+    },
+    "power_protocol": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_confirmatory_power_protocol.json",
+      "sha256": "a85e918bc83caf708e73fe208ec4af84fb879c6cf7bc2bc5695e12984e446a3d"
+    },
+    "reporting": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_future_evaluation_reporting_contract.json",
+      "sha256": "40a3b6fec6e181fdffe7564adc47c24dcf73e0e5773239bfa79853d465fda1e1"
+    },
+    "runtime_validation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_artifact_runtime_validation_report.json",
+      "sha256": "53b952922422965f1eb36d6e964665d09184f788643f94d7a9acffcd29db27eb"
+    }
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-confirmatory-lineage-manifest-v2",
+  "separate_auditable_manual_authorization_decision_required": true,
+  "state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false,
+    "lineage_frozen": true
+  },
+  "v1_terminal_record": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/BTC-15M-MoE-confirmatory-v1-terminal-record.json",
+    "sha256": "85ee7d7bce22833cd32fc9ed5be60191b4be8795c1b2a59d0533b58fe8c5cf33"
+  }
+}

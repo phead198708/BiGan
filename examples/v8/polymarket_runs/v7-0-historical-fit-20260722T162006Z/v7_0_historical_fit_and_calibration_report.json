@@ -1,0 +1,163 @@
+{
+  "#134_resume_allowed": false,
+  "#146_start_allowed": false,
+  "candidate_name": "abstention_aware_expected_net_pnl_v7_0",
+  "capital_at_risk": false,
+  "family_summary": {
+    "HOLD_TO_SETTLEMENT": {
+      "calibration": {
+        "coverage_level": 0.8,
+        "empirical_selected_action_lower_bound_coverage": 0.8134920634920635,
+        "lower_bound_positive_selected_row_count": 0,
+        "lower_bound_positive_selected_target_pnl_sum_report_only": 0,
+        "lower_bound_positive_selected_unique_market_count": 0,
+        "method": "market_weighted_one_sided_selected_action_within_family_residual_quantile",
+        "pnl_used_for_calibration_or_gate": false,
+        "residual_quantile": -0.4335941786544426,
+        "selected_action_residual_count": 77,
+        "unique_market_count": 21
+      },
+      "calibration_market_count": 21,
+      "calibration_row_count": 154,
+      "coefficient_stability": {
+        "market_count": 44,
+        "maximum_coefficient_absolute_delta": 0.005301707727915652,
+        "median_market_max_absolute_delta": 0.0018366244254322817,
+        "method": "leave_one_market_out_with_final_fit_standardization",
+        "worst_market_ids": [
+          "0x792468ca50d769ef201cb472b1fd42c95aaa5450c37d2703bbe776b8fe1d9453",
+          "0x481b9d32c1dc5de3ef1de92220aeacc1accfbd915c9107571d783c0c4400251d",
+          "0xcfb0d2c01d2a5ba2941ee138e2233d00b391d458e2cf5e5a1c8a0e5b255ede30",
+          "0xf84f27e3e8b0dcc512005b3cfbee0cc18db66a636a138e46f0004d85f15838bb",
+          "0xab871a021f8b1b675014d1f16c9d86586785782aad86ad98ac12052d99a367b2"
+        ]
+      },
+      "fit_market_count": 44,
+      "fit_row_count": 320,
+      "forward_oof_metrics": {
+        "fold_summaries": [
+          {
+            "fold_index": 0,
+            "train_market_count": 22,
+            "train_max_decision_ts": 1784030040000,
+            "validation_market_count": 11,
+            "validation_min_decision_ts": 1784030160000
+          },
+          {
+            "fold_index": 1,
+            "train_market_count": 33,
+            "train_max_decision_ts": 1784037840000,
+            "validation_market_count": 11,
+            "validation_min_decision_ts": 1784037960000
+          }
+        ],
+        "fold_train_mean_baseline_market_weighted_mae": 0.31037878787878787,
+        "fold_train_mean_baseline_market_weighted_mse": 0.1507489258406349,
+        "market_weighted_mae": 0.3174036456331406,
+        "market_weighted_mse": 0.15220051052937786,
+        "relative_mae_improvement_over_fold_train_mean": -0.022633176069674445,
+        "relative_mse_improvement_over_fold_train_mean": -0.009629154441057235,
+        "row_count": 158,
+        "unique_market_count": 22
+      },
+      "historical_fit_gate_blocking_reason_codes": [
+        "hold_to_settlement_forward_oof_mae_improved_failed",
+        "hold_to_settlement_forward_oof_mse_improved_failed"
+      ],
+      "historical_fit_gate_passed": false
+    },
+    "SELL_BEFORE_CLOSE": {
+      "calibration": {
+        "coverage_level": 0.8,
+        "empirical_selected_action_lower_bound_coverage": 0.8055555555555556,
+        "lower_bound_positive_selected_row_count": 0,
+        "lower_bound_positive_selected_target_pnl_sum_report_only": 0,
+        "lower_bound_positive_selected_unique_market_count": 0,
+        "method": "market_weighted_one_sided_selected_action_within_family_residual_quantile",
+        "pnl_used_for_calibration_or_gate": false,
+        "residual_quantile": -0.24318155868860925,
+        "selected_action_residual_count": 180,
+        "unique_market_count": 45
+      },
+      "calibration_market_count": 45,
+      "calibration_row_count": 360,
+      "coefficient_stability": {
+        "market_count": 89,
+        "maximum_coefficient_absolute_delta": 0.004406711637834841,
+        "median_market_max_absolute_delta": 0.001037592086628186,
+        "method": "leave_one_market_out_with_final_fit_standardization",
+        "worst_market_ids": [
+          "0x3c77271f05eac9e7e7f98672edaa54932b429447793b1163e563d980e53c526c",
+          "0x8b14fa94af7faf4a9672b307253238df55c93eb4011bc3e4befcd21ebfc2b3dc",
+          "0xafd0407e562a7eeeb799ff2a86f27125ae724e6684b6ee51e1cba47657c4e0df",
+          "0xd7c645f3670a50c7d3dfb24876d739d389c99ea49802c0edde7607da2c05af48",
+          "0xfaee8564b255fcd031b0531cf57e7316a27855068f2a082128bb742e2ed9c811"
+        ]
+      },
+      "fit_market_count": 89,
+      "fit_row_count": 712,
+      "forward_oof_metrics": {
+        "fold_summaries": [
+          {
+            "fold_index": 0,
+            "train_market_count": 44,
+            "train_max_decision_ts": 1784245440000,
+            "validation_market_count": 15,
+            "validation_min_decision_ts": 1784245560000
+          },
+          {
+            "fold_index": 1,
+            "train_market_count": 59,
+            "train_max_decision_ts": 1784250840000,
+            "validation_market_count": 15,
+            "validation_min_decision_ts": 1784252760000
+          },
+          {
+            "fold_index": 2,
+            "train_market_count": 74,
+            "train_max_decision_ts": 1784261340000,
+            "validation_market_count": 15,
+            "validation_min_decision_ts": 1784261460000
+          }
+        ],
+        "fold_train_mean_baseline_market_weighted_mae": 0.23221718368985317,
+        "fold_train_mean_baseline_market_weighted_mse": 0.09489930368793097,
+        "market_weighted_mae": 0.23206108940152315,
+        "market_weighted_mse": 0.09425384105157963,
+        "relative_mae_improvement_over_fold_train_mean": 0.0006721909457764329,
+        "relative_mse_improvement_over_fold_train_mean": 0.006801552922599793,
+        "row_count": 360,
+        "unique_market_count": 45
+      },
+      "historical_fit_gate_blocking_reason_codes": [],
+      "historical_fit_gate_passed": true
+    }
+  },
+  "fit_created_ts": 1784737206000,
+  "fit_leakage_audit_passed": true,
+  "freeze_ready": false,
+  "full_action_grid_market_count": 65,
+  "future_confirmatory_started": false,
+  "historical_development_blocking_reason_codes": [
+    "hold_to_settlement_forward_oof_mae_improved_failed",
+    "hold_to_settlement_forward_oof_mse_improved_failed"
+  ],
+  "historical_development_gate_passed": false,
+  "historical_selected_pnl_report_only": true,
+  "historical_unique_market_count": 199,
+  "implementation_commit": "83bc83a6a53ad38ebab49232e4c6a392de69a9a1",
+  "issue229_or_issue231_outcomes_opened": false,
+  "live_trading_enabled": false,
+  "new_strictly_later_future_confirmatory_required": true,
+  "paper_candidate_allowed": false,
+  "paper_only": true,
+  "polymarket_write_enabled": false,
+  "promotion_evidence_eligible": false,
+  "report_id": "710f366dafa2006f7249f18c293373c5544f89e8f70a7798c03941d38407e5b1",
+  "runtime_aligned_sbc_market_count": 134,
+  "schema_version": "bigan-v8-abstention-aware-expected-net-pnl-v7-0-fit-report-v1",
+  "source_model_candidate_eligible": false,
+  "v8_execution_handoff_allowed": false,
+  "validation_or_oof_pnl_used_for_tuning_or_gate": false,
+  "wallet_signing_enabled": false
+}

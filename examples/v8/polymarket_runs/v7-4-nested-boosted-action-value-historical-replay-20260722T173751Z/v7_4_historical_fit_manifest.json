@@ -1,0 +1,74 @@
+{
+  "#134_resume_allowed": false,
+  "#146_start_allowed": false,
+  "candidate_name": "nested_training_only_boosted_action_value_v7_4",
+  "candidate_selected_rows": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/v7-4-nested-boosted-action-value-historical-replay-20260722T173751Z/v7_4_candidate_selected_rows.jsonl",
+    "sha256": "42aa3de8e58f90d34eab152db30589af26ab4d4e50e304e476d23d679dac6427"
+  },
+  "capital_at_risk": false,
+  "final_selected_policy_profile_name": "KEEP_V6_7",
+  "fit_leakage_audit_passed": true,
+  "freeze_ready": false,
+  "historical_gate_blocking_reason_codes": [],
+  "historical_noninferiority_gate_passed": true,
+  "implementation_commit": "dcc24317fe90a566638eb25fccf15a37a62e9636",
+  "leakage_audit": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/v7-4-nested-boosted-action-value-historical-replay-20260722T173751Z/v7_4_fit_leakage_audit.json",
+    "sha256": "baec9c664935daa7cd80807f75057115c7c8c2c74bf0a3d56b8ccac559bab762"
+  },
+  "live_trading_enabled": false,
+  "manifest_id": "768fe8e209e37c3e2d8bf1d30ac38e57226d6c4d756d884dc59ccb15e4cd32c7",
+  "model": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/v7-4-nested-boosted-action-value-historical-replay-20260722T173751Z/v7_4_nested_boosted_model.json",
+    "sha256": "6b17a8b2a5265a3c4e315389e1e25c9c01bc2b4733efea10257683d369514239"
+  },
+  "model_improvement_demonstrated": false,
+  "outer_oof_rows": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/v7-4-nested-boosted-action-value-historical-replay-20260722T173751Z/v7_4_outer_oof_policy_rows.jsonl",
+    "sha256": "16fbb7c1a2a561b69ff7982d7b7449a71a50ff7381cac48485a7b90a0f24f6bc"
+  },
+  "paper_candidate_allowed": false,
+  "paper_only": true,
+  "polymarket_write_enabled": false,
+  "profile": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_configs/execution_layer_v2_nested_boosted_action_value_v7_4_profile.json",
+    "sha256": "8c155dad7413781f92d961b2a5217798e2874bc437a902e1c854541683d79bb7"
+  },
+  "promotion_evidence_eligible": false,
+  "report": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/v7-4-nested-boosted-action-value-historical-replay-20260722T173751Z/v7_4_historical_noninferiority_report.json",
+    "sha256": "5360809cc293c0c39098d1b3d06f7667e98fb8d89e21f9258000682d40332298"
+  },
+  "report_markdown": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/v7-4-nested-boosted-action-value-historical-replay-20260722T173751Z/v7_4_historical_noninferiority_report.md",
+    "sha256": "e1195c2dfef9b38034cb5cc41f5f82d9e799c29c6480a7e3c385ecded945d283"
+  },
+  "run_id": "v7-4-nested-boosted-action-value-historical-replay-20260722T173751Z",
+  "runtime_target_rows": {
+    "path": "/Volumes/PHILIPS/v8/polymarket_runtime_aligned/runtime-aligned-sbc-v6-4-target-corpus-authoritative-20260720T160030Z/runtime_aligned_sbc_net_return_rows.jsonl",
+    "sha256": "1565116daeb2f5d4d8c33fefa507276f59251edd5ffb5f4f313041bcf9dbb0ec"
+  },
+  "schema_version": "bigan-v8-nested-boosted-action-value-v7-4-manifest-v1",
+  "source_model_candidate_eligible": false,
+  "target_free_canary_collection_allowed": true,
+  "target_free_canary_started": false,
+  "v6_7_baseline_selected_rows": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/v7-4-nested-boosted-action-value-historical-replay-20260722T173751Z/v7_4_v6_7_baseline_selected_rows.jsonl",
+    "sha256": "30adc9b971088023b34d27c18f9538db95d127b80e656fab10cb1abee9de7314"
+  },
+  "v6_7_candidate_profile": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_configs/execution_layer_v2_p_up_semantic_compatibility_v6_7_profile.json",
+    "sha256": "cec55d243acd6bbf60a5e8474545b487086ddcd4d18073682ae7f2d4660d2248"
+  },
+  "v7_0_training_profile": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_configs/execution_layer_v2_abstention_aware_expected_net_pnl_v7_0_training_profile.json",
+    "sha256": "1f66d8699b9727651538cc34a9a2a25ba5eaac5cfded75cf8f4a258b1b5d3f4a"
+  },
+  "v7_2_relative_policy_source": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/src/bigan/v8/polymarket/training/execution_layer_v2_v6_7_relative_safe_policy_v7_2.py",
+    "sha256": "bc099273ca3c1db04062d40a5172e82d0ec075e2c63886cc42dd2dde67cc961a"
+  },
+  "v8_execution_handoff_allowed": false,
+  "wallet_signing_enabled": false
+}

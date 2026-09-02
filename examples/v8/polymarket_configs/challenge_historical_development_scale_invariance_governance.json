@@ -1,0 +1,108 @@
+{
+  "affected_historical_result": {
+    "attempt_002_preregistration_allowed_under_superseded_standard": true,
+    "historical_success_claim_valid_after_review": false,
+    "iteration_003_entry_file_sha256": "8326e6c5cec158f09bdeeac3d14e2e2342ebf9aed3bd9bb5048f017567b6fe62",
+    "iteration_003_entry_semantic_sha256": "abe1eb3b6e03530c15cb51326801e783454a0be4d5885edd7dcca8dab22779ae",
+    "iteration_003_result_sha256": "997cd1ad280cdb6ad1125d9c2629d283f47e2765317f04557f4fdfc7eb972790",
+    "reason_code": "paired_gate_not_scale_invariant_under_asymmetric_candidate_only_sizing",
+    "recorded_iteration_artifacts_rewritten": false,
+    "superseded_success_standard_sha256": "07609f09692723dd1e650080cfdd29466a7ee8a0f8c30d8378045a8ee3523114"
+  },
+  "alpha_spending_ledger_update": {
+    "development_iteration_budget_increased": false,
+    "maximum_development_iterations": 5,
+    "remaining_iteration_slots": [
+      4,
+      5
+    ],
+    "slot_1_consumed": true,
+    "slot_2_consumed": true,
+    "slot_3_consumed": true
+  },
+  "audit": {
+    "baseline_after_cost_pnl_identical_row_by_row": true,
+    "candidate_only_metric_scale_factor": 5.0,
+    "candidate_position_size_iteration_001": 0.2,
+    "candidate_position_size_iteration_003": 1.0,
+    "iteration_001_candidate_comparison_sha256": "50c9055efc86cf6f0c5ed4f03f5109f0e7aac55bc93d8f5858b630ab34aa5fc5",
+    "iteration_001_result_sha256": "80baab4220f48d2cfb98d4ccd25a9b4807462691cfc13f0a40fb96f381a90782",
+    "iteration_003_candidate_comparison_sha256": "20f66bdcc8ab74283370f9d607061c0aeacfbcc521a2e13c24481c86ae0ff174",
+    "iteration_003_result_sha256": "997cd1ad280cdb6ad1125d9c2629d283f47e2765317f04557f4fdfc7eb972790",
+    "paired_metrics_are_exactly_five_times_iteration_001": false,
+    "selected_market_action_pairs_identical": true,
+    "selected_market_count_iteration_001": 5,
+    "selected_market_count_iteration_003": 5
+  },
+  "candidate_only_metric_comparison": {
+    "absolute_bootstrap_lcb": {
+      "iteration_001": 0.04695,
+      "iteration_003": 0.23475,
+      "ratio": 5.0
+    },
+    "first_half_bootstrap_ucb": {
+      "iteration_001": 0.41667874999999815,
+      "iteration_003": 2.08339374999999,
+      "ratio": 5.0
+    },
+    "first_half_total_after_cost_pnl": {
+      "iteration_001": 0.1898,
+      "iteration_003": 0.949,
+      "ratio": 5.0
+    },
+    "largest_winner_after_cost_pnl": {
+      "iteration_001": 0.07995000000000002,
+      "iteration_003": 0.39975000000000005,
+      "ratio": 5.0
+    },
+    "largest_winner_removed_after_cost_pnl": {
+      "iteration_001": 0.1568,
+      "iteration_003": 0.7839999999999998,
+      "ratio": 5.0
+    },
+    "second_half_bootstrap_ucb": {
+      "iteration_001": 0.14085,
+      "iteration_003": 0.7042499999999999,
+      "ratio": 5.0
+    },
+    "second_half_total_after_cost_pnl": {
+      "iteration_001": 0.04695,
+      "iteration_003": 0.23475,
+      "ratio": 5.0
+    },
+    "total_after_cost_pnl": {
+      "iteration_001": 0.23675000000000002,
+      "iteration_003": 1.1837499999999999,
+      "ratio": 5.0
+    }
+  },
+  "conclusion": {
+    "attempt_002_may_rely_on_iteration_003": false,
+    "iteration_003_constitutes_historical_success": false,
+    "new_replay_allowed_only_after_strictly_tighter_standard_is_frozen": true,
+    "pure_sizing_change_can_be_a_future_candidate": false,
+    "required_remediation": "evaluate_candidate_and_baseline_at_unit_sizing_for_every_statistical_gate"
+  },
+  "issue": 262,
+  "paired_gate_diagnostic": {
+    "baseline_total_after_cost_pnl_both_iterations": -1.09565,
+    "iteration_001_candidate_minus_baseline_total": 1.3323999999999998,
+    "iteration_001_paired_lcb": -0.1514512500000002,
+    "iteration_003_candidate_minus_baseline_total": 2.2794,
+    "iteration_003_paired_lcb": 0.6115974999999999,
+    "paired_lcb_flipped_positive": true,
+    "root_cause": "candidate_pnl_scaled_from_0_2_to_1_0_while_baseline_pnl_remained_at_0_2"
+  },
+  "recorded_at": "2026-07-27T04:24:58Z",
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-historical-development-scale-invariance-governance-v1"
+}

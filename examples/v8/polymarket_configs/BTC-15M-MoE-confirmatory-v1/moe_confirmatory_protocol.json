@@ -1,0 +1,213 @@
+{
+  "schema_version": "bigan-btc-15m-moe-confirmatory-statistical-protocol-v1",
+  "protocol_id": "BTC-15M-MoE-confirmatory-v1-statistical-confirmation",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v1",
+  "candidate_id": "mixture_of_experts",
+  "architecture_type": "deterministic_regime_router_with_conditional_experts_and_global_fallback",
+  "created_at": "2026-07-30T03:10:00+00:00",
+  "role": "frozen_strictly_later_two_round_confirmatory_protocol",
+  "frozen_inputs": {
+    "candidate_artifact": {
+      "bundle_hash": "30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8",
+      "model_manifest_path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_model_manifest.json",
+      "model_manifest_sha256": "fddd8c1993c0abdcbd45dc439ae7053ca4173f60f938097bf0e8083f0104b930",
+      "artifact_graph_path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_artifact_graph.json",
+      "artifact_graph_sha256": "f0f0f09c14b85a888dd1aa2c1cfe4f88acfe9332bc6513f83e99404a089768dd"
+    },
+    "baseline_artifact": {
+      "baseline_id": "matched_global_baseline",
+      "definition": "byte_identical_global_fallback_model",
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/moe_global_fallback.json",
+      "sha256": "662989a6c2f479e04ebc925339fd74e969c85821ad36752d631c8039c18e43d2"
+    },
+    "baseline_behavior_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_matched_global_baseline_contract.json",
+      "sha256": "d3e7a53fa8b6872c5c3c0925dc1f5f3e0ceb810f4f1beaf0c876fc7fcae437f4"
+    },
+    "router_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_router_contract.json",
+      "sha256": "243b90aedb54198470ac04aeff713d5a6c6cd8b05c2c87eb49b48752d69bdb46"
+    },
+    "feature_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_feature_contract.json",
+      "sha256": "d6117e95e1fe95c52c2741a5c0cbf6921be8418c50800c77c8bc9e6ed8e30ed5"
+    },
+    "cost_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_cost_and_action_contract.json",
+      "sha256": "d01f221aae46421239e23fe2321a37e530367bc831e1033161d470b887fce8c0"
+    },
+    "collector_protocol": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_confirmatory_collector_protocol.json",
+      "sha256": "89943f00eed24332eca227bdf756e76372d63f94a6bfa0be147d4a690a00b4b4"
+    },
+    "future_evaluation_reporting_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_future_evaluation_reporting_contract.json",
+      "sha256": "e6784c7894d3b729e47345f0e90e4a33915dc2ece59899eb91450f611338d4f4"
+    },
+    "artifact_runtime_validation_report": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_artifact_runtime_validation_report.json",
+      "sha256": "78f62f4ce3e7098b2a2aaafead3907443ed3959d6c8cbd4fc015e2acf2a3ab2e",
+      "mandatory_gate_passed": true
+    },
+    "confirmatory_power_analysis": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_confirmatory_power_analysis.json",
+      "sha256": "16f893eb7fc750bcf7d0a9aa10e2c56a2f358bb9f23a317f3a0ce2d6e48bf2c7",
+      "planning_only": true,
+      "gates_changed": false
+    }
+  },
+  "pre_collection_mandatory_gates": {
+    "artifact_runtime_validation_must_pass": true,
+    "runtime_validation_report_hash_must_match": true,
+    "baseline_behavior_contract_hash_must_match": true,
+    "reporting_contract_hash_must_match": true,
+    "manual_collection_authorization_required": true,
+    "current_manual_collection_authorization_present": false,
+    "collection_may_start": false
+  },
+  "estimands": {
+    "primary": "mean_market_level_unit_net_pnl_delta_moe_minus_matched_global_baseline",
+    "absolute_candidate": "mean_market_level_unit_net_pnl_of_moe",
+    "market_population": "every_frozen_quality_valid_market_with_NO_TRADE_as_zero",
+    "sizing": "unit",
+    "execution_policy": "HOLD_TO_SETTLEMENT",
+    "costs": "frozen_cost_contract",
+    "paired_executable_asks_required": true,
+    "complement_quote_proxy_allowed": false
+  },
+  "bootstrap": {
+    "method": "market_level_paired_percentile_bootstrap_with_shared_resample_indices",
+    "unit": "unique_market",
+    "seed": 26015,
+    "resamples": 10000,
+    "confidence": 0.975,
+    "sidedness": "one_sided_lower_confidence_bound",
+    "quantile": 0.025,
+    "no_trade_value": 0.0,
+    "candidate_and_baseline_use_same_market_draws": true,
+    "route_or_trade_level_resampling_allowed": false
+  },
+  "confirmatory_rounds": {
+    "number_of_confirmatory_rounds": 2,
+    "strictly_later_than_frozen_candidate_required": true,
+    "rounds_are_chronologically_disjoint": true,
+    "round_2_strictly_later_than_round_1": true,
+    "minimum_quality_valid_outcome_finalized_markets_per_round": 40,
+    "target_quality_valid_markets_per_round": 40,
+    "total_target_quality_valid_markets": 80,
+    "paired_executable_ask_coverage_minimum": 0.95,
+    "both_capture_manifests_frozen_before_any_outcome_open": true,
+    "official_post_close_outcome_only": true,
+    "round_replacement_allowed": false,
+    "market_replacement_after_outcome_access_allowed": false
+  },
+  "round_gate": {
+    "minimum_quality_valid_market_count": {
+      "operator": "gte",
+      "value": 40
+    },
+    "paired_executable_ask_coverage": {
+      "operator": "gte",
+      "value": 0.95
+    },
+    "primary_paired_delta_bootstrap_lcb": {
+      "operator": "gt",
+      "value": 0.0
+    },
+    "absolute_moe_bootstrap_lcb": {
+      "operator": "gt",
+      "value": 0.0
+    },
+    "largest_winner_removed": {
+      "moe_total_unit_net_pnl_after_removing_largest_positive_moe_market": {
+        "operator": "gt",
+        "value": 0.0
+      },
+      "paired_delta_total_after_removing_largest_positive_delta_market": {
+        "operator": "gt",
+        "value": 0.0
+      }
+    },
+    "chronological_halves": {
+      "split_rule": "earlier_floor_n_over_2_markets_and_later_remaining_markets",
+      "first_half_moe_total_unit_net_pnl": {
+        "operator": "gte",
+        "value": 0.0
+      },
+      "second_half_moe_total_unit_net_pnl": {
+        "operator": "gte",
+        "value": 0.0
+      },
+      "first_half_paired_delta_total": {
+        "operator": "gte",
+        "value": 0.0
+      },
+      "second_half_paired_delta_total": {
+        "operator": "gte",
+        "value": 0.0
+      }
+    },
+    "target_or_future_label_leakage_count": {
+      "operator": "eq",
+      "value": 0
+    },
+    "reporting_contract_complete": {
+      "operator": "eq",
+      "value": true
+    },
+    "all_gate_booleans_must_be_true": true
+  },
+  "multiplicity_and_stopping": {
+    "single_frozen_candidate": true,
+    "single_frozen_baseline": true,
+    "both_rounds_must_independently_pass": true,
+    "combined_round_result_may_rescue_failed_round": false,
+    "optional_stopping_allowed": false,
+    "interim_outcome_looks_allowed": false,
+    "threshold_or_router_changes_allowed": false,
+    "route_filtering_allowed": false,
+    "post_hoc_exclusions_allowed": false,
+    "failed_round_rerun_allowed": false,
+    "inconclusive_round_rerun_allowed": false,
+    "replacement_round_allowed": false,
+    "additional_round_allowed": false
+  },
+  "failed_round_semantics": {
+    "any_gate_failure": "round_failed_and_lineage_confirmation_failed",
+    "attempt_cap_exhausted_before_40_quality_valid_markets": "round_incomplete_treated_as_failed",
+    "paired_ask_coverage_below_0_95": "round_failed",
+    "missing_required_report_dimension": "round_failed",
+    "runtime_artifact_validation_failure": "fail_closed_before_evaluation",
+    "round_1_failure": "lineage_confirmation_failed_round_2_result_cannot_rescue",
+    "round_2_failure": "lineage_confirmation_failed",
+    "both_rounds_pass": "record_confirmatory_success_without_automatic_promotion_or_execution_unlock"
+  },
+  "no_rerun_rule": {
+    "maximum_confirmatory_evaluations_per_round": 1,
+    "rerun_after_gate_result_known_allowed": false,
+    "rerun_with_changed_seed_allowed": false,
+    "rerun_with_changed_market_set_allowed": false,
+    "technical_failure_before_result": "fail_closed_and_require_new_governance_review_not_automatic_rerun"
+  },
+  "state": {
+    "protocol_frozen": true,
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false,
+    "confirmatory_evaluation_started": false,
+    "confirmatory_rounds_completed": 0
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "#134_resume_allowed": false,
+  "#146_start_allowed": false,
+  "candidate_name": "abstention_aware_expected_net_pnl_v7_0",
+  "canonical_row_count": 1546,
+  "canonical_unique_market_count": 199,
+  "capital_at_risk": false,
+  "feature_timestamp_causality_violation_count": 0,
+  "fit_leakage_audit_passed": true,
+  "fit_leakage_blocking_reason_codes": [],
+  "fit_leakage_checks": {
+    "decision_time_feature_set_exact": true,
+    "feature_timestamp_causality_violation_count_zero": true,
+    "forbidden_inference_field_violation_count_zero": true,
+    "issue229_issue231_excluded": true,
+    "side_rules_disabled": true,
+    "targets_not_used_as_decision_inputs": true,
+    "validation_or_oof_pnl_not_used_for_tuning_or_gate": true
+  },
+  "forbidden_inference_field_violation_count": 0,
+  "freeze_ready": false,
+  "future_target_accessed": false,
+  "leakage_audit_id": "76962344a04b5b7da78e289f6939c2cac312a1f3c1efd3d6d77103425647355f",
+  "live_trading_enabled": false,
+  "paper_candidate_allowed": false,
+  "paper_only": true,
+  "polymarket_write_enabled": false,
+  "promotion_evidence_eligible": false,
+  "schema_version": "bigan-v8-abstention-aware-v7-0-fit-leakage-audit-v1",
+  "source_model_candidate_eligible": false,
+  "v8_execution_handoff_allowed": false,
+  "wallet_signing_enabled": false
+}

@@ -1,0 +1,60 @@
+{
+  "schema_version": "bigan-v8-execution-layer-v2-pnl-aligned-future-evaluation-protocol-v1",
+  "frozen": true,
+  "diagnostic_only": true,
+  "candidate_policy_name": "pnl_aligned_action_conditioned_net_value_v1",
+  "baseline_policy_name": "raw_market_probability_selected_o_action_baseline",
+  "baseline_action_source": "canonical_o_rank_1_action",
+  "baseline_edge_formula": "selected_side_market_probability - executable_entry_price - deterministic_decision_time_execution_cost",
+  "baseline_market_probability_is_calibrated_fair_value": false,
+  "decision_time_execution_cost_rule_id": "spread_queue_staleness_cost_proxy_v1",
+  "decision_time_execution_cost_formula": "min(0.05, 0.001 + max(spread_bps, 0) / 20000 + (1 - clip(queue_fill_proxy, 0, 1)) * 0.002 + min(max(book_staleness_ms, 0) / 1000, 1) * 0.001)",
+  "frozen_entry_edge_threshold": 0.02,
+  "accepted_bet_net_pnl_formula": "guard_proposed_order_size_contracts * guarded_action_total_net_pnl_per_notional",
+  "cost_basis_formula": "guard_proposed_order_size_contracts * (execution_price + guarded_action_execution_cost_per_contract)",
+  "chronological_drawdown_ordering": [
+    "market_close_ts",
+    "market_id",
+    "simulated_order_id"
+  ],
+  "market_bootstrap": {
+    "resample_count": 2000,
+    "seed": 20260715,
+    "confidence_level": 0.95,
+    "sampling_unit": "market_id",
+    "estimand": "candidate_minus_baseline_net_pnl"
+  },
+  "largest_winner_removal_required": true,
+  "future_evidence_gates": {
+    "minimum_unique_market_count": 30,
+    "minimum_accepted_bet_count": 30,
+    "minimum_accepted_bet_count_per_side": 10,
+    "candidate_net_pnl_must_be_positive": true,
+    "candidate_net_pnl_must_exceed_frozen_baseline": true,
+    "candidate_roi_must_be_positive": true,
+    "zero_forbidden_decision_field_violations_required": true,
+    "zero_missing_runtime_fields_required": true,
+    "zero_provenance_violations_required": true,
+    "all_accepted_bets_must_be_settled": true
+  },
+  "outcome_fields_used_for_shadow_selection": false,
+  "outcome_fields_used_for_evaluation_only": true,
+  "uses_future_outcomes_for_feature_selection": false,
+  "uses_future_outcomes_for_hyperparameter_selection": false,
+  "uses_future_outcomes_for_threshold_selection": false,
+  "uses_future_outcomes_for_guard_or_sizing_selection": false,
+  "source_o_score_mutation_allowed": false,
+  "source_ranking_mutation_allowed": false,
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "schema_version": "bigan-v8-source-execution-compatibility-v1",
+  "source_model_id": "frozen_v8_1_primary_source_scores",
+  "source_model_hash": "1565116daeb2f5d4d8c33fefa507276f59251edd5ffb5f4f313041bcf9dbb0ec",
+  "source_action_scores_are_read_only": true,
+  "target_or_outcome_inputs_allowed": false,
+  "required_decision_time_inputs": [
+    "market_id",
+    "decision_ts",
+    "source_model_hash",
+    "source_action_scores",
+    "uncertainty",
+    "opportunity_window_id",
+    "fill_quality_score",
+    "provider_health_score",
+    "provider_features_complete",
+    "kill_switch_active"
+  ],
+  "canonical_payload_contract_sha256": "d6b96c9d5d816c5a9b184cd884789e2a45d3c697b01219b23e9be124f57b00ca",
+  "feature_missingness_contract_sha256": "4eb9cb453a684170e3db64dd0db803f4f0e44055a105806368d48428b5d3a107",
+  "allowed_execution_policy_hashes": [
+    "70f016958cfb4525032692bd52c1027134989506a8f7d458fef990e9430a8b7d",
+    "e283c2166120f22ee47a481776d5efbfca86cb233ffe04d7c9d3be00786d795e",
+    "20f63f82141794b257f64bbbf93a0ae05660421b367486107af081d823711d97"
+  ]
+}

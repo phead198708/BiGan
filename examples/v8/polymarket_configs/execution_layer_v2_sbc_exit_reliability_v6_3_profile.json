@@ -1,0 +1,141 @@
+{
+  "schema_version": "bigan-v8-sbc-exit-reliability-v6-3-profile-v1",
+  "issue_number": 223,
+  "candidate_name": "sbc_exit_reliability_v6_3",
+  "frozen": true,
+  "source_lineage": {
+    "role_assignment_manifest_sha256": "517fa7cab370d75364cab9f37e45f7a8d1fc0ba8e36221b52367e725a002f470",
+    "role_assignment_rows_sha256": "5b123b094227996d982fa76a4e4d2ca1d38f6b3272f91c5be610bcfe65b27097",
+    "v5_freeze_manifest_sha256": "0d0927da515317d0576a04b6c4a9a5175f569225a85ebaf62020326fdc06510d"
+  },
+  "source_contract": {
+    "source_market_count": 195,
+    "eligible_corpus_root": "/Volumes/PHILIPS/v8/polymarket",
+    "eligible_max_decision_ts_exclusive": 1784553360000,
+    "role_market_counts_before_exclusion": {
+      "development_train": 90,
+      "development_calibration": 45,
+      "confirmatory_validation": 60
+    },
+    "role_market_counts_after_exclusion": {
+      "development_train": 89,
+      "development_calibration": 45,
+      "confirmatory_validation": 60
+    },
+    "schema_inspection_contaminated_market_ids": [
+      "0xa71218c89d97eddab2a938a778b34fcb869e6c06be568542429508f386922615"
+    ],
+    "schema_inspection_contaminated_slugs": [
+      "btc-updown-5m-1784230200"
+    ]
+  },
+  "explicitly_excluded_lineages": [
+    {
+      "run_id": "v6-2-bounded-paper-canary-position-lifecycle-20260720T131127Z",
+      "manifest_sha256": "7e79ef12cce3d2fc8f3f9d475d35cc72ef93a0b7657136b56207acb0ae06086b",
+      "reason": "issue_221_paper_canary_outcomes_and_pnl_excluded"
+    },
+    {
+      "run_id": "v6-2-bounded-paper-canary-position-lifecycle-settlement-reconciled-20260720T143948Z",
+      "manifest_sha256": "7582db4350b1385cf020eadb0702eb609acf089d62a2808cf3eb46e319b9b412",
+      "reason": "issue_221_settlement_reconciliation_excluded"
+    },
+    {
+      "run_id": "issue_204_strict_future_evaluation_lineage",
+      "reason": "future_validation_labels_excluded"
+    },
+    {
+      "run_id": "issue_212_future_evaluation_lineage",
+      "reason": "future_validation_labels_excluded"
+    },
+    {
+      "run_id": "issue_192_post_freeze_collections",
+      "reason": "future_collection_excluded_until_candidate_freeze"
+    }
+  ],
+  "label_contract": {
+    "target": "later_executable_sell_before_close_exit_available",
+    "positive_execution_class": "realizable_sell_before_close",
+    "required_label_schema_version": "bigan-v8-polymarket-sell-before-close-executable-exit-v1",
+    "future_intraround_orderbooks_allowed_in_label_stage_only": true,
+    "best_executable_exit_ts_must_be_after_decision_ts": true,
+    "fixed_terminal_bid_only_labels_allowed": false,
+    "outcome_or_settlement_required_for_target": false
+  },
+  "feature_contract": {
+    "common_required_features": [
+      "time_to_close_seconds",
+      "combined_spread_bps",
+      "liquidity_imbalance",
+      "book_snapshot_pair_ts_delta_ms",
+      "btc_return_30s",
+      "btc_return_1m",
+      "reference_price_to_beat_distance_at_decision"
+    ],
+    "side_required_feature_suffixes": [
+      "ask",
+      "bid",
+      "spread_bps",
+      "book_staleness_ms",
+      "queue_fill_probability_proxy",
+      "liquidity_depth",
+      "executable_ask_notional",
+      "executable_bid_notional",
+      "recent_book_update_count_1m",
+      "recent_bid_depth_volatility_1m",
+      "recent_spread_stability_1m"
+    ],
+    "composition_stage_features": {
+      "canonical_v6_2_score_and_margin": "attach_from_exact_frozen_v6_2_lineage",
+      "selected_side_probability": "attach_from_exact_frozen_v6_2_prediction",
+      "pre_entry_exposure_state": "derive_causally_from_prior_frozen_decisions"
+    },
+    "prohibited_decision_input_tokens": [
+      "outcome",
+      "settlement",
+      "resolution",
+      "label",
+      "target",
+      "realized",
+      "pnl",
+      "oracle",
+      "future",
+      "exit_path"
+    ]
+  },
+  "audit_support_gates": {
+    "minimum_eligible_market_count": 180,
+    "minimum_role_market_counts": {
+      "development_train": 80,
+      "development_calibration": 40,
+      "confirmatory_validation": 55
+    },
+    "minimum_sell_before_close_label_count_per_side": 600,
+    "minimum_positive_exit_label_count_per_side": 300,
+    "minimum_negative_exit_label_count_per_side": 100,
+    "minimum_markets_with_both_target_classes_per_side": 150,
+    "minimum_raw_exit_window_snapshot_coverage_rate": 0.7,
+    "maximum_feature_causality_violation_count": 0,
+    "maximum_label_causality_violation_count": 0,
+    "maximum_prohibited_feature_field_count": 0
+  },
+  "access_sequence": {
+    "lineage_manifest_must_be_written_before_label_content_access": true,
+    "label_content_hashing_before_access_is_allowed": true,
+    "audit_requires_exact_lineage_manifest_hash": true,
+    "fit_allowed_only_after_audit_gate_passes": true,
+    "schema_inspection_contamination_is_excluded": true
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}

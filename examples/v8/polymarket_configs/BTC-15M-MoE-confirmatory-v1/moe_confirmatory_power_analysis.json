@@ -1,0 +1,158 @@
+{
+  "schema_version": "bigan-btc-15m-moe-confirmatory-power-analysis-v1",
+  "analysis_id": "BTC-15M-MoE-confirmatory-v1-precollection-power",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v1",
+  "candidate_id": "mixture_of_experts",
+  "created_at": "2026-07-30T04:10:00+00:00",
+  "role": "planning_only_not_a_gate_not_promotion_evidence",
+  "inputs": {
+    "development_oof_predictions": {
+      "path": "examples/v8/polymarket_training_artifacts/BTC-15M-regime-adaptive-v1-development-evaluation/development_oof_predictions.jsonl",
+      "sha256": "d76640aa1550e3ab7bee32e3dd41be26d2ca156020c628bb85a8ae54a47b60f1"
+    },
+    "development_metric_reconciliation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_metric_reconciliation_report.json",
+      "sha256": "153cbcf3573b8ce0b8022c1faab4348193f245ac3de1a8b284c21d0a3d4c8028",
+      "reconciliation_passed": true
+    },
+    "development_market_count": 73,
+    "candidate_id": "mixture_of_experts",
+    "baseline_id": "global_baseline",
+    "NO_TRADE_value": 0.0,
+    "development_outcomes_were_already_open": true,
+    "new_outcomes_opened_for_analysis": 0
+  },
+  "gate_snapshot": {
+    "round_gate_canonical_sha256": "f8bea8ce766685083fcce32b9b67262873e9396683fd1ee594c6ae24a641b5f4",
+    "bootstrap_canonical_sha256": "bc768426d39274a3eea0458cee74c724721bc4dc80a9663f1bc03d589d0a431f",
+    "round_market_count": 40,
+    "bootstrap_confidence": 0.975,
+    "bootstrap_quantile": 0.025,
+    "confirmatory_bootstrap_resamples": 10000,
+    "number_of_confirmatory_rounds": 2,
+    "both_rounds_must_pass": true,
+    "gate_changed_by_power_analysis": false
+  },
+  "historical_paired_estimates": {
+    "moe": {
+      "total_unit_net_pnl": 4.372000000000001,
+      "mean_unit_net_pnl": 0.05989041095890412,
+      "sample_variance": 0.1695016475456621,
+      "sample_standard_deviation": 0.41170577788714857,
+      "expected_round_mean_variance_at_n_40": 0.004237541188641553,
+      "expected_round_mean_standard_error_at_n_40": 0.06509639919873873
+    },
+    "matched_global_baseline_proxy": {
+      "total_unit_net_pnl": 0.5320000000000005,
+      "mean_unit_net_pnl": 0.007287671232876719,
+      "sample_variance": 0.18845906192922376,
+      "sample_standard_deviation": 0.4341187187040243,
+      "expected_round_mean_variance_at_n_40": 0.004711476548230594,
+      "expected_round_mean_standard_error_at_n_40": 0.06864019630093283
+    },
+    "paired_delta_moe_minus_baseline": {
+      "total_unit_net_pnl": 3.84,
+      "mean_unit_net_pnl": 0.052602739726027394,
+      "sample_variance": 0.22409993895072303,
+      "sample_standard_deviation": 0.4733919506611018,
+      "expected_round_mean_variance_at_n_40": 0.005602498473768076,
+      "expected_round_mean_standard_error_at_n_40": 0.07484983950395668
+    }
+  },
+  "detectable_delta_planning_estimates": {
+    "method": "normal_approximation_using_historical_paired_delta_standard_deviation_and_one_sided_97_5pct_LCB",
+    "z_for_one_sided_97_5pct_LCB": 1.959963984540054,
+    "delta_for_approximately_50pct_crossing_probability": 0.14670298967635848,
+    "delta_for_approximately_80pct_crossing_probability": 0.20969820393241315,
+    "delta_for_approximately_90pct_crossing_probability": 0.24262691867341624,
+    "units": "mean_unit_net_pnl_delta_per_market",
+    "gate_or_round_target_change_implied": false
+  },
+  "bootstrap_lcb_crossing_probability_simulation": {
+    "method": "nested_empirical_market_bootstrap_on_centered_historical_paired_delta_residuals",
+    "simulation_seed": 2601501,
+    "outer_round_trials_per_scenario": 2000,
+    "planning_inner_bootstrap_resamples": 500,
+    "confirmatory_inner_bootstrap_resamples_remain": 10000,
+    "round_market_count": 40,
+    "lcb_quantile": 0.025,
+    "scenarios": [
+      {
+        "assumed_true_mean_delta": 0.0,
+        "rounds_with_lcb_gt_zero": 52,
+        "estimated_one_round_probability": 0.026,
+        "estimated_two_independent_round_probability": 0.000676
+      },
+      {
+        "assumed_true_mean_delta": 0.052602739726027394,
+        "scenario_name": "historical_development_paired_mean",
+        "rounds_with_lcb_gt_zero": 243,
+        "estimated_one_round_probability": 0.1215,
+        "estimated_two_independent_round_probability": 0.01476225
+      },
+      {
+        "assumed_true_mean_delta": 0.05,
+        "rounds_with_lcb_gt_zero": 247,
+        "estimated_one_round_probability": 0.1235,
+        "estimated_two_independent_round_probability": 0.01525225
+      },
+      {
+        "assumed_true_mean_delta": 0.1,
+        "rounds_with_lcb_gt_zero": 628,
+        "estimated_one_round_probability": 0.314,
+        "estimated_two_independent_round_probability": 0.098596
+      },
+      {
+        "assumed_true_mean_delta": 0.14670298967635848,
+        "scenario_name": "normal_approximate_50pct_detectable_delta",
+        "rounds_with_lcb_gt_zero": 1105,
+        "estimated_one_round_probability": 0.5525,
+        "estimated_two_independent_round_probability": 0.30525625
+      },
+      {
+        "assumed_true_mean_delta": 0.20969820393241315,
+        "scenario_name": "normal_approximate_80pct_detectable_delta",
+        "rounds_with_lcb_gt_zero": 1690,
+        "estimated_one_round_probability": 0.845,
+        "estimated_two_independent_round_probability": 0.714025
+      },
+      {
+        "assumed_true_mean_delta": 0.24262691867341624,
+        "scenario_name": "normal_approximate_90pct_detectable_delta",
+        "rounds_with_lcb_gt_zero": 1828,
+        "estimated_one_round_probability": 0.914,
+        "estimated_two_independent_round_probability": 0.835396
+      }
+    ]
+  },
+  "interpretation": {
+    "historical_development_delta_is_not_a_future_effect_claim": true,
+    "development_data_is_not_promotion_evidence": true,
+    "estimated_probability_covers_primary_delta_LCB_only": true,
+    "other_frozen_gates_can_only_reduce_overall_success_probability": true,
+    "two_round_probability_uses_independence_as_a_planning_approximation": true,
+    "planning_inner_bootstrap_is_lower_resolution_than_confirmatory_bootstrap": true,
+    "power_analysis_may_not_change_thresholds_round_count_or_market_targets": true,
+    "conclusion": "under_historical_variance_the_frozen_40_market_round_has_low_power_at_the_observed_development_delta"
+  },
+  "state": {
+    "planning_complete": true,
+    "gates_changed": false,
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}

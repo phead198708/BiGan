@@ -1,0 +1,30 @@
+{
+  "#134_resume_allowed": false,
+  "#146_start_allowed": false,
+  "candidate_name": "nested_training_only_boosted_action_value_v7_4",
+  "capital_at_risk": false,
+  "fit_leakage_audit_passed": true,
+  "fit_leakage_blocking_reason_codes": [],
+  "fit_leakage_checks": {
+    "all_134_historical_markets_used": true,
+    "feature_timestamp_causality": true,
+    "outer_oof_not_used_for_selection": true,
+    "outer_validation_target_isolation": true,
+    "prior_result_artifacts_not_opened": true,
+    "safety_blocked": true,
+    "same_decision_only": true
+  },
+  "freeze_ready": false,
+  "future_target_accessed": false,
+  "leakage_audit_id": "771b46ab5a93744cf2536c2467819dce9209357d3b85f2efb15e8637a097f2d4",
+  "live_trading_enabled": false,
+  "paper_candidate_allowed": false,
+  "paper_only": true,
+  "polymarket_write_enabled": false,
+  "prior_result_artifact_paths_accepted_by_config": false,
+  "promotion_evidence_eligible": false,
+  "schema_version": "bigan-v8-nested-boosted-action-value-v7-4-leakage-v1",
+  "source_model_candidate_eligible": false,
+  "v8_execution_handoff_allowed": false,
+  "wallet_signing_enabled": false
+}

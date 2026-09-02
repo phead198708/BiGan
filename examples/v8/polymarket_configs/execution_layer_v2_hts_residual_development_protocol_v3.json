@@ -1,0 +1,148 @@
+{
+  "baseline": {
+    "candidate_name": "raw_selected_side_market_probability",
+    "model_family": "identity_probability"
+  },
+  "candidate_specifications": [
+    {
+      "candidate_name": "hts_residual_chainlink_rank_anchor_offset",
+      "feature_names": [
+        "canonical_o_action_score",
+        "action_score_margin",
+        "chainlink_anchor_alignment"
+      ],
+      "maximum_absolute_residual_coefficient": 3.0,
+      "model_family": "market_probability_logit_offset_regularized_residual",
+      "regularization": 35.0
+    },
+    {
+      "candidate_name": "hts_residual_chainlink_overextension_offset",
+      "feature_names": [
+        "canonical_o_action_score",
+        "action_score_margin",
+        "chainlink_anchor_alignment",
+        "chainlink_anchor_overextension_abs",
+        "chainlink_realized_volatility_120s"
+      ],
+      "maximum_absolute_residual_coefficient": 3.0,
+      "model_family": "market_probability_logit_offset_regularized_residual",
+      "regularization": 45.0
+    },
+    {
+      "candidate_name": "hts_residual_chainlink_nonlinear_microstructure_offset",
+      "feature_names": [
+        "canonical_o_action_score",
+        "action_score_margin",
+        "chainlink_anchor_alignment",
+        "chainlink_anchor_overextension_abs",
+        "chainlink_realized_volatility_120s",
+        "selected_side_probability_minus_execution_price",
+        "log1p_spread_bps",
+        "queue_fill_shortfall",
+        "log1p_book_staleness_ms",
+        "late_window_pressure",
+        "side_book_depth_imbalance",
+        "anchor_alignment_x_price_value",
+        "spread_x_staleness_quality_penalty"
+      ],
+      "maximum_absolute_residual_coefficient": 3.0,
+      "model_family": "market_probability_logit_offset_regularized_residual",
+      "regularization": 75.0
+    }
+  ],
+  "collection_not_before_iso8601": "2026-07-14T10:00:00Z",
+  "collection_not_before_ts": 1784023200000,
+  "data_integrity_correction": {
+    "correction_defined_without_outcome_or_pnl_tuning": true,
+    "pre_fix_rows_allowed_for_candidate_fit": false,
+    "pre_fix_rows_allowed_for_support": false,
+    "reason_code": "phase2_book_mid_price_missing_caused_neutral_probability_fallback",
+    "supersedes_protocol_sha256": "a03ea9c0813dc0d2e2732220c238dc985e7b85d85018e0d499863395ee10fbec"
+  },
+  "decision_time_feature_contract": {
+    "btc_anchor_direction": {
+      "double_counting_allowed": false,
+      "output_feature": "chainlink_anchor_alignment",
+      "source_fields": [
+        "chainlink_momentum_30s",
+        "chainlink_momentum_60s",
+        "chainlink_momentum_120s",
+        "chainlink_reference_distance_at_decision"
+      ],
+      "transform": "selected_side_sign_times_median_of_available_source_returns"
+    },
+    "execution_quality": [
+      "log1p_spread_bps",
+      "queue_fill_shortfall",
+      "log1p_book_staleness_ms",
+      "late_window_pressure",
+      "side_book_depth_imbalance",
+      "spread_x_staleness_quality_penalty"
+    ],
+    "market_price_value": [
+      "selected_side_probability_minus_execution_price",
+      "anchor_alignment_x_price_value"
+    ],
+    "rank_signal": [
+      "canonical_o_action_score",
+      "action_score_margin"
+    ],
+    "reference_overextension": [
+      "chainlink_anchor_overextension_abs",
+      "chainlink_realized_volatility_120s"
+    ]
+  },
+  "development_evaluation_support": {
+    "both_resolved_outcomes_required": true,
+    "both_selected_sides_required": true,
+    "minimum_market_count": 60,
+    "minimum_source_run_count": 6
+  },
+  "development_gate": {
+    "bootstrap_confidence_level": 0.95,
+    "bootstrap_samples": 2000,
+    "bootstrap_seed": 20260714,
+    "bootstrap_market_mean_improvement_lower_bound_must_exceed_zero": true,
+    "finite_bounded_coefficients_required": true,
+    "minimum_relative_brier_improvement_vs_raw": 0.03,
+    "minimum_relative_log_loss_improvement_vs_raw": 0.03,
+    "positive_market_mean_brier_improvement_required": true
+  },
+  "excluded_smoke_corpus_ids": [
+    "btc-updown-5m-1784016300",
+    "btc-updown-5m-1784016600"
+  ],
+  "forward_oof_contract": {
+    "minimum_training_source_runs": 3,
+    "resampling_unit": "market_id",
+    "split_method": "strict_forward_chaining_by_source_run",
+    "validation_labels_used_for_candidate_tuning": false
+  },
+  "future_confirmatory_exactly_once_required": true,
+  "future_confirmatory_market_disjointness_required": true,
+  "future_confirmatory_validation_start_allowed": false,
+  "market_probability_mapping_contract": {
+    "formula": "up_midpoint / (up_midpoint + down_midpoint)",
+    "p_down_formula": "1 - p_up",
+    "rule_id": "phase2_complementary_book_midpoint_ratio_v1",
+    "source_fields": [
+      "up_bid",
+      "up_ask",
+      "down_bid",
+      "down_ask"
+    ],
+    "uses_future_or_settlement_fields": false
+  },
+  "market_probability_offset": {
+    "coefficient": 1.0,
+    "field": "selected_side_probability",
+    "trainable": false,
+    "transform": "logit"
+  },
+  "paper_live_promotion_unlock": false,
+  "protocol_frozen_before_new_development_collection": true,
+  "schema_version": "bigan-v8-hts-residual-development-protocol-v3",
+  "settlement_outcome_used_as_decision_input": false,
+  "settlement_outcome_used_as_training_target_only": true,
+  "uses_validation_labels_for_tuning": false
+}

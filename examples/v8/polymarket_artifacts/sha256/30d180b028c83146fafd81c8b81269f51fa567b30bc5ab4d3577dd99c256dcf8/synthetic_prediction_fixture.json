@@ -1,0 +1,76 @@
+{
+  "feature_names_sha256": "a61ef8953a2801d3e404d376261f306846cae5a4bf3ef3c97918572c48720e89",
+  "fixtures": [
+    {
+      "actual_model_used": "moe_expert_high_vol",
+      "default_feature_value": 0.0,
+      "execution_costs": [
+        0.45,
+        0.45
+      ],
+      "expected_accepted": true,
+      "expected_normalized_probabilities": [
+        0.5,
+        0.5
+      ],
+      "expected_raw_probabilities": [
+        0.4846046268939972,
+        0.4846046268939972
+      ],
+      "expected_scores": [
+        0.04999999999999999,
+        0.04999999999999999
+      ],
+      "expected_selected_side": "UP",
+      "expert_training_market_count": 46,
+      "feature_overrides": {
+        "btc_volatility_15m": 0.0005
+      },
+      "fixture_id": "high_vol_native_expert",
+      "route": "high_vol",
+      "router_inputs": {
+        "available_at_ts": 1000,
+        "btc_return_regime": "bearish",
+        "decision_ts": 1000,
+        "max_input_ts": 999,
+        "volatility_bucket": "high"
+      }
+    },
+    {
+      "actual_model_used": "global_baseline_fallback",
+      "default_feature_value": 0.0,
+      "execution_costs": [
+        0.45,
+        0.45
+      ],
+      "expected_accepted": true,
+      "expected_normalized_probabilities": [
+        0.5,
+        0.5
+      ],
+      "expected_raw_probabilities": [
+        0.38956573605537415,
+        0.38956573605537415
+      ],
+      "expected_scores": [
+        0.04999999999999999,
+        0.04999999999999999
+      ],
+      "expected_selected_side": "UP",
+      "expert_training_market_count": 18,
+      "feature_overrides": {
+        "btc_volatility_15m": 0.00035
+      },
+      "fixture_id": "low_vol_global_fallback",
+      "route": "low_vol",
+      "router_inputs": {
+        "available_at_ts": 2000,
+        "btc_return_regime": "sideways",
+        "decision_ts": 2000,
+        "max_input_ts": 1999,
+        "volatility_bucket": "medium"
+      }
+    }
+  ],
+  "schema_version": "bigan-btc-15m-moe-synthetic-fixtures-v1"
+}

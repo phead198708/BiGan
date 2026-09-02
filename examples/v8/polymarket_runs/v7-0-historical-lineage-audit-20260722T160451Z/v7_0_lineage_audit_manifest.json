@@ -1,0 +1,69 @@
+{
+  "#134_resume_allowed": false,
+  "#146_start_allowed": false,
+  "candidate_name": "abstention_aware_expected_net_pnl_v7_0",
+  "capital_at_risk": false,
+  "forbidden_future_outcome_artifacts_opened": false,
+  "freeze_ready": false,
+  "full_action_grid_manifest": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-merge/examples/v8/polymarket_runs/v8-accepted-bet-pnl-development-corpus-20260714T194120Z/hts_residual_new_development_corpus_manifest.json",
+    "sha256": "fa09998a8093d0f1eb5ec88672cde167bac339fe32b1626f9e35eedd4c0a3120"
+  },
+  "full_action_grid_rows": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-merge/examples/v8/polymarket_runs/v8-accepted-bet-pnl-development-corpus-20260714T194120Z/hts_residual_new_development_rows.jsonl",
+    "sha256": "fc20e07801743d7f62640bb3a99942ea43cf19e7f4b16770b80053886ae6043a"
+  },
+  "future_target_access_allowed": false,
+  "implementation_commit": "c391df519aac6f972292b978400c17c8b87fc9eb",
+  "issue229_selected_window_rows": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/regime-emergent-pnl-v6-8-confirmatory-freeze-20260722T035800Z/v6_8_confirmatory_selected_index_rows.jsonl",
+    "sha256": "8c1a5b92ccd4657bdd6d064cbc45af39d208d944c2b763419597500a7dde48fa"
+  },
+  "issue229_target_free_freeze_manifest": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/regime-emergent-pnl-v6-8-confirmatory-freeze-20260722T035800Z/v6_8_confirmatory_target_free_freeze_manifest.json",
+    "sha256": "186f82099ac2075e9c7f34411c68ef1655bddc7510e92426fb6b2ff82214dd80"
+  },
+  "issue231_selected_window_rows": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/calibration-scale-aligned-runtime-pnl-v6-9-confirmatory-freeze-20260722T153420Z/v6_9_confirmatory_selected_index_rows.jsonl",
+    "sha256": "90cd57f9aa557e264d34d14084c4e4d7811ecbc4f81b9e8799cde1e568e01bbb"
+  },
+  "issue231_target_free_freeze_manifest": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/calibration-scale-aligned-runtime-pnl-v6-9-confirmatory-freeze-20260722T153420Z/v6_9_confirmatory_target_free_freeze_manifest.json",
+    "sha256": "af9bb7a49f87c71c39e4708f89ac8a64c7657063d8ac08777df5496c1be721d2"
+  },
+  "issue_number": 232,
+  "lineage_audit": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/v7-0-historical-lineage-audit-20260722T160451Z/v7_0_lineage_and_exclusion_audit.json",
+    "sha256": "508740562d5682bb6b7f2ca9d4b66a9291b258e329f7a703ab7d6b69431df052"
+  },
+  "lineage_audit_blocking_reason_codes": [],
+  "lineage_audit_markdown": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/v7-0-historical-lineage-audit-20260722T160451Z/v7_0_lineage_and_exclusion_audit.md",
+    "sha256": "36e4e55734d703db9e8d0400e3b6988c15d5445b7c2e2c3c699527a27f6eb874"
+  },
+  "lineage_audit_passed": true,
+  "live_trading_enabled": false,
+  "manifest_id": "bce37bc9e4eb2cd0fc280488deb3f17e41abb419279cc1279d6236d19c7bda4e",
+  "model_fit_attempted": false,
+  "paper_candidate_allowed": false,
+  "paper_only": true,
+  "polymarket_write_enabled": false,
+  "profile": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_configs/execution_layer_v2_abstention_aware_expected_net_pnl_v7_0_profile.json",
+    "sha256": "7ff6e5d95f7502b0b07c188354cdbb09798e115cdf68d148ebc1e02f231db808"
+  },
+  "promotion_evidence_eligible": false,
+  "run_id": "v7-0-historical-lineage-audit-20260722T160451Z",
+  "runtime_target_manifest": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/runtime-aligned-sbc-v6-4-target-corpus-authoritative-20260720T160030Z/v6_4_runtime_aligned_target_manifest.json",
+    "sha256": "e08872532724ace0f84829342092f7cea721e4b6ae91e2b4d8e2974f55fdaab9"
+  },
+  "runtime_target_rows": {
+    "path": "/Volumes/PHILIPS/v8/polymarket_runtime_aligned/runtime-aligned-sbc-v6-4-target-corpus-authoritative-20260720T160030Z/runtime_aligned_sbc_net_return_rows.jsonl",
+    "sha256": "1565116daeb2f5d4d8c33fefa507276f59251edd5ffb5f4f313041bcf9dbb0ec"
+  },
+  "schema_version": "bigan-v8-abstention-aware-v7-0-lineage-manifest-v1",
+  "source_model_candidate_eligible": false,
+  "v8_execution_handoff_allowed": false,
+  "wallet_signing_enabled": false
+}

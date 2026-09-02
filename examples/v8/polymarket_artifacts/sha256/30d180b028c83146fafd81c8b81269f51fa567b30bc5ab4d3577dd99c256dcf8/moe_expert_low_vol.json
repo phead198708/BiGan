@@ -1,0 +1,8 @@
+{
+  "available": false,
+  "expert_id": "low_vol",
+  "frozen_behavior": "global_fallback",
+  "minimum_training_market_count": 20,
+  "schema_version": "bigan-btc-15m-moe-unavailable-expert-v1",
+  "training_market_count": 18
+}

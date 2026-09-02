@@ -1,0 +1,85 @@
+{
+  "schema_version": "bigan-v8-retained-v6-7-paper-readiness-profile-v1",
+  "issue_number": 252,
+  "candidate_name": "retained_v6_7_champion",
+  "frozen": true,
+  "preregistered_in_issue_before_implementation": true,
+  "champion_contract": {
+    "profile_sha256": "cec55d243acd6bbf60a5e8474545b487086ddcd4d18073682ae7f2d4660d2248",
+    "model_score_cost_sizing_threshold_and_guard_mutation_allowed": false,
+    "side_quota_enabled": false,
+    "regime_emergent_side_required": true
+  },
+  "evidence_inventory_contract": {
+    "issue238_manifest_sha256": "7cdaf04f61e02e2c0b829c2d5c6e4a159021cb71923d4326afc8a39e126f2e9f",
+    "issue250_manifest_sha256": "6ecb044f3fc34c4ebf2063412da71fe974f2f55f231fb8fa51418cf247d5ae26",
+    "issue251_manifest_sha256": "6c44b6d56ed9aeb6910bcbf32882e6b6c77a8f3e0ecfe445e4021ade7594da5b",
+    "future_windows_must_be_market_disjoint": true,
+    "future_window_identity_fields": [
+      "market_id",
+      "slug",
+      "decision_id",
+      "source_row_hash"
+    ],
+    "future_windows_must_be_chronological": true,
+    "target_free_freeze_must_precede_outcome_access": true,
+    "official_read_only_settlement_required": true,
+    "complete_settlement_required": true,
+    "decision_time_feature_causality_required": true
+  },
+  "power_design": {
+    "statistical_unit": "quality_valid_market_including_guard_blocked_zero",
+    "primary_estimand": "retained_v6_7_after_cost_pnl_per_quality_valid_market",
+    "completed_future_outcomes_used_for_variance_planning_only": true,
+    "completed_future_outcomes_used_for_model_or_threshold_tuning": false,
+    "completed_future_outcomes_used_as_promotion_pass": false,
+    "one_sided_alpha": 0.05,
+    "target_power": 0.8,
+    "minimum_relevant_mean_after_cost_pnl_per_market": 0.01,
+    "reported_mean_effect_sizes": [
+      0.005,
+      0.0075,
+      0.01,
+      0.0125
+    ],
+    "variance_floor_standard_deviation": 0.05,
+    "robustness_inflation_factor": 1.25,
+    "market_bootstrap_seed": 2522026,
+    "market_bootstrap_resample_count": 10000,
+    "market_bootstrap_one_sided_confidence_level": 0.95,
+    "planning_capture_quality_rate": 0.9,
+    "minimum_target_free_guard_acceptance_rate": 0.95,
+    "bounded_batch_market_count": 12,
+    "result_selected_sample_size_allowed": false,
+    "result_selected_extension_allowed": false
+  },
+  "forward_gate_contract": {
+    "strictly_later_and_disjoint_required": true,
+    "target_free_decision_freeze_required": true,
+    "all_selected_markets_closed_before_outcome_access": true,
+    "official_read_only_settlement_on_quarantine_copies": true,
+    "complete_settlement_required": true,
+    "total_after_cost_pnl_minimum_exclusive": 0.0,
+    "largest_winner_removed_after_cost_pnl_minimum_exclusive": 0.0,
+    "market_bootstrap_one_sided_lower_bound_minimum_exclusive": 0.0,
+    "one_evaluation_only": true,
+    "result_selected_rerun_allowed": false,
+    "paper_candidate_auto_unlock_allowed": false,
+    "separate_manual_paper_authorization_issue_required": true
+  },
+  "safety": {
+    "paper_only": true,
+    "paper_candidate_allowed": false,
+    "paper_loop_allowed": false,
+    "live_trading_enabled": false,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}

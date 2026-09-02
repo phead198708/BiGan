@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bigan-v8-feature-missingness-runtime-v1",
+  "type": "object",
+  "required": [
+    "recent_up_trade_volume",
+    "recent_up_trade_volume_missing",
+    "recent_up_trade_volume_coverage_complete",
+    "recent_down_trade_volume",
+    "recent_down_trade_volume_missing",
+    "recent_down_trade_volume_coverage_complete",
+    "trade_tape_missingness_reason",
+    "trade_tape_collection_mode",
+    "trade_tape_provider_source",
+    "trade_tape_provider_timeout",
+    "trade_tape_truncated",
+    "trade_tape_censored",
+    "trade_tape_historical_backfill",
+    "trade_tape_observation_window_start_ts",
+    "trade_tape_observation_window_end_ts",
+    "trade_tape_max_causal_input_ts",
+    "trade_tape_available_at_ts",
+    "trade_tape_collection_latency_ms",
+    "trade_tape_data_age_ms",
+    "trade_tape_observed_trade_count",
+    "provider_health_score"
+  ],
+  "properties": {
+    "recent_up_trade_volume": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "recent_down_trade_volume": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "recent_up_trade_volume_missing": {
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "recent_down_trade_volume_missing": {
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "recent_up_trade_volume_coverage_complete": {
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "recent_down_trade_volume_coverage_complete": {
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "trade_tape_collection_mode": {
+      "enum": [
+        "websocket",
+        "rest",
+        "timeout",
+        "backfill",
+        "mock"
+      ]
+    },
+    "trade_tape_missingness_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "trade_tape_provider_source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trade_tape_provider_timeout": {
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "trade_tape_truncated": {
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "trade_tape_censored": {
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "trade_tape_historical_backfill": {
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "trade_tape_observation_window_start_ts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trade_tape_observation_window_end_ts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trade_tape_max_causal_input_ts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trade_tape_available_at_ts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trade_tape_collection_latency_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trade_tape_data_age_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trade_tape_observed_trade_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "provider_health_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  },
+  "additionalProperties": true
+}

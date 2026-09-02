@@ -1,0 +1,59 @@
+{
+  "attempt_cap": 926,
+  "attestation_commit": null,
+  "authorization_validator_result": true,
+  "base_commit": "a37320d4f8aa8ccb8176132def6429c1127758ba",
+  "baseline_decision_rows": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_boundary_validation_fixture/baseline_decision_rows.jsonl",
+    "sha256": "6a4c9b58a088d87a488d628c542a3c34905fc173100364d7f94068d052ea1c71"
+  },
+  "candidate_bundle_hash": "fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807",
+  "candidate_bundle_unchanged": true,
+  "candidate_decision_rows": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_boundary_validation_fixture/candidate_decision_rows.jsonl",
+    "sha256": "bd49821b9ebedb703e5cf3c73e37ffdf5045d6a69cc92745ba8c8429d6d321b3"
+  },
+  "cap_exhaustion_result": "terminal_incomplete_failure",
+  "capture_manifest": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_boundary_validation_fixture/confirmatory_capture_manifest.json",
+    "sha256": "cc91a0447b7dd4dd13ecbd9dc5c1fa3cd6122a66e4c248ea2b8de0e91dc7b3eb"
+  },
+  "collection_did_not_start": true,
+  "created_at": "2026-07-30T14:00:00+00:00",
+  "exact_window_validator_result": true,
+  "executable_head_commit": "4451a03777fadc9d2daffe750275549b340f1936",
+  "fresh_outcome_opened": false,
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "normalized_attempt_ledger": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/collection_boundary_validation_fixture/normalized_attempt_ledger.jsonl",
+    "sha256": "d71c1395f6f8c4276418ece37a11f7dfdd1c5608939cd0c854b308c34a5d65c7"
+  },
+  "outcome_access_gate_result": true,
+  "regression_failure_ledger": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/regression_failure_ledger_r2.json",
+    "sha256": "adff2855488a4330729cab9fd740fad6951295de8894ab31bb5f621f611ba7a6"
+  },
+  "regression_required_condition_passed": true,
+  "revision_id": "BTC-15M-MoE-confirmatory-v2-collection-boundary-r2",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-final-boundary-hardening-r2",
+  "state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "target_market_count": 800,
+  "validation_fixture_only": true
+}

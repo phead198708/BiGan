@@ -1,0 +1,94 @@
+{
+  "schema_version": "bigan-v8-runtime-aligned-sbc-net-return-v6-4-profile-v1",
+  "issue_number": 224,
+  "candidate_name": "runtime_aligned_sbc_net_return_v6_4",
+  "frozen": true,
+  "source_lineage": {
+    "issue_223_pre_target_lineage_manifest_sha256": "cc9499e607b8529ecfc6046c1d7001404ce9809344e1648e71daca5b95f3a83b",
+    "issue_223_lineage_rows_sha256": "0be3d7b16a41c9fc35ab95a7361026df0996a4bce41d674bce900b217d17a70a",
+    "v6_2_historical_manifest_sha256": "a76f74484607b524415ef1bb25836d97fbf62b2b9c7f661c001516e3f14be269",
+    "v6_2_target_free_guard_replay_sha256": "c064ec61d958f194d00f58c1ec10ee2858545847647df47bf5cc4f95439e0a05",
+    "v6_2_source_model_sha256": "7e292852673fe2072017effc2d40fce000be81734f0c8c3d6950c02e957bcf0c"
+  },
+  "development_roles": {
+    "model_fit": "development_train",
+    "model_fit_market_count": 89,
+    "conformal_calibration": "development_calibration",
+    "conformal_calibration_market_count": 45,
+    "total_market_count": 134,
+    "historical_oof_role_excluded": "confirmatory_validation",
+    "historical_oof_market_count_excluded": 60,
+    "market_disjoint": true,
+    "chronological": true
+  },
+  "runtime_policy_contract": {
+    "paper_position_size": 0.2,
+    "intended_exit_policy": "sell_before_close",
+    "exit_policy_source": "paper_only_adapter_heuristic_v1",
+    "exit_rule_id": "legacy_adapter_first_causal_guard_quality_sell_signal_v1",
+    "exit_force_seconds_to_close": 60.0,
+    "exit_edge_threshold": -0.02,
+    "exit_profit_target": 0.05,
+    "exit_quality_guard": {
+      "max_spread_bps": 1000.0,
+      "max_book_staleness_ms": 2000.0,
+      "min_queue_fill": 0.5
+    },
+    "source_function_sha256": {
+      "paper_position_lifecycle": "afa9ae11555a32652d8df072ea202d79f4bc66eaee42b5c44be6d953c1db5152",
+      "sell_before_close_exit_candidates": "e0afb2688d788c65146aa81aae092c5a74248d265c54a1e66a37cd8c0af69e43",
+      "sell_before_close_exit_blockers": "184ef5a190c4d197bb2edad032d524f7da6189448acf7426cee4bf1db782050b",
+      "fresh_paper_adapter_sell_decision": "0d07f2800347c5297d90115d52d42129ead41ef84222f872addf35efb80655d9",
+      "v8_execution_guard_config": "756275b84cd792342df60d9be54455893a35e6b0d06976a32ce7e150cb5d219c"
+    }
+  },
+  "target_contract": {
+    "primary_target": "runtime_policy_after_cost_net_pnl_per_contract",
+    "frozen_size_target": "runtime_policy_after_cost_net_pnl_at_frozen_size",
+    "closed_position_terminal_value_source": "first_causal_guard_quality_sell_position_executable_bid",
+    "residual_position_terminal_value_source": "official_read_only_resolved_outcome_payout",
+    "cost_fields_subtracted_exactly_once": [
+      "fees",
+      "slippage",
+      "liquidity_impact"
+    ],
+    "execution_price_crossing_embedded_in_entry_ask_and_exit_bid": true,
+    "future_fields_allowed_only_in_target_stage": true,
+    "settlement_timestamp_required": false,
+    "target_used_as_decision_time_input": false
+  },
+  "support_gates": {
+    "expected_rows_per_market": 8,
+    "minimum_train_residual_rows_per_side": 10,
+    "minimum_calibration_residual_rows_per_side": 5,
+    "minimum_train_closed_rows_per_side": 20,
+    "minimum_calibration_closed_rows_per_side": 10,
+    "minimum_unique_markets_per_role_and_side": 40,
+    "require_positive_and_negative_target_rows_per_role_and_side": true
+  },
+  "external_training_corpus_root": "/Volumes/PHILIPS/v8",
+  "access_policy": {
+    "freeze_lineage_before_target_content_access": true,
+    "fit_stage_roles_only": [
+      "development_train",
+      "development_calibration"
+    ],
+    "issue_223_oof_opened": false,
+    "issue_212_future_outcomes_opened": false,
+    "issue_221_paper_outcomes_opened": false,
+    "issue_192_prefreeze_rows_opened": false,
+    "new_future_holdout_outcomes_opened": false
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}

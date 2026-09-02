@@ -1,0 +1,47 @@
+{
+  "schema_version": "bigan-v8-parallel-candidate-protocol-v1",
+  "issue": 254,
+  "family_id": "v8-high-signal-vs-fallback-2026q3",
+  "candidate_order": [
+    "v8_1_primary_no_fallback",
+    "v8_3_primary_with_fallback",
+    "matched_frozen_v6_7"
+  ],
+  "shared_window": {
+    "strictly_later": true,
+    "single_use": true,
+    "same_source_rows_for_all_candidates": true,
+    "source_row_schema_version": "bigan-v8-parallel-shared-source-row-v1",
+    "selection_rule": "chronological_earliest_quality_valid_after_freeze_boundary",
+    "result_dependent_extension_allowed": false,
+    "candidate_replacement_allowed": false,
+    "threshold_change_allowed": false,
+    "rerun_allowed": false
+  },
+  "statistical_gate": {
+    "minimum_total_support": 40,
+    "candidate_total_after_cost_pnl_minimum_exclusive": 0,
+    "candidate_minus_baseline_after_cost_pnl_minimum_exclusive": 0,
+    "candidate_minus_baseline_bootstrap_lcb_minimum_exclusive": 0,
+    "largest_winner_removed_after_cost_pnl_minimum_exclusive": 0,
+    "bootstrap_unit": "market_id",
+    "bootstrap_resample_count": 5000,
+    "bootstrap_seed": 2542026,
+    "insufficient_support_rule": "terminal_insufficient_support_no_extension"
+  },
+  "multiplicity": {
+    "familywise_window_alpha": 0.025,
+    "method": "bonferroni",
+    "parallel_tested_candidate_count": 2,
+    "per_candidate_alpha": 0.0125
+  },
+  "winner_selection_rule": "highest_adjusted_candidate_minus_baseline_lcb_then_total_pnl_then_candidate_id",
+  "access_sequence": [
+    "freeze_protocol_contracts_and_source_rows",
+    "freeze_all_candidate_decisions",
+    "write_single_use_target_access_claim",
+    "read_official_settlement",
+    "evaluate_all_candidates_without_mutation"
+  ],
+  "permissions_granted_by_protocol": []
+}

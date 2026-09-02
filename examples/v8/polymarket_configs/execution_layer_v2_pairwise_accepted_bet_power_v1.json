@@ -1,0 +1,55 @@
+{
+  "schema_version": "bigan-v8-pairwise-accepted-bet-power-design-v1",
+  "frozen": true,
+  "statistical_unit": "unique_accepted_bet_market",
+  "primary_estimand": "candidate_minus_frozen_baseline_post_cost_net_pnl_per_unique_market",
+  "one_sided_alpha": 0.05,
+  "reported_power_levels": [
+    0.8,
+    0.9
+  ],
+  "reported_standardized_effect_sizes": [
+    0.2,
+    0.25,
+    0.3,
+    0.35,
+    0.4
+  ],
+  "accepted_market_rate_scenarios": [
+    0.4,
+    0.5,
+    0.6
+  ],
+  "capture_quality_rate_scenarios": [
+    0.65,
+    0.7,
+    0.73
+  ],
+  "robustness_inflation_factor": 1.25,
+  "recommended_design": {
+    "target_power": 0.9,
+    "minimum_relevant_standardized_effect_size": 0.35,
+    "planning_accepted_market_rate": 0.4,
+    "planning_capture_quality_rate": 0.65,
+    "maximum_capture_attempt_rounding_multiple": 10
+  },
+  "current_design_reference": {
+    "quality_valid_market_count": 60,
+    "planning_accepted_unique_market_count": 30,
+    "purpose": "power_comparison_only_not_tuning"
+  },
+  "uses_current_oof_validation_or_confirmatory_pnl": false,
+  "uses_realized_candidate_pnl_for_design": false,
+  "collection_stop_rule": "earliest_quality_valid_markets_or_fixed_maximum_attempts",
+  "result_dependent_extension_allowed": false,
+  "paper_only": true,
+  "capital_at_risk": false,
+  "polymarket_write_enabled": false,
+  "wallet_signing_enabled": false,
+  "source_model_candidate_eligible": false,
+  "freeze_ready": false,
+  "promotion_evidence_eligible": false,
+  "v8_execution_handoff_allowed": false,
+  "#134_resume_allowed": false,
+  "#146_start_allowed": false
+}

@@ -1,0 +1,33 @@
+{
+  "schema_version": "bigan-content-addressed-model-bundle-manifest-v1",
+  "bundle_sha256": "8b7fc96af7f23c1e658cb816fc7d58028c71a9d530d2193bad9b2088547ffbcc",
+  "bundle_identity": {
+    "schema_version": "bigan-content-addressed-model-bundle-v1",
+    "artifacts": [
+      {
+        "filename": "model.json",
+        "role": "legacy_v7_model_metadata",
+        "sha256": "9e171d5eb848b7a78faa2ce9b32b0359832e146a3cc67074aa6f3233e7bf4e99"
+      },
+      {
+        "filename": "settlement_model.json",
+        "role": "legacy_v7_settlement_model",
+        "sha256": "e01dffd1bf35cf6dbe6e994bdefca3db7c1da7146cf98f75ff6d4907c636b1f5"
+      },
+      {
+        "filename": "settlement_residual_model.json",
+        "role": "legacy_v7_settlement_residual_model",
+        "sha256": "c75cf7ce5f33a72192a0cb33686dd81206ca2470d8c061c2a70223af5ab8922b"
+      }
+    ]
+  },
+  "dependency_graph": {
+    "model.json": {
+      "settlement.path": "settlement_model.json",
+      "settlement_residual.path": "settlement_residual_model.json"
+    }
+  },
+  "path_resolution": "dependencies_resolve_relative_to_verified_bundle_directory",
+  "development_only_forever": true,
+  "promotion_evidence_eligible": false
+}

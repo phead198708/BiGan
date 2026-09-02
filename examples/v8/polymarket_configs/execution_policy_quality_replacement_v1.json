@@ -1,0 +1,23 @@
+{
+  "schema_version": "bigan-v8-execution-policy-fixture-v1",
+  "candidate_id": "fill_quality_replacement_v1",
+  "description": "Queue-quality-aware selection with fixed-risk position replacement",
+  "constraints": {
+    "minimum_source_score": 0.05,
+    "maximum_uncertainty": 0.3,
+    "minimum_fill_quality_score": 0.8,
+    "minimum_provider_health_score": 0.8,
+    "maximum_opportunities_per_window": 3,
+    "global_exposure_cap": 0.6,
+    "per_side_exposure_cap": 0.4,
+    "per_market_exposure_cap": 0.2,
+    "reentry_cooldown_ms": 300000,
+    "replacement_enabled": true,
+    "replacement_minimum_score_uplift": 0.04,
+    "paper_notional_per_position": 0.2,
+    "partial_sizing_allowed": false
+  },
+  "source_scores_read_only": true,
+  "paper_only": true,
+  "capital_at_risk": false
+}

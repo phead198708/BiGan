@@ -1,0 +1,118 @@
+{
+  "schema_version": "bigan-v8-execution-layer-v2-cross-fitted-family-lcb-protocol-v1",
+  "candidate_name": "market_grouped_cross_fitted_family_lcb_v1",
+  "frozen": true,
+  "decision_time_safe": true,
+  "uses_prior_validation_or_future_labels_for_tuning": false,
+  "role_assignment": {
+    "method": "earliest_capture_quality_valid_unique_markets_chronological_v1",
+    "development_train_market_count": 40,
+    "development_calibration_market_count": 20,
+    "confirmatory_validation_market_count": 30,
+    "target_valid_market_count": 90,
+    "initial_capture_attempt_count": 100,
+    "maximum_total_capture_attempt_count": 120,
+    "outcome_blind_role_assignment": true,
+    "replacement_only_for_capture_quality_failure": true
+  },
+  "collector_contract": {
+    "market_family": "btc_updown_5m",
+    "orderbook_source_priority": "clob_websocket_primary_rest_fallback",
+    "orderbook_snapshot_interval_seconds": 30.0,
+    "public_provider_timeout_seconds": 330.0,
+    "public_provider_http_timeout_seconds": 5.0,
+    "settlement_poll_interval_seconds": 15.0,
+    "settlement_grace_seconds": 1200.0,
+    "chainlink_rtds_warmup_seconds": 60.0,
+    "chainlink_rtds_stale_reconnect_seconds": 15.0,
+    "training_corpus_root": "/Volumes/PHILIPS/v8",
+    "per_round_raw_evidence_required": true,
+    "asynchronous_settlement_required": true
+  },
+  "actions": [
+    "BUY_UP_HOLD_TO_SETTLEMENT",
+    "BUY_DOWN_HOLD_TO_SETTLEMENT",
+    "BUY_UP_SELL_BEFORE_CLOSE",
+    "BUY_DOWN_SELL_BEFORE_CLOSE",
+    "NO_TRADE"
+  ],
+  "trade_families": [
+    "HOLD_TO_SETTLEMENT",
+    "SELL_BEFORE_CLOSE"
+  ],
+  "cross_fit_protocol": {
+    "fold_count": 5,
+    "group_key": "market_id",
+    "fold_assignment": "chronological_contiguous_market_groups",
+    "fit_split": "development_train_only",
+    "fixed_model_family": "deterministic_regularized_family_specific_xgboost_regression",
+    "objective": "reg:squarederror",
+    "eval_metric": "rmse",
+    "num_boost_round": 100,
+    "max_depth": 2,
+    "eta": 0.03,
+    "min_child_weight": 12.0,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "lambda": 25.0,
+    "alpha": 2.0,
+    "seed": 20260715,
+    "nthread": 1,
+    "verbosity": 0
+  },
+  "conformal_lcb_protocol": {
+    "source_split": "development_calibration_only",
+    "residual_definition": "raw_prediction_minus_realized_cost_aware_net_return",
+    "one_sided_quantile": 0.8,
+    "grouping": "action_family",
+    "decision_score": "raw_expected_net_return_minus_family_residual_quantile",
+    "affine_calibration_enabled": false,
+    "minimum_calibration_rows_per_family": 40
+  },
+  "frozen_execution_contract": {
+    "entry_edge_threshold": 0.02,
+    "entry_edge_threshold_source": "preexisting_execution_layer_v2_entry_ev_threshold_default",
+    "execution_guard_mutation_allowed": false,
+    "order_sizing_mutation_allowed": false,
+    "cost_model_mutation_allowed": false
+  },
+  "confirmatory_validation_gates": {
+    "required_unique_market_count": 30,
+    "minimum_accepted_bet_count": 15,
+    "minimum_accepted_bet_count_per_side": 5,
+    "minimum_accepted_bet_count_per_family": 5,
+    "all_accepted_bets_must_be_settled": true,
+    "candidate_net_pnl_must_be_positive": true,
+    "candidate_roi_must_be_positive": true,
+    "candidate_net_pnl_must_exceed_frozen_baseline": true,
+    "zero_role_overlap_required": true,
+    "zero_prior_market_overlap_required": true,
+    "zero_provenance_violations_required": true,
+    "zero_forbidden_inference_field_violations_required": true,
+    "zero_missing_runtime_fields_required": true,
+    "market_bootstrap_interval_required": true,
+    "leave_one_market_out_required": true,
+    "largest_winner_removal_required": true
+  },
+  "future_evidence_gates": {
+    "minimum_unique_market_count": 30,
+    "minimum_accepted_bet_count": 30,
+    "minimum_accepted_bet_count_per_side": 10,
+    "candidate_net_pnl_must_be_positive": true,
+    "candidate_roi_must_be_positive": true,
+    "candidate_net_pnl_must_exceed_frozen_baseline": true,
+    "all_accepted_bets_must_be_settled": true
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}

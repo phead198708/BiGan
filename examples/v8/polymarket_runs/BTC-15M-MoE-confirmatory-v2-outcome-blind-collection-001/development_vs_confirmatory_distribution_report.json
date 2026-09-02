@@ -1,0 +1,179 @@
+{
+  "bucket_cutoffs_frozen_from_development_features": {
+    "combined_spread_bps": {
+      "lower": 436.7289005349933,
+      "upper": 692.6406926406918
+    },
+    "time_to_close_seconds": {
+      "lower": 600.0,
+      "upper": 600.0
+    },
+    "total_liquidity_depth": {
+      "lower": 43706.18666666666,
+      "upper": 78184.08
+    }
+  },
+  "candidate_bundle_hash": "fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807",
+  "collection_stop_or_change_allowed": false,
+  "confirmatory": {
+    "liquidity_bucket_distribution": {
+      "counts": {
+        "high": 2,
+        "medium": 5
+      },
+      "percentages": {
+        "high": 28.571428571428573,
+        "medium": 71.42857142857143
+      }
+    },
+    "market_regime_distribution": {
+      "counts": {
+        "bullish": 4,
+        "sideways": 3
+      },
+      "percentages": {
+        "bullish": 57.142857142857146,
+        "sideways": 42.857142857142854
+      }
+    },
+    "router_distribution": {
+      "bearish_route_percentage": 0.0,
+      "bullish_route_percentage": 57.142857142857146,
+      "counts": {
+        "bullish": 4,
+        "low_vol": 3
+      },
+      "fallback_percentage": 42.857142857142854,
+      "high_vol_route_percentage": 0.0,
+      "low_vol_route_percentage": 42.857142857142854
+    },
+    "spread_bucket_distribution": {
+      "counts": {
+        "high": 1,
+        "low": 6
+      },
+      "percentages": {
+        "high": 14.285714285714286,
+        "low": 85.71428571428571
+      }
+    },
+    "time_to_close_bucket_distribution": {
+      "counts": {
+        "low": 7
+      },
+      "percentages": {
+        "low": 100.0
+      }
+    },
+    "volatility_bucket_distribution": {
+      "counts": {
+        "low": 3,
+        "medium": 4
+      },
+      "percentages": {
+        "low": 42.857142857142854,
+        "medium": 57.142857142857146
+      }
+    }
+  },
+  "confirmatory_market_count": 7,
+  "created_at": "2026-07-30T10:28:45.920961+00:00",
+  "development": {
+    "liquidity_bucket_distribution": {
+      "counts": {
+        "high": 38,
+        "low": 38,
+        "medium": 37
+      },
+      "percentages": {
+        "high": 33.6283185840708,
+        "low": 33.6283185840708,
+        "medium": 32.743362831858406
+      }
+    },
+    "market_regime_distribution": {
+      "counts": {
+        "bearish": 54,
+        "bullish": 48,
+        "sideways": 11
+      },
+      "percentages": {
+        "bearish": 47.78761061946903,
+        "bullish": 42.47787610619469,
+        "sideways": 9.734513274336283
+      }
+    },
+    "router_distribution": {
+      "bearish_route_percentage": 35.39823008849557,
+      "bullish_route_percentage": 24.778761061946902,
+      "counts": {
+        "bearish": 40,
+        "bullish": 28,
+        "high_vol": 36,
+        "low_vol": 9
+      },
+      "fallback_percentage": 7.964601769911504,
+      "high_vol_route_percentage": 31.858407079646017,
+      "low_vol_route_percentage": 7.964601769911504
+    },
+    "spread_bucket_distribution": {
+      "counts": {
+        "high": 35,
+        "low": 40,
+        "medium": 38
+      },
+      "percentages": {
+        "high": 30.97345132743363,
+        "low": 35.39823008849557,
+        "medium": 33.6283185840708
+      }
+    },
+    "time_to_close_bucket_distribution": {
+      "counts": {
+        "low": 113
+      },
+      "percentages": {
+        "low": 100.0
+      }
+    },
+    "volatility_bucket_distribution": {
+      "counts": {
+        "high": 36,
+        "low": 43,
+        "medium": 34
+      },
+      "percentages": {
+        "high": 31.858407079646017,
+        "low": 38.05309734513274,
+        "medium": 30.088495575221238
+      }
+    }
+  },
+  "development_market_count": 113,
+  "diagnostic_only": true,
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "monitoring_influences_collection": false,
+  "monitoring_influences_collection_decisions": false,
+  "monitoring_influences_model": false,
+  "monitoring_only": true,
+  "outcomes_accessed": false,
+  "pnl_accessed": false,
+  "promotion_evidence_eligible": false,
+  "role": "outcome_free_diagnostic_only",
+  "route_filtering_allowed": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-development-vs-confirmatory-distribution-v1",
+  "settlement_accessed": false
+}

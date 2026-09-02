@@ -1,0 +1,83 @@
+{
+  "attempt_id": "v8-1-challenger-future-attempt-002",
+  "candidate_id": "v8_1_entry_price_floor_0_30_sized_1_0",
+  "current_state": {
+    "collection_started": false,
+    "collector_pid": null,
+    "operator_authorization_present": false,
+    "outcomes_resolution_labels_or_pnl_opened": false,
+    "quality_valid_market_count": 0,
+    "service_root_created": false,
+    "target_freeze_executed": false
+  },
+  "execution_contract": {
+    "candidate_fixed_position_size": 1.0,
+    "candidate_scoring_during_raw_capture": false,
+    "collector_index_change_during_freeze_allowed": false,
+    "earliest_exact_quality_valid_market_count": 120,
+    "historical_development_data_used_as_future_evidence": false,
+    "manual_decision_rows_required": false,
+    "matched_baseline_fixed_position_size": 0.2,
+    "postcollection_target_free_scoring_allowed": true,
+    "raw_artifact_hash_verification_required": true,
+    "settlement_or_resolution_provider_called": false,
+    "target_access_claim_written": false
+  },
+  "implementation": {
+    "commit": "c1318cd83a1019662cfa797f65796722f02556a0",
+    "module_sha256": "99f42096284b2d0f1c95da43cfd1ffd553997fcf869433a0c21a9b98bc2b59c2",
+    "runbook_sha256": "bede101c113a4075eff4d1d5d1020a5a45e2bdbbc61dbfc61d193c7de772a6d8",
+    "runner_sha256": "c6c8cd7927fe837871e5e70ddb188bfd6febf06488b765ae86c9c2dcb4e6cb8e",
+    "test_sha256": "8ef50532db0811a57e8a896ea2a78513e9aac70c8139683eec0c76d2f04ead8c"
+  },
+  "lineage": {
+    "attempt_002_collection_execution_manifest_sha256": "6864cb2845c456aea1d65dd401a493aeaaaac432b803170125deeb0fb9ef2d5e",
+    "attempt_002_preregistration_sha256": "0fa091610966a3a3470872a7e1b5832c8a32985fc312235366ad41aa891f249f",
+    "entry_price_floor_profile_sha256": "ea54d339c3ead15188a5fe1ede947e20e8f82cb422418f34a11277633180305e",
+    "feature_contract_sha256": "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959",
+    "frozen_model_binding_sha256": "64fa0f227ce97ec8ea238c3d8285d55efd96be65c95bf7c091aa95c1c185ccfd",
+    "historical_v8_1_fit_manifest_sha256": "3fff5785a53cb32fb26d839786e3f48c2ff2bd7cc9dcf84e801c916a6ebb0fb7",
+    "sizing_profile_sha256": "b04b25fb7dfad6a8949bd630f407abb156128ba59e33682816846344f1c130ff",
+    "v6_2_candidate_manifest_sha256": "b9441b04fb595a927cbf9af9311612b037c36fc8c623ac8a92b6f4cb8ece84b9",
+    "v8_1_candidate_contract_sha256": "b06919aadbea6821f44c1decf4f488fd3e34fc2612a115466caad3fe6173ad90"
+  },
+  "model_version": "v8.1",
+  "output_contract": {
+    "canonical_candidate_and_baseline_decisions": true,
+    "canonical_target_free_pairs": true,
+    "collector_index_snapshot_required": true,
+    "decision_time_feature_rows_retained": true,
+    "exact_market_grid_reconciliation_required": true,
+    "hash_indexed_manifest_required": true,
+    "native_v8_1_decisions_retained_for_supplemental_evidence": true,
+    "shared_source_rows_retained": true
+  },
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-attempt-002-target-freeze-execution-manifest-v1",
+  "synthetic_verification": {
+    "candidate_entry_price_filter_and_sizing_exercised": true,
+    "collection_or_network_invoked": false,
+    "exact_120_pair_freeze_passed": true,
+    "market_order_tamper_fails_closed": true,
+    "outcome_field_tamper_fails_closed": true,
+    "premature_decision_freeze_fails_closed": true,
+    "promotion_evidence_eligible": false,
+    "real_future_evidence": false
+  },
+  "validation": {
+    "artifact_checks_failed": 0,
+    "focused_related_test_count": 196,
+    "focused_related_tests_passed": true,
+    "ruff_passed": true,
+    "static_semantic_checks_failed": 0
+  }
+}

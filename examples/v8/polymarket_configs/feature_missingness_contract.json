@@ -1,0 +1,78 @@
+{
+  "schema_version": "bigan-v8-feature-missingness-contract-artifact-v1",
+  "feature_contract_version": "bigan-v8-feature-missingness-v1",
+  "issue": 257,
+  "provider_dependent_feature_fields": [
+    "value",
+    "availability_flag",
+    "coverage_complete_flag",
+    "missingness_reason",
+    "provider_source",
+    "collection_mode",
+    "collection_latency_ms",
+    "data_age_ms",
+    "truncated",
+    "censored",
+    "observation_window_start_ts",
+    "observation_window_end_ts",
+    "max_causal_input_ts",
+    "available_at_ts"
+  ],
+  "trade_volume_features": [
+    "recent_up_trade_volume",
+    "recent_up_trade_volume_missing",
+    "recent_up_trade_volume_coverage_complete",
+    "recent_down_trade_volume",
+    "recent_down_trade_volume_missing",
+    "recent_down_trade_volume_coverage_complete",
+    "trade_tape_collection_mode",
+    "trade_tape_provider_timeout",
+    "trade_tape_truncated",
+    "trade_tape_censored",
+    "provider_health_score"
+  ],
+  "collection_modes": [
+    "websocket",
+    "rest",
+    "timeout",
+    "backfill",
+    "mock"
+  ],
+  "rules": {
+    "unknown_or_incomplete_value": null,
+    "missing_encoded_as_zero": false,
+    "true_zero_requires_complete_coverage": true,
+    "available_at_must_not_exceed_decision_ts": true,
+    "historical_backfill_available_to_earlier_decisions": false,
+    "timeout_truncation_censor_or_backfill_can_be_complete": false,
+    "provider_health_can_bypass_execution_safety": false,
+    "future_candidate_missing_metadata_behavior": "fail_closed",
+    "legacy_frozen_artifact_rewrite_allowed": false
+  },
+  "diagnostics": [
+    "primary_candidate_selection",
+    "fallback_selection",
+    "no_trade",
+    "execution_guard_rejection",
+    "side_composition",
+    "action_family_composition",
+    "feature_null_zero_positive_distribution"
+  ],
+  "safety": {
+    "settlement_used_at_decision_time": false,
+    "outcome_used_at_decision_time": false,
+    "pnl_used_at_decision_time": false,
+    "future_information_used_at_decision_time": false,
+    "paper_candidate_unlocked": false,
+    "promotion_unlocked": false,
+    "live_unlocked": false,
+    "write_enabled": false,
+    "wallet_enabled": false,
+    "capital_at_risk": false,
+    "handoff_enabled": false,
+    "source_change_enabled": false,
+    "freeze_change_enabled": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}

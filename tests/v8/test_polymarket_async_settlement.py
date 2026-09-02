@@ -16,10 +16,18 @@ from bigan.v8.polymarket.recorder import (
     finalize_polymarket_pending_round,
 )
 from bigan.v8.polymarket.recorder.btc_reference import mock_btc_feature_candle_rows
+from bigan.v8.polymarket.recorder.chainlink_rtds import (
+    CHAINLINK_RTDS_CORPUS_FILENAME,
+    CHAINLINK_RTDS_CORPUS_MANIFEST_FILENAME,
+    CHAINLINK_RTDS_RAW_FILENAME,
+)
 from bigan.v8.polymarket.recorder.market_discovery import discover_mock_market_rows
 from bigan.v8.polymarket.recorder.orderbook_state import (
     mock_orderbook_rows,
     mock_trade_rows,
+)
+from bigan.v8.polymarket.recorder.public_provider import (
+    RealCorpusPublicProviderError,
 )
 
 
@@ -40,10 +48,365 @@ def test_pending_capture_does_not_call_resolution_or_export(tmp_path: Path) -> N
     assert result.report["resolution_provider_called"] is False
     assert result.report["raw_polymarket_market_count"] == 1
     assert result.report["raw_orderbook_row_count"] > 0
+    assert result.report[
+        "feature_enrichment_post_market_close_candle_rejected_count"
+    ] > 0
+    assert "feature_enrichment_post_market_close_candle_rejected" in result.report[
+        "feature_enrichment_warning_reason_codes"
+    ]
+    market_end_ts = max(
+        row["market_end_ts"]
+        for row in _read_jsonl(
+            result.raw_dir / "raw_polymarket_markets.jsonl"
+        )
+    )
+    assert all(
+        int(row["available_at_ts"]) <= int(market_end_ts)
+        for row in _read_jsonl(
+            result.raw_dir / "raw_binance_btcusdt_klines.jsonl"
+        )
+    )
+    assert result.report["provider_raw_orderbook_snapshot_count"] >= result.report[
+        "training_sampled_orderbook_row_count"
+    ]
+    assert result.report["provider_raw_artifacts_preserved"] is True
     assert result.report["raw_resolution_count"] == 0
     assert result.report["training_eligible"] is False
     assert result.report["exported_training_corpus_dir"] is None
     assert (result.raw_dir / "raw_polymarket_resolutions.jsonl").read_text() == ""
+    provider_raw_books = result.artifact_paths["provider_raw_polymarket_orderbooks"]
+    assert provider_raw_books.exists()
+    assert len(_read_jsonl(provider_raw_books)) == result.report[
+        "provider_raw_orderbook_snapshot_count"
+    ]
+    assert result.manifest["provider_raw_artifact_hashes"][
+        "raw_polymarket_orderbooks.jsonl"
+    ]
+    assert result.manifest["training_raw_is_validated_sampled_view"] is True
+    for key in (
+        "provider_raw_trade_row_count",
+        "trade_collection_mode_distribution",
+        "trade_full_round_coverage_complete_market_count",
+        "trade_rest_truncated_market_count",
+        "trade_api_request_failed_market_count",
+        "trade_tape_censored_market_count",
+        "trade_collection_reason_distribution",
+    ):
+        assert result.manifest[key] == result.report[key]
+
+
+def test_pending_feature_enrichment_preserves_raw_evidence_and_blocks_resolution(
+    tmp_path: Path,
+) -> None:
+    provider = AsyncSettlementRecoveringCandleProvider(
+        resolved=True,
+        recover_on_candle_call=3,
+        raise_timeout_before_recovery=True,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="pending-feature-enrichment",
+        output_dir=tmp_path,
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+    market = provider.market_rows(config)[0]
+    capture = capture_polymarket_pending_round(
+        config,
+        public_provider=provider,
+        chainlink_rtds_collector=AsyncSettlementFakeChainlinkCollector(
+            rows=[
+                _chainlink_row(int(market["market_start_ts"]) - 1_000, 65_000.0),
+                _chainlink_row(int(market["market_end_ts"]) - 1_000, 65_025.0),
+            ]
+        ),
+        feature_enrichment_max_attempts=4,
+    )
+
+    assert capture.report["capture_status"] == "pending_feature_enrichment"
+    assert capture.report["pending_feature_enrichment"] is True
+    assert capture.report["pending_resolution"] is False
+    assert capture.report["raw_polymarket_market_count"] == 1
+    assert capture.report["raw_orderbook_row_count"] > 0
+    assert capture.report["raw_trade_row_count"] > 0
+    assert capture.report["raw_chainlink_price_row_count"] == 2
+    assert capture.report["raw_btc_candle_row_count"] == 0
+    assert capture.report["resolution_provider_called"] is False
+    assert "read_only_public_http_timeout" in capture.report[
+        "public_collection_reason_codes"
+    ]
+    assert provider.resolution_calls == 0
+
+    still_pending = finalize_polymarket_pending_round(
+        capture.run_dir,
+        public_provider=provider,
+        destination_root=tmp_path / "training_root",
+    )
+
+    assert still_pending.report["finalization_status"] == (
+        "pending_feature_enrichment"
+    )
+    assert still_pending.report["pending_feature_enrichment"] is True
+    assert still_pending.report["pending_resolution"] is False
+    assert still_pending.report["resolution_provider_called"] is False
+    assert still_pending.report["outcome_or_pnl_fields_accessed"] is False
+    assert still_pending.report["raw_orderbook_row_count"] == (
+        capture.report["raw_orderbook_row_count"]
+    )
+    assert provider.resolution_calls == 0
+
+    finalized = finalize_polymarket_pending_round(
+        capture.run_dir,
+        public_provider=provider,
+        destination_root=tmp_path / "training_root",
+        overwrite_existing=True,
+    )
+
+    assert finalized.report["finalization_status"] == "exported"
+    assert finalized.report["feature_enrichment_recovered"] is True
+    assert finalized.report["feature_enrichment_attempt_count"] == 2
+    assert finalized.report["feature_enrichment_causality_validation_passed"] is True
+    assert finalized.report["raw_btc_candle_row_count"] > 0
+    assert finalized.report["resolution_provider_called"] is True
+    assert provider.resolution_calls == 1
+    assert finalized.exported_training_corpus_dir is not None
+
+
+def test_pending_feature_enrichment_exhaustion_fails_closed_before_resolution(
+    tmp_path: Path,
+) -> None:
+    provider = AsyncSettlementRecoveringCandleProvider(
+        resolved=True,
+        recover_on_candle_call=99,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="feature-enrichment-exhausted",
+        output_dir=tmp_path,
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+    capture = capture_polymarket_pending_round(
+        config,
+        public_provider=provider,
+        feature_enrichment_max_attempts=2,
+    )
+
+    first = finalize_polymarket_pending_round(
+        capture.run_dir,
+        public_provider=provider,
+        destination_root=tmp_path / "training_root",
+    )
+    second = finalize_polymarket_pending_round(
+        capture.run_dir,
+        public_provider=provider,
+        destination_root=tmp_path / "training_root",
+    )
+
+    assert first.report["finalization_status"] == "pending_feature_enrichment"
+    assert second.report["finalization_status"] == "blocked_fail_closed"
+    assert second.report["pending_feature_enrichment"] is False
+    assert second.report["training_eligible"] is False
+    assert second.report["resolution_provider_called"] is False
+    assert "missing_btc_feature_candles" in second.report[
+        "feature_enrichment_reason_codes"
+    ]
+    assert provider.resolution_calls == 0
+
+
+def test_pending_feature_enrichment_rejects_post_close_candles(
+    tmp_path: Path,
+) -> None:
+    provider = AsyncSettlementRecoveringCandleProvider(
+        resolved=True,
+        recover_on_candle_call=2,
+        future_only=True,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="feature-enrichment-future-candle",
+        output_dir=tmp_path,
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+    capture = capture_polymarket_pending_round(
+        config,
+        public_provider=provider,
+        feature_enrichment_max_attempts=1,
+    )
+
+    blocked = finalize_polymarket_pending_round(
+        capture.run_dir,
+        public_provider=provider,
+        destination_root=tmp_path / "training_root",
+    )
+    enrichment = _read_json(
+        capture.run_dir / "pending_round_feature_enrichment_report.json"
+    )
+
+    assert blocked.report["finalization_status"] == "blocked_fail_closed"
+    assert blocked.report["resolution_provider_called"] is False
+    assert enrichment[
+        "feature_enrichment_post_market_close_candle_rejected_count"
+    ] > 0
+    assert enrichment["feature_enrichment_candle_row_count"] == 0
+    assert enrichment["feature_enrichment_causality_validation_passed"] is False
+    assert "feature_enrichment_post_market_close_candle_rejected" in enrichment[
+        "feature_enrichment_warning_reason_codes"
+    ]
+    assert provider.resolution_calls == 0
+
+
+def test_pending_round_persists_causal_chainlink_evidence_through_export(
+    tmp_path: Path,
+) -> None:
+    provider = AsyncSettlementFakeProvider(resolved=True)
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="pending-chainlink-round",
+        output_dir=tmp_path,
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+    market = provider.market_rows(config)[0]
+    market_start_ts = int(market["market_start_ts"])
+    market_end_ts = int(market["market_end_ts"])
+    collector = AsyncSettlementFakeChainlinkCollector(
+        rows=[
+            _chainlink_row(market_start_ts - 1_000, 65_000.0),
+            _chainlink_row(market_start_ts + 60_000, 65_025.0),
+            _chainlink_row(market_end_ts + 1_000, 99_999.0),
+        ]
+    )
+
+    capture = capture_polymarket_pending_round(
+        config,
+        public_provider=provider,
+        chainlink_rtds_collector=collector,
+    )
+
+    assert capture.report["raw_chainlink_price_row_count"] == 2
+    assert capture.report["chainlink_timestamp_causality_violation_count"] == 0
+    assert capture.report["chainlink_rtds_price_stream_fresh"] is True
+    assert capture.report["chainlink_rtds_price_stream_stale"] is False
+    assert capture.report["chainlink_rtds_stale_reconnect_seconds"] == 15.0
+    assert capture.report["chainlink_rtds_stale_reconnect_count"] == 2
+    assert capture.report["chainlink_rtds_last_price_row_received_at_ts"] == 3_000_000
+    assert capture.manifest["chainlink_raw_artifact_row_count"] == 2
+    assert capture.manifest["chainlink_raw_artifact_sha256"]
+    raw_rows = _read_jsonl(capture.raw_dir / CHAINLINK_RTDS_RAW_FILENAME)
+    assert [row["price"] for row in raw_rows] == [65_000.0, 65_025.0]
+
+    finalized = finalize_polymarket_pending_round(
+        capture.run_dir,
+        public_provider=provider,
+        destination_root=tmp_path / "training_root",
+        overwrite_existing=True,
+    )
+
+    assert finalized.report["finalization_status"] == "exported"
+    assert finalized.report["raw_chainlink_price_row_count"] == 2
+    assert finalized.report["chainlink_corpus_evidence"]["attached"] is True
+    rounds_index = _read_jsonl(finalized.artifact_paths["rounds_index"])
+    training_raw_dir = finalized.run_dir / rounds_index[0]["training_raw_dir"]
+    assert len(_read_jsonl(training_raw_dir / CHAINLINK_RTDS_RAW_FILENAME)) == 2
+    training_manifest = _read_json(training_raw_dir / "round_training_manifest.json")
+    assert training_manifest["raw_chainlink_price_row_count"] == 2
+    assert training_manifest["supplemental_decision_time_artifact_hashes"][
+        CHAINLINK_RTDS_RAW_FILENAME
+    ]
+    assert finalized.exported_training_corpus_dir is not None
+    assert len(
+        _read_jsonl(
+            finalized.exported_training_corpus_dir / CHAINLINK_RTDS_CORPUS_FILENAME
+        )
+    ) == 2
+    evidence_manifest = _read_json(
+        finalized.exported_training_corpus_dir
+        / CHAINLINK_RTDS_CORPUS_MANIFEST_FILENAME
+    )
+    assert evidence_manifest["decision_time_only"] is True
+    assert evidence_manifest["timestamp_causality_violation_count"] == 0
+    assert evidence_manifest["feature_builder_integration_passed"] is True
+    assert evidence_manifest["feature_builder_integration_required"] is False
+    feature_rows = _read_jsonl(
+        finalized.exported_training_corpus_dir / "polymarket_feature_rows.jsonl"
+    )
+    assert evidence_manifest["integrated_feature_row_count"] == len(feature_rows)
+    assert all(
+        row["feature_provenance"][
+            "reference_price_to_beat_distance_at_decision"
+        ]["reference_price_to_beat_source"]
+        == "polymarket_rtds_chainlink_market_start"
+        for row in feature_rows
+    )
+
+
+def test_pending_round_rejects_noncausal_chainlink_rows_without_blocking_core_capture(
+    tmp_path: Path,
+) -> None:
+    provider = AsyncSettlementFakeProvider(resolved=False)
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="pending-invalid-chainlink",
+        output_dir=tmp_path,
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+    market = provider.market_rows(config)[0]
+    source_ts = int(market["market_start_ts"])
+    invalid = _chainlink_row(source_ts, 65_000.0)
+    invalid["available_at_ts"] = source_ts - 1
+
+    capture = capture_polymarket_pending_round(
+        config,
+        public_provider=provider,
+        chainlink_rtds_collector=AsyncSettlementFakeChainlinkCollector(
+            rows=[invalid]
+        ),
+    )
+
+    assert capture.report["capture_status"] == "pending_resolution"
+    assert capture.report["raw_chainlink_price_row_count"] == 0
+    assert "chainlink_rtds_timestamp_causality_violation" in capture.report[
+        "chainlink_capture_reason_codes"
+    ]
+
+
+def test_pending_finalization_completes_payout_only_resolution_from_chainlink(
+    tmp_path: Path,
+) -> None:
+    provider = AsyncSettlementPayoutOnlyProvider(resolved=True)
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="pending-payout-only-resolution",
+        output_dir=tmp_path,
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+    market = provider.market_rows(config)[0]
+    start_ts = int(market["market_start_ts"])
+    end_ts = int(market["market_end_ts"])
+    capture = capture_polymarket_pending_round(
+        config,
+        public_provider=provider,
+        chainlink_rtds_collector=AsyncSettlementFakeChainlinkCollector(
+            rows=[
+                _chainlink_row(start_ts - 1_000, 65_000.0),
+                _chainlink_row(end_ts - 1_000, 65_025.0),
+            ]
+        ),
+    )
+
+    finalized = finalize_polymarket_pending_round(
+        capture.run_dir,
+        public_provider=provider,
+        destination_root=tmp_path / "training_root",
+        overwrite_existing=True,
+    )
+
+    assert finalized.report["finalization_status"] == "exported"
+    resolution = _read_jsonl(
+        finalized.raw_dir / "raw_polymarket_resolutions.jsonl"
+    )[0]
+    assert resolution["reference_price_start"] == 65_000.0
+    assert resolution["reference_price_end"] == 65_025.0
+    assert resolution["reference_price_pair_completed_from_chainlink_rtds"] is True
+    assert resolution["resolved_outcome"] == "UP"
 
 
 def test_pending_capture_explains_orderbook_rejection_without_raw_book_dump(
@@ -68,6 +431,9 @@ def test_pending_capture_explains_orderbook_rejection_without_raw_book_dump(
     assert detail["valid_book_rows_by_outcome"]["DOWN"] == 0
     assert detail["explanation"] == "No valid DOWN orderbook rows were available for this market."
     assert "raw_rows" not in detail
+    assert len(
+        _read_jsonl(result.artifact_paths["provider_raw_polymarket_orderbooks"])
+    ) > 0
 
 
 def test_pending_finalization_waits_for_resolution_before_export(tmp_path: Path) -> None:
@@ -106,6 +472,13 @@ def test_pending_finalization_waits_for_resolution_before_export(tmp_path: Path)
     assert finalized.report["pending_resolution"] is False
     assert finalized.report["training_eligible"] is True
     assert finalized.report["raw_resolution_count"] == 1
+    assert finalized.report["provider_raw_resolution_row_count"] == 1
+    assert finalized.report["provider_raw_artifacts_preserved"] is True
+    assert len(
+        _read_jsonl(
+            finalized.artifact_paths["provider_raw_polymarket_resolutions"]
+        )
+    ) == 1
     assert finalized.exported_training_corpus_dir is not None
     assert finalized.exported_training_corpus_dir.name.startswith("btc-updown-5m-")
     assert (finalized.exported_training_corpus_dir / "polymarket_label_rows.jsonl").exists()
@@ -134,7 +507,7 @@ def test_pending_finalization_waits_for_resolution_before_export(tmp_path: Path)
         capture.run_dir,
         public_provider=provider,
         destination_root=tmp_path / "training_root",
-        overwrite_existing=True,
+        overwrite_existing=False,
     )
 
     assert provider.resolution_calls == 3
@@ -353,12 +726,110 @@ class AsyncSettlementMissingBookProvider(AsyncSettlementFakeProvider):
         ]
 
 
+class AsyncSettlementRecoveringCandleProvider(AsyncSettlementFakeProvider):
+    def __init__(
+        self,
+        *,
+        resolved: bool,
+        recover_on_candle_call: int,
+        future_only: bool = False,
+        raise_timeout_before_recovery: bool = False,
+    ) -> None:
+        super().__init__(resolved=resolved)
+        self.recover_on_candle_call = recover_on_candle_call
+        self.future_only = future_only
+        self.raise_timeout_before_recovery = (
+            raise_timeout_before_recovery
+        )
+        self.candle_calls = 0
+
+    def btc_feature_candle_rows(
+        self,
+        markets: list[dict[str, Any]],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> list[dict[str, Any]]:
+        self.candle_calls += 1
+        if self.candle_calls < self.recover_on_candle_call:
+            if self.raise_timeout_before_recovery:
+                raise RealCorpusPublicProviderError(
+                    "Transient candle source timeout.",
+                    reason_codes=("read_only_public_http_timeout",),
+                )
+            return []
+        rows = mock_btc_feature_candle_rows(markets, config)
+        if not self.future_only:
+            return rows
+        market_end_ts = max(int(row["market_end_ts"]) for row in markets)
+        return [
+            {
+                **row,
+                "close_time": market_end_ts + 60_000,
+                "available_at_ts": market_end_ts + 60_000,
+            }
+            for row in rows
+        ]
+
+
+class AsyncSettlementPayoutOnlyProvider(AsyncSettlementFakeProvider):
+    def resolution_rows(
+        self,
+        markets: list[dict[str, Any]],
+        config: PolymarketRealCorpusRecorderConfig,
+    ) -> list[dict[str, Any]]:
+        del config
+        self.resolution_calls += 1
+        if not self.resolved:
+            return []
+        return [
+            {
+                "market_id": market["market_id"],
+                "reference_price_source": market["reference_price_source"],
+                "resolution_status": "normal",
+                "resolved_outcome": "UP",
+                "payout_up": 1.0,
+                "payout_down": 0.0,
+                "raw_resolution_text": "Official payout is available before references.",
+                "paper_only": True,
+                "capital_at_risk": False,
+                "broker_exchange_write_enabled": False,
+                "live_exchange_write_enabled": False,
+                "polymarket_write_enabled": False,
+                "wallet_signing_enabled": False,
+            }
+            for market in markets
+        ]
+
+
 class AsyncSettlementTwoRoundProvider(AsyncSettlementFakeProvider):
     def market_rows(
         self,
         config: PolymarketRealCorpusRecorderConfig,
     ) -> list[dict[str, Any]]:
         return [_as_real_public_market_row(row) for row in discover_mock_market_rows(config)[:2]]
+
+
+class AsyncSettlementFakeChainlinkCollector:
+    def __init__(self, *, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def rows(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self._rows]
+
+    def collection_report(self) -> dict[str, Any]:
+        return {
+            "report_type": "polymarket_chainlink_rtds_collection",
+            "source_type": "polymarket_rtds_chainlink",
+            "raw_price_row_count": len(self._rows),
+            "price_stream_fresh": True,
+            "price_stream_stale": False,
+            "stale_reconnect_seconds": 15.0,
+            "stale_reconnect_count": 2,
+            "last_price_row_received_at_ts": 3_000_000,
+            "current_price_stream_staleness_ms": 500,
+            "read_only": True,
+            "paper_only": True,
+            "capital_at_risk": False,
+        }
 
 
 def _as_real_public_market_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -372,6 +843,22 @@ def _as_real_public_market_row(row: dict[str, Any]) -> dict[str, Any]:
     )
     market["raw_public_payload"] = {"mock_public_data": False}
     return market
+
+
+def _chainlink_row(source_ts: int, price: float) -> dict[str, Any]:
+    return {
+        "source_type": "polymarket_rtds_chainlink",
+        "symbol": "btc/usd",
+        "source_ts": source_ts,
+        "available_at_ts": source_ts,
+        "price": price,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "broker_exchange_write_enabled": False,
+        "live_exchange_write_enabled": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

@@ -1,0 +1,256 @@
+{
+  "schema_version": "bigan-btc-15m-moe-future-evaluation-reporting-contract-v1",
+  "contract_id": "BTC-15M-MoE-confirmatory-v1-future-reporting",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v1",
+  "candidate_id": "mixture_of_experts",
+  "created_at": "2026-07-30T03:05:00+00:00",
+  "role": "frozen_future_confirmatory_reporting_schema",
+  "development_data_may_populate_this_report": false,
+  "promotion_claim_allowed": false,
+  "population": {
+    "all_frozen_round_markets_required": true,
+    "no_trade_value": 0.0,
+    "one_market_one_row_required": true,
+    "market_level_pairing_required": true,
+    "true_paired_executable_asks_required": true,
+    "complement_quote_proxy_allowed": false,
+    "failed_or_missing_prediction_must_be_reported": true
+  },
+  "required_market_row_fields": [
+    "round_id",
+    "market_id",
+    "decision_ts",
+    "market_start_ts",
+    "quality_valid",
+    "paired_executable_ask_available",
+    "requested_route",
+    "expert_id",
+    "expert_training_market_count",
+    "expert_available",
+    "fallback_used",
+    "actual_model_used",
+    "moe_prediction_up",
+    "moe_prediction_down",
+    "baseline_prediction_up",
+    "baseline_prediction_down",
+    "moe_selected_side",
+    "baseline_selected_side",
+    "moe_accepted",
+    "baseline_accepted",
+    "moe_unit_net_pnl",
+    "baseline_unit_net_pnl",
+    "delta_unit_net_pnl",
+    "cost_decomposition",
+    "feature_complete",
+    "provider_missingness",
+    "provider_health_score",
+    "btc_return_regime",
+    "chronological_half"
+  ],
+  "required_panels": {
+    "overall": {
+      "dimensions": [
+        "all_markets"
+      ],
+      "metrics": [
+        "market_count",
+        "moe_total_unit_net_pnl",
+        "moe_mean_unit_net_pnl",
+        "baseline_total_unit_net_pnl",
+        "baseline_mean_unit_net_pnl",
+        "delta_total_unit_net_pnl",
+        "delta_mean_unit_net_pnl",
+        "delta_market_bootstrap_lcb",
+        "moe_market_bootstrap_lcb",
+        "paired_executable_ask_coverage"
+      ]
+    },
+    "route": {
+      "dimensions": [
+        "high_vol_expert",
+        "bullish_expert",
+        "bearish_expert",
+        "low_vol_fallback"
+      ],
+      "metrics": [
+        "market_count",
+        "accepted_count",
+        "moe_total_unit_net_pnl",
+        "baseline_total_unit_net_pnl",
+        "delta_total_unit_net_pnl",
+        "largest_winner_contribution"
+      ],
+      "empty_bucket_policy": "report_zero_count_and_null_rate_metrics"
+    },
+    "actual_model": {
+      "dimensions": [
+        "expert_prediction",
+        "fallback_prediction"
+      ],
+      "metrics": [
+        "market_count",
+        "accepted_count",
+        "moe_total_unit_net_pnl",
+        "baseline_total_unit_net_pnl",
+        "delta_total_unit_net_pnl",
+        "largest_winner_contribution"
+      ]
+    },
+    "provider": {
+      "dimensions": [
+        "complete_feature_markets",
+        "missingness_markets"
+      ],
+      "metrics": [
+        "market_count",
+        "accepted_count",
+        "moe_total_unit_net_pnl",
+        "baseline_total_unit_net_pnl",
+        "delta_total_unit_net_pnl",
+        "missing_field_distribution"
+      ]
+    },
+    "regime": {
+      "dimensions": [
+        "bullish",
+        "bearish",
+        "sideways"
+      ],
+      "additional_required_bucket": "missing",
+      "metrics": [
+        "market_count",
+        "accepted_count",
+        "moe_total_unit_net_pnl",
+        "baseline_total_unit_net_pnl",
+        "delta_total_unit_net_pnl"
+      ]
+    }
+  },
+  "round_reporting": {
+    "round_1_independent_panel_required": true,
+    "round_2_independent_panel_required": true,
+    "combined_panel_allowed_as_diagnostic_only": true,
+    "combined_panel_may_not_rescue_failed_round": true,
+    "gate_boolean_and_failure_reason_required_for_every_gate": true
+  },
+  "mandatory_round_attribution": {
+    "pnl_by_actual_model": {
+      "dimensions": [
+        "expert",
+        "fallback"
+      ],
+      "metrics": [
+        "market_count",
+        "accepted_count",
+        "moe_total_unit_net_pnl",
+        "baseline_total_unit_net_pnl",
+        "delta_total_unit_net_pnl"
+      ]
+    },
+    "pnl_by_requested_route": {
+      "dimensions": [
+        "high_vol",
+        "bullish",
+        "bearish",
+        "low_vol"
+      ],
+      "metrics": [
+        "market_count",
+        "accepted_count",
+        "moe_total_unit_net_pnl",
+        "baseline_total_unit_net_pnl",
+        "delta_total_unit_net_pnl"
+      ]
+    },
+    "fallback_share": {
+      "numerator": "market_count_with_fallback_used_true",
+      "denominator": "all_frozen_round_markets",
+      "report_count_and_fraction": true
+    },
+    "expert_training_support": {
+      "dimensions": [
+        "requested_route",
+        "actual_model_used"
+      ],
+      "metrics": [
+        "minimum_expert_training_market_count",
+        "maximum_expert_training_market_count",
+        "mean_expert_training_market_count",
+        "support_below_20_count"
+      ]
+    },
+    "route_distribution": {
+      "dimensions": [
+        "high_vol",
+        "bullish",
+        "bearish",
+        "low_vol"
+      ],
+      "metrics": [
+        "market_count",
+        "market_fraction"
+      ]
+    },
+    "missingness_by_route": {
+      "dimensions": [
+        "high_vol",
+        "bullish",
+        "bearish",
+        "low_vol"
+      ],
+      "metrics": [
+        "market_count",
+        "feature_complete_count",
+        "missing_feature_market_count",
+        "missing_field_distribution"
+      ]
+    },
+    "provider_health_by_route": {
+      "dimensions": [
+        "high_vol",
+        "bullish",
+        "bearish",
+        "low_vol"
+      ],
+      "metrics": [
+        "market_count",
+        "provider_health_score_minimum",
+        "provider_health_score_mean",
+        "provider_health_score_maximum",
+        "provider_health_score_missing_count"
+      ]
+    },
+    "required_for_every_round": true,
+    "empty_bucket_policy": "report_zero_count_and_null_rate_metrics",
+    "route_filtering_allowed": false,
+    "post_hoc_exclusion_allowed": false
+  },
+  "forbidden_reporting_behavior": {
+    "route_filtering": true,
+    "post_hoc_exclusions": true,
+    "winner_language_before_all_gates_pass": true,
+    "bucket_suppression": true,
+    "missingness_as_zero": true,
+    "outlier_removal": true,
+    "threshold_recalibration": true,
+    "round_pooling_to_rescue_failure": true
+  },
+  "state": {
+    "future_evaluation_started": false,
+    "fresh_outcomes_opened": false,
+    "report_created": false
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}

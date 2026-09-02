@@ -1,0 +1,888 @@
+{
+  "attestation_commit": null,
+  "base_commit": "a37320d4f8aa8ccb8176132def6429c1127758ba",
+  "base_pytest": {
+    "error_count": 0,
+    "failure_count": 23,
+    "failure_records": 23,
+    "failures": [
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: '/private/tmp/bigan-moe-v2-regression.FxK8DK/base/examples/v8/polymarket_runs/policy-selected-runtime-pnl-v6-6-fresh-calibration-freeze-20260720T232530Z/v6_6_fresh_calibration_prediction_freeze_manifest.json'",
+        "message_sha256": "2bfded9b1d46c8500af5bd256ba6c2c6135abc762c21773498e03b1200b50cb9",
+        "node_id": "tests/v8/test_execution_layer_v2_p_up_semantic_compatibility_v6_7.py::test_v6_7_real_exact_60_canary_passes_without_unlock",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: '<REPO_ROOT>/examples/v8/polymarket_runs/policy-selected-runtime-pnl-v6-6-fresh-calibration-freeze-20260720T232530Z/v6_6_fresh_calibration_prediction_freeze_manifest.json'",
+        "normalized_message_sha256": "d7c6c226f3c84acdef8cd40aa1d90db27fb5b7b4f86e9c5ee4f5343797230991"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_collection_handoff_pins_complete_outcome_blind_batch",
+        "normalized_message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "normalized_message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_future_decision_input_build_is_feature_only_without_outcome_artifacts",
+        "normalized_message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "normalized_message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_target_identity_mismatch_fails_before_marker",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_target_rejects_prediction_artifact_drift_before_marker",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_accept_official_unknown_50_50",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_fail_closed_for_incomplete_action_grid",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_fail_closed_for_unresolved_official_outcome",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_load_post_shadow_exactly_once",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_resume_same_hash_pinned_start_marker",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_builds_causal_post_protocol_development_rows_fail_closed",
+        "normalized_message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "normalized_message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_evaluation_rejects_frozen_o_context_drift",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_duplicate_market_is_fail_closed",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_freeze_and_evaluation_are_exactly_once",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_overlap_blocks_before_evaluation_marker",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_rejects_incomplete_outcome_blind_target_structure",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_requires_outcome_blind_hts_support",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_source_tamper_fails_before_exactly_once_marker",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_development_build_skips_chainlink_ineligible_source_corpus",
+        "normalized_message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "normalized_message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_fails_closed_when_cached_token_mapping_disagrees_with_clob",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_fails_closed_when_gamma_times_out_and_cache_is_missing",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_retries_transient_clob_identity_timeout_without_relaxing_identity",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_uses_cache_only_after_gamma_timeout_and_clob_revalidation",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      }
+    ],
+    "failures_by_node": [
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: '/private/tmp/bigan-moe-v2-regression.FxK8DK/base/examples/v8/polymarket_runs/policy-selected-runtime-pnl-v6-6-fresh-calibration-freeze-20260720T232530Z/v6_6_fresh_calibration_prediction_freeze_manifest.json'",
+        "message_sha256": "2bfded9b1d46c8500af5bd256ba6c2c6135abc762c21773498e03b1200b50cb9",
+        "node_id": "tests/v8/test_execution_layer_v2_p_up_semantic_compatibility_v6_7.py::test_v6_7_real_exact_60_canary_passes_without_unlock",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: '<REPO_ROOT>/examples/v8/polymarket_runs/policy-selected-runtime-pnl-v6-6-fresh-calibration-freeze-20260720T232530Z/v6_6_fresh_calibration_prediction_freeze_manifest.json'",
+        "normalized_message_sha256": "d7c6c226f3c84acdef8cd40aa1d90db27fb5b7b4f86e9c5ee4f5343797230991"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_collection_handoff_pins_complete_outcome_blind_batch",
+        "normalized_message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "normalized_message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_future_decision_input_build_is_feature_only_without_outcome_artifacts",
+        "normalized_message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "normalized_message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_target_identity_mismatch_fails_before_marker",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_target_rejects_prediction_artifact_drift_before_marker",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_accept_official_unknown_50_50",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_fail_closed_for_incomplete_action_grid",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_fail_closed_for_unresolved_official_outcome",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_load_post_shadow_exactly_once",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_resume_same_hash_pinned_start_marker",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_builds_causal_post_protocol_development_rows_fail_closed",
+        "normalized_message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "normalized_message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_evaluation_rejects_frozen_o_context_drift",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_duplicate_market_is_fail_closed",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_freeze_and_evaluation_are_exactly_once",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_overlap_blocks_before_evaluation_marker",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_rejects_incomplete_outcome_blind_target_structure",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_requires_outcome_blind_hts_support",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_source_tamper_fails_before_exactly_once_marker",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_development_build_skips_chainlink_ineligible_source_corpus",
+        "normalized_message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "normalized_message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_fails_closed_when_cached_token_mapping_disagrees_with_clob",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_fails_closed_when_gamma_times_out_and_cache_is_missing",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_retries_transient_clob_identity_timeout_without_relaxing_identity",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_uses_cache_only_after_gamma_timeout_and_clob_revalidation",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      }
+    ],
+    "passed": 1584,
+    "skipped_count": 0,
+    "tests_collected": 1607
+  },
+  "base_ruff_errors": [],
+  "capture_artifact_hashes": {
+    "base_pytest_junit_sha256": "86960206971fe5660b2d41344f77ea43efea872231e0e6ba6686cea18b2946f7",
+    "base_ruff_json_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "head_pytest_junit_sha256": "89dd78b0eda056066bed1b1e58fb6785b4c9dc7e37bd3179fa7df70d4cb06c3e",
+    "head_ruff_json_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "commands": {
+    "pytest": "PYTHONPATH=src:. python -m pytest tests/v8 -q",
+    "ruff": "PYTHONPATH=src python -m ruff check src/bigan/v8/polymarket examples/v8 tests/v8"
+  },
+  "created_at": "2026-07-30T12:00:00+00:00",
+  "executable_head_commit": "2cf4441995e582549dffa819af9304fa58622055",
+  "head_pytest": {
+    "error_count": 0,
+    "failure_count": 23,
+    "failure_records": 23,
+    "failures": [
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: '/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/policy-selected-runtime-pnl-v6-6-fresh-calibration-freeze-20260720T232530Z/v6_6_fresh_calibration_prediction_freeze_manifest.json'",
+        "message_sha256": "d1b25f7661fc576b3173d5a2605f49baa3b0ef99da4d73e2cef712515ba070e1",
+        "node_id": "tests/v8/test_execution_layer_v2_p_up_semantic_compatibility_v6_7.py::test_v6_7_real_exact_60_canary_passes_without_unlock",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: '<REPO_ROOT>/examples/v8/polymarket_runs/policy-selected-runtime-pnl-v6-6-fresh-calibration-freeze-20260720T232530Z/v6_6_fresh_calibration_prediction_freeze_manifest.json'",
+        "normalized_message_sha256": "d7c6c226f3c84acdef8cd40aa1d90db27fb5b7b4f86e9c5ee4f5343797230991"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_collection_handoff_pins_complete_outcome_blind_batch",
+        "normalized_message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "normalized_message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_future_decision_input_build_is_feature_only_without_outcome_artifacts",
+        "normalized_message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "normalized_message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_target_identity_mismatch_fails_before_marker",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_target_rejects_prediction_artifact_drift_before_marker",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_accept_official_unknown_50_50",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_fail_closed_for_incomplete_action_grid",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_fail_closed_for_unresolved_official_outcome",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_load_post_shadow_exactly_once",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_resume_same_hash_pinned_start_marker",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_builds_causal_post_protocol_development_rows_fail_closed",
+        "normalized_message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "normalized_message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_evaluation_rejects_frozen_o_context_drift",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_duplicate_market_is_fail_closed",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_freeze_and_evaluation_are_exactly_once",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_overlap_blocks_before_evaluation_marker",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_rejects_incomplete_outcome_blind_target_structure",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_requires_outcome_blind_hts_support",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_source_tamper_fails_before_exactly_once_marker",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_development_build_skips_chainlink_ineligible_source_corpus",
+        "normalized_message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "normalized_message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_fails_closed_when_cached_token_mapping_disagrees_with_clob",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_fails_closed_when_gamma_times_out_and_cache_is_missing",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_retries_transient_clob_identity_timeout_without_relaxing_identity",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_uses_cache_only_after_gamma_timeout_and_clob_revalidation",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      }
+    ],
+    "failures_by_node": [
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: '/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/policy-selected-runtime-pnl-v6-6-fresh-calibration-freeze-20260720T232530Z/v6_6_fresh_calibration_prediction_freeze_manifest.json'",
+        "message_sha256": "d1b25f7661fc576b3173d5a2605f49baa3b0ef99da4d73e2cef712515ba070e1",
+        "node_id": "tests/v8/test_execution_layer_v2_p_up_semantic_compatibility_v6_7.py::test_v6_7_real_exact_60_canary_passes_without_unlock",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: '<REPO_ROOT>/examples/v8/polymarket_runs/policy-selected-runtime-pnl-v6-6-fresh-calibration-freeze-20260720T232530Z/v6_6_fresh_calibration_prediction_freeze_manifest.json'",
+        "normalized_message_sha256": "d7c6c226f3c84acdef8cd40aa1d90db27fb5b7b4f86e9c5ee4f5343797230991"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_collection_handoff_pins_complete_outcome_blind_batch",
+        "normalized_message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "normalized_message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_future_decision_input_build_is_feature_only_without_outcome_artifacts",
+        "normalized_message": "AssertionError: assert 'BLOCKED_FAIL_CLOSED' == 'OUTCOME_BLIN...N_INPUT_READY'\n  \n  - OUTCOME_BLIND_FUTURE_DECISION_INPUT_READY\n  + BLOCKED_FAIL_CLOSED",
+        "normalized_message_sha256": "b226a51082008ffbe2fd10aa2c842ac78f2b140513ab1dd93682e7623c4fca19"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_target_identity_mismatch_fails_before_marker",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_target_rejects_prediction_artifact_drift_before_marker",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_accept_official_unknown_50_50",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_fail_closed_for_incomplete_action_grid",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_fail_closed_for_unresolved_official_outcome",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_load_post_shadow_exactly_once",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "IndexError: list index out of range",
+        "message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a",
+        "node_id": "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_resume_same_hash_pinned_start_marker",
+        "normalized_message": "IndexError: list index out of range",
+        "normalized_message_sha256": "c074e342afb1d9047bcde6d3d2e49dff2f151e327f21cb2d581aa2c91679d30a"
+      },
+      {
+        "failure_type": "failure",
+        "message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_builds_causal_post_protocol_development_rows_fail_closed",
+        "normalized_message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "normalized_message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_evaluation_rejects_frozen_o_context_drift",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_duplicate_market_is_fail_closed",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_freeze_and_evaluation_are_exactly_once",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_overlap_blocks_before_evaluation_marker",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_rejects_incomplete_outcome_blind_target_structure",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_requires_outcome_blind_hts_support",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_source_tamper_fails_before_exactly_once_marker",
+        "normalized_message": "FileNotFoundError: [Errno 2] No such file or directory: 'examples/v8/polymarket_runs/o-v8-future-holdout-diversified7-eval-20260703T061730Z-20260703T065518Z/o_replay_aligned_source_ranking_manifest.json'",
+        "normalized_message_sha256": "6cd707ecdc6b8309beedb8dd88e2480692bce2c30ec55205cba2b518ff701e6e"
+      },
+      {
+        "failure_type": "failure",
+        "message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1",
+        "node_id": "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_development_build_skips_chainlink_ineligible_source_corpus",
+        "normalized_message": "ValueError: frozen O scorer failed closed: missing_coefficients,missing_feature_schema,missing_frozen_model_summary,missing_ranking_correction_config",
+        "normalized_message_sha256": "28fc7a7fb82500da400040294f518280ce1d677d70528617cbac70525f8ea9a1"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_fails_closed_when_cached_token_mapping_disagrees_with_clob",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_fails_closed_when_gamma_times_out_and_cache_is_missing",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_retries_transient_clob_identity_timeout_without_relaxing_identity",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      },
+      {
+        "failure_type": "failure",
+        "message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48",
+        "node_id": "tests/v8/test_polymarket_market_identity_cache.py::test_provider_uses_cache_only_after_gamma_timeout_and_clob_revalidation",
+        "normalized_message": "AssertionError: unexpected url: https://data-api.polymarket.com/trades?limit=500",
+        "normalized_message_sha256": "1d0a7b5d8720d54e696d9b3164d07231c8e66f06c588ccefb78ebb3f83d0ad48"
+      }
+    ],
+    "passed": 1622,
+    "skipped_count": 1,
+    "tests_collected": 1646
+  },
+  "head_ruff_errors": [],
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "pytest_reconciliation": {
+    "added_failure_node_ids": [],
+    "base_failure_node_ids": [
+      "tests/v8/test_execution_layer_v2_p_up_semantic_compatibility_v6_7.py::test_v6_7_real_exact_60_canary_passes_without_unlock",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_collection_handoff_pins_complete_outcome_blind_batch",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_future_decision_input_build_is_feature_only_without_outcome_artifacts",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_target_identity_mismatch_fails_before_marker",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_target_rejects_prediction_artifact_drift_before_marker",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_accept_official_unknown_50_50",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_fail_closed_for_incomplete_action_grid",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_fail_closed_for_unresolved_official_outcome",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_load_post_shadow_exactly_once",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_resume_same_hash_pinned_start_marker",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_builds_causal_post_protocol_development_rows_fail_closed",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_evaluation_rejects_frozen_o_context_drift",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_duplicate_market_is_fail_closed",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_freeze_and_evaluation_are_exactly_once",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_overlap_blocks_before_evaluation_marker",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_rejects_incomplete_outcome_blind_target_structure",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_requires_outcome_blind_hts_support",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_source_tamper_fails_before_exactly_once_marker",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_development_build_skips_chainlink_ineligible_source_corpus",
+      "tests/v8/test_polymarket_market_identity_cache.py::test_provider_fails_closed_when_cached_token_mapping_disagrees_with_clob",
+      "tests/v8/test_polymarket_market_identity_cache.py::test_provider_fails_closed_when_gamma_times_out_and_cache_is_missing",
+      "tests/v8/test_polymarket_market_identity_cache.py::test_provider_retries_transient_clob_identity_timeout_without_relaxing_identity",
+      "tests/v8/test_polymarket_market_identity_cache.py::test_provider_uses_cache_only_after_gamma_timeout_and_clob_revalidation"
+    ],
+    "changed_message_failure_node_ids": [],
+    "head_failure_node_ids": [
+      "tests/v8/test_execution_layer_v2_p_up_semantic_compatibility_v6_7.py::test_v6_7_real_exact_60_canary_passes_without_unlock",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_collection_handoff_pins_complete_outcome_blind_batch",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_future_decision_input_build_is_feature_only_without_outcome_artifacts",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_target_identity_mismatch_fails_before_marker",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_target_rejects_prediction_artifact_drift_before_marker",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_accept_official_unknown_50_50",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_fail_closed_for_incomplete_action_grid",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_fail_closed_for_unresolved_official_outcome",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_load_post_shadow_exactly_once",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_resume_same_hash_pinned_start_marker",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_builds_causal_post_protocol_development_rows_fail_closed",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_evaluation_rejects_frozen_o_context_drift",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_duplicate_market_is_fail_closed",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_freeze_and_evaluation_are_exactly_once",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_overlap_blocks_before_evaluation_marker",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_rejects_incomplete_outcome_blind_target_structure",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_requires_outcome_blind_hts_support",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_source_tamper_fails_before_exactly_once_marker",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_development_build_skips_chainlink_ineligible_source_corpus",
+      "tests/v8/test_polymarket_market_identity_cache.py::test_provider_fails_closed_when_cached_token_mapping_disagrees_with_clob",
+      "tests/v8/test_polymarket_market_identity_cache.py::test_provider_fails_closed_when_gamma_times_out_and_cache_is_missing",
+      "tests/v8/test_polymarket_market_identity_cache.py::test_provider_retries_transient_clob_identity_timeout_without_relaxing_identity",
+      "tests/v8/test_polymarket_market_identity_cache.py::test_provider_uses_cache_only_after_gamma_timeout_and_clob_revalidation"
+    ],
+    "head_failures_subset_of_base_failures": true,
+    "new_test_failure_count": 0,
+    "removed_failure_node_ids": [],
+    "unchanged_failure_node_ids": [
+      "tests/v8/test_execution_layer_v2_p_up_semantic_compatibility_v6_7.py::test_v6_7_real_exact_60_canary_passes_without_unlock",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_collection_handoff_pins_complete_outcome_blind_batch",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_future_decision_input_build_is_feature_only_without_outcome_artifacts",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_target_identity_mismatch_fails_before_marker",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_target_rejects_prediction_artifact_drift_before_marker",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_accept_official_unknown_50_50",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_fail_closed_for_incomplete_action_grid",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_fail_closed_for_unresolved_official_outcome",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_load_post_shadow_exactly_once",
+      "tests/v8/test_execution_layer_v2_pnl_aligned_future_evaluation.py::test_settlement_targets_resume_same_hash_pinned_start_marker",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_builds_causal_post_protocol_development_rows_fail_closed",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_evaluation_rejects_frozen_o_context_drift",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_duplicate_market_is_fail_closed",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_freeze_and_evaluation_are_exactly_once",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_overlap_blocks_before_evaluation_marker",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_rejects_incomplete_outcome_blind_target_structure",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_input_requires_outcome_blind_hts_support",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_confirmatory_source_tamper_fails_before_exactly_once_marker",
+      "tests/v8/test_polymarket_execution_layer_v2_hts_residual_development_corpus.py::test_development_build_skips_chainlink_ineligible_source_corpus",
+      "tests/v8/test_polymarket_market_identity_cache.py::test_provider_fails_closed_when_cached_token_mapping_disagrees_with_clob",
+      "tests/v8/test_polymarket_market_identity_cache.py::test_provider_fails_closed_when_gamma_times_out_and_cache_is_missing",
+      "tests/v8/test_polymarket_market_identity_cache.py::test_provider_retries_transient_clob_identity_timeout_without_relaxing_identity",
+      "tests/v8/test_polymarket_market_identity_cache.py::test_provider_uses_cache_only_after_gamma_timeout_and_clob_revalidation"
+    ]
+  },
+  "required_condition_passed": true,
+  "revision_id": "BTC-15M-MoE-confirmatory-v2-precollection-r1",
+  "ruff_reconciliation": {
+    "added_error_identities": [],
+    "new_ruff_error_count": 0,
+    "removed_error_identities": [],
+    "unchanged_error_identities": []
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-regression-failure-ledger-r1",
+  "state": {
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  }
+}

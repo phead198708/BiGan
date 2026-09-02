@@ -1,0 +1,45 @@
+{
+  "all_historical_success_criteria_passed": false,
+  "candidate_comparison": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-fixed-edge-0-025-price-floor-0-30-development-iteration-005-20260727T045100Z/candidate_market_comparison.jsonl",
+    "sha256": "3091d5e84194b0fd576df3155072c5f9d257732d0ee68e9488681fe2e6d6081e",
+    "size_bytes": 199828
+  },
+  "candidate_id": "v8_1_fixed_edge_0_025_price_floor_0_30",
+  "collection_started": false,
+  "historical_development_only": true,
+  "historical_evaluation_manifest": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-fixed-edge-0-025-price-floor-0-30-development-iteration-005-20260727T045100Z/evaluation/challenge_historical_development_manifest.json",
+    "sha256": "79d2790f1d5eae93cd76886db12254b0ae5aa260d965f6c0171ab4a8085df14d",
+    "size_bytes": 1375
+  },
+  "historical_evaluation_report": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-fixed-edge-0-025-price-floor-0-30-development-iteration-005-20260727T045100Z/evaluation/challenge_historical_development_result.json",
+    "sha256": "2e77c923e116fedb1c6fb102d3adf55b2d7b9c913b6fee39cc57b5856cd5e9d5",
+    "size_bytes": 5319
+  },
+  "iteration_entry": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-fixed-edge-0-025-price-floor-0-30-development-iteration-005-20260727T045100Z/evaluation/challenge_historical_development_iteration_entry.json",
+    "sha256": "29d72dd31764cd284355ec3eae2c409e55a21d5ee47339604d62260ed385c0fc",
+    "size_bytes": 2040
+  },
+  "promotion_evidence_eligible": false,
+  "replacement_future_attempt_preregistration_allowed": false,
+  "run_id": "challenge-v8-1-fixed-edge-0-025-price-floor-0-30-development-iteration-005-20260727T045100Z",
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-fixed-edge-price-floor-development-manifest-v1",
+  "target_free_manifest": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-fixed-edge-0-025-price-floor-0-30-development-iteration-005-20260727T045100Z/candidate_target_free_manifest.json",
+    "sha256": "d5e901069fe8aa067927ec8ffa29f111ff77c7525d090f9088dafd52f162a8f0",
+    "size_bytes": 3197
+  }
+}

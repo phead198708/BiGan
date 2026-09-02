@@ -1,0 +1,40 @@
+{
+  "schema_version": "bigan-challenge-model-layer-market-diagnostic-freeze-v1",
+  "frozen": true,
+  "source_base_commit": "1338e55ec2c3359663d698b7c7f7d19af1a1b87c",
+  "diagnostic_inputs": {
+    "path": "examples/v8/polymarket_configs/challenge_model_layer_diagnostic_inputs.json",
+    "sha256": "21c034c717c61756327f2d7395bbafc93f48d93cc4413734f4776082858ac173",
+    "size_bytes": 6823
+  },
+  "diagnostic_json": {
+    "path": "examples/v8/polymarket_configs/challenge_model_layer_market_diagnostic.json",
+    "sha256": "3eebbf4b4c86cb0a1c00034ac3b31983c05d81c524dae8ca3fd3695a9b8e9c9b",
+    "size_bytes": 516077
+  },
+  "diagnostic_markdown": {
+    "path": "docs/v8/challenge_model_layer_market_diagnostic.md",
+    "sha256": "51a25815b7341af9bce61e46190b49a146101239c6e602b6e77dd227cbc23dec",
+    "size_bytes": 4595
+  },
+  "report_payload_sha256": "b72c870c57d44a1c06677ad0766421e3d4732e48075ed25e85f13cb95c37414e",
+  "market_selection": {
+    "recommendation": "turn_to_15m",
+    "new_persistent_collection_market_families": [
+      "btc_updown_15m"
+    ],
+    "training_started": false
+  },
+  "evidence_role": {
+    "development_only_forever": true,
+    "promotion_evidence_eligible": false
+  },
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "schema_version": "bigan-challenge-model-development-lane-start-record-v1",
+  "lane_id": "challenge-model-development-btc-updown-15m-v1",
+  "started_at": "2026-07-27T06:20:11.810898+00:00",
+  "market_family": "btc_updown_15m",
+  "service_root": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1",
+  "collector": {
+    "pid": 61611,
+    "commit": "7d3a4d7ebe072910bca44647c25d9a7710181dce",
+    "initial_batch_id": "challenge-development-15m-000001-20260727T062011Z",
+    "initial_batch_round_count": 4,
+    "initial_status": "collecting_outcome_blind_15m_development_batch"
+  },
+  "post_close_development_finalizer": {
+    "pid": 62046,
+    "started": true,
+    "initial_status": "running_post_close_development_finalizer",
+    "outcomes_opened_only_after_official_post_close_resolution": true,
+    "feedback_to_capture_control_allowed": false
+  },
+  "protocol": {
+    "path": "examples/v8/polymarket_configs/challenge_model_development_lane_15m_protocol.json",
+    "sha256": "19badf0185b16df00b58b029ff39896ffadbc167a7f760a0ee931142411a0fc2"
+  },
+  "market_selection_diagnostic_freeze": {
+    "path": "examples/v8/polymarket_configs/challenge_model_layer_market_diagnostic_freeze.json",
+    "sha256": "32bbf6d8ec629ab4f910a92e7893bf82f6bb54c65c976a2347498335db0f2fb8",
+    "recommendation": "turn_to_15m"
+  },
+  "data_governance": {
+    "candidate_agnostic_development_lane": true,
+    "development_only_forever": true,
+    "promotion_evidence_eligible": false,
+    "confirmatory_collection_lane": false,
+    "daily_capture_summaries_enabled": true,
+    "single_experiment_freeze": false
+  },
+  "authorization_checkpoint": {
+    "explicit_120_round_authorization_recorded": false,
+    "maximum_capture_attempts_before_pause": 119,
+    "collector_stops_before_attempt_120": true
+  },
+  "training_started": false,
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  }
+}

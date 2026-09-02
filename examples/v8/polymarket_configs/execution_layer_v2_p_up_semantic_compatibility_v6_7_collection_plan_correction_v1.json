@@ -1,0 +1,44 @@
+{
+  "schema_version": "bigan-v8-p-up-semantic-execution-compatibility-v6-7-collection-plan-correction-v1",
+  "issue_number": 227,
+  "candidate_name": "p_up_semantic_execution_compatibility_v6_7",
+  "correction_created_ts": 1784592720630,
+  "correction_scope": "candidate_profile_file_sha256_binding_only",
+  "original_collection_plan": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue192/examples/v8/polymarket_runs/persistent-outcome-blind-service-v6-7-post-freeze-20260720T235811Z/v6_7_outcome_blind_collection_plan.json",
+    "sha256": "6d3dae149d12113f7735fedbbd67db39d1e082bcf8bb9ee35d06ab38277544a9"
+  },
+  "incorrect_declared_candidate_profile_sha256": "79d46a8459f57aa9bc0d365db59066b678a052c11f29738b2c93c2b776566550",
+  "authoritative_candidate_freeze": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_runs/p-up-semantic-execution-compatibility-v6-7-freeze-20260720T235811Z/v6_7_p_up_semantic_candidate_freeze_manifest.json",
+    "sha256": "2c9d0bb52ba2e59f960648845c8c9a4a574dd402684f3505d146ca4ca6e12493"
+  },
+  "authoritative_candidate_profile": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-v8-issue212/examples/v8/polymarket_configs/execution_layer_v2_p_up_semantic_compatibility_v6_7_profile.json",
+    "sha256": "cec55d243acd6bbf60a5e8474545b487086ddcd4d18073682ae7f2d4660d2248"
+  },
+  "authoritative_freeze_profile_descriptor_matches": true,
+  "candidate_freeze_created_ts": 1784591891531,
+  "future_collection_minimum_created_ts_exclusive": 1784591891531,
+  "collection_window_sizes_changed": false,
+  "collection_order_changed": false,
+  "candidate_scoring_changed": false,
+  "execution_thresholds_or_guards_changed": false,
+  "calibration_or_confirmatory_gate_changed": false,
+  "labels_outcomes_resolution_or_pnl_opened_before_correction": false,
+  "candidate_scoring_attempted_before_correction": false,
+  "result_selected_correction": false,
+  "required_for_future_window_freeze": true,
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}

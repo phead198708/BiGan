@@ -1,0 +1,15 @@
+{
+  "approver_identity": "codex_thread_user:019f9cff-7537-7cc1-8e91-affcad78729f",
+  "authorization_decision": "authorize_outcome_blind_collection_and_resume_goal",
+  "authorization_scope": "BTC-15M-MoE-confirmatory-v2_outcome_blind_capture_only",
+  "authorization_source_id": "codex-thread:019f9cff-7537-7cc1-8e91-affcad78729f:user-message:2026-07-30T08:16:30Z",
+  "canonical_message_bytes": {
+    "encoding": "UTF-8",
+    "terminal_newline": false
+  },
+  "canonical_message_sha256": "00ab41d5e203291d87df66e85495f71e5acea7cf899ed8dd8f782d2d1b5dc5db",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "message_text": "授权开始collection，重新resume goal",
+  "recorded_at": "2026-07-30T08:16:30Z",
+  "schema_version": "bigan-codex-manual-authorization-source-v1"
+}

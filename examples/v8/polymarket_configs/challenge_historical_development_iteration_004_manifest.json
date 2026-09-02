@@ -1,0 +1,45 @@
+{
+  "all_historical_success_criteria_passed": false,
+  "candidate_comparison": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-fixed-edge-support-recovery-0-025-development-iteration-004-20260727T044600Z/candidate_market_comparison.jsonl",
+    "sha256": "1bbfd6984de9feb41e882ae1783589bf5ee78747b32d710d21cb2c28972939a8",
+    "size_bytes": 200252
+  },
+  "candidate_id": "v8_1_fixed_edge_support_recovery_0_025",
+  "collection_started": false,
+  "historical_development_only": true,
+  "historical_evaluation_manifest": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-fixed-edge-support-recovery-0-025-development-iteration-004-20260727T044600Z/evaluation/challenge_historical_development_manifest.json",
+    "sha256": "51aa9e7e3e4180d47d54460b96f19b881d47c1849c7893fa275aee16e06badde",
+    "size_bytes": 1375
+  },
+  "historical_evaluation_report": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-fixed-edge-support-recovery-0-025-development-iteration-004-20260727T044600Z/evaluation/challenge_historical_development_result.json",
+    "sha256": "c58755f516c853fc0ab16cf5acb507b023dca52130c841c714e5058c3ddceda8",
+    "size_bytes": 5325
+  },
+  "iteration_entry": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-fixed-edge-support-recovery-0-025-development-iteration-004-20260727T044600Z/evaluation/challenge_historical_development_iteration_entry.json",
+    "sha256": "e1567e9b1f2b2d4609231e02f88bec259004806f4a87e79bfcacb78f0368a43e",
+    "size_bytes": 2040
+  },
+  "promotion_evidence_eligible": false,
+  "replacement_future_attempt_preregistration_allowed": false,
+  "run_id": "challenge-v8-1-fixed-edge-support-recovery-0-025-development-iteration-004-20260727T044600Z",
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-fixed-edge-support-recovery-development-manifest-v1",
+  "target_free_manifest": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-fixed-edge-support-recovery-0-025-development-iteration-004-20260727T044600Z/candidate_target_free_manifest.json",
+    "sha256": "46733c3cb6e47a9beadc9b1fcb6df535b4a60d0ba922340522c0977f8895af28",
+    "size_bytes": 2508
+  }
+}

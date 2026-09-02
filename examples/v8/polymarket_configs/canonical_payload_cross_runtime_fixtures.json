@@ -1,0 +1,39 @@
+{
+  "schema_version": "bigan-v8-canonical-payload-cross-runtime-fixtures-v1",
+  "canonical_contract_version": "bigan-v8-canonical-payload-v1",
+  "payload_schema_version": "bigan-v8-decision-feature-payload-v1",
+  "fixtures": [
+    {
+      "name": "nested_unicode_numeric_timestamp",
+      "payload": {
+        "schema_version": "bigan-v8-decision-feature-payload-v1",
+        "decision_ts": 1785046562000,
+        "features": {
+          "café": 1.0,
+          "negative_zero": -0.0,
+          "ordered_values": [
+            3,
+            2.5,
+            null,
+            true,
+            "é"
+          ]
+        }
+      },
+      "canonical_utf8": "{\"canonical_contract_version\":\"bigan-v8-canonical-payload-v1\",\"payload\":{\"decision_ts\":1785046562000,\"features\":{\"café\":1,\"negative_zero\":0,\"ordered_values\":[3,2.5,null,true,\"é\"]},\"schema_version\":\"bigan-v8-decision-feature-payload-v1\"},\"payload_schema_version\":\"bigan-v8-decision-feature-payload-v1\"}",
+      "canonical_sha256": "cf08d8013d1f53c0001c113babd50fc0b139b364b64d95f423abb5cd5e414822"
+    },
+    {
+      "name": "object_key_order_independent",
+      "payload": {
+        "z": 1,
+        "a": {
+          "b": 2,
+          "a": 3
+        }
+      },
+      "canonical_utf8": "{\"canonical_contract_version\":\"bigan-v8-canonical-payload-v1\",\"payload\":{\"a\":{\"a\":3,\"b\":2},\"z\":1},\"payload_schema_version\":\"bigan-v8-decision-feature-payload-v1\"}",
+      "canonical_sha256": "fc844b1555e9a7345cad1100eceffd57d5082d4f4431d5c7e28796bdc683657f"
+    }
+  ]
+}

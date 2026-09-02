@@ -1,0 +1,46 @@
+{
+  "evaluation_executed_exactly_once": true,
+  "evaluation_report": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/moe_confirmatory_evaluation_report.json",
+    "sha256": "72b7c4a8abaa438e0656f7b510acd6fd01894b5d6e55869dc8fd4708e35cc26f"
+  },
+  "evaluation_report_markdown": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/moe_confirmatory_evaluation_report.md",
+    "sha256": "055f048d547fb122053e852d8b50ab5398216b6ad14c84b63f632498b7d2a333"
+  },
+  "implementation_commit": "b3bcdf468a4c24d03e400eff0a56be4b1111345e",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "market_evaluation_rows": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/confirmatory_market_evaluation_rows.jsonl",
+    "sha256": "1bd6e2fe4ae3d8f867976fe490fb79e32a784f7266950a269d83495264c580c7"
+  },
+  "no_rerun": true,
+  "official_settlement_rows": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/official_settlement_rows.jsonl",
+    "sha256": "4f1f62051283e56bb2b14217a39815a2889df0507a2b813e20e380bfe49c0d35"
+  },
+  "outcome_access_claim": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_collection_freeze_001/outcome_access_claim_001.json",
+    "sha256": "d555bd316367dcae5163048c8da4ad1702753e30cb67bbb78b89f7fbf606d240"
+  },
+  "promotion_evidence_eligible": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-confirmatory-evaluation-manifest-v1",
+  "settlement_ingestion_report": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/confirmatory_evaluation_001/settlement_ingestion_report.json",
+    "sha256": "50d842fb8341d38c55555153f7f68c94a11a160d369b872d00f5e4f94b0cb091"
+  },
+  "source_capture_mutated": false
+}

@@ -1,0 +1,83 @@
+{
+  "all_paths_repository_relative": true,
+  "architecture_type": "deterministic_regime_router_with_conditional_experts_and_global_fallback",
+  "artifact_count": 13,
+  "artifacts": {
+    "moe_candidate_contract.json": {
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/moe_candidate_contract.json",
+      "sha256": "6c64c9acfa6c5a008a0d0939915f5309b5d882cb18474cd26ae697e6d3d425f0"
+    },
+    "moe_cost_and_action_contract.json": {
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/moe_cost_and_action_contract.json",
+      "sha256": "d01f221aae46421239e23fe2321a37e530367bc831e1033161d470b887fce8c0"
+    },
+    "moe_expert_bearish.json": {
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/moe_expert_bearish.json",
+      "sha256": "fe302bf971c656cf086bd5a9abdd494bad858c106524128548c5c235649bb6c0"
+    },
+    "moe_expert_bullish.json": {
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/moe_expert_bullish.json",
+      "sha256": "4c4be84cac34ee35a8b923d49b9f8a0b4b4a6834bac5c9ee9654358974366bb2"
+    },
+    "moe_expert_high_vol.json": {
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/moe_expert_high_vol.json",
+      "sha256": "40f9ee88f16cbebea9bb8c15b7d9d9e72293fb6f203400ef1d5164f4091796c6"
+    },
+    "moe_expert_low_vol.json": {
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/moe_expert_low_vol.json",
+      "sha256": "0958b4b9d3d4b1f7e77c1afbc122a66834829cb1909c45e7d05868749932548b"
+    },
+    "moe_feature_contract.json": {
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/moe_feature_contract.json",
+      "sha256": "d6117e95e1fe95c52c2741a5c0cbf6921be8418c50800c77c8bc9e6ed8e30ed5"
+    },
+    "moe_global_fallback.json": {
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/moe_global_fallback.json",
+      "sha256": "662989a6c2f479e04ebc925339fd74e969c85821ad36752d631c8039c18e43d2"
+    },
+    "moe_model_manifest.json": {
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/moe_model_manifest.json",
+      "sha256": "fddd8c1993c0abdcbd45dc439ae7053ca4173f60f938097bf0e8083f0104b930"
+    },
+    "moe_router_contract.json": {
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/moe_router_contract.json",
+      "sha256": "243b90aedb54198470ac04aeff713d5a6c6cd8b05c2c87eb49b48752d69bdb46"
+    },
+    "ordered_feature_names.json": {
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/ordered_feature_names.json",
+      "sha256": "147cda8b3541677f1b49a9ff841b17b0bf849ac36379035d6fa28d1a8c1a2e1b"
+    },
+    "synthetic_prediction_fixture.json": {
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/synthetic_prediction_fixture.json",
+      "sha256": "a1e8931a910d1e206448d31dd83ab707f9a5025c6fb1b27685d0f3e8bb290755"
+    },
+    "training_population_manifest.json": {
+      "path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8/training_population_manifest.json",
+      "sha256": "b9a4bcd589d2b8eab2359a891213f423ef1680d2e4cdf7fdfa68be90fcdf2103"
+    }
+  },
+  "bundle_hash": "30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8",
+  "bundle_repo_path": "examples/v8/polymarket_artifacts/sha256/30d180b028c83146fafd81c8b81269f51fa567b30bc5ab4d3577dd99c256dcf8",
+  "candidate_id": "mixture_of_experts",
+  "fresh_collection_authorized": false,
+  "fresh_collection_started": false,
+  "fresh_outcomes_opened": false,
+  "graph_content_sha256": "e532ed5485f6bec038a408827c8a9f41ce5a2f6c6e40e78ade3c205661c71776",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v1",
+  "machine_local_absolute_paths_allowed": false,
+  "promotion_evidence_eligible": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-artifact-graph-v1"
+}

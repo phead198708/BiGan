@@ -1,0 +1,35 @@
+{
+  "schema_version": "bigan-v8-challenge-historical-replay-contract-v1",
+  "issue": 260,
+  "candidate_id": "v8_1_primary_no_fallback",
+  "baseline_id": "matched_frozen_v6_7",
+  "historical_role": "development_screening_only_before_new_collection",
+  "promotion_evidence_eligible": false,
+  "gate": {
+    "exact_market_count": 120,
+    "minimum_candidate_support": 40,
+    "minimum_policy_difference_market_count": 1,
+    "candidate_minus_champion_total_pnl_minimum_exclusive": 0.0,
+    "candidate_largest_winner_removed_pnl_minimum_exclusive": 0.0,
+    "candidate_minus_champion_largest_winner_removed_pnl_minimum_exclusive": 0.0,
+    "paired_delta_largest_winner_removed_pnl_minimum_exclusive": 0.0,
+    "identical_market_cost_sizing_position_management_and_guard_required": true,
+    "historical_pnl_feature_parameter_or_threshold_tuning_allowed": false
+  },
+  "paired_market_bootstrap": {
+    "method": "paired_market_cluster_percentile",
+    "alpha": 0.0125,
+    "resample_count": 10000,
+    "seed": 260081,
+    "diagnostic_only": true,
+    "eligibility_blocker": false
+  },
+  "safety": {
+    "paper_candidate_unlocked": false,
+    "promotion_unlocked": false,
+    "live_unlocked": false,
+    "write_enabled": false,
+    "wallet_enabled": false,
+    "capital_at_risk": false
+  }
+}

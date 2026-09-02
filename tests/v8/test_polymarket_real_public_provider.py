@@ -3,13 +3,129 @@
 from __future__ import annotations
 
 import json
+import time
+import urllib.error
 import urllib.parse
+
+import pytest
 
 from bigan.v8.polymarket import (
     PolymarketCLOBWebSocketOrderBookSource,
     PolymarketPublicHTTPRealCorpusProvider,
     PolymarketRealCorpusRecorderConfig,
 )
+from bigan.v8.polymarket.recorder.public_provider import RealCorpusPublicProviderError
+
+
+def test_public_http_provider_uses_stable_read_only_json_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+    class Opener:
+        def open(self, request, *, timeout):
+            captured["headers"] = {
+                name.lower(): value for name, value in request.header_items()
+            }
+            captured["method"] = request.get_method()
+            captured["timeout"] = timeout
+            return Response()
+
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.recorder.public_provider.urllib.request.build_opener",
+        lambda *handlers: Opener(),
+    )
+    provider = PolymarketPublicHTTPRealCorpusProvider(http_timeout_seconds=7.0)
+
+    assert provider._get_json("https://gamma-api.polymarket.com/markets") == {
+        "ok": True
+    }
+    assert captured == {
+        "headers": {
+            "accept": "application/json",
+            "user-agent": "bigan-v8-polymarket-real-corpus-readonly/1.0",
+        },
+        "method": "GET",
+        "timeout": 7.0,
+    }
+
+
+def test_public_http_provider_http_error_remains_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Opener:
+        def open(self, request, *, timeout):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                403,
+                "Forbidden",
+                hdrs=None,
+                fp=None,
+            )
+
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.recorder.public_provider.urllib.request.build_opener",
+        lambda *handlers: Opener(),
+    )
+    provider = PolymarketPublicHTTPRealCorpusProvider(http_timeout_seconds=7.0)
+
+    with pytest.raises(RealCorpusPublicProviderError) as exc_info:
+        provider._get_json("https://gamma-api.polymarket.com/markets")
+
+    assert exc_info.value.reason_codes == ("read_only_public_http_error",)
+
+
+def test_public_http_provider_clob_books_uses_stable_read_only_json_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'[{"asset_id": "up-token"}]'
+
+    def urlopen(request, *, timeout):
+        captured["headers"] = {
+            name.lower(): value for name, value in request.header_items()
+        }
+        captured["method"] = request.get_method()
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.recorder.public_provider.urllib.request.urlopen",
+        urlopen,
+    )
+    provider = PolymarketPublicHTTPRealCorpusProvider(http_timeout_seconds=7.0)
+
+    assert provider._fetch_clob_books(("up-token",)) == {
+        "up-token": {"asset_id": "up-token"}
+    }
+    assert captured == {
+        "headers": {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "user-agent": "bigan-v8-polymarket-real-corpus-readonly/1.0",
+        },
+        "method": "POST",
+        "timeout": 7.0,
+    }
 
 
 def test_public_http_provider_normalizes_public_market_rows_without_fake_resolution() -> None:
@@ -44,6 +160,9 @@ def test_public_http_provider_normalizes_public_market_rows_without_fake_resolut
     assert markets[0]["reference_price_start"] == 65000.0
     assert markets[0]["reference_price_at_start"] == 65000.0
     assert markets[0]["reference_price_start_source_type"] == "gamma_market_payload"
+    assert markets[0]["market_identity_source_type"] == "gamma_primary"
+    assert markets[0]["market_identity_cache_fallback_used"] is False
+    assert markets[0]["market_identity_cache_provenance_valid"] is True
     assert markets[0]["up_token_id"] == "up-token"
     assert markets[0]["down_token_id"] == "down-token"
     assert len(books) == 2
@@ -53,6 +172,130 @@ def test_public_http_provider_normalizes_public_market_rows_without_fake_resolut
     assert len(candles) == 2
     assert {row["source"] for row in candles} == {"coinbase_btc_usd"}
     assert resolutions == []
+
+
+def test_public_http_provider_uses_exact_trade_and_clob_identity_when_gamma_times_out() -> None:
+    decision_ts = 1_700_001_060_000
+    slug = "btc-updown-5m-1700001000"
+
+    def fetch_json(url: str):
+        parsed = urllib.parse.urlparse(url)
+        if "gamma-api.polymarket.com" in parsed.netloc:
+            raise RealCorpusPublicProviderError(
+                "pytest Gamma timeout",
+                reason_codes=("read_only_public_http_timeout",),
+            )
+        if "data-api.polymarket.com" in parsed.netloc:
+            return [
+                {
+                    "slug": slug,
+                    "conditionId": "0xcondition",
+                    "asset": "up-token",
+                    "outcome": "Up",
+                    "timestamp": 1_700_001_059,
+                },
+                {
+                    "slug": "unrelated-market",
+                    "conditionId": "0xunrelated",
+                    "asset": "other-token",
+                    "outcome": "Yes",
+                    "timestamp": 1_700_001_059,
+                },
+            ]
+        if parsed.netloc == "clob.polymarket.com" and parsed.path == "/markets/0xcondition":
+            return {
+                "condition_id": "0xcondition",
+                "market_slug": slug,
+                "question": "Bitcoin Up or Down - test",
+                "description": (
+                    "Resolution uses the BTC/USD stream at "
+                    "https://data.chain.link/streams/btc-usd."
+                ),
+                "enable_order_book": True,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "tokens": [
+                    {"token_id": "up-token", "outcome": "Up"},
+                    {"token_id": "down-token", "outcome": "Down"},
+                ],
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=decision_ts,
+        fetch_json=fetch_json,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider-clob-fallback",
+        output_dir="/tmp/provider-clob-fallback",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+
+    assert len(markets) == 1
+    assert markets[0]["slug"] == slug
+    assert markets[0]["condition_id"] == "0xcondition"
+    assert markets[0]["up_token_id"] == "up-token"
+    assert markets[0]["down_token_id"] == "down-token"
+    assert markets[0]["reference_price_source"] == (
+        "https://data.chain.link/streams/btc-usd"
+    )
+    assert markets[0]["market_identity_source_type"] == (
+        "data_api_recent_trade_clob_verified"
+    )
+    assert markets[0]["market_identity_data_api_discovery_used"] is True
+    assert markets[0]["market_identity_clob_revalidation_passed"] is True
+    validation = markets[0]["market_identity_clob_revalidation"]
+    assert validation["data_api_exact_slug_trade_count"] == 1
+    assert validation["data_api_latest_trade_ts"] <= decision_ts
+
+
+def test_public_http_provider_fails_closed_when_data_api_identity_is_ambiguous() -> None:
+    slug = "btc-updown-5m-1700001000"
+
+    def fetch_json(url: str):
+        parsed = urllib.parse.urlparse(url)
+        if "gamma-api.polymarket.com" in parsed.netloc:
+            raise RealCorpusPublicProviderError(
+                "pytest Gamma timeout",
+                reason_codes=("read_only_public_http_timeout",),
+            )
+        if "data-api.polymarket.com" in parsed.netloc:
+            return [
+                {
+                    "slug": slug,
+                    "conditionId": condition_id,
+                    "asset": f"{condition_id}-token",
+                    "outcome": "Up",
+                    "timestamp": 1_700_001_059,
+                }
+                for condition_id in ("0xcondition-a", "0xcondition-b")
+            ]
+        raise AssertionError(f"CLOB must not be queried for ambiguous identity: {url}")
+
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_060_000,
+        fetch_json=fetch_json,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider-clob-fallback-ambiguous",
+        output_dir="/tmp/provider-clob-fallback-ambiguous",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    with pytest.raises(RealCorpusPublicProviderError) as exc_info:
+        provider.market_rows(config)
+
+    assert "data_api_market_identity_condition_ambiguous" in (
+        exc_info.value.reason_codes
+    )
+    assert "gamma_market_identity_cache_not_configured" in (
+        exc_info.value.reason_codes
+    )
 
 
 def test_public_http_provider_uses_official_reference_prices_when_present() -> None:
@@ -238,18 +481,29 @@ def test_public_http_provider_configures_default_websocket_snapshot_interval() -
     assert provider.orderbook_source.snapshot_interval_seconds == 2.5
 
 
+def test_public_http_provider_rejects_pre_stream_rest_seed() -> None:
+    with pytest.raises(ValueError, match="REST is fallback-only"):
+        PolymarketPublicHTTPRealCorpusProvider(
+            seed_rest_orderbooks_before_stream=True,
+        )
+
+
 def test_public_http_provider_separates_http_and_orderbook_timeouts() -> None:
     provider = PolymarketPublicHTTPRealCorpusProvider(
         current_time_ms=1_700_001_000_000,
         fetch_json=FakePublicFetch(include_reference_prices=False),
         timeout_seconds=330.0,
         http_timeout_seconds=15.0,
+        orderbook_ws_initial_complete_book_timeout_seconds=5.0,
+        rest_fallback_collection_seconds=300.0,
     )
 
     assert provider.timeout_seconds == 330.0
     assert provider.http_timeout_seconds == 15.0
     assert isinstance(provider.orderbook_source, PolymarketCLOBWebSocketOrderBookSource)
     assert provider.orderbook_source.timeout_seconds == 330.0
+    assert provider.orderbook_source.initial_complete_book_timeout_seconds == 5.0
+    assert provider.rest_fallback_collection_seconds == 300.0
 
 
 def test_public_http_provider_falls_back_to_kraken_feature_candles() -> None:
@@ -303,6 +557,7 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
     book_payloads: dict[str, dict] = {}
     fallback_payloads: dict[str, dict] = {}
     resolution_payloads: dict[str, dict] = {}
+    trade_payloads: list[dict] = []
 
     source._update_payload_maps(
         payload={
@@ -318,6 +573,7 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
         book_payloads=book_payloads,
         fallback_payloads=fallback_payloads,
         resolution_payloads=resolution_payloads,
+        trade_payloads=trade_payloads,
     )
     source._update_payload_maps(
         payload={
@@ -339,6 +595,25 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
         book_payloads=book_payloads,
         fallback_payloads=fallback_payloads,
         resolution_payloads=resolution_payloads,
+        trade_payloads=trade_payloads,
+    )
+    source._update_payload_maps(
+        payload={
+            "event_type": "last_trade_price",
+            "market": "0xcondition",
+            "asset_id": "up-token",
+            "timestamp": "1700000000120",
+            "price": "0.57",
+            "size": "3.5",
+            "side": "BUY",
+            "transaction_hash": "0xtrade",
+        },
+        receive_time_ms=1_700_000_000_125,
+        target_tokens={"up-token", "down-token"},
+        book_payloads=book_payloads,
+        fallback_payloads=fallback_payloads,
+        resolution_payloads=resolution_payloads,
+        trade_payloads=trade_payloads,
     )
     source._update_payload_maps(
         payload={
@@ -355,6 +630,7 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
         book_payloads=book_payloads,
         fallback_payloads=fallback_payloads,
         resolution_payloads=resolution_payloads,
+        trade_payloads=trade_payloads,
     )
 
     assert book_payloads["up-token"]["bids"] == [{"price": "0.56", "size": "100"}]
@@ -364,6 +640,124 @@ def test_websocket_orderbook_source_projects_market_channel_events() -> None:
     assert fallback_payloads["down-token"]["source_event_type"] == "price_change"
     assert resolution_payloads["0xcondition"]["winning_asset_id"] == "up-token"
     assert resolution_payloads["0xcondition"]["winning_outcome"] == "Up"
+    assert trade_payloads == [
+        {
+            "market": "0xcondition",
+            "asset": "up-token",
+            "timestamp_ms": 1_700_000_000_120,
+            "receive_time": 1_700_000_000_125,
+            "price": "0.57",
+            "size": "3.5",
+            "side": "BUY",
+            "transaction_hash": "0xtrade",
+            "trade_source_type": "polymarket_clob_websocket_market",
+        }
+    ]
+
+
+def test_public_http_provider_merges_ws_trade_tape_with_paginated_rest() -> None:
+    fetch = PaginatedTradeFetch(page_size=2, truncated=False)
+    orderbook_source = FakeTradeStreamOrderBookSource()
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_300_100,
+        fetch_json=fetch,
+        orderbook_source=orderbook_source,
+        recent_trade_limit=2,
+        recent_trade_max_pages=3,
+    )
+    market = _trade_test_market()
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="trade-tape",
+        output_dir="/tmp/trade-tape",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    rows = provider.trade_rows([market], config)
+
+    assert fetch.requested_offsets == [0, 2]
+    assert len(rows) == 3
+    assert [row["transaction_hash"] for row in rows] == ["0xa", "0xb", "0xc"]
+    duplicate = next(row for row in rows if row["transaction_hash"] == "0xb")
+    assert duplicate["trade_source_type"] == "polymarket_clob_websocket_market"
+    assert duplicate["available_at_ts"] == 1_700_001_200_105
+    assert market["trade_api_pagination_exhausted"] is True
+    assert market["trade_api_reached_market_start"] is True
+    assert market["trade_rest_rows_truncated"] is False
+    assert market["trade_full_round_coverage_complete"] is True
+    assert market["trade_tape_censored"] is False
+    assert market["trade_collection_reason_codes"] == []
+
+
+def test_public_http_provider_marks_bounded_trade_backfill_as_censored() -> None:
+    fetch = PaginatedTradeFetch(page_size=2, truncated=True)
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_300_100,
+        fetch_json=fetch,
+        orderbook_source=FakeOrderBookSource(),
+        recent_trade_limit=2,
+        recent_trade_max_pages=2,
+    )
+    market = _trade_test_market()
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="trade-tape-truncated",
+        output_dir="/tmp/trade-tape-truncated",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    rows = provider.trade_rows([market], config)
+
+    assert len(rows) == 4
+    assert fetch.requested_offsets == [0, 2]
+    assert market["trade_api_pagination_exhausted"] is False
+    assert market["trade_api_reached_market_start"] is False
+    assert market["trade_rest_rows_truncated"] is True
+    assert market["trade_full_round_coverage_complete"] is False
+    assert market["trade_tape_censored"] is True
+    assert "trade_data_api_pagination_truncated" in market[
+        "trade_collection_reason_codes"
+    ]
+    assert "trade_stream_unavailable" in market["trade_collection_reason_codes"]
+
+
+def test_public_http_provider_keeps_complete_ws_tape_when_rest_reconciliation_fails() -> None:
+    orderbook_source = FakeTradeStreamOrderBookSource()
+
+    def fail_rest(url: str):
+        raise RealCorpusPublicProviderError(
+            f"read-only reconciliation unavailable: {url}",
+            reason_codes=("read_only_public_http_timeout",),
+        )
+
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_300_100,
+        fetch_json=fail_rest,
+        orderbook_source=orderbook_source,
+        recent_trade_limit=2,
+        recent_trade_max_pages=2,
+    )
+    market = _trade_test_market()
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="trade-tape-ws-only",
+        output_dir="/tmp/trade-tape-ws-only",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    rows = provider.trade_rows([market], config)
+
+    assert len(rows) == 1
+    assert rows[0]["trade_source_type"] == "polymarket_clob_websocket_market"
+    assert market["trade_full_round_coverage_complete"] is True
+    assert market["trade_api_request_failed"] is True
+    assert market["trade_tape_censored"] is False
+    assert "read_only_public_http_timeout" in market[
+        "trade_collection_reason_codes"
+    ]
+    assert "trade_data_api_reconciliation_failed" in market[
+        "trade_collection_reason_codes"
+    ]
 
 
 def test_websocket_orderbook_source_keeps_partial_snapshots_after_disconnect(monkeypatch) -> None:
@@ -417,6 +811,118 @@ def test_websocket_orderbook_source_keeps_partial_snapshots_after_disconnect(mon
     assert len(snapshots) >= 1
     assert set(snapshots[0]) == {"up-token", "down-token"}
     assert resolutions["0xcondition"]["winning_asset_id"] == "up-token"
+
+
+def test_websocket_orderbook_source_fails_fast_when_snapshot_stream_stalls(
+    monkeypatch,
+) -> None:
+    source = PolymarketCLOBWebSocketOrderBookSource(
+        timeout_seconds=1.0,
+        snapshot_interval_seconds=0.001,
+        snapshot_stall_timeout_seconds=0.02,
+    )
+    websocket = FakeDisconnectingWebSocket(
+        [
+            json.dumps(
+                [
+                    {
+                        "asset_id": "up-token",
+                        "market": "0xcondition",
+                        "timestamp": "1700000000000",
+                        "hash": "up-book-hash",
+                        "bids": [{"price": "0.56", "size": "100"}],
+                        "asks": [{"price": "0.58", "size": "120"}],
+                    },
+                    {
+                        "asset_id": "down-token",
+                        "market": "0xcondition",
+                        "timestamp": "1700000000000",
+                        "hash": "down-book-hash",
+                        "bids": [{"price": "0.42", "size": "90"}],
+                        "asks": [{"price": "0.44", "size": "110"}],
+                    },
+                ]
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.recorder.public_provider.websockets.connect",
+        lambda *args, **kwargs: websocket,
+    )
+
+    started_at = time.monotonic()
+    with pytest.raises(RealCorpusPublicProviderError) as exc_info:
+        source.book_payload_snapshots(("up-token", "down-token"))
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.25
+    assert "polymarket_clob_ws_snapshot_stream_stalled" in (
+        exc_info.value.reason_codes
+    )
+
+
+def test_websocket_orderbook_source_returns_partial_coverage_at_initial_deadline(
+    monkeypatch,
+) -> None:
+    source = PolymarketCLOBWebSocketOrderBookSource(
+        timeout_seconds=1.0,
+        snapshot_interval_seconds=0.001,
+        initial_complete_book_timeout_seconds=0.02,
+    )
+    websocket = FakeDisconnectingWebSocket(
+        [
+            json.dumps(
+                {
+                    "asset_id": "up-token",
+                    "market": "0xcondition",
+                    "timestamp": "1700000000000",
+                    "hash": "up-book-hash",
+                    "bids": [{"price": "0.56", "size": "100"}],
+                    "asks": [{"price": "0.58", "size": "120"}],
+                }
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.recorder.public_provider.websockets.connect",
+        lambda *args, **kwargs: websocket,
+    )
+
+    started_at = time.monotonic()
+    snapshots = source.book_payload_snapshots(("up-token", "down-token"))
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.25
+    assert snapshots
+    assert all(set(snapshot) == {"up-token"} for snapshot in snapshots)
+
+
+def test_websocket_orderbook_source_fails_at_bounded_initial_deadline(
+    monkeypatch,
+) -> None:
+    source = PolymarketCLOBWebSocketOrderBookSource(
+        timeout_seconds=1.0,
+        snapshot_interval_seconds=0.001,
+        initial_complete_book_timeout_seconds=0.02,
+    )
+
+    def fail_connect(*args, **kwargs):
+        raise TimeoutError("pytest connect timeout")
+
+    monkeypatch.setattr(
+        "bigan.v8.polymarket.recorder.public_provider.websockets.connect",
+        fail_connect,
+    )
+
+    started_at = time.monotonic()
+    with pytest.raises(RealCorpusPublicProviderError) as exc_info:
+        source.book_payload_snapshots(("up-token", "down-token"))
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.25
+    assert "polymarket_clob_ws_initial_complete_book_timeout" in (
+        exc_info.value.reason_codes
+    )
 
 
 def test_public_http_provider_uses_websocket_market_resolved_event() -> None:
@@ -498,6 +1004,259 @@ def test_public_http_provider_uses_websocket_without_rest_seed() -> None:
         "polymarket_clob_websocket"
     }
     assert all(row["orderbook_rest_fallback_used"] is False for row in books)
+
+
+def test_public_http_provider_uses_rest_only_after_websocket_failure() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=FakePublicFetch(include_reference_prices=True),
+        orderbook_source=FailingWebSocketStreamOrderBookSource(),
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    books = provider.orderbook_rows(markets, config)
+
+    assert len(books) == 2
+    assert {row["orderbook_source_type"] for row in books} == {
+        "polymarket_clob_rest_fallback"
+    }
+    assert all(row["orderbook_rest_fallback_used"] is True for row in books)
+    assert all(
+        row["orderbook_fallback_reason_codes"]
+        == ["polymarket_clob_ws_orderbook_collection_failed"]
+        for row in books
+    )
+
+
+def test_public_http_provider_collects_causal_rest_fallback_snapshots_after_ws_failure() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=SequencedRestFallbackFetch(),
+        orderbook_source=FailingWebSocketStreamOrderBookSource(),
+        orderbook_snapshot_interval_seconds=0.005,
+        rest_fallback_collection_seconds=0.021,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    books = provider.orderbook_rows(markets, config)
+
+    assert len(books) >= 6
+    assert len({row["rest_fallback_snapshot_index"] for row in books}) >= 3
+    assert {row["outcome"] for row in books} == {"UP", "DOWN"}
+    assert {row["orderbook_source_type"] for row in books} == {
+        "polymarket_clob_rest_fallback"
+    }
+    assert all(row["orderbook_rest_fallback_used"] is True for row in books)
+    assert max(row["available_at_ts"] for row in books) <= markets[0]["market_end_ts"]
+
+
+def test_public_http_provider_accepts_complete_ws_decision_window() -> None:
+    source = WindowCoverageWebSocketStreamOrderBookSource(
+        (60_000, 120_000, 180_000, 240_000)
+    )
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=FakePublicFetch(
+            include_reference_prices=True,
+            fail_clob_books=True,
+        ),
+        orderbook_source=source,
+        rest_fallback_collection_seconds=330.0,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    books = provider.orderbook_rows(markets, config)
+
+    assert len(books) == 8
+    assert all(
+        row["orderbook_full_decision_window_coverage_passed"] is True
+        for row in books
+    )
+    assert {
+        row["orderbook_expected_decision_pair_count"] for row in books
+    } == {4}
+    assert {
+        row["orderbook_observed_decision_pair_count"] for row in books
+    } == {4}
+    assert all(
+        row["orderbook_window_coverage_fallback_applied"] is False
+        for row in books
+    )
+
+
+def test_public_http_provider_rest_recovers_premature_ws_window(
+    monkeypatch,
+) -> None:
+    source = WindowCoverageWebSocketStreamOrderBookSource(
+        (60_000, 120_000)
+    )
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_120_000,
+        fetch_json=FakePublicFetch(include_reference_prices=True),
+        orderbook_source=source,
+        rest_fallback_collection_seconds=330.0,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+    markets = provider.market_rows(config)
+    fallback_calls: list[tuple[str, ...]] = []
+
+    def fake_fallback(
+        fallback_markets: list[dict],
+        *,
+        reason_codes: tuple[str, ...],
+    ) -> list[dict]:
+        fallback_calls.append(reason_codes)
+        return _window_fallback_rows(
+            fallback_markets[0],
+            (180_000, 240_000),
+        )
+
+    monkeypatch.setattr(provider, "_rest_orderbook_fallback", fake_fallback)
+
+    books = provider.orderbook_rows(markets, config)
+
+    assert fallback_calls == [
+        ("polymarket_clob_ws_window_coverage_incomplete",)
+    ]
+    assert len(books) == 8
+    assert {
+        row["orderbook_source_type"] for row in books
+    } == {
+        "polymarket_clob_websocket",
+        "polymarket_clob_rest_fallback",
+    }
+    assert all(
+        row["orderbook_full_decision_window_coverage_passed"] is True
+        for row in books
+    )
+    assert all(
+        row["orderbook_window_coverage_fallback_applied"] is True
+        for row in books
+    )
+
+
+def test_public_http_provider_fails_closed_when_rest_window_stays_partial(
+    monkeypatch,
+) -> None:
+    source = WindowCoverageWebSocketStreamOrderBookSource(
+        (60_000, 120_000)
+    )
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_120_000,
+        fetch_json=FakePublicFetch(include_reference_prices=True),
+        orderbook_source=source,
+        rest_fallback_collection_seconds=330.0,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+    markets = provider.market_rows(config)
+
+    monkeypatch.setattr(
+        provider,
+        "_rest_orderbook_fallback",
+        lambda fallback_markets, *, reason_codes: _window_fallback_rows(
+            fallback_markets[0],
+            (180_000,),
+        ),
+    )
+
+    with pytest.raises(RealCorpusPublicProviderError) as exc_info:
+        provider.orderbook_rows(markets, config)
+
+    assert (
+        "polymarket_clob_ws_and_rest_window_coverage_incomplete"
+        in exc_info.value.reason_codes
+    )
+    assert (
+        "orderbook_collection_ended_before_last_required_decision"
+        in exc_info.value.reason_codes
+    )
+    assert (
+        "orderbook_required_decision_pair_coverage_incomplete"
+        in exc_info.value.reason_codes
+    )
+
+
+def test_public_http_provider_does_not_start_streaming_rest_fallback_after_close() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_300_001,
+        market_slugs=("btc-updown-5m-1700001000",),
+        fetch_json=FakePublicFetch(include_reference_prices=True),
+        orderbook_source=FailingWebSocketStreamOrderBookSource(),
+        rest_fallback_collection_seconds=1.0,
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    with pytest.raises(RealCorpusPublicProviderError) as exc_info:
+        provider.orderbook_rows(markets, config)
+
+    assert "polymarket_clob_rest_fallback_market_closed" in (
+        exc_info.value.reason_codes
+    )
+
+
+def test_public_http_provider_rest_fallback_only_fills_missing_ws_token() -> None:
+    provider = PolymarketPublicHTTPRealCorpusProvider(
+        current_time_ms=1_700_001_000_000,
+        fetch_json=FakePublicFetch(include_reference_prices=True),
+        orderbook_source=PartialWebSocketStreamOrderBookSource(),
+    )
+    config = PolymarketRealCorpusRecorderConfig(
+        run_id="provider",
+        output_dir="/tmp/provider",
+        market_families=("btc_updown_5m",),
+        mock_public_data=False,
+    )
+
+    markets = provider.market_rows(config)
+    books = provider.orderbook_rows(markets, config)
+
+    assert len(books) == 2
+    by_outcome = {row["outcome"]: row for row in books}
+    assert by_outcome["UP"]["orderbook_source_type"] == (
+        "polymarket_clob_websocket"
+    )
+    assert by_outcome["UP"]["orderbook_rest_fallback_used"] is False
+    assert by_outcome["DOWN"]["orderbook_source_type"] == (
+        "polymarket_clob_rest_fallback"
+    )
+    assert by_outcome["DOWN"]["orderbook_rest_fallback_used"] is True
+    assert by_outcome["DOWN"]["orderbook_fallback_reason_codes"] == [
+        "polymarket_clob_ws_missing_token_orderbook"
+    ]
 
 
 class FakePublicFetch:
@@ -665,6 +1424,37 @@ class FakePublicFetch:
         raise AssertionError(f"unexpected url: {url}")
 
 
+class SequencedRestFallbackFetch(FakePublicFetch):
+    def __init__(self) -> None:
+        super().__init__(include_reference_prices=True)
+        self.book_call_count = 0
+
+    def __call__(self, url: str):
+        parsed = urllib.parse.urlparse(url)
+        query = urllib.parse.parse_qs(parsed.query)
+        if "clob.polymarket.com" in parsed.netloc and parsed.path == "/book":
+            token_id = query["token_id"][0]
+            snapshot_index = self.book_call_count // 2
+            self.book_call_count += 1
+            observed_at = 1_700_001_000_100 + snapshot_index * 10
+            if token_id == "up-token":
+                return _book_payload(
+                    token_id=token_id,
+                    bid=0.56,
+                    ask=0.58,
+                    timestamp=str(observed_at),
+                    receive_time=observed_at,
+                )
+            return _book_payload(
+                token_id=token_id,
+                bid=0.42,
+                ask=0.44,
+                timestamp=str(observed_at),
+                receive_time=observed_at,
+            )
+        return super().__call__(url)
+
+
 class DeferredResolutionFetch(FakePublicFetch):
     def __init__(self) -> None:
         super().__init__(include_reference_prices=False)
@@ -693,6 +1483,118 @@ class FakeOrderBookSource:
             "up-token": _book_payload(token_id="up-token", bid=0.56, ask=0.58),
             "down-token": _book_payload(token_id="down-token", bid=0.42, ask=0.44),
         }
+
+
+class FakeTradeStreamOrderBookSource(FakeOrderBookSource):
+    def trade_payloads(self, token_ids: tuple[str, ...]) -> list[dict]:
+        self.requested_token_ids = token_ids
+        return [
+            {
+                "market": "0xcondition",
+                "asset": "up-token",
+                "timestamp_ms": 1_700_001_200_100,
+                "receive_time": 1_700_001_200_105,
+                "price": "0.57",
+                "size": "2.5",
+                "side": "BUY",
+                "transaction_hash": "0xb",
+                "trade_source_type": "polymarket_clob_websocket_market",
+            }
+        ]
+
+    def trade_collection_report(self) -> dict:
+        return {
+            "trade_stream_started_at_ts": 1_700_001_000_000,
+            "trade_stream_ended_at_ts": 1_700_001_300_000,
+            "trade_stream_continuity_passed": True,
+            "trade_stream_reason_codes": [],
+        }
+
+
+class PaginatedTradeFetch:
+    def __init__(self, *, page_size: int, truncated: bool) -> None:
+        self.page_size = page_size
+        self.truncated = truncated
+        self.requested_offsets: list[int] = []
+
+    def __call__(self, url: str):
+        parsed = urllib.parse.urlparse(url)
+        if "data-api.polymarket.com" not in parsed.netloc:
+            raise AssertionError(f"unexpected URL: {url}")
+        query = urllib.parse.parse_qs(parsed.query)
+        assert int(query["limit"][0]) == self.page_size
+        offset = int(query["offset"][0])
+        self.requested_offsets.append(offset)
+        rows = [
+            _trade_payload(
+                transaction_hash="0xc",
+                token_id="down-token",
+                timestamp_ms=1_700_001_250_000,
+            ),
+            _trade_payload(
+                transaction_hash="0xb",
+                token_id="up-token",
+                timestamp_ms=1_700_001_200_100,
+            ),
+            _trade_payload(
+                transaction_hash="0xa",
+                token_id="up-token",
+                timestamp_ms=(
+                    1_700_001_000_000 if not self.truncated else 1_700_001_150_000
+                ),
+            ),
+        ]
+        if self.truncated:
+            rows.extend(
+                [
+                    _trade_payload(
+                        transaction_hash="0xd",
+                        token_id="down-token",
+                        timestamp_ms=1_700_001_100_000,
+                    ),
+                    _trade_payload(
+                        transaction_hash="0xe",
+                        token_id="up-token",
+                        timestamp_ms=1_700_001_090_000,
+                    ),
+                    _trade_payload(
+                        transaction_hash="0xf",
+                        token_id="down-token",
+                        timestamp_ms=1_700_001_080_000,
+                    ),
+                ]
+            )
+        return rows[offset : offset + self.page_size]
+
+
+def _trade_test_market() -> dict:
+    return {
+        "market_id": "0xcondition",
+        "condition_id": "0xcondition",
+        "slug": "btc-updown-5m-1700001000",
+        "market_family": "btc_updown_5m",
+        "market_start_ts": 1_700_001_000_000,
+        "market_end_ts": 1_700_001_300_000,
+        "up_token_id": "up-token",
+        "down_token_id": "down-token",
+    }
+
+
+def _trade_payload(
+    *,
+    transaction_hash: str,
+    token_id: str,
+    timestamp_ms: int,
+) -> dict:
+    return {
+        "market": "0xcondition",
+        "asset": token_id,
+        "timestamp": timestamp_ms // 1000,
+        "price": "0.57" if token_id == "up-token" else "0.43",
+        "size": "1.0",
+        "side": "BUY",
+        "transactionHash": transaction_hash,
+    }
 
 
 class FakeStreamOrderBookSource(FakeOrderBookSource):
@@ -761,6 +1663,100 @@ class FakeWebSocketStreamOrderBookSource(PolymarketCLOBWebSocketOrderBookSource)
                 ),
             }
         ]
+
+
+class FailingWebSocketStreamOrderBookSource(FakeWebSocketStreamOrderBookSource):
+    def book_payload_snapshots(self, token_ids: tuple[str, ...]) -> list[dict[str, dict]]:
+        self.requested_token_ids = token_ids
+        raise RealCorpusPublicProviderError(
+            "pytest websocket failure",
+            reason_codes=("polymarket_clob_ws_orderbook_collection_failed",),
+        )
+
+
+class PartialWebSocketStreamOrderBookSource(FakeWebSocketStreamOrderBookSource):
+    def book_payload_snapshots(self, token_ids: tuple[str, ...]) -> list[dict[str, dict]]:
+        self.requested_token_ids = token_ids
+        return [
+            {
+                "up-token": _book_payload(
+                    token_id="up-token",
+                    bid=0.57,
+                    ask=0.59,
+                    timestamp="1700000059000",
+                    receive_time=1_700_000_059_100,
+                )
+            }
+        ]
+
+
+class WindowCoverageWebSocketStreamOrderBookSource(
+    FakeWebSocketStreamOrderBookSource
+):
+    def __init__(self, offsets_ms: tuple[int, ...]) -> None:
+        super().__init__()
+        self.continuous_window_coverage_required = True
+        self.offsets_ms = offsets_ms
+
+    def book_payload_snapshots(
+        self,
+        token_ids: tuple[str, ...],
+    ) -> list[dict[str, dict]]:
+        self.requested_token_ids = token_ids
+        market_start_ts = 1_700_001_000_000
+        return [
+            {
+                "up-token": _book_payload(
+                    token_id="up-token",
+                    bid=0.57,
+                    ask=0.59,
+                    timestamp=str(market_start_ts + offset_ms),
+                    receive_time=market_start_ts + offset_ms,
+                ),
+                "down-token": _book_payload(
+                    token_id="down-token",
+                    bid=0.41,
+                    ask=0.43,
+                    timestamp=str(market_start_ts + offset_ms),
+                    receive_time=market_start_ts + offset_ms,
+                ),
+            }
+            for offset_ms in self.offsets_ms
+        ]
+
+
+def _window_fallback_rows(
+    market: dict,
+    offsets_ms: tuple[int, ...],
+) -> list[dict]:
+    market_start_ts = int(market["market_start_ts"])
+    collection_end_ts = market_start_ts + max(offsets_ms, default=0)
+    return [
+        {
+            "market_id": market["market_id"],
+            "token_id": token_id,
+            "outcome": outcome,
+            "ts": market_start_ts + offset_ms,
+            "available_at_ts": market_start_ts + offset_ms,
+            "collection_end_ts": collection_end_ts,
+            "bid_price": bid,
+            "ask_price": ask,
+            "mid_price": (bid + ask) / 2.0,
+            "bid_size": 100.0,
+            "ask_size": 100.0,
+            "liquidity_depth": 200.0,
+            "orderbook_source_type": "polymarket_clob_rest_fallback",
+            "orderbook_rest_fallback_used": True,
+            "orderbook_fallback_reason_codes": [
+                "polymarket_clob_ws_window_coverage_incomplete"
+            ],
+        }
+        for offset_ms in offsets_ms
+        for outcome, token_id, bid, ask in (
+            ("UP", market["up_token_id"], 0.57, 0.59),
+            ("DOWN", market["down_token_id"], 0.41, 0.43),
+        )
+    ]
 
 
 class FakeDisconnectingWebSocket:

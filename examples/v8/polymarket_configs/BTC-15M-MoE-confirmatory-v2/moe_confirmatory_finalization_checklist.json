@@ -1,0 +1,52 @@
+{
+  "after_outcome_access": {
+    "bootstrap_reproducible_required": true,
+    "failed_evaluation_rerun_allowed": false,
+    "gate_evaluation_exactly_once": true,
+    "inferred_outcomes_allowed": false,
+    "not_executed": true,
+    "official_settlement_only": true,
+    "optional_stopping_allowed": false,
+    "population_changes_allowed": false,
+    "unresolved_markets_allowed": false
+  },
+  "before_outcome_access": {
+    "all_hashes_reconcile": false,
+    "baseline_rows_equal_800": false,
+    "candidate_rows_equal_800": false,
+    "capture_manifest_frozen": false,
+    "decision_artifacts_frozen": false,
+    "exact_800_population_frozen": false,
+    "outcome_access_allowed_now": false,
+    "paired_rows_equal_800": false,
+    "partial_incremental_or_selective_open_forbidden": true
+  },
+  "candidate_bundle_hash": "fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807",
+  "created_at": "2026-07-30T09:19:06.237120+00:00",
+  "exact_quality_valid_market_target": 800,
+  "fresh_collection_started": true,
+  "fresh_outcomes_opened": false,
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "maximum_attempts": 926,
+  "monitoring_boundary": {
+    "current_outcomes_may_be_read": false,
+    "monitoring_may_change_model_or_decisions": false,
+    "monitoring_may_filter_or_reorder_markets": false,
+    "monitoring_may_influence_collection": false
+  },
+  "promotion_evidence_eligible": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-moe-confirmatory-finalization-checklist-v1"
+}

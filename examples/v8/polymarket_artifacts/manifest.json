@@ -1,0 +1,19 @@
+{
+  "schema_version": "bigan-repository-pinned-model-artifacts-v1",
+  "bundles": [
+    {
+      "path": "examples/v8/polymarket_artifacts/sha256/8b7fc96af7f23c1e658cb816fc7d58028c71a9d530d2193bad9b2088547ffbcc/bundle_manifest.json",
+      "bundle_sha256": "8b7fc96af7f23c1e658cb816fc7d58028c71a9d530d2193bad9b2088547ffbcc",
+      "role": "legacy_v7_settlement_model_bundle"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "examples/v8/polymarket_artifacts/sha256/b92d2c087de20fbc6e6a142f13e0e48e14ecc25915cf318b485dc2927f958772/v8_1_adaptive_support_controller_model.json",
+      "sha256": "b92d2c087de20fbc6e6a142f13e0e48e14ecc25915cf318b485dc2927f958772",
+      "role": "v8_1_adaptive_support_controller"
+    }
+  ],
+  "development_only_forever": true,
+  "promotion_evidence_eligible": false
+}

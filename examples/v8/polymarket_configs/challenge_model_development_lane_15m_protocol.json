@@ -1,0 +1,67 @@
+{
+  "schema_version": "bigan-challenge-model-development-lane-protocol-v1",
+  "lane_id": "challenge-model-development-btc-updown-15m-v1",
+  "market_family": "btc_updown_15m",
+  "market_selection_diagnostic_freeze": {
+    "path": "examples/v8/polymarket_configs/challenge_model_layer_market_diagnostic_freeze.json",
+    "sha256": "32bbf6d8ec629ab4f910a92e7893bf82f6bb54c65c976a2347498335db0f2fb8"
+  },
+  "lane_role": "persistent_candidate_agnostic_development_data",
+  "development_only_forever": true,
+  "promotion_evidence_eligible": false,
+  "confirmatory_collection_lane": false,
+  "outcome_blind_capture": {
+    "enabled": true,
+    "outcomes_labels_or_pnl_available_to_capture_control": false,
+    "resolution_provider_enabled_in_capture_process": false,
+    "settlement_finalizer_enabled_in_capture_process": false,
+    "training_export_enabled_in_capture_process": false
+  },
+  "post_close_development_finalization": {
+    "enabled_in_separate_process": true,
+    "official_read_only_resolution_required": true,
+    "market_close_must_precede_target_access": true,
+    "finalized_corpus_role": "development_training_only",
+    "feedback_to_capture_schedule_allowed": false,
+    "promotion_evidence_eligible": false
+  },
+  "collection_schedule": {
+    "batch_round_count": 4,
+    "continuous": true,
+    "daily_summary_enabled": true,
+    "single_experiment_freeze": false,
+    "model_score_or_acceptance_control_allowed": false
+  },
+  "authorization_checkpoint": {
+    "previous_120_round_permission_requirement_preserved": true,
+    "maximum_capture_attempts_before_additional_permission": 120,
+    "explicit_120_round_authorization_recorded": true,
+    "authorization_extension": {
+      "path": "examples/v8/polymarket_configs/challenge_model_development_lane_attempt_120_authorization.json",
+      "sha256": "a40e962c6f5da521726061d66298746900d8fea4a07ae0fa78909c2baff06b0a"
+    },
+    "stop_before_attempt_121": true,
+    "attempt_121_authorized": false
+  },
+  "required_raw_streams": [
+    "raw_polymarket_markets.jsonl",
+    "raw_polymarket_orderbooks.jsonl",
+    "raw_polymarket_trades.jsonl",
+    "raw_binance_btcusdt_klines.jsonl",
+    "raw_polymarket_chainlink_prices.jsonl"
+  ],
+  "causality": {
+    "available_at_must_not_exceed_decision_ts": true,
+    "max_input_ts_must_not_exceed_decision_ts": true,
+    "future_exit_or_resolution_as_feature_allowed": false,
+    "missing_trade_tape_as_zero_allowed": false
+  },
+  "safety": {
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  }
+}

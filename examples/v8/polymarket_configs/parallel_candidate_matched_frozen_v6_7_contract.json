@@ -1,0 +1,20 @@
+{
+  "schema_version": "bigan-v8-parallel-candidate-contract-v1",
+  "candidate_id": "matched_frozen_v6_7",
+  "profile_sha256": "cec55d243acd6bbf60a5e8474545b487086ddcd4d18073682ae7f2d4660d2248",
+  "frozen_v6_2_candidate_manifest_sha256": "b9441b04fb595a927cbf9af9311612b037c36fc8c623ac8a92b6f4cb8ece84b9",
+  "paper_position_size": 0.2,
+  "policy": "p_up_semantic_compatibility_v6_7",
+  "same_source_rows_cost_size_guard_and_runtime_required": true,
+  "byte_for_byte_frozen_behavior_required": true,
+  "contract_frozen_before_target_access": true,
+  "outcomes_labels_settlement_returns_or_pnl_opened": false,
+  "safety": {
+    "paper_candidate_unlocked": false,
+    "promotion_unlocked": false,
+    "live_unlocked": false,
+    "write_enabled": false,
+    "wallet_enabled": false,
+    "capital_at_risk": false
+  }
+}

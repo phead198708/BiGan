@@ -1,0 +1,30 @@
+{
+  "schema_version": "bigan-v8-policy-candidate-manifest-v1",
+  "issue": 256,
+  "source_model_hash": "1565116daeb2f5d4d8c33fefa507276f59251edd5ffb5f4f313041bcf9dbb0ec",
+  "candidate_fixtures": [
+    {
+      "candidate_id": "high_signal_adaptive_abstention_v1",
+      "path": "execution_policy_high_signal_abstention_v1.json",
+      "raw_sha256": "5ff4030dec4f401c2f304cd543b1244218bd2299ff4a3435b32be7a40e47d03c",
+      "execution_policy_hash": "70f016958cfb4525032692bd52c1027134989506a8f7d458fef990e9430a8b7d"
+    },
+    {
+      "candidate_id": "window_risk_budgeted_v1",
+      "path": "execution_policy_risk_budgeted_v1.json",
+      "raw_sha256": "9e720bc8a9ec03cd557249e85e07be52ff970b2cc5bfc4152189749459f77085",
+      "execution_policy_hash": "e283c2166120f22ee47a481776d5efbfca86cb233ffe04d7c9d3be00786d795e"
+    },
+    {
+      "candidate_id": "fill_quality_replacement_v1",
+      "path": "execution_policy_quality_replacement_v1.json",
+      "raw_sha256": "36547efb50a021374bb003fa0a1284fd2e380ec2890f52531cf8b2e2b619f03b",
+      "execution_policy_hash": "20f63f82141794b257f64bbbf93a0ae05660421b367486107af081d823711d97"
+    }
+  ],
+  "candidate_count_cap": 3,
+  "open_ended_optimizer_enabled": false,
+  "outcome_selected_candidate_enabled": false,
+  "framework_creation_unlocks_candidate": false,
+  "promotion_unlocked": false
+}

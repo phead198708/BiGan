@@ -1,0 +1,54 @@
+{
+  "schema_version": "bigan-v8-market-clustered-mean-ev-v6-2-future-holdout-profile-v1",
+  "issue": 212,
+  "candidate": {
+    "candidate_name": "market_clustered_mean_ev_v6_2",
+    "candidate_manifest_sha256": "b9441b04fb595a927cbf9af9311612b037c36fc8c623ac8a92b6f4cb8ece84b9",
+    "model_sha256": "7e292852673fe2072017effc2d40fce000be81734f0c8c3d6950c02e957bcf0c",
+    "calibration_sha256": "dc82ddebc51e95e46477894f2a0ba7bd8fa2f6845b22ced43402822b66b68e43",
+    "profile_sha256": "41e1fe0d1c1a9525aad292d1f7fd61927dab85ab11013fb6aac0b77da142664c",
+    "freeze_created_ts_exclusive": 1784470529364,
+    "first_eligible_index_sequence": 313
+  },
+  "collection": {
+    "market_family": "btc_updown_5m",
+    "bounded_batch_round_count": 12,
+    "quality_valid_market_target": 200,
+    "attempt_scan_cap": 240,
+    "selection_rule": "chronological_earliest_quality_valid_strictly_later_disjoint",
+    "exact_freeze_market_count": 200
+  },
+  "target_free_support": {
+    "minimum_guard_accepted_unique_market_count": 120,
+    "minimum_guard_accepted_unique_market_count_per_side": 17,
+    "statistical_unit": "unique_market_id",
+    "source_power_analysis_issue": 205,
+    "outcomes_used_for_support_monitoring": false
+  },
+  "early_stop": {
+    "consecutive_complete_zero_action_batch_limit": 2,
+    "consecutive_zero_action_quality_market_minimum": 24,
+    "stop_on_hash_or_causality_violation": true,
+    "stop_on_target_or_outcome_access": true,
+    "stop_when_support_is_impossible_within_scan_cap": true,
+    "threshold_or_model_change_after_canary_output_allowed": false
+  },
+  "future_evaluation": {
+    "decision_freeze_before_outcome_access_required": true,
+    "side_only_buy_up_buy_down_after_cost_pnl_gate": true,
+    "action_and_family_pnl_diagnostic_only": true,
+    "single_evaluation_allowed": true
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "v8_execution_handoff_allowed": false,
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false
+  }
+}

@@ -27,6 +27,7 @@ from bigan.v8.polymarket.training.o_v8_paper_candidate_unlock import (
     run_polymarket_o_v8_paper_candidate_unlock,
 )
 from bigan.v8.polymarket.training.o_v8_paper_fresh_loop import (
+    EXECUTION_LAYER_V2_PAPER_REMAP_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_CANONICAL_FEATURE_MAPPING_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_CANONICAL_SCORER_ALIGNMENT_SCHEMA_VERSION,
     O_V8_PAPER_FRESH_CANONICAL_SCORER_SCHEMA_VERSION,
@@ -7808,6 +7809,11 @@ def test_o_v8_paper_fresh_score_decomposition_provider_components(
     assert up_hts["book_staleness_term_used"] is False
     assert up_hts["time_to_close_term_used"] is False
     assert up_hts["canonical_frozen_o_scorer_used"] is False
+    assert len(_read_jsonl(result.artifact_paths["raw_polymarket_markets"])) == 1
+    assert len(_read_jsonl(result.artifact_paths["raw_polymarket_orderbooks"])) == 2
+    assert len(_read_jsonl(result.artifact_paths["raw_polymarket_trades"])) == 1
+    assert len(_read_jsonl(result.artifact_paths["raw_btc_feature_candles"])) == 1
+    assert result.artifact_hashes["raw_polymarket_orderbooks"]
     assert result.manifest["v8_execution_handoff_allowed"] is False
 
 
@@ -8000,6 +8006,8 @@ def test_o_v8_paper_fresh_signal_trace_canonical_time_windows(
         p_up=0.82,
     )
     early_row["microstructure_snapshot"]["time_to_close_seconds"] = 260.0
+    early_row["market_start_ts"] = early_row["decision_ts"] - 40_000
+    early_row["market_end_ts"] = early_row["decision_ts"] + 260_000
     hts_allowed_row = _paper_fresh_public_row(
         index=1,
         market_id="fresh-trace-hts",
@@ -8008,6 +8016,8 @@ def test_o_v8_paper_fresh_signal_trace_canonical_time_windows(
         p_up=0.83,
     )
     hts_allowed_row["microstructure_snapshot"]["time_to_close_seconds"] = 180.0
+    hts_allowed_row["market_start_ts"] = hts_allowed_row["decision_ts"] - 120_000
+    hts_allowed_row["market_end_ts"] = hts_allowed_row["decision_ts"] + 180_000
     sbc_only_row = _paper_fresh_public_row(
         index=4,
         market_id="fresh-trace-sbc-only",
@@ -8016,6 +8026,8 @@ def test_o_v8_paper_fresh_signal_trace_canonical_time_windows(
         p_up=0.84,
     )
     sbc_only_row["microstructure_snapshot"]["time_to_close_seconds"] = 90.0
+    sbc_only_row["market_start_ts"] = sbc_only_row["decision_ts"] - 210_000
+    sbc_only_row["market_end_ts"] = sbc_only_row["decision_ts"] + 90_000
     final_row = _paper_fresh_public_row(
         index=2,
         market_id="fresh-trace-final",
@@ -8024,6 +8036,8 @@ def test_o_v8_paper_fresh_signal_trace_canonical_time_windows(
         p_up=0.85,
     )
     final_row["microstructure_snapshot"]["time_to_close_seconds"] = 45.0
+    final_row["market_start_ts"] = final_row["decision_ts"] - 255_000
+    final_row["market_end_ts"] = final_row["decision_ts"] + 45_000
 
     result = run_polymarket_o_v8_paper_fresh_loop(
         PolymarketOV8PaperFreshLoopConfig(
@@ -8059,10 +8073,20 @@ def test_o_v8_paper_fresh_signal_trace_canonical_time_windows(
     assert by_market["fresh-trace-sbc-only"]["time_to_close_gate_passed"] is False
     assert by_market["fresh-trace-sbc-only"]["time_to_close_shortfall_seconds"] == 30.0
     assert by_market["fresh-trace-sbc-only"]["signal_outcome_classification"] == (
-        "guard_blocked_time_window"
+        "paper_intent_created"
     )
-    assert "execution_time_to_close_unsafe" in by_market["fresh-trace-sbc-only"][
-        "execution_blocking_reason_codes"
+    assert by_market["fresh-trace-sbc-only"]["execution_blocking_reason_codes"] == []
+    assert (
+        by_market["fresh-trace-sbc-only"]["execution_guarded_action"]
+        == "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+    assert by_market["fresh-trace-sbc-only"]["hts_time_window_remap_applied"] is True
+    assert (
+        by_market["fresh-trace-sbc-only"]["remapped_action"]
+        == "BUY_UP_SELL_BEFORE_CLOSE"
+    )
+    assert "same_side_sbc_guard_passed" in by_market["fresh-trace-sbc-only"][
+        "remap_reason_codes"
     ]
     assert by_market["fresh-trace-final"]["lifecycle_window"] == (
         "final_no_trade_window"
@@ -8152,6 +8176,168 @@ def test_o_v8_paper_fresh_signal_trace_sbc_window_can_pass(
     ] == 1
     assert result.manifest["paper_fresh_order_intent_count"] == 1
     assert result.manifest["v8_execution_handoff_allowed"] is False
+
+
+def test_o_v8_paper_fresh_hts_time_window_remap_creates_paper_intent(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    row = _paper_fresh_public_row(
+        index=1,
+        market_id="fresh-hts-remap-up",
+        action="BUY_UP_HOLD_TO_SETTLEMENT",
+        side="UP",
+        p_up=0.82,
+    )
+    row["microstructure_snapshot"]["time_to_close_seconds"] = 90.0
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-hts-remap-up",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((row,),),
+        )
+    )
+
+    remap = result.execution_layer_v2_paper_remap_report
+    remap_payload = dict(remap)
+    remap_id = remap_payload.pop("execution_layer_v2_paper_remap_report_id")
+    assert canonical_json_sha256(remap_payload) == remap_id
+    assert remap["schema_version"] == EXECUTION_LAYER_V2_PAPER_REMAP_SCHEMA_VERSION
+    assert remap["hts_time_window_blocked_count"] == 1
+    assert remap["same_side_sbc_alternative_available_count"] == 1
+    assert remap["same_side_sbc_calibrated_ev_available_count"] == 1
+    assert remap["remap_candidate_count"] == 1
+    assert remap["remap_guard_passed_count"] == 1
+    assert remap["paper_intent_remap_applied_count"] == 1
+    assert remap["paper_only"] is True
+    assert remap["capital_at_risk"] is False
+    assert remap["polymarket_write_enabled"] is False
+    assert remap["wallet_signing_enabled"] is False
+    assert remap["v8_execution_handoff_allowed"] is False
+    assert remap["source_scores_mutated"] is False
+    assert remap["o_score_mutated"] is False
+
+    intents = _read_jsonl(result.artifact_paths["fresh_order_intent_log"])
+    assert len(intents) == 1
+    intent = intents[0]
+    assert intent["source_selected_action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+    assert intent["execution_guarded_action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert intent["original_action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+    assert intent["remapped_action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert intent["hts_time_window_remap_applied"] is True
+    assert "same_side_sbc_guard_passed" in intent["remap_reason_codes"]
+    assert intent["paper_only"] is True
+    assert intent["capital_at_risk"] is False
+    assert intent["polymarket_write_enabled"] is False
+    assert intent["wallet_signing_enabled"] is False
+
+    trace_row = result.signal_trace_report["trace_rows"][0]
+    assert trace_row["canonical_selected_action"] is None
+    assert trace_row["selected_action_is_hts"] is True
+    assert trace_row["original_action"] == "BUY_UP_HOLD_TO_SETTLEMENT"
+    assert trace_row["remapped_action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert trace_row["hts_time_window_remap_applied"] is True
+    assert trace_row["execution_guarded_action"] == "BUY_UP_SELL_BEFORE_CLOSE"
+    assert trace_row["order_allowed"] is True
+    assert trace_row["paper_intent_id"]
+
+    assert result.fresh_loop_run_report[
+        "execution_layer_v2_paper_remap_applied_count"
+    ] == 1
+    assert result.manifest["execution_layer_v2_paper_remap_applied_count"] == 1
+    assert "execution_layer_v2_paper_remap_report" in result.manifest[
+        "artifact_hashes"
+    ]
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["#146_start_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
+
+
+def test_o_v8_paper_fresh_hts_time_window_remap_missing_sbc_fails_closed(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    row = _paper_fresh_public_row(
+        index=1,
+        market_id="fresh-hts-remap-missing-sbc",
+        action="BUY_DOWN_HOLD_TO_SETTLEMENT",
+        side="DOWN",
+        p_up=0.20,
+    )
+    row["microstructure_snapshot"]["time_to_close_seconds"] = 90.0
+    row["full_5_action_ranking"] = [
+        candidate
+        for candidate in row["full_5_action_ranking"]
+        if candidate["selected_action"] != "BUY_DOWN_SELL_BEFORE_CLOSE"
+    ]
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-hts-remap-missing-sbc",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((row,),),
+        )
+    )
+
+    remap = result.execution_layer_v2_paper_remap_report
+    assert remap["hts_time_window_blocked_count"] == 1
+    assert remap["same_side_sbc_alternative_available_count"] == 0
+    assert remap["remap_candidate_count"] == 0
+    assert remap["remap_guard_passed_count"] == 0
+    assert "same_side_sbc_alternative_missing" in remap[
+        "remap_reason_distribution"
+    ]
+    assert result.fresh_loop_run_report["paper_fresh_order_intent_count"] == 0
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["#146_start_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
+
+
+def test_o_v8_paper_fresh_hts_time_window_remap_guard_blocked_fails_closed(
+    tmp_path: Path,
+) -> None:
+    unlock_dir, unlock_manifest_sha = _build_issue160_unlock_fixture(tmp_path)
+    row = _paper_fresh_public_row(
+        index=1,
+        market_id="fresh-hts-remap-wide-sbc",
+        action="BUY_UP_HOLD_TO_SETTLEMENT",
+        side="UP",
+        p_up=0.82,
+    )
+    row["microstructure_snapshot"]["time_to_close_seconds"] = 90.0
+    for candidate in row["full_5_action_ranking"]:
+        if candidate["selected_action"] == "BUY_UP_SELL_BEFORE_CLOSE":
+            candidate["microstructure_snapshot"] = {
+                **row["microstructure_snapshot"],
+                "spread_bps": 9_999.0,
+            }
+
+    result = run_polymarket_o_v8_paper_fresh_loop(
+        PolymarketOV8PaperFreshLoopConfig(
+            run_id="fresh-hts-remap-wide-sbc",
+            output_dir=tmp_path / "fresh",
+            paper_candidate_unlock_dir=unlock_dir,
+            expected_paper_candidate_unlock_manifest_sha256=unlock_manifest_sha,
+            public_data_cycles=((row,),),
+        )
+    )
+
+    remap = result.execution_layer_v2_paper_remap_report
+    assert remap["hts_time_window_blocked_count"] == 1
+    assert remap["same_side_sbc_alternative_available_count"] == 1
+    assert remap["same_side_sbc_calibrated_ev_available_count"] == 1
+    assert remap["remap_candidate_count"] == 1
+    assert remap["remap_guard_passed_count"] == 0
+    assert "execution_spread_too_wide" in remap["remap_reason_distribution"]
+    assert result.fresh_loop_run_report["paper_fresh_order_intent_count"] == 0
+    assert result.manifest["v8_execution_handoff_allowed"] is False
+    assert result.manifest["#146_start_allowed"] is False
+    assert result.manifest["#134_resume_allowed"] is False
 
 
 def test_o_v8_paper_fresh_exit_adapter_no_position_emits_no_exit(

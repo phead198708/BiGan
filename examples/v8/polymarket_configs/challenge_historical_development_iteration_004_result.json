@@ -1,0 +1,114 @@
+{
+  "all_historical_success_criteria_passed": false,
+  "attempt_002_preregistration_allowed": false,
+  "bootstrap": {
+    "candidate_absolute_97_5_lcb": -5.35191875,
+    "first_half_candidate_97_5_ucb": 5.362549999999999,
+    "paired_delta_97_5_lcb": -0.7208250000000004,
+    "second_half_candidate_97_5_ucb": 0.8157562500000001
+  },
+  "candidate_id": "v8_1_fixed_edge_support_recovery_0_025",
+  "checks": {
+    "accepted_market_count_at_least_39": true,
+    "all_safety_unlocks_remain_false": true,
+    "candidate_absolute_bootstrap_97_5_lcb_positive": false,
+    "candidate_largest_winner_removed_pnl_positive": false,
+    "exact_195_unique_frozen_chronological_market_rows": true,
+    "first_half_not_significantly_negative": true,
+    "full_window_paired_bootstrap_97_5_lcb_positive": false,
+    "historical_results_not_promotion_evidence": true,
+    "second_half_not_significantly_negative": true,
+    "statistical_gates_use_unit_sizing": true,
+    "support_consistent_with_future_protocol": true
+  },
+  "concentration_diagnostics": {
+    "hard_gate": false,
+    "largest_absolute_single_market_pnl_share": 0.042272108071290726,
+    "largest_winner_share_of_positive_pnl": 0.08645307330663415,
+    "selected_action_distribution": {
+      "BUY_DOWN_SELL_BEFORE_CLOSE": 75,
+      "BUY_UP_SELL_BEFORE_CLOSE": 1,
+      "NO_TRADE": 119
+    },
+    "selected_side_distribution": {
+      "DOWN": 75,
+      "NONE": 119,
+      "UP": 1
+    }
+  },
+  "development_corpus_id": "issue-252-exact-195-outcome-opened-corpus",
+  "evaluated_at": "2026-07-27T04:46:00Z",
+  "historical_development_only": true,
+  "implementation_base_commit": "8d238e095a33b6b5ab4ad3c0e0b73dc16afdb4b7",
+  "implementation_commit": "2873bf0a05c72cd9f9a15dc2c35797373e74d2eb",
+  "input_descriptors": {
+    "attempt_closure": {
+      "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_attempt_001_closure.json",
+      "sha256": "9bc138bcff811f2a0d0a05556d3e189b7c74eb23ce03e2062bb397c4149d4414",
+      "size_bytes": 6383
+    },
+    "comparison_rows": {
+      "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-fixed-edge-support-recovery-0-025-development-iteration-004-20260727T044600Z/candidate_market_comparison.jsonl",
+      "sha256": "1bbfd6984de9feb41e882ae1783589bf5ee78747b32d710d21cb2c28972939a8",
+      "size_bytes": 200252
+    },
+    "development_registry": {
+      "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_historical_development_data_registry.json",
+      "sha256": "dd4926b24bbe2b80bb127c5af861f62e432131469bfc202248d85ec4a1380fd4",
+      "size_bytes": 6419
+    },
+    "ledger_root": {
+      "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_historical_development_iteration_ledger.json",
+      "sha256": "2bdbbb1ee0f8694b7be3f5fa485a3591662daa906e1edfc316db92f538fc894a",
+      "size_bytes": 3357
+    },
+    "preregistration": {
+      "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_historical_development_iteration_004_preregistration.json",
+      "sha256": "315865ab003f03c7abe98fb8126758dadcdb44e400a42f71ec419de3cc2cec12",
+      "size_bytes": 4458
+    },
+    "previous_iteration_entry": {
+      "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_historical_development_iteration_003_entry.json",
+      "sha256": "8326e6c5cec158f09bdeeac3d14e2e2342ebf9aed3bd9bb5048f017567b6fe62",
+      "size_bytes": 2037
+    },
+    "success_standard": {
+      "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_configs/challenge_historical_development_success_standard_v2.json",
+      "sha256": "01b6d0c80cd9f54cf78523e556788788dd3ac6324dc1865d385f6f4cf2dcb9bb",
+      "size_bytes": 6823
+    }
+  },
+  "iteration_number": 4,
+  "market_count": 195,
+  "metrics": {
+    "acceptance_rate": 0.38974358974358975,
+    "accepted_market_count": 76,
+    "baseline_total_after_cost_pnl": -1.09565,
+    "baseline_unit_sizing_total_after_cost_pnl": -5.478249999999999,
+    "candidate_largest_winner_after_cost_pnl": 0.7447499999999999,
+    "candidate_largest_winner_removed_after_cost_pnl": -1.1337499999999998,
+    "candidate_minus_baseline_total_after_cost_pnl": 1.01785,
+    "candidate_minus_baseline_unit_sizing_total_after_cost_pnl": 5.08925,
+    "candidate_total_after_cost_pnl": -0.0778,
+    "candidate_unit_sizing_total_after_cost_pnl": -0.38899999999999985,
+    "expected_accepted_markets_in_120": 46.76923076923077,
+    "first_half_candidate_total_after_cost_pnl": 1.6352499999999999,
+    "second_half_candidate_total_after_cost_pnl": -2.02425,
+    "statistical_gate_position_size": 1.0
+  },
+  "preregistration_commit": "f9ccb562596d72c2f466b503a588aa682ad43fc6",
+  "promotion_evidence_eligible": false,
+  "replacement_future_attempt_preregistration_allowed": false,
+  "run_id": "evaluation",
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-historical-development-result-v1"
+}

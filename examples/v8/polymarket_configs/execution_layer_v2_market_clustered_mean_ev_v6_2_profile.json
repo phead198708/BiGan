@@ -1,0 +1,89 @@
+{
+  "schema_version": "bigan-v8-market-clustered-mean-ev-v6-2-profile-v1",
+  "candidate_name": "market_clustered_mean_ev_v6_2",
+  "issue_number": 211,
+  "frozen": true,
+  "purpose": "target_free_action_production_before_future_collection",
+  "source_lineage": {
+    "issue209_manifest_sha256": "a60c1f7595a2d202136a55f3fb7549d5df0fda2b7f64fffc8521b23a1d00be08",
+    "v5_freeze_manifest_sha256": "0d0927da515317d0576a04b6c4a9a5175f569225a85ebaf62020326fdc06510d",
+    "v5_model_sha256": "7e292852673fe2072017effc2d40fce000be81734f0c8c3d6950c02e957bcf0c",
+    "v5_conformal_action_rows_sha256": "143327aa6f2b19a1e1ece1b9d9a047b458600660ccff5fb06e5bb6edc7b03471",
+    "target_free_five_action_rows_sha256": "52624d7f47bc43e1d3b41c3350c95a6410e31dcc873d4d6ff919744d33a7074d",
+    "target_free_selected_rows_sha256": "d8ae788529b46d3680670abfcd39fefbe9d5f5e0a6cdbb6a8dec72fe7a41a241",
+    "feature_contract_sha256": "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959"
+  },
+  "point_model": {
+    "source": "exact_frozen_v5_direct_net_return_model",
+    "model_sha256": "7e292852673fe2072017effc2d40fce000be81734f0c8c3d6950c02e957bcf0c",
+    "fit_market_count": 135,
+    "model_parameters_or_features_mutated": false,
+    "model_score_mutation_allowed": false
+  },
+  "mean_risk_calibration": {
+    "source_role": "confirmatory_validation",
+    "market_count": 60,
+    "selection": "earliest_positive_raw_ev_guard_compatible_trade_per_market",
+    "residual": "raw_prediction_minus_cost_aware_target_return",
+    "grouping": "selected_side_buy_up_buy_down_only",
+    "action_family_metrics_diagnostic_only": true,
+    "confidence_bound": "market_bootstrap_upper_confidence_bound_of_mean_residual",
+    "confidence_level": 0.95,
+    "bootstrap_resample_count": 5000,
+    "bootstrap_seed": 21060720,
+    "minimum_selected_market_count": 40,
+    "minimum_selected_market_count_per_side": 20,
+    "individual_outcome_quantile_subtraction_enabled": false,
+    "calibration_policy_pnl_computed": false,
+    "threshold_search_enabled": false,
+    "candidate_comparison_enabled": false
+  },
+  "decision_rule": {
+    "score_formula": "raw_direct_predicted_net_return - selected_side_mean_residual_upper_confidence_bound",
+    "no_trade_score": 0.0,
+    "minimum_selected_score_exclusive": 0.0,
+    "maximum_selected_trade_rows_per_market": 1,
+    "guard_compatibility_mask_before_argmax": true,
+    "full_execution_guard_unchanged": true,
+    "cost_model_unchanged": true,
+    "sizing_and_exposure_unchanged": true,
+    "p_up_alignment_policy_unchanged": true
+  },
+  "target_free_check": {
+    "selected_market_count": 50,
+    "selected_sequence_start": 237,
+    "selected_sequence_end": 286,
+    "minimum_positive_mean_ev_lcb_unique_market_count": 10,
+    "minimum_positive_mean_ev_lcb_unique_market_count_per_side": 5,
+    "minimum_full_guard_accepted_unique_market_count": 10,
+    "minimum_full_guard_accepted_unique_market_count_per_side": 5,
+    "labels_outcomes_settlement_targets_or_pnl_opened": false,
+    "result_dependent_extension_allowed": false
+  },
+  "collection_policy": {
+    "persistent_collector_must_be_paused_before_run": true,
+    "resume_only_if_all_target_free_action_and_full_guard_support_gates_pass": true,
+    "candidate_freeze_must_precede_resumed_collection": true,
+    "new_strictly_later_future_holdout_required_after_candidate_freeze": true
+  },
+  "prohibited_inputs": {
+    "uses_204_outcomes_for_fitting": false,
+    "uses_204_pnl_for_tuning": false,
+    "uses_target_free_check_labels_for_tuning": false,
+    "uses_current_oof_validation_or_confirmatory_pnl_for_tuning": false,
+    "result_driven_model_threshold_penalty_or_gate_change_allowed": false
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false
+  }
+}

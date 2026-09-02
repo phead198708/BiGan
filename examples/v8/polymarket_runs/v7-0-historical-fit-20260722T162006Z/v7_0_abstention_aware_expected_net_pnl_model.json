@@ -1,0 +1,387 @@
+{
+  "#134_resume_allowed": false,
+  "#146_start_allowed": false,
+  "candidate_name": "abstention_aware_expected_net_pnl_v7_0",
+  "capital_at_risk": false,
+  "decision_time_safe": true,
+  "family_gate_results": {
+    "HOLD_TO_SETTLEMENT": {
+      "passed": false,
+      "reason_codes": [
+        "hold_to_settlement_forward_oof_mae_improved_failed",
+        "hold_to_settlement_forward_oof_mse_improved_failed"
+      ]
+    },
+    "SELL_BEFORE_CLOSE": {
+      "passed": true,
+      "reason_codes": []
+    }
+  },
+  "family_models": {
+    "HOLD_TO_SETTLEMENT": {
+      "calibration": {
+        "coverage_level": 0.8,
+        "empirical_selected_action_lower_bound_coverage": 0.8134920634920635,
+        "lower_bound_positive_selected_row_count": 0,
+        "lower_bound_positive_selected_target_pnl_sum_report_only": 0,
+        "lower_bound_positive_selected_unique_market_count": 0,
+        "method": "market_weighted_one_sided_selected_action_within_family_residual_quantile",
+        "pnl_used_for_calibration_or_gate": false,
+        "residual_quantile": -0.4335941786544426,
+        "selected_action_residual_count": 77,
+        "unique_market_count": 21
+      },
+      "calibration_market_count": 21,
+      "calibration_row_count": 154,
+      "coefficient_stability": {
+        "market_count": 44,
+        "maximum_coefficient_absolute_delta": 0.005301707727915652,
+        "median_market_max_absolute_delta": 0.0018366244254322817,
+        "method": "leave_one_market_out_with_final_fit_standardization",
+        "worst_market_ids": [
+          "0x792468ca50d769ef201cb472b1fd42c95aaa5450c37d2703bbe776b8fe1d9453",
+          "0x481b9d32c1dc5de3ef1de92220aeacc1accfbd915c9107571d783c0c4400251d",
+          "0xcfb0d2c01d2a5ba2941ee138e2233d00b391d458e2cf5e5a1c8a0e5b255ede30",
+          "0xf84f27e3e8b0dcc512005b3cfbee0cc18db66a636a138e46f0004d85f15838bb",
+          "0xab871a021f8b1b675014d1f16c9d86586785782aad86ad98ac12052d99a367b2"
+        ]
+      },
+      "family": "HOLD_TO_SETTLEMENT",
+      "feature_names": [
+        "action_score_available",
+        "action_score",
+        "action_score_margin",
+        "btc_anchor_direction",
+        "selected_side_probability",
+        "execution_price",
+        "selected_side_probability_minus_execution_price",
+        "log1p_spread_bps",
+        "queue_fill_shortfall",
+        "log1p_book_staleness_ms",
+        "late_window_pressure",
+        "pre_entry_market_exposure",
+        "same_side_prior_entry",
+        "side_flip_prior_entry",
+        "side_is_up"
+      ],
+      "fit_market_count": 44,
+      "fit_row_count": 320,
+      "forward_oof_metrics": {
+        "fold_summaries": [
+          {
+            "fold_index": 0,
+            "train_market_count": 22,
+            "train_max_decision_ts": 1784030040000,
+            "validation_market_count": 11,
+            "validation_min_decision_ts": 1784030160000
+          },
+          {
+            "fold_index": 1,
+            "train_market_count": 33,
+            "train_max_decision_ts": 1784037840000,
+            "validation_market_count": 11,
+            "validation_min_decision_ts": 1784037960000
+          }
+        ],
+        "fold_train_mean_baseline_market_weighted_mae": 0.31037878787878787,
+        "fold_train_mean_baseline_market_weighted_mse": 0.1507489258406349,
+        "market_weighted_mae": 0.3174036456331406,
+        "market_weighted_mse": 0.15220051052937786,
+        "relative_mae_improvement_over_fold_train_mean": -0.022633176069674445,
+        "relative_mse_improvement_over_fold_train_mean": -0.009629154441057235,
+        "row_count": 158,
+        "unique_market_count": 22
+      },
+      "historical_fit_gate_blocking_reason_codes": [
+        "hold_to_settlement_forward_oof_mae_improved_failed",
+        "hold_to_settlement_forward_oof_mse_improved_failed"
+      ],
+      "historical_fit_gate_checks": {
+        "calibration_coverage_passed": true,
+        "calibration_market_support_passed": true,
+        "coefficient_stability_passed": true,
+        "coefficients_finite_and_bounded": true,
+        "forward_oof_mae_improved": false,
+        "forward_oof_mse_improved": false
+      },
+      "historical_fit_gate_passed": false,
+      "model": {
+        "coefficient_absolute_bound": 8.0,
+        "coefficients": [
+          -1.5657496199952292e-33,
+          0.001279078031080206,
+          0.001760148977492658,
+          0.001884094073950076,
+          -0.0006173003998842134,
+          -0.000634786088985045,
+          0.0018788994104207708,
+          0.0013254465621461676,
+          0.002144649666918429,
+          -8.068617298449979e-05,
+          -0.00011471009500503049,
+          0.0,
+          0.0,
+          0.0,
+          0.012577339723967492
+        ],
+        "coefficients_finite_and_bounded": true,
+        "feature_mean": [
+          0.9999999999999993,
+          0.6728927785520836,
+          -0.4178319375852775,
+          0.0,
+          0.5000000000000001,
+          0.505817234848485,
+          -0.005817234848484835,
+          5.7261596237543735,
+          0.02541770592765673,
+          6.248789116717837,
+          0.512121212121212,
+          0.0,
+          0.0,
+          0.0,
+          0.5000000000000001
+        ],
+        "feature_names": [
+          "action_score_available",
+          "action_score",
+          "action_score_margin",
+          "btc_anchor_direction",
+          "selected_side_probability",
+          "execution_price",
+          "selected_side_probability_minus_execution_price",
+          "log1p_spread_bps",
+          "queue_fill_shortfall",
+          "log1p_book_staleness_ms",
+          "late_window_pressure",
+          "pre_entry_market_exposure",
+          "same_side_prior_entry",
+          "side_flip_prior_entry",
+          "side_is_up"
+        ],
+        "feature_scale": [
+          1.0,
+          0.6509962920522766,
+          0.8698509608389894,
+          0.0006980832970218349,
+          0.29834253863612636,
+          0.2983554985729566,
+          0.002780857577994347,
+          1.0524608935251083,
+          0.036339745468676445,
+          1.4710429266625273,
+          0.21847623233546584,
+          1.0,
+          1.0,
+          1.0,
+          0.4999999999999998
+        ],
+        "fit_market_count": 44,
+        "fit_market_ids_hash": "1fbccce2c05641ca95e40fd567c6cdde4c74aafce861339cc3df4836b333d9ad",
+        "fit_row_count": 320,
+        "intercept": -0.011884469696969673,
+        "model_family": "market_weighted_family_specific_ridge_with_unpenalized_intercept",
+        "ridge_alpha": 100.0
+      }
+    },
+    "SELL_BEFORE_CLOSE": {
+      "calibration": {
+        "coverage_level": 0.8,
+        "empirical_selected_action_lower_bound_coverage": 0.8055555555555556,
+        "lower_bound_positive_selected_row_count": 0,
+        "lower_bound_positive_selected_target_pnl_sum_report_only": 0,
+        "lower_bound_positive_selected_unique_market_count": 0,
+        "method": "market_weighted_one_sided_selected_action_within_family_residual_quantile",
+        "pnl_used_for_calibration_or_gate": false,
+        "residual_quantile": -0.24318155868860925,
+        "selected_action_residual_count": 180,
+        "unique_market_count": 45
+      },
+      "calibration_market_count": 45,
+      "calibration_row_count": 360,
+      "coefficient_stability": {
+        "market_count": 89,
+        "maximum_coefficient_absolute_delta": 0.004406711637834841,
+        "median_market_max_absolute_delta": 0.001037592086628186,
+        "method": "leave_one_market_out_with_final_fit_standardization",
+        "worst_market_ids": [
+          "0x3c77271f05eac9e7e7f98672edaa54932b429447793b1163e563d980e53c526c",
+          "0x8b14fa94af7faf4a9672b307253238df55c93eb4011bc3e4befcd21ebfc2b3dc",
+          "0xafd0407e562a7eeeb799ff2a86f27125ae724e6684b6ee51e1cba47657c4e0df",
+          "0xd7c645f3670a50c7d3dfb24876d739d389c99ea49802c0edde7607da2c05af48",
+          "0xfaee8564b255fcd031b0531cf57e7316a27855068f2a082128bb742e2ed9c811"
+        ]
+      },
+      "family": "SELL_BEFORE_CLOSE",
+      "feature_names": [
+        "action_score_available",
+        "action_score",
+        "action_score_margin",
+        "btc_anchor_direction",
+        "selected_side_probability",
+        "execution_price",
+        "selected_side_probability_minus_execution_price",
+        "log1p_spread_bps",
+        "queue_fill_shortfall",
+        "log1p_book_staleness_ms",
+        "late_window_pressure",
+        "pre_entry_market_exposure",
+        "same_side_prior_entry",
+        "side_flip_prior_entry",
+        "side_is_up"
+      ],
+      "fit_market_count": 89,
+      "fit_row_count": 712,
+      "forward_oof_metrics": {
+        "fold_summaries": [
+          {
+            "fold_index": 0,
+            "train_market_count": 44,
+            "train_max_decision_ts": 1784245440000,
+            "validation_market_count": 15,
+            "validation_min_decision_ts": 1784245560000
+          },
+          {
+            "fold_index": 1,
+            "train_market_count": 59,
+            "train_max_decision_ts": 1784250840000,
+            "validation_market_count": 15,
+            "validation_min_decision_ts": 1784252760000
+          },
+          {
+            "fold_index": 2,
+            "train_market_count": 74,
+            "train_max_decision_ts": 1784261340000,
+            "validation_market_count": 15,
+            "validation_min_decision_ts": 1784261460000
+          }
+        ],
+        "fold_train_mean_baseline_market_weighted_mae": 0.23221718368985317,
+        "fold_train_mean_baseline_market_weighted_mse": 0.09489930368793097,
+        "market_weighted_mae": 0.23206108940152315,
+        "market_weighted_mse": 0.09425384105157963,
+        "relative_mae_improvement_over_fold_train_mean": 0.0006721909457764329,
+        "relative_mse_improvement_over_fold_train_mean": 0.006801552922599793,
+        "row_count": 360,
+        "unique_market_count": 45
+      },
+      "historical_fit_gate_blocking_reason_codes": [],
+      "historical_fit_gate_checks": {
+        "calibration_coverage_passed": true,
+        "calibration_market_support_passed": true,
+        "coefficient_stability_passed": true,
+        "coefficients_finite_and_bounded": true,
+        "forward_oof_mae_improved": true,
+        "forward_oof_mse_improved": true
+      },
+      "historical_fit_gate_passed": true,
+      "model": {
+        "coefficient_absolute_bound": 8.0,
+        "coefficients": [
+          -0.007028884010088862,
+          0.0005246730966218386,
+          0.00032415617562461644,
+          -0.014627682350045138,
+          -0.003382811776942314,
+          -0.0033878589173750697,
+          0.0005745948454488084,
+          -0.001319716914870695,
+          0.0012054390669899119,
+          0.0024467910219939867,
+          -0.0004899677315241277,
+          -0.0010400909697912471,
+          0.0052488709956074655,
+          -0.0061179471138108725,
+          -0.012626786659021642
+        ],
+        "coefficients_finite_and_bounded": true,
+        "feature_mean": [
+          0.5014044943820225,
+          -0.10375240946308892,
+          -0.10469400599317064,
+          0.0,
+          0.5,
+          0.5057401685393255,
+          -0.005740168539325775,
+          5.648974500407941,
+          0.023686558317405532,
+          5.968114052335354,
+          0.5,
+          0.08988764044943882,
+          0.25842696629213485,
+          0.25842696629213485,
+          0.5
+        ],
+        "feature_names": [
+          "action_score_available",
+          "action_score",
+          "action_score_margin",
+          "btc_anchor_direction",
+          "selected_side_probability",
+          "execution_price",
+          "selected_side_probability_minus_execution_price",
+          "log1p_spread_bps",
+          "queue_fill_shortfall",
+          "log1p_book_staleness_ms",
+          "late_window_pressure",
+          "pre_entry_market_exposure",
+          "same_side_prior_entry",
+          "side_flip_prior_entry",
+          "side_is_up"
+        ],
+        "feature_scale": [
+          0.49999802739163995,
+          0.25425621645214674,
+          0.2536849603336183,
+          0.00036905160149288936,
+          0.27789111925836213,
+          0.2779278989921196,
+          0.0026578032591046403,
+          0.9335912617498923,
+          0.04995175115694507,
+          1.1934024852968756,
+          0.2236067977499797,
+          0.09246310387164491,
+          0.437769881770299,
+          0.437769881770299,
+          0.5
+        ],
+        "fit_market_count": 89,
+        "fit_market_ids_hash": "c829dd1e5b7456dc90d4e6ea489496e6ff617cd988572cf18450d1c8347c8c36",
+        "fit_row_count": 712,
+        "intercept": -0.012575842696629168,
+        "model_family": "market_weighted_family_specific_ridge_with_unpenalized_intercept",
+        "ridge_alpha": 100.0
+      }
+    }
+  },
+  "fit_created_ts": 1784737206000,
+  "freeze_ready": false,
+  "frozen_historical_model": false,
+  "full_five_action_grid_required": true,
+  "historical_development_blocking_reason_codes": [
+    "hold_to_settlement_forward_oof_mae_improved_failed",
+    "hold_to_settlement_forward_oof_mse_improved_failed"
+  ],
+  "historical_development_gate_passed": false,
+  "implementation_commit": "83bc83a6a53ad38ebab49232e4c6a392de69a9a1",
+  "issue229_or_issue231_outcomes_opened": false,
+  "issue229_or_issue231_rows_used_for_fit_or_tuning": false,
+  "live_trading_enabled": false,
+  "model_artifact_id": "702ee00bac121149965565a81af5d664dc4a51a9fef6b5814a710f4913a38a66",
+  "new_strictly_later_future_confirmatory_required": true,
+  "no_trade_score": 0.0,
+  "paper_candidate_allowed": false,
+  "paper_only": true,
+  "polymarket_write_enabled": false,
+  "promotion_evidence_eligible": false,
+  "ranking_score_source": "model_predicted_after_cost_net_pnl_lower_bound",
+  "schema_version": "bigan-v8-abstention-aware-expected-net-pnl-v7-0-model-v1",
+  "side_count_hard_gate_enabled": false,
+  "side_pnl_hard_gate_enabled": false,
+  "side_quota_applied": false,
+  "source_model_candidate_eligible": false,
+  "v8_execution_handoff_allowed": false,
+  "validation_or_oof_pnl_used_for_tuning_or_gate": false,
+  "wallet_signing_enabled": false
+}

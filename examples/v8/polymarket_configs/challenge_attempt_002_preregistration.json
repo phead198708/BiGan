@@ -1,0 +1,162 @@
+{
+  "alpha_spending": {
+    "attempt_consumed": false,
+    "attempt_consumed_at": "first_single_use_target_access_claim",
+    "candidate_count": 1,
+    "confidence_level": 0.975,
+    "one_sided_alpha": 0.025,
+    "promotion_attempt_number": 2
+  },
+  "attempt_id": "v8-1-challenger-future-attempt-002",
+  "baseline_id": "matched_frozen_v6_7",
+  "candidate_id": "v8_1_entry_price_floor_0_30_sized_1_0",
+  "decision_freeze": {
+    "baseline_decisions_frozen_before_target_access": true,
+    "baseline_fixed_position_size": 0.2,
+    "candidate_decisions_frozen_before_target_access": true,
+    "candidate_fixed_position_size": 1.0,
+    "candidate_replacement_allowed": false,
+    "candidate_threshold_feature_controller_and_sizing_frozen": true,
+    "result_selected_rerun_allowed": false,
+    "target_used_as_decision_input": false
+  },
+  "evaluation": {
+    "absolute_candidate_gate": {
+      "candidate_lcb_minimum_exclusive": 0.0,
+      "lower_confidence_bound_quantile": 0.025,
+      "method": "market_percentile_bootstrap",
+      "resample_count": 10000,
+      "scope": "all_120_markets",
+      "seed": 26212002
+    },
+    "all_hard_gates_required_for_success": true,
+    "concentration_diagnostics": {
+      "hard_gate": false,
+      "report_largest_absolute_single_market_pnl_share": true,
+      "report_largest_winner_share_of_positive_pnl": true,
+      "report_selected_action_distribution": true,
+      "report_selected_side_distribution": true
+    },
+    "full_window_paired_gate": {
+      "candidate_minus_baseline_lcb_minimum_exclusive": 0.0,
+      "lower_confidence_bound_quantile": 0.025,
+      "method": "paired_market_percentile_bootstrap",
+      "resample_count": 10000,
+      "scope": "all_120_markets",
+      "seed": 26212001
+    },
+    "manual_code_change_after_target_access_allowed": false,
+    "protocol_isomorphic_to_historical_standard": true,
+    "robustness_gates": {
+      "chronological_halves": {
+        "bootstrap_method": "market_percentile_bootstrap",
+        "first_half_market_count": 60,
+        "first_half_seed": 26212003,
+        "method": "chronological_equal_halves",
+        "resample_count": 10000,
+        "second_half_market_count": 60,
+        "second_half_seed": 26212004,
+        "upper_confidence_bound_minimum_inclusive": 0.0,
+        "upper_confidence_bound_quantile": 0.975
+      },
+      "largest_winner_removed_candidate_pnl_minimum_exclusive": 0.0
+    },
+    "single_use": true,
+    "support": {
+      "all_market_rows_remain_in_paired_gate": true,
+      "hard_gate": false,
+      "minimum_accepted_candidate_support": null
+    }
+  },
+  "frozen": true,
+  "future_window": {
+    "attempted_market_count": 0,
+    "bounded_batch_market_count": 12,
+    "candidate_scoring_during_raw_capture_allowed": false,
+    "collection_started": false,
+    "collector_pid": null,
+    "exact_quality_valid_market_count": 120,
+    "market_family": "btc_updown_5m",
+    "maximum_attempted_market_count": 180,
+    "maximum_batch_count": 15,
+    "minimum_accepted_candidate_support": null,
+    "operator_collection_authorization_granted": false,
+    "operator_collection_authorization_required": true,
+    "outcomes_resolution_labels_or_pnl_opened": false,
+    "quality_valid_market_count": 0,
+    "resolution_provider_enabled_during_collection": false,
+    "result_dependent_extension_allowed": false,
+    "same_source_market_rows_for_candidate_and_baseline": true,
+    "selection_rule": "chronological_earliest_quality_valid_after_freeze_boundary",
+    "service_root": "examples/v8/polymarket_live_runs/challenge-model-v8-1-attempt-002",
+    "settlement_finalizer_enabled_during_collection": false,
+    "strictly_future_and_disjoint_from_all_development_data": true,
+    "strictly_later_minimum_market_start_ts_exclusive": 1785088622878,
+    "support_mode": "full_window_paired_no_minimum_accepted_support"
+  },
+  "goal": "challenge_model_promote_to_champion_model",
+  "historical_eligibility": {
+    "all_historical_success_criteria_passed": true,
+    "attempt_002_preregistration_allowed": true,
+    "development_iteration_limit": 5,
+    "development_iterations_consumed": 3,
+    "further_historical_iteration_allowed_after_success": false,
+    "historical_result_is_promotion_evidence": false,
+    "iteration_number": 3
+  },
+  "issue": 262,
+  "lineage": {
+    "attempt_001_closure_sha256": "9bc138bcff811f2a0d0a05556d3e189b7c74eb23ce03e2062bb397c4149d4414",
+    "candidate_implementation_commit": "5aa6ff72192c27c15a5999b016e7fbdd3a663f65",
+    "candidate_module_sha256": "e7aa6bcd4566eb1cf8cfc8f4bfb451ecb97b45702ac1f4a334387e6f380ec0f0",
+    "candidate_profile_sha256": "b04b25fb7dfad6a8949bd630f407abb156128ba59e33682816846344f1c130ff",
+    "development_registry_sha256": "dd4926b24bbe2b80bb127c5af861f62e432131469bfc202248d85ec4a1380fd4",
+    "future_evaluator_commit": "461ea48116dd42680c3e019f279b7eea3b2134b5",
+    "future_evaluator_module_sha256": "f6451a9b3ddaea43af80f15296a55864efda08f56cf0d021ca81ba2f2cfe92f3",
+    "future_evaluator_test_sha256": "902148a102f879f836e9862bb2838c06ce0ca58afe03bb96d850f617440ba20c",
+    "historical_evidence_commit": "59b516eed43fcc72eef8e9d2bb09ca350852336b",
+    "historical_iteration_003_entry_file_sha256": "8326e6c5cec158f09bdeeac3d14e2e2342ebf9aed3bd9bb5048f017567b6fe62",
+    "historical_iteration_003_entry_semantic_sha256": "abe1eb3b6e03530c15cb51326801e783454a0be4d5885edd7dcca8dab22779ae",
+    "historical_iteration_003_result_sha256": "997cd1ad280cdb6ad1125d9c2629d283f47e2765317f04557f4fdfc7eb972790",
+    "historical_success_standard_sha256": "07609f09692723dd1e650080cfdd29466a7ee8a0f8c30d8378045a8ee3523114",
+    "synthetic_dry_run_sha256": "a55b2e4c547329967d588c619412ca76d7d0c62371642cc3ba731e6bedbfaf8f"
+  },
+  "model_version": "v8.1",
+  "preregistered_at": "2026-07-26T17:57:02Z",
+  "preregistered_before_collection": true,
+  "preregistration_freeze_created_ts": 1785088622878,
+  "promotion_evidence": {
+    "attempt_002_future_window_only": true,
+    "automatic_promotion_allowed": false,
+    "eligible_only_if_all_hard_gates_pass": true,
+    "historical_results_eligible": false,
+    "promotion_audit_required_after_gate_pass": true
+  },
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-attempt-002-preregistration-v1",
+  "settlement": {
+    "all_120_markets_settled_before_evaluation": true,
+    "costs_subtracted_exactly_once": true,
+    "official_read_only_resolution_only": true,
+    "single_use_target_access_claim_required": true,
+    "source_outcome_blind_rows_mutated": false,
+    "target_access_after_decision_freeze_and_market_close": true
+  },
+  "target_mapping": {
+    "all_120_markets_included": true,
+    "baseline_position_size": 0.2,
+    "candidate_position_size": 1.0,
+    "candidate_trade_value_field": "runtime_policy_after_cost_net_pnl_per_contract",
+    "comparison_unit": "market_id",
+    "no_trade_after_cost_pnl": 0.0
+  }
+}

@@ -1,0 +1,306 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+
+from bigan.v8.polymarket.challenge_model_promotion import (
+    ChallengeModelPromotionError,
+    audit_challenge_model_promotion,
+    promotion_readiness_markdown,
+)
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def _write(path: Path, payload: dict) -> dict[str, str]:
+    path.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+
+def _copy_config(tmp_path: Path) -> Path:
+    destination = tmp_path / "examples/v8/polymarket_configs"
+    shutil.copytree(ROOT / "examples/v8/polymarket_configs", destination)
+    return destination
+
+
+def _rewrite_json_and_pin(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    path.with_suffix(".sha256").write_text(
+        hashlib.sha256(path.read_bytes()).hexdigest() + "\n",
+        encoding="ascii",
+    )
+
+
+def _runtime(tmp_path: Path):
+    fresh_attempt_id = "challenge-future-attempt-001"
+    freeze_sha256 = "f" * 64
+    selected_candidate = "v8_1_primary_no_fallback"
+    selected_gate = {"all_hard_gates_passed": True}
+    parallel = {
+        "schema_version": "bigan-v8-parallel-future-evaluation-v1",
+        "multiplicity_aware_selected_candidate": selected_candidate,
+        "candidate_gates": {selected_candidate: selected_gate},
+        "single_use_claim": {
+            "single_use": True,
+            "target_access_after_decision_freeze": True,
+            "result_selected_rerun_allowed": False,
+            "freeze_sha256": freeze_sha256,
+        },
+    }
+    parallel_descriptor = _write(tmp_path / "parallel.json", parallel)
+    common = {
+        "fresh_attempt_id": fresh_attempt_id,
+        "selected_candidate_id": selected_candidate,
+        "parallel_freeze_sha256": freeze_sha256,
+        "source_parallel_evaluation_report_sha256": parallel_descriptor["sha256"],
+    }
+    policy_common = {
+        **common,
+        "policy_candidate_count": 3,
+        "all_preregistered_policy_candidates_evaluated": True,
+        "outcome_selected_policy_used": False,
+        "passed": True,
+    }
+    return {
+        "parallel_evaluation_report": parallel_descriptor,
+        "regime_stratified_pnl_report": _write(
+            tmp_path / "regime.json",
+            {
+                "schema_version": "bigan-v8-regime-stratified-pnl-report-v1",
+                **common,
+                "all_dimension_partitions_reconcile": True,
+                "diagnostic_only": True,
+                "stratified_metrics_are_eligibility_blockers": False,
+            },
+        ),
+        "provider_health_diagnostics_report": _write(
+            tmp_path / "provider-health.json",
+            {
+                "schema_version": "bigan-v8-provider-health-diagnostics-v1",
+                **common,
+                "feature_completeness_report": {
+                    "feature_row_count": 480,
+                    "complete_feature_row_count": 480,
+                    "incomplete_feature_row_count": 0,
+                },
+                "decision_row_count": 120,
+                "matched_decision_count": 120,
+                "unmatched_decision_count": 0,
+                "diagnostic_only": True,
+                "outcomes_settlement_pnl_or_future_information_used": False,
+            },
+        ),
+        "replay_parity_report": _write(
+            tmp_path / "parity.json",
+            {
+                "schema_version": ("bigan-v8-challenge-execution-policy-replay-parity-v1"),
+                **policy_common,
+            },
+        ),
+        "policy_safety_report": _write(
+            tmp_path / "safety.json",
+            {
+                "schema_version": ("bigan-v8-challenge-execution-policy-safety-v1"),
+                **policy_common,
+            },
+        ),
+        "policy_reconciliation_report": _write(
+            tmp_path / "reconciliation.json",
+            {
+                "schema_version": ("bigan-v8-challenge-execution-policy-reconciliation-v1"),
+                **policy_common,
+            },
+        ),
+        "powered_paper_gate_report": _write(
+            tmp_path / "paper.json",
+            {
+                "schema_version": "bigan-v8-challenge-powered-paper-gate-v1",
+                **common,
+                "selected_candidate_gate": selected_gate,
+                "checks": {
+                    "selected_candidate_matches_parallel_winner": True,
+                    "selected_candidate_all_hard_gates_passed": True,
+                },
+                "powered_paper_gate_passed": True,
+                "separate_result_selected_retest_performed": False,
+                "paper_only": True,
+                "capital_at_risk": False,
+            },
+        ),
+        "attempt_consumption_record": _write(
+            tmp_path / "consumption.json",
+            {
+                "schema_version": "bigan-v8-challenge-attempt-consumption-v1",
+                "fresh_attempt_id": fresh_attempt_id,
+                "parallel_freeze_sha256": freeze_sha256,
+                "fresh_attempt_number": 1,
+                "familywise_window_alpha": 0.025,
+                "per_candidate_alpha": 0.0125,
+                "attempt_consumed": True,
+                "alpha_consumed": True,
+                "consumes_attempt": True,
+                "consumes_alpha": True,
+                "evidence_permanently_consumed": True,
+            },
+        ),
+    }
+
+
+def test_static_issue_prerequisites_pass_but_promotion_waits_for_fresh_evidence() -> None:
+    report = audit_challenge_model_promotion(repository_root=ROOT)
+    assert all(report["static_checks"].values())
+    assert all(report["artifact_checks"].values())
+    assert report["static_check_failure_reasons"] == {}
+    assert report["static_checks"]["issue_255_next_fresh_gate_statistically_eligible"]
+    assert report["static_checks"]["issue_254_parallel_protocol_preregistered"]
+    assert report["static_checks"]["issue_257_feature_missingness_governance_valid"]
+    assert report["static_checks"]["issue_258_regime_diagnostics_governance_valid"]
+    assert report["static_checks"]["issue_256_policy_framework_preregistered"]
+    assert report["static_checks"]["cross_issue_promotion_evidence_protocol_valid"]
+    assert report["static_checks"]["historical_replay_strictly_superior_before_collection"] is True
+    assert report["fresh_runtime_evidence_supplied"] is False
+    assert report["decision"] == "BLOCKED"
+    assert report["promotion_unlocked"] is False
+    assert report["selected_champion_candidate"] is None
+    assert "evidence:fresh_parallel_evaluation_present" in report["blockers"]
+    assert "Historical or consumed results are not substituted" in (
+        promotion_readiness_markdown(report)
+    )
+
+
+def test_semantically_tampered_collection_plan_fails_even_with_new_hash(
+    tmp_path: Path,
+) -> None:
+    destination = _copy_config(tmp_path)
+    plan_path = destination / "parallel_future_collection_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["collection"]["quality_valid_market_target"] = 119
+    _rewrite_json_and_pin(plan_path, plan)
+
+    report = audit_challenge_model_promotion(repository_root=tmp_path)
+
+    assert report["artifact_checks"]["parallel_future_collection_plan.json"] is True
+    assert report["static_checks"]["issue_254_parallel_protocol_preregistered"] is False
+    assert report["static_check_failure_reasons"][
+        "issue_254_parallel_protocol_preregistered"
+    ]
+    assert report["decision"] == "BLOCKED"
+
+
+def test_issue_257_semantic_weakening_fails_even_with_new_sidecar(
+    tmp_path: Path,
+) -> None:
+    destination = _copy_config(tmp_path)
+    contract_path = destination / "feature_missingness_contract.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["rules"]["missing_encoded_as_zero"] = True
+    _rewrite_json_and_pin(contract_path, contract)
+
+    report = audit_challenge_model_promotion(repository_root=tmp_path)
+
+    assert report["artifact_checks"]["feature_missingness_contract.json"] is True
+    assert report["static_checks"]["all_issue_contract_artifacts_hash_verified"] is True
+    assert report["static_checks"]["issue_257_feature_missingness_governance_valid"] is False
+    assert report["static_check_failure_reasons"][
+        "issue_257_feature_missingness_governance_valid"
+    ]
+    assert report["decision"] == "BLOCKED"
+
+
+def test_issue_258_semantic_weakening_fails_even_with_new_sidecar(
+    tmp_path: Path,
+) -> None:
+    destination = _copy_config(tmp_path)
+    contract_path = destination / "regime_definition_contract.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["diagnostic_only"] = False
+    _rewrite_json_and_pin(contract_path, contract)
+
+    report = audit_challenge_model_promotion(repository_root=tmp_path)
+
+    assert report["artifact_checks"]["regime_definition_contract.json"] is True
+    assert report["static_checks"]["all_issue_contract_artifacts_hash_verified"] is True
+    assert report["static_checks"]["issue_258_regime_diagnostics_governance_valid"] is False
+    assert report["static_check_failure_reasons"][
+        "issue_258_regime_diagnostics_governance_valid"
+    ]
+    assert report["decision"] == "BLOCKED"
+
+
+def test_issue_256_template_weakening_fails_even_with_new_sidecar(
+    tmp_path: Path,
+) -> None:
+    destination = _copy_config(tmp_path)
+    template_path = (
+        destination
+        / "execution_policy_future_validation_protocol.template.json"
+    )
+    template = json.loads(template_path.read_text(encoding="utf-8"))
+    template["result_driven_policy_search_allowed"] = True
+    _rewrite_json_and_pin(template_path, template)
+
+    report = audit_challenge_model_promotion(repository_root=tmp_path)
+
+    assert (
+        report["artifact_checks"][
+            "execution_policy_future_validation_protocol.template.json"
+        ]
+        is True
+    )
+    assert report["static_checks"]["all_issue_contract_artifacts_hash_verified"] is True
+    assert report["static_checks"]["cross_issue_promotion_evidence_protocol_valid"] is True
+    assert report["static_checks"]["issue_256_policy_framework_preregistered"] is False
+    assert report["static_check_failure_reasons"][
+        "issue_256_policy_framework_preregistered"
+    ]
+    assert report["decision"] == "BLOCKED"
+
+
+def test_complete_fresh_hash_bound_evidence_can_promote_candidate(tmp_path: Path) -> None:
+    report = audit_challenge_model_promotion(
+        repository_root=ROOT,
+        runtime_evidence=_runtime(tmp_path),
+    )
+    assert report["decision"] == "PROMOTE_TO_CHAMPION"
+    assert report["challenge_model_promotion_eligible"] is True
+    assert report["selected_champion_candidate"] == "v8_1_primary_no_fallback"
+    assert report["promotion_unlocked"] is True
+    assert report["live_unlocked"] is False
+    assert report["capital_at_risk"] is False
+
+
+def test_failed_paper_evidence_and_hash_tamper_fail_closed(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    paper_path = Path(runtime["powered_paper_gate_report"]["path"])
+    paper_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "bigan-v8-challenge-powered-paper-gate-v1",
+                "powered_paper_gate_passed": False,
+                "paper_only": True,
+                "capital_at_risk": False,
+            }
+        )
+    )
+    runtime["powered_paper_gate_report"]["sha256"] = hashlib.sha256(
+        paper_path.read_bytes()
+    ).hexdigest()
+    report = audit_challenge_model_promotion(
+        repository_root=ROOT,
+        runtime_evidence=runtime,
+    )
+    assert report["challenge_model_promotion_eligible"] is False
+    assert "evidence:powered_paper_gate_passed" in report["blockers"]
+    runtime["parallel_evaluation_report"]["sha256"] = "0" * 64
+    with pytest.raises(ChallengeModelPromotionError, match="hash mismatch"):
+        audit_challenge_model_promotion(
+            repository_root=ROOT,
+            runtime_evidence=runtime,
+        )

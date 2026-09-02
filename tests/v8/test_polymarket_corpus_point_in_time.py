@@ -125,6 +125,178 @@ def test_current_kline_close_is_not_used_before_candle_is_available(
     )
 
 
+def test_chainlink_price_to_beat_is_causal_and_overrides_candle_proxy(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    markets = _read_jsonl(raw_dir / "raw_polymarket_markets.jsonl")
+    chainlink_rows = []
+    for market_index, market in enumerate(markets):
+        start_ts = int(market["market_start_ts"])
+        end_ts = int(market["market_end_ts"])
+        reference_price = 70_000.0 + market_index * 1_000.0
+        chainlink_rows.append(
+            _chainlink_row(
+                source_ts=start_ts - 1_000,
+                available_at_ts=start_ts - 1_000,
+                price=reference_price,
+            )
+        )
+        ts = start_ts + 60_000
+        while ts < end_ts:
+            chainlink_rows.append(
+                _chainlink_row(
+                    source_ts=ts,
+                    available_at_ts=ts,
+                    price=reference_price + (ts - start_ts) / 1_000.0,
+                )
+            )
+            ts += 60_000
+    first_start = int(markets[0]["market_start_ts"])
+    chainlink_rows.append(
+        _chainlink_row(
+            source_ts=first_start,
+            available_at_ts=first_start + 1,
+            price=999_999.0,
+        )
+    )
+    _write_jsonl(
+        raw_dir / "raw_polymarket_chainlink_prices.jsonl",
+        chainlink_rows,
+    )
+
+    result = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus",
+        )
+    )
+    features = _read_jsonl(result.output_dir / "polymarket_feature_rows.jsonl")
+    first = _feature_at(
+        features=features,
+        market_id="btc5m-up",
+        decision_ts=first_start,
+    )
+    assert first["features"]["reference_price_to_beat"] == pytest.approx(70_000.0)
+    assert first["features"][
+        "reference_price_to_beat_distance_at_decision"
+    ] == pytest.approx(0.0)
+    assert first["features"]["chainlink_price_at_decision"] == pytest.approx(
+        70_000.0
+    )
+    provenance = first["feature_provenance"][
+        "reference_price_to_beat_distance_at_decision"
+    ]
+    assert provenance["reference_price_to_beat_source"] == (
+        "polymarket_rtds_chainlink_market_start"
+    )
+    assert provenance["provenance_valid"] is True
+    assert provenance["max_input_ts"] <= first["decision_ts"]
+    assert provenance["available_at_ts"] <= first["decision_ts"]
+    assert "raw_polymarket_chainlink_prices.price_at_or_before_market_start" in (
+        provenance["source_fields_used"]
+    )
+    assert "raw_polymarket_chainlink_prices.price_at_or_before_decision" in (
+        provenance["source_fields_used"]
+    )
+    evidence = _read_json(
+        result.output_dir
+        / "polymarket_chainlink_decision_time_evidence_manifest.json"
+    )
+    assert evidence["feature_builder_integration_passed"] is True
+    assert evidence["feature_builder_integration_required"] is False
+    assert evidence["missing_or_invalid_feature_row_count"] == 0
+
+
+def test_recent_trade_volume_fails_closed_when_stream_window_is_censored(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw-censored"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    markets = _read_jsonl(raw_dir / "raw_polymarket_markets.jsonl")
+    market = next(row for row in markets if row["market_id"] == "btc5m-up")
+    market.update(
+        {
+            "trade_stream_started_at_ts": market["market_start_ts"] + 1,
+            "trade_stream_ended_at_ts": market["market_end_ts"],
+            "trade_stream_continuity_passed": True,
+            "trade_full_round_coverage_complete": False,
+            "trade_tape_censored": True,
+            "trade_collection_reason_codes": [
+                "trade_stream_started_after_market_start"
+            ],
+        }
+    )
+    _write_jsonl(raw_dir / "raw_polymarket_markets.jsonl", markets)
+
+    result = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus-censored",
+        )
+    )
+    feature = _feature_at(
+        features=_read_jsonl(result.output_dir / "polymarket_feature_rows.jsonl"),
+        market_id="btc5m-up",
+        decision_ts=market["market_start_ts"],
+    )
+
+    assert feature["features"]["recent_up_trade_volume"] is None
+    assert feature["features"]["recent_down_trade_volume"] is None
+    assert feature["features"]["recent_trade_volume_coverage_complete"] == 0.0
+    assert feature["features"]["recent_trade_volume_censored"] == 1.0
+    provenance = feature["feature_provenance"]["recent_up_trade_volume"]
+    assert provenance["trade_stream_continuity_passed"] is True
+    assert provenance["trade_tape_censored"] is True
+    assert provenance["trade_collection_reason_codes"] == [
+        "trade_stream_started_after_market_start"
+    ]
+
+
+def test_recent_trade_volume_is_used_only_with_complete_causal_stream_window(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw-complete"
+    write_deterministic_polymarket_corpus_fixtures(raw_dir)
+    markets = _read_jsonl(raw_dir / "raw_polymarket_markets.jsonl")
+    market = next(row for row in markets if row["market_id"] == "btc5m-up")
+    market.update(
+        {
+            "trade_stream_started_at_ts": market["market_start_ts"],
+            "trade_stream_ended_at_ts": market["market_end_ts"],
+            "trade_stream_continuity_passed": True,
+            "trade_full_round_coverage_complete": True,
+            "trade_tape_censored": False,
+            "trade_collection_reason_codes": [],
+        }
+    )
+    _write_jsonl(raw_dir / "raw_polymarket_markets.jsonl", markets)
+
+    result = build_polymarket_btc_corpus(
+        PolymarketCorpusBuildConfig(
+            input_dir=raw_dir,
+            output_dir=tmp_path / "corpus-complete",
+        )
+    )
+    feature = _feature_at(
+        features=_read_jsonl(result.output_dir / "polymarket_feature_rows.jsonl"),
+        market_id="btc5m-up",
+        decision_ts=market["market_start_ts"],
+    )
+
+    assert feature["features"]["recent_up_trade_volume"] == pytest.approx(10.0)
+    assert feature["features"]["recent_down_trade_volume"] == pytest.approx(10.0)
+    assert feature["features"]["recent_trade_volume_coverage_complete"] == 1.0
+    assert feature["features"]["recent_trade_volume_censored"] == 0.0
+    provenance = feature["feature_provenance"]["recent_up_trade_volume"]
+    assert provenance["trade_coverage_required_start_ts"] == market[
+        "market_start_ts"
+    ]
+    assert provenance["trade_stream_started_at_ts"] == market["market_start_ts"]
+    assert provenance["trade_stream_ended_at_ts"] >= feature["decision_ts"]
+
+
 def test_train_shadow_split_is_temporal_and_leak_free(tmp_path: Path) -> None:
     result = _build_fixture_corpus(tmp_path)
     split = _read_json(result.output_dir / "polymarket_train_shadow_split.json")
@@ -268,3 +440,30 @@ def _read_jsonl(path: Path) -> list[dict]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def _chainlink_row(
+    *, source_ts: int, available_at_ts: int, price: float
+) -> dict:
+    return {
+        "source_type": "polymarket_rtds_chainlink",
+        "symbol": "btc/usd",
+        "source_ts": source_ts,
+        "available_at_ts": available_at_ts,
+        "price": price,
+        "timestamp_causality_valid": source_ts <= available_at_ts,
+        "read_only": True,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "broker_exchange_write_enabled": False,
+        "live_exchange_write_enabled": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+    }

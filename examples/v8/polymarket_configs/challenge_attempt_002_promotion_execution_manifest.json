@@ -1,0 +1,78 @@
+{
+  "attempt_id": "v8-1-challenger-future-attempt-002",
+  "candidate_id": "v8_1_entry_price_floor_0_30_sized_1_0",
+  "current_state": {
+    "collection_started": false,
+    "operator_authorization_present": false,
+    "outcomes_resolution_labels_or_pnl_opened": false,
+    "promotion_ready": false,
+    "quality_valid_market_count": 0,
+    "real_future_evidence_present": false,
+    "sole_external_start_condition": "explicit_operator_authorization_for_exact_120_market_collection"
+  },
+  "final_audit_contract": {
+    "all_issue_static_prerequisites_required": true,
+    "all_supplemental_runtime_reports_required": true,
+    "automatic_promotion_from_future_gate_allowed": false,
+    "comparison_recomputed_from_frozen_decisions_and_targets": true,
+    "exact_future_market_count": 120,
+    "historical_evidence_substitution_allowed": false,
+    "operator_authorization_hash_reconciliation_required": true,
+    "single_use_alpha_consumption_required": true,
+    "stored_gate_result_recomputed": true,
+    "synthetic_evidence_substitution_allowed": false
+  },
+  "implementation": {
+    "audit_module_sha256": "cf6eb763114c65c2e386b66df93fc3fba5118419f34792bb6af0d4da0ee1bc15",
+    "audit_runner_sha256": "b05f3d6486d4421d94ee11bd010e8a70b9290dd678f673d626cac04ea426a667",
+    "commit": "ab54de3e848c8c3bb0961e22184313173b7f247c",
+    "supplemental_module_sha256": "cf07b4a155a3d047b887aec27226a141ff34dfde0561c56d8cf0010b3727a33c",
+    "supplemental_runner_sha256": "adede81aeeb961e24fb186df748d77531879bafe8772f5ef17e0767d4b8b1ed6",
+    "test_sha256": "648a09f18bff41be622b179a42dfa4e772cef90d295896e105063e68a1a7f8d2"
+  },
+  "lineage": {
+    "attempt_002_execution_manifest_sha256": "f58e53f317ecdc7de467570b93094034a201a545d50efd48abc54194ea47eabf",
+    "attempt_002_preregistration_sha256": "0fa091610966a3a3470872a7e1b5832c8a32985fc312235366ad41aa891f249f",
+    "promotion_evidence_protocol_sha256": "b9eaaf37c214cea59abdea7bc682a12e0e12a23837f626bd815e4d37c14dee52"
+  },
+  "model_version": "v8.1",
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-attempt-002-promotion-execution-manifest-v1",
+  "supplemental_evidence_contract": {
+    "execution_policy_candidate_count": 3,
+    "execution_policy_performance_can_replace_future_gate": false,
+    "future_gate_changed": false,
+    "issue_256_reports": [
+      "replay_parity_report",
+      "policy_safety_report",
+      "policy_reconciliation_report"
+    ],
+    "issue_257_report": "provider_health_diagnostics_report",
+    "issue_258_regime_metrics_are_hard_gates": false,
+    "issue_258_report": "regime_stratified_pnl_report",
+    "manual_report_edit_required": false,
+    "same_frozen_future_grid_required": true
+  },
+  "synthetic_full_path_verification": {
+    "fixture_declares_real_shape_inputs_for_success_branch_coverage": true,
+    "promotion_evidence_eligible": false,
+    "real_provider_evidence": false,
+    "retained_as_future_evidence": false,
+    "success_and_fail_closed_branches_exercised": true
+  },
+  "validation": {
+    "collection_control_invoked": false,
+    "focused_related_test_count": 138,
+    "focused_related_tests_passed": true,
+    "ruff_passed": true
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "schema_version": "bigan-v8-execution-layer-v2-pnl-aligned-future-supplemental-diagnostics-v1",
+  "frozen": true,
+  "diagnostic_only": true,
+  "report_only": true,
+  "primary_future_evidence_gate_mutation_allowed": false,
+  "group_dimensions": [
+    "execution_guarded_side",
+    "execution_guarded_action",
+    "execution_guarded_action_family"
+  ],
+  "group_metrics": [
+    "accepted_bet_count",
+    "settled_bet_count",
+    "contract_size_sum",
+    "gross_pnl_sum",
+    "execution_cost_sum",
+    "cost_basis_sum",
+    "settled_net_pnl_sum",
+    "roi",
+    "win_rate"
+  ],
+  "market_concentration": {
+    "basis": "absolute_settled_net_pnl_by_market",
+    "metrics": [
+      "top_1_absolute_pnl_share",
+      "top_3_absolute_pnl_share",
+      "absolute_pnl_hhi"
+    ]
+  },
+  "leave_one_market_out": {
+    "sampling_unit": "market_id",
+    "metrics": [
+      "net_pnl_after_market_removed",
+      "minimum_net_pnl_after_one_market_removed",
+      "maximum_net_pnl_after_one_market_removed",
+      "all_scenarios_positive"
+    ]
+  },
+  "chronological_ordering": [
+    "market_close_ts",
+    "market_id",
+    "simulated_order_id"
+  ],
+  "outcome_rows_used_for_report_only": true,
+  "outcome_rows_used_for_selection_or_tuning": false,
+  "source_model_candidate_eligible": false,
+  "freeze_ready": false,
+  "promotion_evidence_eligible": false,
+  "v8_execution_handoff_allowed": false,
+  "paper_only": true,
+  "capital_at_risk": false,
+  "polymarket_write_enabled": false,
+  "wallet_signing_enabled": false,
+  "#134_resume_allowed": false,
+  "#146_start_allowed": false
+}

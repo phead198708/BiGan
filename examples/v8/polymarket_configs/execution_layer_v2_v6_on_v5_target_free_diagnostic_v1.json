@@ -1,0 +1,62 @@
+{
+  "schema_version": "bigan-v8-v6-on-v5-target-free-diagnostic-profile-v1",
+  "candidate_name": "v6_on_v5_policy_selected_conformal_target_free_diagnostic",
+  "issue_number": 209,
+  "frozen": true,
+  "purpose": "retrospective_development_diagnostic_only",
+  "source_lineage": {
+    "v5_freeze_manifest_sha256": "0d0927da515317d0576a04b6c4a9a5175f569225a85ebaf62020326fdc06510d",
+    "v5_fit_action_rows_sha256": "265828722a64bfdeb2f7b4ace26121bb9986ea98fade53513e3c7ebcca10b050",
+    "v5_calibration_action_rows_sha256": "143327aa6f2b19a1e1ece1b9d9a047b458600660ccff5fb06e5bb6edc7b03471",
+    "v5_role_assignment_manifest_sha256": "517fa7cab370d75364cab9f37e45f7a8d1fc0ba8e36221b52367e725a002f470",
+    "v5_role_rows_sha256": "5b123b094227996d982fa76a4e4d2ca1d38f6b3272f91c5be610bcfe65b27097",
+    "v6_preregistration_profile_sha256": "63a9a201e4729f7c1ffd3dc7dabc97ed380942fe3c3417a66ad86dd6d65d8f39",
+    "v6_preregistration_manifest_sha256": "a6e12959d7d0f85215fdbc8e82df904ce841812171a5df0c945f27fbbd46d84b",
+    "feature_contract_sha256": "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959"
+  },
+  "chronological_roles": {
+    "point_model_fit_market_count": 135,
+    "policy_selected_conformal_market_count": 60,
+    "target_free_check_market_count": 50,
+    "assignment": "v5_fit_then_v5_calibration_then_strictly_later_post_issue204_check"
+  },
+  "target_free_check": {
+    "minimum_eligible_index_sequence": 237,
+    "maximum_index_scan_count": 100,
+    "selection_method": "earliest_quality_valid_post_issue204_disjoint_rows",
+    "minimum_full_guard_accepted_market_count_per_side": 5,
+    "result_dependent_extension_allowed": false,
+    "labels_outcomes_settlement_targets_or_pnl_opened": false
+  },
+  "model_and_policy_contract": {
+    "point_model_config_source": "issue207_frozen_v6_profile",
+    "feature_set_source": "issue207_frozen_feature_contract",
+    "conformal_method_source": "issue207_policy_selected_conformal_contract",
+    "execution_guard_source": "issue207_unchanged_full_execution_guard",
+    "hyperparameter_search_enabled": false,
+    "threshold_search_enabled": false,
+    "cost_model_mutation_allowed": false,
+    "execution_guard_mutation_allowed": false,
+    "sizing_or_exposure_mutation_allowed": false
+  },
+  "prohibited_inputs": {
+    "uses_204_outcomes_for_fitting": false,
+    "uses_204_pnl_for_tuning": false,
+    "uses_target_free_check_labels_for_tuning": false,
+    "uses_current_oof_validation_or_confirmatory_pnl_for_tuning": false,
+    "result_driven_model_threshold_penalty_or_gate_change_allowed": false
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false
+  }
+}

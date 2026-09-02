@@ -1,0 +1,162 @@
+{
+  "schema_version": "bigan-btc-15m-moe-confirmatory-candidate-contract-v1",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v1",
+  "candidate_id": "mixture_of_experts",
+  "architecture_type": "deterministic_regime_router_with_conditional_experts_and_global_fallback",
+  "created_at": "2026-07-30T00:50:00+00:00",
+  "role": "single_static_development_candidate_freeze",
+  "development_only_forever": true,
+  "promotion_evidence_eligible": false,
+  "parent_hypothesis": {
+    "parent_lineage_id": "BTC-15M-regime-adaptive-v1",
+    "parent_result_sha256": "e2bce83faa98319c69ddd7560f8cdd6cb0a6aa983d728710c3c0ab22f7e5b57e",
+    "parent_candidate_id": "mixture_of_experts",
+    "parent_evidence_role": "hypothesis_generation_only",
+    "parent_evidence_is_fresh_validation": false,
+    "parent_selected_candidate_id": null,
+    "parent_candidate_budget_consumed": 5,
+    "parent_candidate_budget_maximum": 5
+  },
+  "hardening_inputs": {
+    "metric_reconciliation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_metric_reconciliation_report.json",
+      "sha256": "153cbcf3573b8ce0b8022c1faab4348193f245ac3de1a8b284c21d0a3d4c8028",
+      "reconciliation_passed": true
+    },
+    "route_attribution": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_route_attribution_report.json",
+      "sha256": "f540ed6bcbd7bc93e74d283a61cb385c802e8e0c24c102e35ef4d14b3dc99adf",
+      "attribution_reconciliation_passed": true
+    },
+    "provenance_attestation": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/development_evaluation_provenance_attestation.json",
+      "sha256": "306ad3c4e90455f636ca573d43b341497db2fc9fe297287b7045d52cb7f27147",
+      "recorded_source_commit_exactly_reachable": false,
+      "limitation_preserved": true
+    }
+  },
+  "contracts": {
+    "router": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_router_contract.json",
+      "sha256": "243b90aedb54198470ac04aeff713d5a6c6cd8b05c2c87eb49b48752d69bdb46"
+    },
+    "features": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_feature_contract.json",
+      "sha256": "d6117e95e1fe95c52c2741a5c0cbf6921be8418c50800c77c8bc9e6ed8e30ed5"
+    },
+    "cost_and_action": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v1/moe_cost_and_action_contract.json",
+      "sha256": "d01f221aae46421239e23fe2321a37e530367bc831e1033161d470b887fce8c0"
+    }
+  },
+  "development_population": {
+    "finalized_index_path": "examples/v8/polymarket_runs/challenge-model-development-btc-updown-15m-v1/finalized_development_corpus_index.jsonl",
+    "finalized_index_sha256": "0c3623e0d6d540a0fae4b71e96e8df3e342e171213212df43473c2b4de2292e6",
+    "market_count": 113,
+    "role": "development_training_only",
+    "promotion_evidence_eligible": false,
+    "future_validation_eligible": false
+  },
+  "model_family": {
+    "name": "xgboost_shared_side_symmetric_pair_normalized_win_probability",
+    "parameters": {
+      "objective": "binary:logistic",
+      "eval_metric": "logloss",
+      "tree_method": "hist",
+      "nthread": 1,
+      "max_depth": 2,
+      "eta": 0.05,
+      "min_child_weight": 8.0,
+      "subsample": 1.0,
+      "colsample_bytree": 1.0,
+      "reg_lambda": 10.0,
+      "reg_alpha": 0.0,
+      "gamma": 0.0,
+      "max_bin": 64,
+      "seed": 26015
+    },
+    "maximum_num_boost_round": 400,
+    "early_stopping_rounds": 30,
+    "hyperparameter_search_allowed": false
+  },
+  "static_training_protocol": {
+    "global_core_training_market_count": 93,
+    "global_validation_tail_market_count": 20,
+    "global_validation_is_chronologically_later_than_core": true,
+    "expert_num_boost_round": "global_fallback_best_iteration_plus_one",
+    "expert_training_population": "all_113_development_markets_with_rows_assigned_to_route",
+    "expert_support_unit": "distinct_market",
+    "minimum_expert_support": 20,
+    "route_support": {
+      "high_vol": 46,
+      "bullish": 40,
+      "bearish": 57,
+      "low_vol": 18
+    },
+    "expert_availability": {
+      "high_vol": true,
+      "bullish": true,
+      "bearish": true,
+      "low_vol": false
+    },
+    "low_vol_behavior": "global_fallback_due_to_frozen_support_below_20",
+    "global_fallback_is_matched_baseline": true,
+    "random_or_market_split_allowed": false
+  },
+  "frozen_behavior": {
+    "deterministic_router": true,
+    "expert_ids": [
+      "high_vol",
+      "bullish",
+      "bearish",
+      "low_vol"
+    ],
+    "global_fallback_required": true,
+    "pair_normalization_required": true,
+    "fixed_action_threshold": 0.0,
+    "true_paired_executable_asks_required": true,
+    "complement_proxy_allowed": false,
+    "unit_sizing": true,
+    "one_trade_maximum_per_market": true,
+    "execution_policy": "HOLD_TO_SETTLEMENT"
+  },
+  "forbidden_changes": [
+    "candidate_id",
+    "architecture_type",
+    "router",
+    "router_cutoffs",
+    "feature_set",
+    "expert_set",
+    "minimum_expert_support",
+    "fallback_logic",
+    "xgboost_parameters",
+    "threshold",
+    "side_filter",
+    "regime_filter",
+    "missingness_filter",
+    "uncertainty_overlay",
+    "post_hoc_abstention",
+    "hyperparameter_search"
+  ],
+  "state": {
+    "candidate_contract_frozen": true,
+    "static_model_training_started": false,
+    "static_model_frozen": false,
+    "fresh_collection_authorized": false,
+    "fresh_collection_started": false,
+    "fresh_outcomes_opened": false
+  },
+  "safety": {
+    "source_model_candidate_eligible": false,
+    "freeze_ready": false,
+    "promotion_evidence_eligible": false,
+    "paper_candidate_allowed": false,
+    "v8_execution_handoff_allowed": false,
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "live_trading_allowed": false,
+    "wallet_signing_allowed": false,
+    "polymarket_write_allowed": false,
+    "capital_at_risk": false
+  }
+}

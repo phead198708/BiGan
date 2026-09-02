@@ -17,12 +17,18 @@ from bigan.v8.polymarket.contracts import canonical_json_sha256
 from bigan.v8.polymarket.corpus.contracts import BTC_UPDOWN_MARKET_HORIZONS_MS
 from bigan.v8.polymarket.recorder.contracts import PolymarketRealCorpusRecorderConfig
 from bigan.v8.polymarket.recorder.public_provider import (
+    BTC_UPDOWN_FAMILY_BY_SLUG,
+    BTC_UPDOWN_SLUG_PATTERN,
     PolymarketPublicHTTPRealCorpusProvider,
     RealCorpusPublicProviderError,
 )
 from bigan.v8.polymarket.training.contracts import (
     POLYMARKET_POLICY_TRAINING_PHASE,
     compact_safety_fields,
+)
+from bigan.v8.polymarket.training.execution_layer_v2_policy_replay import (
+    _calibrated_expected_return_source,
+    _load_frozen_ev_calibration_artifact,
 )
 from bigan.v8.polymarket.training.o_v8_paper_candidate_unlock import (
     _sha256_file as _sha256_file_existing,
@@ -95,6 +101,9 @@ O_V8_PAPER_FRESH_EXIT_SIGNAL_SCHEMA_VERSION = (
 O_V8_PAPER_FRESH_EXIT_LEDGER_UPDATE_SCHEMA_VERSION = (
     "bigan-v8-polymarket-o-v8-paper-fresh-exit-ledger-update-v1"
 )
+EXECUTION_LAYER_V2_PAPER_REMAP_SCHEMA_VERSION = (
+    "bigan-v8-polymarket-execution-layer-v2-paper-remap-v1"
+)
 
 PINNED_ISSUE_160_RUN_ID = "o-v8-paper-candidate-unlock-20260703T073000Z"
 PINNED_ISSUE_160_MANIFEST_SHA256 = (
@@ -130,6 +139,9 @@ O_V8_PAPER_FRESH_EXIT_PROFIT_TARGET = 0.05
 O_V8_PAPER_FRESH_EXIT_FORCE_SECONDS_TO_CLOSE = 60.0
 O_V8_PAPER_FRESH_EXIT_THRESHOLD_PROFILE_NAME = "paper_only_adapter_heuristic_v1"
 O_V8_PAPER_FRESH_EXIT_DECISION_POLICY_SOURCE = "paper_only_adapter_heuristic_v1"
+O_V8_PAPER_FRESH_HTS_REMAP_EV_THRESHOLD = 0.02
+O_V8_PAPER_FRESH_HTS_REMAP_SCORE_TO_EXPECTED_NET_RETURN_WEIGHT = 0.02
+O_V8_PAPER_FRESH_HTS_REMAP_EXECUTION_COST = 0.001
 O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER = "read_only_public_provider"
 O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE = "snapshot_fixture"
 O_V8_PAPER_FRESH_PUBLIC_DATA_SOURCES = (
@@ -154,6 +166,18 @@ _FALSE_SAFETY_FIELDS = (
     "#146_start_allowed",
 )
 
+_CHAINLINK_DECISION_TIME_FIELDS = (
+    "chainlink_price_at_decision",
+    "chainlink_reference_price_at_market_start",
+    "chainlink_reference_distance_at_decision",
+    "chainlink_momentum_30s",
+    "chainlink_momentum_60s",
+    "chainlink_momentum_120s",
+    "chainlink_realized_volatility_120s",
+    "chainlink_vs_btc_feature_price_gap",
+    "chainlink_regime_feature_provenance",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PolymarketOV8PaperFreshLoopConfig:
@@ -168,8 +192,11 @@ class PolymarketOV8PaperFreshLoopConfig:
     public_data_cycles: tuple[tuple[dict[str, Any], ...], ...] | None = None
     public_data_source: str = O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER
     public_provider: Any | None = None
+    chainlink_rtds_price_rows: tuple[dict[str, Any], ...] = ()
+    chainlink_rtds_persist_price_rows: tuple[dict[str, Any], ...] | None = None
     initial_paper_position_rows: tuple[dict[str, Any], ...] = ()
     canonical_o_source_manifest_path: Path | str | None = None
+    frozen_ev_calibration_artifact_path: Path | str | None = None
     expected_paper_candidate_unlock_manifest_sha256: str | None = (
         PINNED_ISSUE_160_MANIFEST_SHA256
     )
@@ -213,6 +240,20 @@ class PolymarketOV8PaperFreshLoopConfig:
                 "initial_paper_position_rows",
                 tuple(dict(row) for row in self.initial_paper_position_rows),
             )
+        if not isinstance(self.chainlink_rtds_price_rows, tuple):
+            object.__setattr__(
+                self,
+                "chainlink_rtds_price_rows",
+                tuple(dict(row) for row in self.chainlink_rtds_price_rows),
+            )
+        if self.chainlink_rtds_persist_price_rows is not None and not isinstance(
+            self.chainlink_rtds_persist_price_rows, tuple
+        ):
+            object.__setattr__(
+                self,
+                "chainlink_rtds_persist_price_rows",
+                tuple(dict(row) for row in self.chainlink_rtds_persist_price_rows),
+            )
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         object.__setattr__(
             self, "paper_candidate_unlock_dir", Path(self.paper_candidate_unlock_dir)
@@ -225,6 +266,15 @@ class PolymarketOV8PaperFreshLoopConfig:
                 self,
                 "canonical_o_source_manifest_path",
                 Path(self.canonical_o_source_manifest_path),
+            )
+        if self.frozen_ev_calibration_artifact_path is not None and not isinstance(
+            self.frozen_ev_calibration_artifact_path,
+            Path,
+        ):
+            object.__setattr__(
+                self,
+                "frozen_ev_calibration_artifact_path",
+                Path(self.frozen_ev_calibration_artifact_path),
             )
 
 
@@ -255,7 +305,99 @@ class PolymarketOV8PaperFreshLoopResult:
     paper_exit_signal_report: dict[str, Any]
     paper_sell_position_intents: list[dict[str, Any]]
     synthetic_ledger_update_report: dict[str, Any]
+    execution_layer_v2_paper_remap_report: dict[str, Any]
     manifest: dict[str, Any]
+
+
+def score_frozen_o_decision_rows(
+    *,
+    run_id: str,
+    decision_rows: list[dict[str, Any]],
+    paper_candidate_unlock_dir: Path | str,
+    expected_paper_candidate_unlock_manifest_sha256: str = (
+        PINNED_ISSUE_160_MANIFEST_SHA256
+    ),
+    canonical_o_source_manifest_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Score normalized rows with the pinned O scorer without executing orders."""
+
+    config = PolymarketOV8PaperFreshLoopConfig(
+        run_id=run_id,
+        output_dir=Path("."),
+        paper_candidate_unlock_dir=paper_candidate_unlock_dir,
+        public_data_source=O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE,
+        public_data_cycles=(tuple(dict(row) for row in decision_rows),),
+        canonical_o_source_manifest_path=canonical_o_source_manifest_path,
+        expected_paper_candidate_unlock_manifest_sha256=(
+            expected_paper_candidate_unlock_manifest_sha256
+        ),
+    )
+    forbidden_rows = _rows_with_forbidden_fields(decision_rows)
+    unlock_evidence = _verify_paper_candidate_unlock(config)
+    canonical_context = _fresh_canonical_scorer_context(
+        config=config,
+        unlock_evidence=unlock_evidence,
+    )
+    collection_report = {
+        "public_data_source": O_V8_PUBLIC_DATA_SOURCE_SNAPSHOT_FIXTURE,
+        "public_market_count": len(
+            {str(row.get("market_id") or "") for row in decision_rows}
+        ),
+    }
+    mapping_report, action_rows = _fresh_canonical_feature_mapping_report(
+        config=config,
+        public_cycles=[list(decision_rows)],
+        public_data_collection_report=collection_report,
+        canonical_context=canonical_context,
+    )
+    if forbidden_rows:
+        mapping_report = {
+            **mapping_report,
+            "canonical_feature_mapping_complete": False,
+            "canonical_feature_mapping_blocking_reason_codes": sorted(
+                {
+                    *mapping_report[
+                        "canonical_feature_mapping_blocking_reason_codes"
+                    ],
+                    "forbidden_outcome_field_present_in_decision_rows",
+                }
+            ),
+            "forbidden_outcome_row_count": len(forbidden_rows),
+        }
+    scorer_report = _fresh_canonical_scorer_report(
+        config=config,
+        canonical_context=canonical_context,
+        canonical_feature_mapping_report=mapping_report,
+        canonical_action_rows=action_rows,
+    )
+    return {
+        "run_id": run_id,
+        "decision_row_count": len(decision_rows),
+        "paper_candidate_unlock_verified": unlock_evidence[
+            "paper_candidate_unlock_verified"
+        ],
+        "paper_candidate_unlock_blocking_reason_codes": unlock_evidence[
+            "paper_candidate_unlock_blocking_reason_codes"
+        ],
+        "canonical_context": canonical_context,
+        "canonical_feature_mapping_report": mapping_report,
+        "canonical_scorer_report": scorer_report,
+        "scoring_passed": (
+            unlock_evidence["paper_candidate_unlock_verified"] is True
+            and mapping_report["canonical_feature_mapping_complete"] is True
+            and scorer_report["canonical_frozen_o_scorer_used"] is True
+        ),
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "#134_resume_allowed": False,
+        "#146_start_allowed": False,
+    }
 
 
 def run_polymarket_o_v8_paper_fresh_loop(
@@ -277,6 +419,7 @@ def run_polymarket_o_v8_paper_fresh_loop(
     public_data = _resolve_public_data_cycles(config, unlock_evidence)
     public_cycles = public_data["public_data_cycles"]
     public_data_collection_report = public_data["public_data_collection_report"]
+    raw_provider_payloads = public_data["raw_provider_payloads"]
     canonical_context = _fresh_canonical_scorer_context(
         config=config,
         unlock_evidence=unlock_evidence,
@@ -301,6 +444,9 @@ def run_polymarket_o_v8_paper_fresh_loop(
         public_data_collection_report=public_data_collection_report,
         canonical_scorer_report=canonical_scorer_report,
     )
+    ev_calibration_artifact = _load_frozen_ev_calibration_artifact(
+        config.frozen_ev_calibration_artifact_path
+    )
     execution_cycles = _fresh_execution_cycles_from_canonical_scorer(
         public_cycles=public_cycles,
         canonical_scorer_report=canonical_scorer_report,
@@ -310,10 +456,18 @@ def run_polymarket_o_v8_paper_fresh_loop(
         public_cycles=execution_cycles,
         public_data_source=public_data_collection_report["public_data_source"],
         unlock_verified=unlock_verified,
+        ev_calibration_artifact=ev_calibration_artifact,
     )
     intents = execution_result["paper_order_intents"]
     fills = _fresh_paper_fills_from_intents(intents)
     ledger_rows = _fresh_paper_ledger_from_fills(fills)
+    execution_layer_v2_paper_remap_report = (
+        _execution_layer_v2_paper_remap_report(
+            config=config,
+            execution_result=execution_result,
+            intents=intents,
+        )
+    )
 
     run_report = _fresh_loop_run_report(
         config=config,
@@ -420,6 +574,8 @@ def run_polymarket_o_v8_paper_fresh_loop(
         / "o_v8_paper_fresh_fill_simulation_report.json",
         "fresh_fill_simulation_summary": output_dir
         / "o_v8_paper_fresh_fill_simulation_report.md",
+        "fresh_fill_log": output_dir / "o_v8_paper_fresh_fill_log.jsonl",
+        "fresh_ledger_log": output_dir / "o_v8_paper_fresh_ledger_log.jsonl",
         "fresh_runtime_safety_report": output_dir
         / "o_v8_paper_fresh_runtime_safety_report.json",
         "fresh_runtime_safety_summary": output_dir
@@ -488,6 +644,20 @@ def run_polymarket_o_v8_paper_fresh_loop(
         / "o_v8_paper_fresh_synthetic_ledger_update_report.json",
         "fresh_synthetic_ledger_update_summary": output_dir
         / "o_v8_paper_fresh_synthetic_ledger_update_report.md",
+        "execution_layer_v2_paper_remap_report": output_dir
+        / "execution_layer_v2_paper_remap_report.json",
+        "execution_layer_v2_paper_remap_summary": output_dir
+        / "execution_layer_v2_paper_remap_report.md",
+        "raw_polymarket_markets": output_dir / "raw_polymarket_markets.jsonl",
+        "raw_polymarket_orderbooks": output_dir
+        / "raw_polymarket_orderbooks.jsonl",
+        "raw_polymarket_trades": output_dir / "raw_polymarket_trades.jsonl",
+        "raw_btc_feature_candles": output_dir
+        / "raw_btc_feature_candles.jsonl",
+        "raw_polymarket_chainlink_prices": output_dir
+        / "raw_polymarket_chainlink_prices.jsonl",
+        "chainlink_rtds_collection_report": output_dir
+        / "chainlink_rtds_collection_report.json",
         "manifest": output_dir / "o_v8_paper_fresh_loop_manifest.json",
     }
     _write_json(artifact_paths["fresh_loop_run_report"], run_report)
@@ -498,6 +668,8 @@ def run_polymarket_o_v8_paper_fresh_loop(
         artifact_paths["fresh_fill_simulation_summary"],
         _fresh_fill_simulation_md(fill_report),
     )
+    _write_jsonl(artifact_paths["fresh_fill_log"], fills)
+    _write_jsonl(artifact_paths["fresh_ledger_log"], ledger_rows)
     _write_json(artifact_paths["fresh_runtime_safety_report"], safety_report)
     _write_text(
         artifact_paths["fresh_runtime_safety_summary"],
@@ -621,6 +793,59 @@ def run_polymarket_o_v8_paper_fresh_loop(
         artifact_paths["fresh_synthetic_ledger_update_summary"],
         _fresh_synthetic_ledger_update_md(synthetic_ledger_update_report),
     )
+    _write_json(
+        artifact_paths["execution_layer_v2_paper_remap_report"],
+        execution_layer_v2_paper_remap_report,
+    )
+    _write_text(
+        artifact_paths["execution_layer_v2_paper_remap_summary"],
+        _execution_layer_v2_paper_remap_md(
+            execution_layer_v2_paper_remap_report
+        ),
+    )
+    _write_jsonl(
+        artifact_paths["raw_polymarket_markets"],
+        raw_provider_payloads["markets"],
+    )
+    _write_jsonl(
+        artifact_paths["raw_polymarket_orderbooks"],
+        raw_provider_payloads["orderbooks"],
+    )
+    _write_jsonl(
+        artifact_paths["raw_polymarket_trades"],
+        raw_provider_payloads["trades"],
+    )
+    _write_jsonl(
+        artifact_paths["raw_btc_feature_candles"],
+        raw_provider_payloads["btc_feature_candles"],
+    )
+    _write_jsonl(
+        artifact_paths["raw_polymarket_chainlink_prices"],
+        raw_provider_payloads["chainlink_rtds_prices"],
+    )
+    _write_json(
+        artifact_paths["chainlink_rtds_collection_report"],
+        {
+            "report_type": "polymarket_chainlink_rtds_fresh_loop_context",
+            "source_type": "polymarket_rtds_chainlink",
+            "raw_price_row_count": len(
+                raw_provider_payloads["chainlink_rtds_prices"]
+            ),
+            "timestamp_causality_violation_count": sum(
+                1
+                for row in raw_provider_payloads["chainlink_rtds_prices"]
+                if row.get("timestamp_causality_valid") is not True
+            ),
+            "collector_lifecycle_owned_by_parent_runner": True,
+            "decision_critical": False,
+            "fail_closed_when_feature_unavailable": True,
+            "paper_only": True,
+            "capital_at_risk": False,
+            "polymarket_write_enabled": False,
+            "wallet_signing_enabled": False,
+            "v8_execution_handoff_allowed": False,
+        },
+    )
 
     artifact_hashes = {
         name: _sha256_file(path)
@@ -652,6 +877,7 @@ def run_polymarket_o_v8_paper_fresh_loop(
         paper_exit_signal_report=paper_exit_signal_report,
         paper_sell_position_intents=paper_sell_position_intents,
         synthetic_ledger_update_report=synthetic_ledger_update_report,
+        execution_layer_v2_paper_remap_report=execution_layer_v2_paper_remap_report,
     )
     _write_json(artifact_paths["manifest"], manifest)
     artifact_hashes["manifest"] = _sha256_file(artifact_paths["manifest"])
@@ -680,6 +906,7 @@ def run_polymarket_o_v8_paper_fresh_loop(
         paper_exit_signal_report=paper_exit_signal_report,
         paper_sell_position_intents=paper_sell_position_intents,
         synthetic_ledger_update_report=synthetic_ledger_update_report,
+        execution_layer_v2_paper_remap_report=execution_layer_v2_paper_remap_report,
         manifest=manifest,
     )
 
@@ -776,6 +1003,7 @@ def _resolve_public_data_cycles(
                 cycles=cycles,
                 unlock_evidence=unlock_evidence,
             ),
+            "raw_provider_payloads": _empty_raw_provider_payloads(),
         }
     return _collect_read_only_public_provider_cycles(
         config=config,
@@ -803,6 +1031,9 @@ def _snapshot_fixture_collection_report(
             {str(row.get("market_id")) for cycle in cycles for row in cycle}
         ),
         "public_orderbook_row_count": None,
+        "orderbook_source_type_distribution": {},
+        "orderbook_rest_fallback_row_count": 0,
+        "orderbook_fallback_reason_distribution": {},
         "public_trade_row_count": None,
         "public_btc_feature_candle_row_count": None,
         "public_feature_row_count": row_count,
@@ -857,6 +1088,9 @@ def _collect_read_only_public_provider_cycles(
             "public_data_row_count": 0,
             "public_market_count": 0,
             "public_orderbook_row_count": 0,
+            "orderbook_source_type_distribution": {},
+            "orderbook_rest_fallback_row_count": 0,
+            "orderbook_fallback_reason_distribution": {},
             "public_trade_row_count": 0,
             "public_btc_feature_candle_row_count": 0,
             "public_feature_row_count": 0,
@@ -866,6 +1100,7 @@ def _collect_read_only_public_provider_cycles(
         return {
             "public_data_cycles": [[] for _ in range(config.max_cycles)],
             "public_data_collection_report": report,
+            "raw_provider_payloads": _empty_raw_provider_payloads(),
         }
 
     recorder_config = PolymarketRealCorpusRecorderConfig(
@@ -875,60 +1110,166 @@ def _collect_read_only_public_provider_cycles(
         mock_public_data=False,
         build_phase2_corpus=False,
     )
-    try:
-        markets = provider.market_rows(recorder_config)
-        orderbooks = provider.orderbook_rows(markets, recorder_config)
-        trades = provider.trade_rows(markets, recorder_config)
-        btc_candles = provider.btc_feature_candle_rows(markets, recorder_config)
-        rows = _fresh_public_rows_from_provider_payloads(
-            run_id=config.run_id,
-            markets=markets,
-            orderbooks=orderbooks,
-            trades=trades,
-            btc_candles=btc_candles,
+    stage_statuses: dict[str, dict[str, Any]] = {}
+    markets = _call_public_provider_stage(
+        stage_name="market_discovery",
+        decision_critical=True,
+        callback=lambda: provider.market_rows(recorder_config),
+        stage_statuses=stage_statuses,
+    )
+    if markets:
+        orderbooks = _call_public_provider_stage(
+            stage_name="orderbook_collection",
+            decision_critical=True,
+            callback=lambda: provider.orderbook_rows(markets, recorder_config),
+            stage_statuses=stage_statuses,
         )
-        reason_codes: list[str] = []
-        collection_failed = False
-        if not rows:
-            collection_failed = True
-            reason_codes.append("read_only_public_provider_no_decision_feature_rows")
-    except RealCorpusPublicProviderError as exc:
-        markets = []
-        orderbooks = []
-        trades = []
-        btc_candles = []
-        rows = []
-        collection_failed = True
-        reason_codes = list(exc.reason_codes) or [
-            "read_only_public_provider_collection_failed"
-        ]
-        exception_type = exc.__class__.__name__
-        exception_message = str(exc)
-    except Exception as exc:  # noqa: BLE001
-        markets = []
-        orderbooks = []
-        trades = []
-        btc_candles = []
-        rows = []
-        collection_failed = True
-        reason_codes = ["read_only_public_provider_collection_failed"]
-        exception_type = exc.__class__.__name__
-        exception_message = str(exc)
+        trades = _call_public_provider_stage(
+            stage_name="trade_collection",
+            decision_critical=False,
+            callback=lambda: provider.trade_rows(markets, recorder_config),
+            stage_statuses=stage_statuses,
+        )
+        btc_candles = _call_public_provider_stage(
+            stage_name="btc_feature_candle_collection",
+            decision_critical=True,
+            callback=lambda: provider.btc_feature_candle_rows(
+                markets, recorder_config
+            ),
+            stage_statuses=stage_statuses,
+        )
     else:
-        exception_type = None
-        exception_message = None
+        orderbooks = []
+        trades = []
+        btc_candles = []
+        for stage_name, decision_critical in (
+            ("orderbook_collection", True),
+            ("trade_collection", False),
+            ("btc_feature_candle_collection", True),
+        ):
+            stage_statuses[stage_name] = {
+                "stage_name": stage_name,
+                "decision_critical": decision_critical,
+                "attempted": False,
+                "passed": False,
+                "row_count": 0,
+                "reason_codes": ["provider_stage_skipped_missing_markets"],
+                "exception_type": None,
+                "exception_message": None,
+            }
+    rows = _fresh_public_rows_from_provider_payloads(
+        run_id=config.run_id,
+        markets=markets,
+        orderbooks=orderbooks,
+        trades=trades,
+        btc_candles=btc_candles,
+        chainlink_rtds_prices=[
+            dict(row) for row in config.chainlink_rtds_price_rows
+        ],
+    )
+    persisted_chainlink_rows = (
+        [dict(row) for row in config.chainlink_rtds_persist_price_rows]
+        if config.chainlink_rtds_persist_price_rows is not None
+        else [dict(row) for row in config.chainlink_rtds_price_rows]
+    )
+    stage_statuses["decision_feature_build"] = {
+        "stage_name": "decision_feature_build",
+        "decision_critical": True,
+        "attempted": True,
+        "passed": bool(rows),
+        "row_count": len(rows),
+        "reason_codes": []
+        if rows
+        else ["read_only_public_provider_no_decision_feature_rows"],
+        "exception_type": None,
+        "exception_message": None,
+    }
+    collection_failed = not rows
+    critical_stage_failures = [
+        status
+        for status in stage_statuses.values()
+        if status["decision_critical"] is True and status["passed"] is not True
+    ]
+    optional_stage_failures = [
+        status
+        for status in stage_statuses.values()
+        if status["decision_critical"] is False and status["passed"] is not True
+    ]
+    reason_codes = sorted(
+        {
+            str(reason)
+            for status in critical_stage_failures
+            for reason in status["reason_codes"]
+        }
+    )
+    degradation_reason_codes = sorted(
+        {
+            str(reason)
+            for status in optional_stage_failures
+            for reason in status["reason_codes"]
+        }
+    )
+    first_critical_exception = next(
+        (
+            status
+            for status in critical_stage_failures
+            if status.get("exception_type")
+        ),
+        None,
+    )
+    exception_type = (
+        None
+        if first_critical_exception is None
+        else first_critical_exception["exception_type"]
+    )
+    exception_message = (
+        None
+        if first_critical_exception is None
+        else first_critical_exception["exception_message"]
+    )
 
     cycles = _partition_public_rows(rows, config.max_cycles)
+    orderbook_source_counter = Counter(
+        str(row.get("orderbook_source_type") or "unknown") for row in orderbooks
+    )
+    orderbook_fallback_reason_counter: Counter[str] = Counter()
+    for row in orderbooks:
+        orderbook_fallback_reason_counter.update(
+            str(reason)
+            for reason in row.get("orderbook_fallback_reason_codes") or []
+        )
     report = {
         **base_report,
         "paper_fresh_provider_collection_failed": collection_failed,
         "public_data_collection_reason_codes": sorted(set(reason_codes)),
+        "public_data_degraded": bool(optional_stage_failures),
+        "public_data_degradation_reason_codes": degradation_reason_codes,
+        "provider_stage_statuses": stage_statuses,
+        "decision_critical_provider_failure": collection_failed,
+        "decision_optional_provider_failure": bool(optional_stage_failures),
         "public_data_cycle_count": len(cycles),
         "public_data_row_count": len(rows),
         "public_market_count": len(markets),
         "public_orderbook_row_count": len(orderbooks),
+        "orderbook_source_type_distribution": dict(
+            sorted(orderbook_source_counter.items())
+        ),
+        "orderbook_rest_fallback_row_count": sum(
+            1 for row in orderbooks if row.get("orderbook_rest_fallback_used") is True
+        ),
+        "orderbook_fallback_reason_distribution": dict(
+            sorted(orderbook_fallback_reason_counter.items())
+        ),
         "public_trade_row_count": len(trades),
         "public_btc_feature_candle_row_count": len(btc_candles),
+        "public_chainlink_rtds_price_row_count": len(
+            config.chainlink_rtds_price_rows
+        ),
+        "public_chainlink_rtds_persisted_price_row_count": len(
+            persisted_chainlink_rows
+        ),
+        "chainlink_rtds_feature_available": bool(config.chainlink_rtds_price_rows),
+        "chainlink_rtds_decision_critical": False,
         "public_feature_row_count": len(rows),
         "provider_exception_type": exception_type,
         "provider_exception_message": exception_message,
@@ -936,6 +1277,75 @@ def _collect_read_only_public_provider_cycles(
     return {
         "public_data_cycles": cycles,
         "public_data_collection_report": report,
+        "raw_provider_payloads": {
+            "markets": [dict(row) for row in markets],
+            "orderbooks": [dict(row) for row in orderbooks],
+            "trades": [dict(row) for row in trades],
+            "btc_feature_candles": [dict(row) for row in btc_candles],
+            "chainlink_rtds_prices": persisted_chainlink_rows,
+        },
+    }
+
+
+def _call_public_provider_stage(
+    *,
+    stage_name: str,
+    decision_critical: bool,
+    callback: Any,
+    stage_statuses: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    try:
+        rows = callback()
+    except RealCorpusPublicProviderError as exc:
+        reason_codes = list(exc.reason_codes) or [
+            f"{stage_name}_public_provider_failed"
+        ]
+        stage_statuses[stage_name] = {
+            "stage_name": stage_name,
+            "decision_critical": decision_critical,
+            "attempted": True,
+            "passed": False,
+            "row_count": 0,
+            "reason_codes": reason_codes,
+            "exception_type": exc.__class__.__name__,
+            "exception_message": str(exc),
+        }
+        return []
+    except Exception as exc:  # noqa: BLE001
+        stage_statuses[stage_name] = {
+            "stage_name": stage_name,
+            "decision_critical": decision_critical,
+            "attempted": True,
+            "passed": False,
+            "row_count": 0,
+            "reason_codes": [f"{stage_name}_public_provider_failed"],
+            "exception_type": exc.__class__.__name__,
+            "exception_message": str(exc),
+        }
+        return []
+    normalized_rows = [dict(row) for row in rows]
+    stage_statuses[stage_name] = {
+        "stage_name": stage_name,
+        "decision_critical": decision_critical,
+        "attempted": True,
+        "passed": bool(normalized_rows),
+        "row_count": len(normalized_rows),
+        "reason_codes": []
+        if normalized_rows
+        else [f"{stage_name}_returned_no_rows"],
+        "exception_type": None,
+        "exception_message": None,
+    }
+    return normalized_rows
+
+
+def _empty_raw_provider_payloads() -> dict[str, list[dict[str, Any]]]:
+    return {
+        "markets": [],
+        "orderbooks": [],
+        "trades": [],
+        "btc_feature_candles": [],
+        "chainlink_rtds_prices": [],
     }
 
 
@@ -974,11 +1384,19 @@ def _fresh_public_rows_from_provider_payloads(
     orderbooks: list[dict[str, Any]],
     trades: list[dict[str, Any]],
     btc_candles: list[dict[str, Any]],
+    chainlink_rtds_prices: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     del trades
     markets_by_id = {str(market.get("market_id")): dict(market) for market in markets}
     books_by_market = _latest_public_books_by_market(orderbooks)
     candles = sorted(btc_candles, key=lambda row: int(row.get("available_at_ts") or row.get("ts") or 0))
+    chainlink_prices = sorted(
+        chainlink_rtds_prices or [],
+        key=lambda row: (
+            int(row.get("available_at_ts") or 0),
+            int(row.get("source_ts") or 0),
+        ),
+    )
     rows: list[dict[str, Any]] = []
     for market_id, pair in sorted(books_by_market.items()):
         market = markets_by_id.get(market_id)
@@ -986,10 +1404,27 @@ def _fresh_public_rows_from_provider_payloads(
             continue
         up = pair["UP"]
         down = pair["DOWN"]
-        decision_ts = max(
+        book_decision_ts = max(
             _book_available_at(up),
             _book_available_at(down),
             int(market.get("market_start_ts") or 0),
+        )
+        latest_chainlink = _latest_chainlink_price_available_at(
+            chainlink_prices,
+            available_at_or_before=max(
+                book_decision_ts,
+                max(
+                    (
+                        int(row.get("available_at_ts") or 0)
+                        for row in chainlink_prices
+                    ),
+                    default=0,
+                ),
+            ),
+        )
+        decision_ts = max(
+            book_decision_ts,
+            int((latest_chainlink or {}).get("available_at_ts") or 0),
         )
         market_end_ts = int(market.get("market_end_ts") or 0)
         if decision_ts <= 0 or market_end_ts <= decision_ts:
@@ -997,6 +1432,11 @@ def _fresh_public_rows_from_provider_payloads(
         candle = _latest_public_btc_candle(candles, decision_ts)
         if candle is None:
             continue
+        reference_candle = _market_start_reference_public_btc_candle(
+            candles,
+            market_start_ts=int(market.get("market_start_ts") or 0),
+            decision_ts=decision_ts,
+        )
         rows.append(
             _fresh_public_row_from_provider_feature_context(
                 run_id=run_id,
@@ -1005,6 +1445,8 @@ def _fresh_public_rows_from_provider_payloads(
                 up=up,
                 down=down,
                 candle=candle,
+                reference_candle=reference_candle,
+                chainlink_rtds_prices=chainlink_prices,
                 decision_ts=decision_ts,
             )
         )
@@ -1040,6 +1482,40 @@ def _latest_public_btc_candle(
     return latest
 
 
+def _latest_chainlink_price_available_at(
+    rows: list[dict[str, Any]],
+    *,
+    available_at_or_before: int,
+) -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    for row in rows:
+        available_at = int(row.get("available_at_ts") or 0)
+        if available_at <= available_at_or_before:
+            latest = dict(row)
+        if available_at > available_at_or_before:
+            break
+    return latest
+
+
+def _market_start_reference_public_btc_candle(
+    candles: list[dict[str, Any]],
+    *,
+    market_start_ts: int,
+    decision_ts: int,
+) -> dict[str, Any] | None:
+    if market_start_ts <= 0:
+        return None
+    latest: dict[str, Any] | None = None
+    for row in candles:
+        available_at = int(row.get("available_at_ts") or row.get("ts") or 0)
+        close_time = int(row.get("close_time") or available_at)
+        if available_at <= decision_ts and close_time <= market_start_ts:
+            latest = dict(row)
+        if close_time > market_start_ts and available_at > decision_ts:
+            break
+    return latest
+
+
 def _fresh_public_row_from_provider_feature_context(
     *,
     run_id: str,
@@ -1048,6 +1524,8 @@ def _fresh_public_row_from_provider_feature_context(
     up: dict[str, Any],
     down: dict[str, Any],
     candle: dict[str, Any],
+    reference_candle: dict[str, Any] | None = None,
+    chainlink_rtds_prices: list[dict[str, Any]] | None = None,
     decision_ts: int,
 ) -> dict[str, Any]:
     p_up = _public_p_up(up=up, down=down)
@@ -1064,17 +1542,53 @@ def _fresh_public_row_from_provider_feature_context(
     selected = ranking[0]
     selected_action = str(selected["selected_action"])
     selected_side = _side_from_action(selected_action)
-    reference_provenance = _provider_reference_price_provenance(
+    regime_features = _provider_decision_time_regime_features(
         market=market,
         candle=candle,
+        reference_candle=reference_candle,
+        chainlink_rtds_prices=chainlink_rtds_prices or [],
         decision_ts=decision_ts,
+        ranking=ranking,
+        selected_action=selected_action,
+    )
+    reference_provenance = dict(
+        regime_features.get("reference_price_to_beat_distance_provenance")
+        or _provider_reference_price_provenance(
+            market=market,
+            candle=candle,
+            decision_ts=decision_ts,
+        )
     )
     max_input_ts = max(
         _book_available_at(up),
         _book_available_at(down),
         int(candle.get("available_at_ts") or candle.get("ts") or 0),
         int(reference_provenance.get("max_input_ts") or 0),
+        int(regime_features.get("decision_time_regime_feature_max_input_ts") or 0),
     )
+    market_start_ts = int(market.get("market_start_ts") or 0)
+    market_end_ts = int(market.get("market_end_ts") or 0)
+    horizon_ms = int(
+        market.get("horizon_ms") or max(0, market_end_ts - market_start_ts)
+    )
+    market_schedule_provenance = {
+        "source_type": "normalized_public_market_metadata",
+        "source_fields_used": [
+            "raw_polymarket_markets.slug",
+            "raw_polymarket_markets.market_start_ts",
+            "raw_polymarket_markets.market_end_ts",
+            "raw_polymarket_markets.horizon_ms",
+        ],
+        "raw_market_sha256": market.get("raw_market_sha256"),
+        "decision_ts": decision_ts,
+        "max_input_ts": decision_ts,
+        "provenance_valid": bool(
+            market_start_ts > 0
+            and market_end_ts > market_start_ts
+            and horizon_ms == market_end_ts - market_start_ts
+        ),
+        "warning_reason_codes": [],
+    }
     return {
         "decision_group_id": (
             f"{run_id}|read-only-public-provider|{market.get('market_id')}|"
@@ -1084,6 +1598,20 @@ def _fresh_public_row_from_provider_feature_context(
         "condition_id": str(market.get("condition_id") or ""),
         "slug": str(market.get("slug") or ""),
         "market_family": str(market.get("market_family") or ""),
+        "market_start_ts": market_start_ts,
+        "market_end_ts": market_end_ts,
+        "horizon_ms": horizon_ms,
+        "market_schedule_source_type": "normalized_public_market_metadata",
+        "market_schedule_provenance": market_schedule_provenance,
+        "up_token_id": str(market.get("up_token_id") or up.get("token_id") or ""),
+        "down_token_id": str(market.get("down_token_id") or down.get("token_id") or ""),
+        "reference_price_source": str(market.get("reference_price_source") or ""),
+        "reference_price_start": market.get("reference_price_start"),
+        "reference_price_at_start": market.get("reference_price_at_start"),
+        "reference_price_to_beat_at_decision": regime_features.get(
+            "reference_price_to_beat_at_decision"
+        ),
+        "raw_market_sha256": market.get("raw_market_sha256"),
         "decision_ts": decision_ts,
         "selected_action": selected_action,
         "selected_side": selected_side,
@@ -1105,6 +1633,7 @@ def _fresh_public_row_from_provider_feature_context(
             decision_ts=decision_ts,
         ),
         "reference_price_feature_provenance": reference_provenance,
+        **regime_features,
         "decision_time_feature_max_input_ts": max_input_ts,
         "full_5_action_ranking": ranking,
         "score_components": {
@@ -1114,16 +1643,45 @@ def _fresh_public_row_from_provider_feature_context(
             "p_down": p_down,
             "btc_mid_price": _float(candle.get("close_price")),
             "reference_price_to_beat": _float(
-                market.get("reference_price_start")
-                if market.get("reference_price_start") is not None
-                else market.get("reference_price_at_start")
+                regime_features.get("reference_price_to_beat_at_decision")
+            ),
+            "btc_momentum": regime_features.get("btc_momentum"),
+            "reference_price_to_beat_distance_at_decision": regime_features.get(
+                "reference_price_to_beat_distance_at_decision"
+            ),
+            "time_since_market_start_seconds": regime_features.get(
+                "time_since_market_start_seconds"
+            ),
+            "action_score_margin": regime_features.get("action_score_margin"),
+            "side_specific_action_score_margin": regime_features.get(
+                "side_specific_action_score_margin"
+            ),
+            "chainlink_price_at_decision": regime_features.get(
+                "chainlink_price_at_decision"
+            ),
+            "chainlink_reference_price_at_market_start": regime_features.get(
+                "chainlink_reference_price_at_market_start"
+            ),
+            "chainlink_reference_distance_at_decision": regime_features.get(
+                "chainlink_reference_distance_at_decision"
+            ),
+            "chainlink_momentum_30s": regime_features.get("chainlink_momentum_30s"),
+            "chainlink_momentum_60s": regime_features.get("chainlink_momentum_60s"),
+            "chainlink_momentum_120s": regime_features.get(
+                "chainlink_momentum_120s"
+            ),
+            "chainlink_realized_volatility_120s": regime_features.get(
+                "chainlink_realized_volatility_120s"
+            ),
+            "chainlink_vs_btc_feature_price_gap": regime_features.get(
+                "chainlink_vs_btc_feature_price_gap"
             ),
             "max_input_ts": max_input_ts,
         },
         "public_data_source": O_V8_PUBLIC_DATA_SOURCE_READ_ONLY_PROVIDER,
         "public_provider_row_index": row_index,
         "public_provider_feature_builder_rule_id": (
-            "public_provider_market_orderbook_trade_btc_to_decision_features_v1"
+            "public_provider_market_orderbook_btc_chainlink_to_decision_features_v2"
         ),
         "paper_only": True,
         "capital_at_risk": False,
@@ -1324,6 +1882,473 @@ def _provider_reference_price_provenance(
     }
 
 
+def _provider_decision_time_regime_features(
+    *,
+    market: dict[str, Any],
+    candle: dict[str, Any],
+    reference_candle: dict[str, Any] | None,
+    chainlink_rtds_prices: list[dict[str, Any]],
+    decision_ts: int,
+    ranking: list[dict[str, Any]],
+    selected_action: str,
+) -> dict[str, Any]:
+    btc_momentum, btc_provenance = _provider_btc_momentum_feature(
+        candle=candle,
+        decision_ts=decision_ts,
+    )
+    chainlink_features = _provider_chainlink_regime_features(
+        rows=chainlink_rtds_prices,
+        market_start_ts=int(market.get("market_start_ts") or 0),
+        decision_ts=decision_ts,
+        comparison_btc_price=_float(candle.get("close_price")),
+    )
+    (
+        reference_price_to_beat,
+        reference_distance,
+        reference_provenance,
+    ) = _provider_reference_distance_feature(
+        market=market,
+        candle=candle,
+        reference_candle=reference_candle,
+        chainlink_features=chainlink_features,
+        decision_ts=decision_ts,
+    )
+    time_since_start, time_provenance = _provider_time_since_market_start_feature(
+        market=market,
+        decision_ts=decision_ts,
+    )
+    margin_features = _provider_action_score_margin_features(
+        ranking=ranking,
+        selected_action=selected_action,
+        decision_ts=decision_ts,
+    )
+    required_provenances = [
+        btc_provenance,
+        reference_provenance,
+        time_provenance,
+        margin_features["action_score_margin_provenance"],
+    ]
+    optional_provenances = [
+        margin_features["side_specific_action_score_margin_provenance"],
+    ]
+    provenances = [*required_provenances, *optional_provenances]
+    valid_provenances = [
+        provenance for provenance in provenances if provenance.get("provenance_valid")
+    ]
+    max_input_ts = max(
+        [int(provenance.get("max_input_ts") or 0) for provenance in valid_provenances]
+        or [decision_ts]
+    )
+    return {
+        "btc_momentum": btc_momentum,
+        "btc_momentum_provenance": btc_provenance,
+        "reference_price_to_beat_at_decision": reference_price_to_beat,
+        "reference_price_to_beat_distance_at_decision": reference_distance,
+        "reference_price_to_beat_distance_provenance": reference_provenance,
+        **chainlink_features,
+        "time_since_market_start_seconds": time_since_start,
+        "time_since_market_start_provenance": time_provenance,
+        "action_score_margin": margin_features["action_score_margin"],
+        "action_score_margin_provenance": margin_features[
+            "action_score_margin_provenance"
+        ],
+        "side_specific_action_score_margin": margin_features[
+            "side_specific_action_score_margin"
+        ],
+        "side_specific_action_score_margin_provenance": margin_features[
+            "side_specific_action_score_margin_provenance"
+        ],
+        "decision_time_regime_feature_provenance": {
+            "provenance_valid": all(
+                bool(provenance.get("provenance_valid"))
+                for provenance in required_provenances
+            ),
+            "decision_ts": decision_ts,
+            "max_input_ts": max_input_ts,
+            "source_fields_used": sorted(
+                {
+                    str(source)
+                    for provenance in provenances
+                    for source in provenance.get("source_fields_used", [])
+                }
+            ),
+            "source_field_name": "decision_time_hts_regime_feature_block_v1",
+            "source_timestamp": max_input_ts,
+            "unavailable_reason_codes": sorted(
+                {
+                    str(reason)
+                    for provenance in provenances
+                    for reason in provenance.get("unavailable_reason_codes", [])
+                }
+            ),
+        },
+        "decision_time_regime_feature_max_input_ts": max_input_ts,
+    }
+
+
+def _provider_btc_momentum_feature(
+    *,
+    candle: dict[str, Any],
+    decision_ts: int,
+) -> tuple[float | None, dict[str, Any]]:
+    available_at = int(candle.get("available_at_ts") or candle.get("ts") or 0)
+    open_price = _float(candle.get("open_price"))
+    close_price = _float(candle.get("close_price"))
+    reason_codes: list[str] = []
+    if available_at > decision_ts:
+        reason_codes.append("btc_candle_not_decision_time_available")
+    if open_price <= 0.0:
+        reason_codes.append("btc_candle_open_price_missing_or_non_positive")
+    if close_price <= 0.0:
+        reason_codes.append("btc_candle_close_price_missing_or_non_positive")
+    value = (
+        (close_price - open_price) / open_price
+        if not reason_codes
+        else None
+    )
+    return value, {
+        "provenance_valid": not reason_codes,
+        "decision_ts": decision_ts,
+        "max_input_ts": available_at,
+        "source_fields_used": [
+            "raw_btc_feature_candles.open_price",
+            "raw_btc_feature_candles.close_price",
+            "raw_btc_feature_candles.available_at_ts",
+        ],
+        "source_field_name": "read_only_public_provider_btc_candle_momentum",
+        "source_timestamp": available_at,
+        "unavailable_reason_codes": reason_codes,
+    }
+
+
+def _provider_reference_distance_feature(
+    *,
+    market: dict[str, Any],
+    candle: dict[str, Any],
+    reference_candle: dict[str, Any] | None,
+    chainlink_features: dict[str, Any],
+    decision_ts: int,
+) -> tuple[float | None, float | None, dict[str, Any]]:
+    reference = _float(
+        market.get("reference_price_start")
+        if market.get("reference_price_start") is not None
+        else market.get("reference_price_at_start")
+    )
+    reference_source_type = "polymarket_market_metadata_price_to_beat"
+    reference_source_timestamp = decision_ts if reference > 0.0 else 0
+    reference_warning_reason_codes: list[str] = []
+    source_fields_used = [
+        "raw_polymarket_markets.reference_price_start",
+        "raw_polymarket_markets.reference_price_at_start",
+    ]
+    current_price = _float(candle.get("close_price"))
+    current_source_timestamp = int(
+        candle.get("available_at_ts") or candle.get("ts") or 0
+    )
+    chainlink_reference = _float(
+        chainlink_features.get("chainlink_reference_price_at_market_start")
+    )
+    chainlink_current = _float(
+        chainlink_features.get("chainlink_price_at_decision")
+    )
+    chainlink_provenance = dict(
+        chainlink_features.get("chainlink_regime_feature_provenance") or {}
+    )
+    if reference <= 0.0 and chainlink_reference > 0.0 and chainlink_current > 0.0:
+        reference = chainlink_reference
+        current_price = chainlink_current
+        reference_source_timestamp = int(
+            chainlink_provenance.get("max_input_ts") or 0
+        )
+        current_source_timestamp = reference_source_timestamp
+        reference_source_type = "polymarket_rtds_chainlink_market_start_proxy"
+        source_fields_used.extend(
+            [
+                "raw_polymarket_chainlink_prices.price",
+                "raw_polymarket_chainlink_prices.source_ts",
+                "raw_polymarket_chainlink_prices.available_at_ts",
+            ]
+        )
+        reference_warning_reason_codes.append(
+            "official_price_to_beat_metadata_unavailable_chainlink_rtds_market_start_proxy_used"
+        )
+    if reference <= 0.0 and reference_candle is not None:
+        reference = _float(reference_candle.get("close_price"))
+        reference_source_timestamp = int(
+            reference_candle.get("available_at_ts")
+            or reference_candle.get("close_time")
+            or reference_candle.get("ts")
+            or 0
+        )
+        reference_source_type = "btc_feature_candle_market_start_proxy"
+        source_fields_used.extend(
+            [
+                "raw_btc_feature_candles.close_price",
+                "raw_btc_feature_candles.available_at_ts",
+                "raw_btc_feature_candles.close_time",
+            ]
+        )
+        reference_warning_reason_codes.append(
+            "official_polymarket_price_to_beat_unavailable_btc_feature_candle_proxy_used"
+        )
+    close_price = current_price
+    candle_ts = current_source_timestamp
+    reason_codes: list[str] = []
+    if candle_ts > decision_ts:
+        reason_codes.append("btc_candle_not_decision_time_available")
+    if reference <= 0.0:
+        reason_codes.append("reference_price_to_beat_missing_or_non_positive")
+    if reference_source_timestamp > decision_ts:
+        reason_codes.append("reference_price_to_beat_not_decision_time_available")
+    if close_price <= 0.0:
+        reason_codes.append("btc_candle_close_price_missing_or_non_positive")
+    value = (close_price - reference) / reference if not reason_codes else None
+    max_input_ts = max(candle_ts, reference_source_timestamp)
+    return reference if not reason_codes else None, value, {
+        "provenance_valid": not reason_codes and max_input_ts <= decision_ts,
+        "decision_ts": decision_ts,
+        "max_input_ts": max_input_ts,
+        "source_fields_used": source_fields_used,
+        "source_field_name": "read_only_public_provider_reference_distance",
+        "reference_price_to_beat_source_type": reference_source_type,
+        "reference_price_to_beat_at_decision": reference if reference > 0.0 else None,
+        "source_timestamp": max_input_ts,
+        "unavailable_reason_codes": reason_codes,
+        "warning_reason_codes": reference_warning_reason_codes,
+    }
+
+
+def _provider_chainlink_regime_features(
+    *,
+    rows: list[dict[str, Any]],
+    market_start_ts: int,
+    decision_ts: int,
+    comparison_btc_price: float,
+) -> dict[str, Any]:
+    causal_rows = [
+        dict(row)
+        for row in rows
+        if int(row.get("available_at_ts") or 0) <= decision_ts
+        and int(row.get("source_ts") or 0) <= int(row.get("available_at_ts") or 0)
+        and _float(row.get("price")) > 0.0
+    ]
+    causal_rows.sort(
+        key=lambda row: (
+            int(row.get("source_ts") or 0),
+            int(row.get("available_at_ts") or 0),
+        )
+    )
+    current = causal_rows[-1] if causal_rows else None
+    reference_candidates = [
+        row
+        for row in causal_rows
+        if market_start_ts > 0 and int(row.get("source_ts") or 0) <= market_start_ts
+    ]
+    reference = reference_candidates[-1] if reference_candidates else None
+    unavailable_reason_codes: list[str] = []
+    if current is None:
+        unavailable_reason_codes.append("chainlink_rtds_current_price_unavailable")
+    if reference is None:
+        unavailable_reason_codes.append(
+            "chainlink_rtds_market_start_reference_unavailable"
+        )
+    current_price = _float((current or {}).get("price")) or None
+    reference_price = _float((reference or {}).get("price")) or None
+    distance = (
+        (float(current_price) - float(reference_price)) / float(reference_price)
+        if current_price is not None and reference_price is not None
+        else None
+    )
+    momentum_by_horizon: dict[str, float | None] = {}
+    if current is None:
+        momentum_by_horizon = {
+            "30s": None,
+            "60s": None,
+            "120s": None,
+        }
+    else:
+        current_source_ts = int(current["source_ts"])
+        for horizon_seconds in (30, 60, 120):
+            baseline = _latest_chainlink_source_row_at_or_before(
+                causal_rows,
+                source_ts=current_source_ts - horizon_seconds * 1000,
+            )
+            baseline_price = _float((baseline or {}).get("price"))
+            momentum_by_horizon[f"{horizon_seconds}s"] = (
+                (float(current_price) - baseline_price) / baseline_price
+                if current_price is not None and baseline_price > 0.0
+                else None
+            )
+    recent_rows = []
+    if current is not None:
+        lower_bound = int(current["source_ts"]) - 120_000
+        recent_rows = [row for row in causal_rows if int(row["source_ts"]) >= lower_bound]
+    returns = [
+        (_float(right.get("price")) - _float(left.get("price")))
+        / _float(left.get("price"))
+        for left, right in zip(recent_rows, recent_rows[1:], strict=False)
+        if _float(left.get("price")) > 0.0
+    ]
+    realized_volatility = (
+        (sum(value * value for value in returns) / len(returns)) ** 0.5
+        if returns
+        else None
+    )
+    max_input_ts = max(
+        (
+            int(row.get("available_at_ts") or 0)
+            for row in (current, reference)
+            if row is not None
+        ),
+        default=0,
+    )
+    provenance_valid = (
+        not unavailable_reason_codes
+        and max_input_ts > 0
+        and max_input_ts <= decision_ts
+    )
+    return {
+        "chainlink_price_at_decision": current_price,
+        "chainlink_reference_price_at_market_start": reference_price,
+        "chainlink_reference_distance_at_decision": distance,
+        "chainlink_momentum_30s": momentum_by_horizon["30s"],
+        "chainlink_momentum_60s": momentum_by_horizon["60s"],
+        "chainlink_momentum_120s": momentum_by_horizon["120s"],
+        "chainlink_realized_volatility_120s": realized_volatility,
+        "chainlink_vs_btc_feature_price_gap": (
+            (float(current_price) - comparison_btc_price) / comparison_btc_price
+            if current_price is not None and comparison_btc_price > 0.0
+            else None
+        ),
+        "chainlink_regime_feature_provenance": {
+            "provenance_valid": provenance_valid,
+            "decision_ts": decision_ts,
+            "max_input_ts": max_input_ts,
+            "current_source_ts": (current or {}).get("source_ts"),
+            "reference_source_ts": (reference or {}).get("source_ts"),
+            "source_fields_used": [
+                "raw_polymarket_chainlink_prices.price",
+                "raw_polymarket_chainlink_prices.source_ts",
+                "raw_polymarket_chainlink_prices.available_at_ts",
+            ],
+            "source_field_name": "polymarket_rtds_chainlink_btc_usd",
+            "source_timestamp": max_input_ts,
+            "unavailable_reason_codes": unavailable_reason_codes,
+            "warning_reason_codes": [
+                "market_start_value_is_same_source_decision_time_proxy_not_embedded_market_price_to_beat"
+            ]
+            if reference is not None
+            else [],
+        },
+    }
+
+
+def _latest_chainlink_source_row_at_or_before(
+    rows: list[dict[str, Any]],
+    *,
+    source_ts: int,
+) -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    for row in rows:
+        if int(row.get("source_ts") or 0) <= source_ts:
+            latest = row
+        else:
+            break
+    return latest
+
+
+def _provider_time_since_market_start_feature(
+    *,
+    market: dict[str, Any],
+    decision_ts: int,
+) -> tuple[float | None, dict[str, Any]]:
+    market_start_ts = int(market.get("market_start_ts") or 0)
+    reason_codes: list[str] = []
+    if market_start_ts <= 0:
+        reason_codes.append("market_start_ts_missing")
+    value = (
+        (decision_ts - market_start_ts) / 1000.0
+        if not reason_codes
+        else None
+    )
+    # Market schedule metadata is read at decision time from the public market row.
+    source_ts = decision_ts if not reason_codes else 0
+    return value, {
+        "provenance_valid": not reason_codes and source_ts <= decision_ts,
+        "decision_ts": decision_ts,
+        "max_input_ts": source_ts,
+        "source_fields_used": ["raw_polymarket_markets.market_start_ts"],
+        "source_field_name": "read_only_public_provider_market_schedule",
+        "source_timestamp": source_ts,
+        "unavailable_reason_codes": reason_codes,
+    }
+
+
+def _provider_action_score_margin_features(
+    *,
+    ranking: list[dict[str, Any]],
+    selected_action: str,
+    decision_ts: int,
+) -> dict[str, Any]:
+    selected = _ranking_action(ranking, selected_action)
+    selected_score = (
+        _float(selected.get("corrected_model_score")) if selected else None
+    )
+    other_scores = [
+        _float(row.get("corrected_model_score"))
+        for row in ranking
+        if row.get("selected_action") != selected_action
+    ]
+    action_margin = (
+        selected_score - max(other_scores)
+        if selected_score is not None and other_scores
+        else None
+    )
+    selected_side = _side_from_action(selected_action)
+    opposite_side = (
+        "DOWN" if selected_side == "UP" else "UP" if selected_side == "DOWN" else ""
+    )
+    opposite_scores = [
+        _float(row.get("corrected_model_score"))
+        for row in ranking
+        if _side_from_action(str(row.get("selected_action") or "")) == opposite_side
+    ]
+    side_margin = (
+        selected_score - max(opposite_scores)
+        if selected_score is not None and opposite_scores
+        else None
+    )
+    common_provenance = {
+        "decision_ts": decision_ts,
+        "max_input_ts": decision_ts,
+        "source_fields_used": [
+            "full_5_action_ranking.selected_action",
+            "full_5_action_ranking.corrected_model_score",
+        ],
+        "source_timestamp": decision_ts,
+    }
+    return {
+        "action_score_margin": action_margin,
+        "action_score_margin_provenance": {
+            **common_provenance,
+            "provenance_valid": action_margin is not None,
+            "source_field_name": "full_5_action_ranking_top_action_margin",
+            "unavailable_reason_codes": []
+            if action_margin is not None
+            else ["full_5_action_ranking_missing_second_action"],
+        },
+        "side_specific_action_score_margin": side_margin,
+        "side_specific_action_score_margin_provenance": {
+            **common_provenance,
+            "provenance_valid": side_margin is not None,
+            "source_field_name": "full_5_action_ranking_side_margin",
+            "unavailable_reason_codes": []
+            if side_margin is not None
+            else ["full_5_action_ranking_missing_opposite_side_action"],
+        },
+    }
+
+
 def _partition_public_rows(
     rows: list[dict[str, Any]],
     max_cycles: int,
@@ -1383,11 +2408,13 @@ def _execute_fresh_public_cycles(
     public_cycles: list[list[dict[str, Any]]],
     public_data_source: str,
     unlock_verified: bool,
+    ev_calibration_artifact: dict[str, Any],
 ) -> dict[str, Any]:
     runtime_state = _initial_fresh_runtime_state()
     guard_config = _v8_execution_guard_config()
     all_guard_rows: list[dict[str, Any]] = []
     all_intents: list[dict[str, Any]] = []
+    all_remap_rows: list[dict[str, Any]] = []
     cycle_reports: list[dict[str, Any]] = []
     cycle_failure_count = 0
 
@@ -1415,6 +2442,19 @@ def _execute_fresh_public_cycles(
                 guard_row["cycle_id"] = cycle_id
                 guard_row["public_data_source"] = public_data_source
                 guard_row["pre_decision_exposure_state"] = pre_state
+                guard_row, remap_row = _paper_hts_time_window_remap_guard_row(
+                    original_guard_row=guard_row,
+                    guard_input=guard_input,
+                    guard_config=guard_config,
+                    runtime_state=runtime_state,
+                    runtime_mode="simulated_runtime_state",
+                    cycle_id=cycle_id,
+                    public_data_source=public_data_source,
+                    pre_state=pre_state,
+                    ev_calibration_artifact=ev_calibration_artifact,
+                )
+                if remap_row is not None:
+                    all_remap_rows.append(remap_row)
                 if guard_row.get("order_allowed") is True:
                     guard_row["simulated_order_id"] = (
                         f"{config.run_id}-fresh-sim-{len(all_intents) + 1:06d}"
@@ -1462,9 +2502,438 @@ def _execute_fresh_public_cycles(
         "cycle_monitoring_rows": cycle_reports,
         "guard_decision_rows": all_guard_rows,
         "paper_order_intents": all_intents,
+        "paper_remap_rows": all_remap_rows,
         "final_runtime_state": _compact_runtime_state(runtime_state),
         "cycle_failure_count": cycle_failure_count,
     }
+
+
+def _paper_hts_time_window_remap_guard_row(
+    *,
+    original_guard_row: dict[str, Any],
+    guard_input: dict[str, Any],
+    guard_config: dict[str, Any],
+    runtime_state: dict[str, Any],
+    runtime_mode: str,
+    cycle_id: str,
+    public_data_source: str,
+    pre_state: dict[str, Any],
+    ev_calibration_artifact: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if not _paper_hts_time_window_remap_applicable(
+        original_guard_row=original_guard_row,
+        guard_config=guard_config,
+    ):
+        original_guard_row.setdefault("hts_time_window_remap_applied", False)
+        original_guard_row.setdefault("remap_reason_codes", [])
+        return original_guard_row, None
+
+    original_action = str(original_guard_row.get("source_selected_action") or "")
+    side = str(original_guard_row.get("source_selected_side") or _side_from_action(original_action))
+    remapped_action = f"BUY_{side}_SELL_BEFORE_CLOSE"
+    reason_codes: list[str] = ["hts_time_window_blocked_original_action"]
+    candidate = _paper_same_side_sbc_candidate(
+        full_ranking=list(guard_input.get("full_5_action_ranking") or []),
+        remapped_action=remapped_action,
+    )
+    if candidate is None:
+        return original_guard_row, _paper_remap_row(
+            original_guard_row=original_guard_row,
+            remapped_guard_row=None,
+            remapped_action=remapped_action,
+            applied=False,
+            candidate=False,
+            calibrated_ev=None,
+            calibrated_ev_source="missing_same_side_sbc_candidate",
+            reason_codes=[*reason_codes, "same_side_sbc_alternative_missing"],
+        )
+    reason_codes.append("same_side_sbc_alternative_available")
+
+    calibrated_ev, ev_source = _paper_remap_calibrated_ev(
+        guard_input=guard_input,
+        candidate=candidate,
+        side=side,
+        ev_calibration_artifact=ev_calibration_artifact,
+    )
+    if calibrated_ev is None:
+        return original_guard_row, _paper_remap_row(
+            original_guard_row=original_guard_row,
+            remapped_guard_row=None,
+            remapped_action=remapped_action,
+            applied=False,
+            candidate=False,
+            calibrated_ev=None,
+            calibrated_ev_source=ev_source,
+            reason_codes=[*reason_codes, "same_side_sbc_calibrated_ev_missing"],
+        )
+    if calibrated_ev < O_V8_PAPER_FRESH_HTS_REMAP_EV_THRESHOLD:
+        return original_guard_row, _paper_remap_row(
+            original_guard_row=original_guard_row,
+            remapped_guard_row=None,
+            remapped_action=remapped_action,
+            applied=False,
+            candidate=False,
+            calibrated_ev=calibrated_ev,
+            calibrated_ev_source=ev_source,
+            reason_codes=[
+                *reason_codes,
+                "same_side_sbc_calibrated_ev_below_threshold",
+            ],
+        )
+
+    remap_input = _paper_remap_guard_input(
+        guard_input=guard_input,
+        candidate=candidate,
+        remapped_action=remapped_action,
+        side=side,
+    )
+    remapped_guard_row = _v8_execution_guard_decision(
+        remap_input,
+        guard_config=guard_config,
+        runtime_state=runtime_state,
+        runtime_mode=runtime_mode,
+    )
+    remapped_guard_row["cycle_id"] = cycle_id
+    remapped_guard_row["public_data_source"] = public_data_source
+    remapped_guard_row["pre_decision_exposure_state"] = pre_state
+    remapped_guard_row["original_action"] = original_action
+    remapped_guard_row["original_family"] = original_guard_row.get(
+        "source_selected_family"
+    )
+    remapped_guard_row["original_side"] = side
+    remapped_guard_row["remapped_action"] = remapped_action
+    remapped_guard_row["remapped_family"] = "SELL_BEFORE_CLOSE"
+    remapped_guard_row["remapped_side"] = side
+    remapped_guard_row["source_selected_action"] = original_action
+    remapped_guard_row["source_selected_family"] = original_guard_row.get(
+        "source_selected_family"
+    )
+    remapped_guard_row["source_selected_side"] = side
+    remapped_guard_row["source_model_score"] = original_guard_row.get(
+        "source_model_score"
+    )
+    remapped_guard_row["source_raw_model_score"] = original_guard_row.get(
+        "source_raw_model_score"
+    )
+    remapped_guard_row["original_execution_blocking_reason_codes"] = list(
+        original_guard_row.get("execution_blocking_reason_codes") or []
+    )
+    remapped_guard_row["original_execution_guard_reason_codes"] = list(
+        original_guard_row.get("execution_guard_reason_codes") or []
+    )
+    remapped_guard_row["original_order_allowed"] = bool(
+        original_guard_row.get("order_allowed")
+    )
+    remapped_guard_row["hts_time_window_remap_calibrated_ev"] = calibrated_ev
+    remapped_guard_row["hts_time_window_remap_calibrated_ev_source"] = ev_source
+    remapped_guard_row["hts_time_window_remap_ev_threshold"] = (
+        O_V8_PAPER_FRESH_HTS_REMAP_EV_THRESHOLD
+    )
+    remapped_guard_row["hts_time_window_remap_applied"] = (
+        remapped_guard_row.get("order_allowed") is True
+    )
+    remap_reasons = [
+        *reason_codes,
+        "same_side_sbc_calibrated_ev_threshold_passed",
+    ]
+    if remapped_guard_row.get("order_allowed") is True:
+        remap_reasons.append("same_side_sbc_guard_passed")
+    else:
+        remap_reasons.extend(
+            list(remapped_guard_row.get("execution_blocking_reason_codes") or [])
+            or ["same_side_sbc_guard_blocked"]
+        )
+    remapped_guard_row["remap_reason_codes"] = sorted(set(remap_reasons))
+
+    return (
+        remapped_guard_row if remapped_guard_row.get("order_allowed") is True else original_guard_row,
+        _paper_remap_row(
+            original_guard_row=original_guard_row,
+            remapped_guard_row=remapped_guard_row,
+            remapped_action=remapped_action,
+            applied=remapped_guard_row.get("order_allowed") is True,
+            candidate=True,
+            calibrated_ev=calibrated_ev,
+            calibrated_ev_source=ev_source,
+            reason_codes=remapped_guard_row["remap_reason_codes"],
+        ),
+    )
+
+
+def _paper_hts_time_window_remap_applicable(
+    *,
+    original_guard_row: dict[str, Any],
+    guard_config: dict[str, Any],
+) -> bool:
+    action = str(original_guard_row.get("source_selected_action") or "")
+    if action not in {"BUY_UP_HOLD_TO_SETTLEMENT", "BUY_DOWN_HOLD_TO_SETTLEMENT"}:
+        return False
+    if original_guard_row.get("order_allowed") is True:
+        return False
+    blocking = set(original_guard_row.get("execution_blocking_reason_codes") or [])
+    if blocking != {"execution_time_to_close_unsafe"}:
+        return False
+    micro = dict(original_guard_row.get("microstructure_snapshot") or {})
+    time_to_close = _trace_float_or_none(micro.get("time_to_close_seconds"))
+    return bool(
+        time_to_close is not None
+        and time_to_close >= float(guard_config["min_time_to_close_seconds"])
+        and time_to_close < float(guard_config["min_hts_time_to_close_seconds"])
+    )
+
+
+def _paper_same_side_sbc_candidate(
+    *,
+    full_ranking: list[dict[str, Any]],
+    remapped_action: str,
+) -> dict[str, Any] | None:
+    for row in full_ranking:
+        if str(row.get("selected_action") or "") == remapped_action:
+            return dict(row)
+    return None
+
+
+def _paper_remap_calibrated_ev(
+    *,
+    guard_input: dict[str, Any],
+    candidate: dict[str, Any],
+    side: str,
+    ev_calibration_artifact: dict[str, Any],
+) -> tuple[float | None, str]:
+    explicit = candidate.get(
+        "calibrated_action_expected_net_return",
+        guard_input.get("calibrated_action_expected_net_return"),
+    )
+    if explicit is not None:
+        return _float(explicit), "input_calibrated_action_expected_net_return"
+    micro = {
+        **dict(guard_input.get("microstructure_snapshot") or {}),
+        **dict(candidate.get("microstructure_snapshot") or {}),
+    }
+    if ev_calibration_artifact.get("path") is not None:
+        source_score = candidate.get(
+            "corrected_model_score",
+            guard_input.get("corrected_model_score"),
+        )
+        expected_return, _, ev_source, _, reasons = _calibrated_expected_return_source(
+            input_expected_return=None,
+            input_expected_return_field=None,
+            canonical_score=_trace_float_or_none(source_score),
+            canonical_score_field="same_side_sbc.corrected_model_score",
+            canonical_raw_score=_trace_float_or_none(
+                candidate.get("raw_model_score", guard_input.get("raw_model_score"))
+            ),
+            canonical_raw_score_field="same_side_sbc.raw_model_score",
+            execution_price=_trace_float_or_none(micro.get("entry_ask")),
+            execution_price_field="microstructure_snapshot.entry_ask",
+            executable_exit_bid_proxy=_trace_float_or_none(
+                micro.get("executable_exit_bid_proxy")
+            ),
+            spread_bps=_trace_float_or_none(micro.get("spread_bps")),
+            queue_fill_proxy=_trace_float_or_none(micro.get("queue_fill_proxy")),
+            book_staleness_ms=_trace_float_or_none(micro.get("book_staleness_ms")),
+            time_to_close=_trace_float_or_none(micro.get("time_to_close_seconds")),
+            family="SELL_BEFORE_CLOSE",
+            side=side,
+            execution_cost=O_V8_PAPER_FRESH_HTS_REMAP_EXECUTION_COST,
+            ev_calibration_artifact=ev_calibration_artifact,
+        )
+        if expected_return is None:
+            reason_suffix = ",".join(reasons) if reasons else "unknown"
+            return None, f"{ev_source}:{reason_suffix}"
+        return expected_return, ev_source
+    source_score = guard_input.get("corrected_model_score")
+    if source_score is None:
+        return None, "missing_source_model_score_for_frozen_ev_mapping"
+    return (
+        _float(source_score)
+        * O_V8_PAPER_FRESH_HTS_REMAP_SCORE_TO_EXPECTED_NET_RETURN_WEIGHT
+        - O_V8_PAPER_FRESH_HTS_REMAP_EXECUTION_COST,
+        "paper_fresh_frozen_score_to_expected_net_return_v1",
+    )
+
+
+def _paper_remap_guard_input(
+    *,
+    guard_input: dict[str, Any],
+    candidate: dict[str, Any],
+    remapped_action: str,
+    side: str,
+) -> dict[str, Any]:
+    micro = {
+        **dict(guard_input.get("microstructure_snapshot") or {}),
+        **dict(candidate.get("microstructure_snapshot") or {}),
+    }
+    return {
+        **dict(guard_input),
+        "selected_action": remapped_action,
+        "selected_side": side,
+        "selected_action_family": "SELL_BEFORE_CLOSE",
+        "microstructure_snapshot": micro,
+        "p_up_action_disagreement": _p_up_action_disagreement(
+            action=remapped_action,
+            p_up=_float(guard_input.get("p_up")),
+        ),
+    }
+
+
+def _paper_remap_row(
+    *,
+    original_guard_row: dict[str, Any],
+    remapped_guard_row: dict[str, Any] | None,
+    remapped_action: str,
+    applied: bool,
+    candidate: bool,
+    calibrated_ev: float | None,
+    calibrated_ev_source: str,
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    return {
+        "decision_group_id": original_guard_row.get("decision_group_id"),
+        "market_id": original_guard_row.get("market_id"),
+        "decision_ts": original_guard_row.get("decision_ts"),
+        "original_action": original_guard_row.get("source_selected_action"),
+        "original_family": original_guard_row.get("source_selected_family"),
+        "original_side": original_guard_row.get("source_selected_side"),
+        "remapped_action": remapped_action,
+        "remapped_family": "SELL_BEFORE_CLOSE",
+        "remapped_side": _side_from_action(remapped_action),
+        "hts_time_window_remap_applied": applied,
+        "remap_candidate": candidate,
+        "calibrated_ev": calibrated_ev,
+        "calibrated_ev_source": calibrated_ev_source,
+        "calibrated_ev_threshold": O_V8_PAPER_FRESH_HTS_REMAP_EV_THRESHOLD,
+        "original_order_allowed": bool(original_guard_row.get("order_allowed")),
+        "remapped_order_allowed": bool(
+            remapped_guard_row and remapped_guard_row.get("order_allowed") is True
+        ),
+        "original_execution_blocking_reason_codes": list(
+            original_guard_row.get("execution_blocking_reason_codes") or []
+        ),
+        "original_execution_guard_reason_codes": list(
+            original_guard_row.get("execution_guard_reason_codes") or []
+        ),
+        "remapped_execution_blocking_reason_codes": list(
+            (remapped_guard_row or {}).get("execution_blocking_reason_codes") or []
+        ),
+        "remapped_execution_guard_reason_codes": list(
+            (remapped_guard_row or {}).get("execution_guard_reason_codes") or []
+        ),
+        "remap_reason_codes": sorted(set(reason_codes)),
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+        "uses_settlement_pnl_or_outcome_labels": False,
+        "uses_oracle_actions_or_future_returns": False,
+        "source_scores_mutated": False,
+        "o_score_mutated": False,
+    }
+
+
+def _execution_layer_v2_paper_remap_report(
+    *,
+    config: PolymarketOV8PaperFreshLoopConfig,
+    execution_result: dict[str, Any],
+    intents: list[dict[str, Any]],
+) -> dict[str, Any]:
+    rows = list(execution_result.get("paper_remap_rows") or [])
+    applied_rows = [
+        row for row in rows if row.get("hts_time_window_remap_applied") is True
+    ]
+    intent_remaps = [
+        intent for intent in intents if intent.get("hts_time_window_remap_applied") is True
+    ]
+    report = {
+        "schema_version": EXECUTION_LAYER_V2_PAPER_REMAP_SCHEMA_VERSION,
+        "report_type": "execution_layer_v2_paper_remap",
+        "phase": POLYMARKET_POLICY_TRAINING_PHASE,
+        "run_id": config.run_id,
+        "execution_layer_v2_paper_remap_enabled": True,
+        "paper_only_intent_path": True,
+        "paper_only": True,
+        "capital_at_risk": False,
+        "polymarket_write_enabled": False,
+        "wallet_signing_enabled": False,
+        "v8_execution_handoff_allowed": False,
+        "source_model_candidate_eligible": False,
+        "freeze_ready": False,
+        "promotion_evidence_eligible": False,
+        "paper_run_resume_allowed": False,
+        "#146_start_allowed": False,
+        "#134_resume_allowed": False,
+        "hts_time_window_blocked_count": len(rows),
+        "same_side_sbc_alternative_available_count": sum(
+            1
+            for row in rows
+            if "same_side_sbc_alternative_available"
+            in set(row.get("remap_reason_codes") or [])
+        ),
+        "same_side_sbc_calibrated_ev_available_count": sum(
+            1 for row in rows if row.get("calibrated_ev") is not None
+        ),
+        "same_side_sbc_guard_passed_count": len(applied_rows),
+        "remap_candidate_count": sum(
+            1 for row in rows if row.get("remap_candidate") is True
+        ),
+        "remap_guard_passed_count": len(applied_rows),
+        "paper_intent_remap_applied_count": len(intent_remaps),
+        "original_action_distribution": _counter_from_rows(rows, "original_action"),
+        "remapped_action_distribution": _counter_from_rows(rows, "remapped_action"),
+        "remap_reason_distribution": _counter_from_rows(rows, "remap_reason_codes"),
+        "remap_failure_reason_distribution": _counter_from_rows(
+            [row for row in rows if row.get("hts_time_window_remap_applied") is not True],
+            "remap_reason_codes",
+        ),
+        "paper_intent_remap_ids": [
+            str(intent.get("paper_fresh_order_intent_id")) for intent in intent_remaps
+        ],
+        "remap_rows": rows,
+        "uses_validation_outcomes_for_tuning": False,
+        "thresholds_tuned": False,
+        "uses_realized_pnl_or_labels_for_analysis": False,
+        "uses_oracle_actions_for_analysis": False,
+        "forbidden_outcome_fields_used": [],
+        "source_scores_mutated": False,
+        "o_score_mutated": False,
+        "promotion_evidence": False,
+        **compact_safety_fields(),
+    }
+    return _with_report_id(report, "execution_layer_v2_paper_remap_report_id")
+
+
+def _execution_layer_v2_paper_remap_md(report: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# Execution Layer v2 Paper HTS Time-Window Remap",
+            "",
+            f"- run_id: `{report['run_id']}`",
+            f"- paper_only_intent_path: `{report['paper_only_intent_path']}`",
+            f"- hts_time_window_blocked_count: `{report['hts_time_window_blocked_count']}`",
+            f"- remap_candidate_count: `{report['remap_candidate_count']}`",
+            f"- remap_guard_passed_count: `{report['remap_guard_passed_count']}`",
+            f"- paper_intent_remap_applied_count: `{report['paper_intent_remap_applied_count']}`",
+            f"- same_side_sbc_alternative_available_count: `{report['same_side_sbc_alternative_available_count']}`",
+            f"- same_side_sbc_calibrated_ev_available_count: `{report['same_side_sbc_calibrated_ev_available_count']}`",
+            f"- same_side_sbc_guard_passed_count: `{report['same_side_sbc_guard_passed_count']}`",
+            f"- v8_execution_handoff_allowed: `{report['v8_execution_handoff_allowed']}`",
+            f"- capital_at_risk: `{report['capital_at_risk']}`",
+            f"- polymarket_write_enabled: `{report['polymarket_write_enabled']}`",
+            f"- wallet_signing_enabled: `{report['wallet_signing_enabled']}`",
+            "",
+            "## Remap Reason Distribution",
+            "",
+            "```json",
+            json.dumps(report["remap_reason_distribution"], indent=2, sort_keys=True),
+            "```",
+            "",
+            "This report promotes the HTS time-window remap only into the local "
+            "paper intent path. It does not mutate O/source scores and does not "
+            "unlock live, paper promotion, wallet signing, or Polymarket writes.",
+            "",
+        ]
+    )
 
 
 def _fresh_loop_run_report(
@@ -1479,6 +2948,7 @@ def _fresh_loop_run_report(
     ledger_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     guard_rows = execution_result["guard_decision_rows"]
+    remap_rows = list(execution_result.get("paper_remap_rows") or [])
     blockers = list(unlock_evidence["paper_candidate_unlock_blocking_reason_codes"])
     canonical_scorer_used = any(
         row.get("canonical_frozen_o_scorer_used") is True
@@ -1537,6 +3007,13 @@ def _fresh_loop_run_report(
         ),
         "guard_blocked_decision_count": sum(
             1 for row in guard_rows if row.get("order_allowed") is not True
+        ),
+        "execution_layer_v2_paper_remap_enabled": True,
+        "execution_layer_v2_paper_remap_candidate_count": sum(
+            1 for row in remap_rows if row.get("remap_candidate") is True
+        ),
+        "execution_layer_v2_paper_remap_applied_count": sum(
+            1 for row in remap_rows if row.get("hts_time_window_remap_applied") is True
         ),
         "paper_fresh_order_intent_count": len(intents),
         "paper_fresh_fill_count": len(fills),
@@ -2147,6 +3624,21 @@ def _fresh_provider_feature_coverage_report(
         )
         is not True
     ]
+    chainlink_available_rows = [
+        row for row in rows if row.get("chainlink_price_at_decision") is not None
+    ]
+    chainlink_reference_rows = [
+        row
+        for row in rows
+        if row.get("chainlink_reference_price_at_market_start") is not None
+    ]
+    chainlink_missing_reasons = Counter(
+        str(reason)
+        for row in rows
+        for reason in (
+            row.get("chainlink_regime_feature_provenance") or {}
+        ).get("unavailable_reason_codes", [])
+    )
     sparse = len(rows) < max(5, len(public_cycles))
     report = {
         "schema_version": O_V8_PAPER_FRESH_PROVIDER_FEATURE_COVERAGE_SCHEMA_VERSION,
@@ -2190,6 +3682,33 @@ def _fresh_provider_feature_coverage_report(
         "public_btc_feature_candle_row_count": public_data_collection_report[
             "public_btc_feature_candle_row_count"
         ],
+        "public_chainlink_rtds_price_row_count": int(
+            public_data_collection_report.get("public_chainlink_rtds_price_row_count")
+            or 0
+        ),
+        "chainlink_price_at_decision_available_count": len(
+            chainlink_available_rows
+        ),
+        "chainlink_market_start_reference_available_count": len(
+            chainlink_reference_rows
+        ),
+        "chainlink_reference_distance_available_count": sum(
+            1
+            for row in rows
+            if row.get("chainlink_reference_distance_at_decision") is not None
+        ),
+        "chainlink_feature_provenance_violation_count": sum(
+            1
+            for row in rows
+            if row.get("chainlink_price_at_decision") is not None
+            and (row.get("chainlink_regime_feature_provenance") or {}).get(
+                "provenance_valid"
+            )
+            is not True
+        ),
+        "chainlink_feature_missing_reason_distribution": dict(
+            sorted(chainlink_missing_reasons.items())
+        ),
         "sparse_provider_row_flag": sparse,
         "sparse_provider_row_reason_codes": [
             "provider_feature_rows_below_minimum_diagnostic_density"
@@ -3235,26 +4754,18 @@ def _fresh_signal_trace_report(
         if not micro:
             micro = dict(provider_row.get("microstructure_snapshot") or {})
         decision_ts = int(provider_row.get("decision_ts") or guard_row.get("decision_ts") or 0)
-        market_start_ts = _trace_int_or_none(
-            provider_row.get("market_start_ts")
-            or provider_row.get("market_start_timestamp")
-            or provider_row.get("score_components", {}).get("market_start_ts")
+        market_schedule = _trace_market_schedule(
+            provider_row=provider_row,
+            decision_ts=decision_ts,
+            micro=micro,
         )
-        market_end_ts = _trace_int_or_none(
-            provider_row.get("market_end_ts")
-            or provider_row.get("market_end_timestamp")
-            or provider_row.get("score_components", {}).get("market_end_ts")
-        )
+        market_start_ts = market_schedule["market_start_ts"]
+        market_end_ts = market_schedule["market_end_ts"]
         time_to_close = _trace_time_to_close_seconds(
             decision_ts=decision_ts,
             market_end_ts=market_end_ts,
             micro=micro,
         )
-        if market_end_ts is None and time_to_close is not None:
-            market_end_ts = int(decision_ts + time_to_close * 1000)
-        if market_start_ts is None and market_end_ts is not None:
-            horizon_ms = _trace_int_or_none(provider_row.get("horizon_ms")) or 300_000
-            market_start_ts = market_end_ts - horizon_ms
         elapsed = (
             (decision_ts - market_start_ts) / 1000.0
             if market_start_ts is not None and decision_ts
@@ -3280,6 +4791,28 @@ def _fresh_signal_trace_report(
         )
         blocking_reasons = list(guard_row.get("execution_blocking_reason_codes") or [])
         paper_intent_id = intent_row.get("paper_fresh_order_intent_id")
+        ranking_for_trace = (
+            guard_row.get("top_k_action_ranking")
+            or provider_row.get("full_5_action_ranking")
+            or []
+        )
+        action_score_margin = (
+            guard_row.get("action_score_margin")
+            if guard_row.get("action_score_margin") is not None
+            else provider_row.get("action_score_margin")
+        )
+        if action_score_margin is None:
+            action_score_margin = _top_action_margin(ranking_for_trace)
+        side_score_margin = (
+            guard_row.get("side_specific_action_score_margin")
+            if guard_row.get("side_specific_action_score_margin") is not None
+            else provider_row.get("side_specific_action_score_margin")
+        )
+        if side_score_margin is None:
+            side_score_margin = _top_action_side_margin(
+                ranking_for_trace,
+                selected_action=selected_action,
+            )
         trace_row = {
             "run_id": config.run_id,
             "cycle_id": provider_row.get("cycle_id"),
@@ -3292,7 +4825,21 @@ def _fresh_signal_trace_report(
             "market_start_ts": market_start_ts,
             "decision_ts": decision_ts,
             "market_end_ts": market_end_ts,
+            "market_schedule_source_type": market_schedule["source_type"],
+            "market_schedule_provenance": market_schedule["provenance"],
+            "market_schedule_warning_reason_codes": market_schedule[
+                "warning_reason_codes"
+            ],
             "elapsed_since_market_start_seconds": elapsed,
+            "time_since_market_start_seconds": guard_row.get(
+                "time_since_market_start_seconds",
+                provider_row.get("time_since_market_start_seconds", elapsed),
+            ),
+            "time_since_market_start_provenance": dict(
+                guard_row.get("time_since_market_start_provenance")
+                or provider_row.get("time_since_market_start_provenance")
+                or {}
+            ),
             "time_to_close_seconds": time_to_close,
             "provider_row_source": provider_row.get("provider_row_source")
             or public_data_collection_report.get("public_data_collection_mode"),
@@ -3357,19 +4904,69 @@ def _fresh_signal_trace_report(
                 "p_up_action_disagreement",
                 provider_row.get("p_up_action_disagreement"),
             ),
+            "btc_momentum": guard_row.get(
+                "btc_momentum",
+                provider_row.get("btc_momentum"),
+            ),
+            "btc_momentum_provenance": dict(
+                guard_row.get("btc_momentum_provenance")
+                or provider_row.get("btc_momentum_provenance")
+                or {}
+            ),
+            "reference_price_to_beat_at_decision": guard_row.get(
+                "reference_price_to_beat_at_decision",
+                provider_row.get("reference_price_to_beat_at_decision"),
+            ),
+            "reference_price_to_beat_distance_at_decision": guard_row.get(
+                "reference_price_to_beat_distance_at_decision",
+                provider_row.get("reference_price_to_beat_distance_at_decision"),
+            ),
+            "reference_price_to_beat_distance_provenance": dict(
+                guard_row.get("reference_price_to_beat_distance_provenance")
+                or provider_row.get("reference_price_to_beat_distance_provenance")
+                or {}
+            ),
             "high_score_flag": guard_row.get(
                 "source_high_score_flag",
-                canonical_selected.get("high_score_flag", provider_row.get("high_score_flag")),
+                canonical_selected.get(
+                    "high_score_flag",
+                    provider_row.get("high_score_flag"),
+                ),
             ),
-            "score_margin": _top_action_margin(
-                guard_row.get("top_k_action_ranking")
-                or provider_row.get("full_5_action_ranking")
-                or []
+            "action_score_margin": action_score_margin,
+            "score_margin": action_score_margin,
+            "action_score_margin_provenance": dict(
+                guard_row.get("action_score_margin_provenance")
+                or provider_row.get("action_score_margin_provenance")
+                or {}
             ),
+            "side_specific_action_score_margin": side_score_margin,
+            "side_specific_action_score_margin_provenance": dict(
+                guard_row.get("side_specific_action_score_margin_provenance")
+                or provider_row.get("side_specific_action_score_margin_provenance")
+                or {}
+            ),
+            "decision_time_regime_feature_provenance": dict(
+                guard_row.get("decision_time_regime_feature_provenance")
+                or provider_row.get("decision_time_regime_feature_provenance")
+                or {}
+            ),
+            "decision_time_regime_feature_max_input_ts": guard_row.get(
+                "decision_time_regime_feature_max_input_ts",
+                provider_row.get("decision_time_regime_feature_max_input_ts"),
+            ),
+            **_chainlink_decision_time_field_payload(guard_row, provider_row),
             "execution_guarded_action": guard_row.get("execution_guarded_action"),
             "execution_guarded_side": guard_row.get("execution_guarded_side"),
             "execution_guarded_family": guard_row.get("execution_guarded_family"),
             "execution_guarded_score": guard_row.get("execution_guarded_score"),
+            "original_action": guard_row.get("original_action")
+            or guard_row.get("source_selected_action"),
+            "remapped_action": guard_row.get("remapped_action"),
+            "remap_reason_codes": list(guard_row.get("remap_reason_codes") or []),
+            "hts_time_window_remap_applied": bool(
+                guard_row.get("hts_time_window_remap_applied")
+            ),
             "order_allowed": bool(guard_row.get("order_allowed")),
             "proposed_order_size": guard_row.get("proposed_order_size"),
             "paper_intent_id": paper_intent_id,
@@ -4833,16 +6430,113 @@ def _trace_signal_outcome_classification(
     return "no_guard_decision_available"
 
 
+def _trace_market_schedule(
+    *,
+    provider_row: dict[str, Any],
+    decision_ts: int,
+    micro: dict[str, Any],
+) -> dict[str, Any]:
+    provided_start = _trace_int_or_none(
+        provider_row.get("market_start_ts")
+        or provider_row.get("market_start_timestamp")
+        or provider_row.get("score_components", {}).get("market_start_ts")
+    )
+    provided_end = _trace_int_or_none(
+        provider_row.get("market_end_ts")
+        or provider_row.get("market_end_timestamp")
+        or provider_row.get("score_components", {}).get("market_end_ts")
+    )
+    slug = str(provider_row.get("slug") or "")
+    slug_schedule = _trace_market_schedule_from_slug(slug)
+    warning_reason_codes: list[str] = []
+    source_type = "market_schedule_unavailable"
+    source_fields_used: list[str] = []
+    market_start_ts: int | None = None
+    market_end_ts: int | None = None
+    if slug_schedule is not None:
+        slug_start, slug_end = slug_schedule
+        if provided_start == slug_start and provided_end == slug_end:
+            market_start_ts = provided_start
+            market_end_ts = provided_end
+            source_type = "normalized_public_market_metadata"
+            source_fields_used = [
+                "provider_row.market_start_ts",
+                "provider_row.market_end_ts",
+                "provider_row.slug",
+            ]
+        else:
+            market_start_ts = slug_start
+            market_end_ts = slug_end
+            source_type = "canonical_market_slug_schedule"
+            source_fields_used = ["provider_row.slug"]
+            warning_reason_codes.append(
+                "market_schedule_backfilled_from_canonical_slug"
+                if provided_start is None or provided_end is None
+                else "provider_market_schedule_mismatch_canonical_slug"
+            )
+    elif (
+        provided_start is not None
+        and provided_end is not None
+        and provided_start > 0
+        and provided_end > provided_start
+    ):
+        market_start_ts = provided_start
+        market_end_ts = provided_end
+        source_type = "normalized_public_market_metadata_without_slug_schedule"
+        source_fields_used = [
+            "provider_row.market_start_ts",
+            "provider_row.market_end_ts",
+        ]
+    else:
+        warning_reason_codes.append("market_schedule_identity_unavailable")
+        if micro.get("time_to_close_seconds") is not None:
+            warning_reason_codes.append(
+                "microstructure_time_to_close_not_used_for_market_identity"
+            )
+    provenance = {
+        "source_type": source_type,
+        "source_fields_used": source_fields_used,
+        "slug": slug,
+        "raw_market_sha256": provider_row.get("raw_market_sha256"),
+        "decision_ts": decision_ts,
+        "max_input_ts": decision_ts,
+        "provenance_valid": bool(
+            decision_ts > 0
+            and market_start_ts is not None
+            and market_end_ts is not None
+            and market_start_ts > 0
+            and market_end_ts > market_start_ts
+        ),
+        "warning_reason_codes": sorted(set(warning_reason_codes)),
+    }
+    return {
+        "market_start_ts": market_start_ts,
+        "market_end_ts": market_end_ts,
+        "source_type": source_type,
+        "warning_reason_codes": provenance["warning_reason_codes"],
+        "provenance": provenance,
+    }
+
+
+def _trace_market_schedule_from_slug(slug: str) -> tuple[int, int] | None:
+    match = BTC_UPDOWN_SLUG_PATTERN.match(slug)
+    if match is None:
+        return None
+    family = BTC_UPDOWN_FAMILY_BY_SLUG[match.group(1)]
+    start_ts = int(match.group(2)) * 1000
+    return start_ts, start_ts + BTC_UPDOWN_MARKET_HORIZONS_MS[family]
+
+
 def _trace_time_to_close_seconds(
     *,
     decision_ts: int,
     market_end_ts: int | None,
     micro: dict[str, Any],
 ) -> float | None:
-    if micro.get("time_to_close_seconds") is not None:
-        return _float(micro.get("time_to_close_seconds"))
     if market_end_ts is not None and decision_ts:
         return (market_end_ts - decision_ts) / 1000.0
+    if micro.get("time_to_close_seconds") is not None:
+        return _float(micro.get("time_to_close_seconds"))
     return None
 
 
@@ -4923,6 +6617,7 @@ def _fresh_loop_manifest(
     canonical_scorer_alignment_report: dict[str, Any],
     signal_trace_report: dict[str, Any],
     time_window_diagnostic_report: dict[str, Any],
+    execution_layer_v2_paper_remap_report: dict[str, Any],
     legacy_position_policy_audit_report: dict[str, Any],
     paper_position_state_report: dict[str, Any],
     paper_exit_signal_report: dict[str, Any],
@@ -4987,6 +6682,25 @@ def _fresh_loop_manifest(
         "fresh_time_window_diagnostic_report_id": time_window_diagnostic_report[
             "o_v8_paper_fresh_time_window_diagnostic_report_id"
         ],
+        "execution_layer_v2_paper_remap_report_id": (
+            execution_layer_v2_paper_remap_report[
+                "execution_layer_v2_paper_remap_report_id"
+            ]
+        ),
+        "execution_layer_v2_paper_remap_enabled": (
+            execution_layer_v2_paper_remap_report[
+                "execution_layer_v2_paper_remap_enabled"
+            ]
+        ),
+        "execution_layer_v2_paper_remap_applied_count": (
+            execution_layer_v2_paper_remap_report["remap_guard_passed_count"]
+        ),
+        "execution_layer_v2_paper_remap_candidate_count": (
+            execution_layer_v2_paper_remap_report["remap_candidate_count"]
+        ),
+        "execution_layer_v2_paper_remap_reason_distribution": (
+            execution_layer_v2_paper_remap_report["remap_reason_distribution"]
+        ),
         "fresh_legacy_position_policy_audit_report_id": (
             legacy_position_policy_audit_report[
                 "o_v8_paper_fresh_legacy_position_policy_audit_report_id"
@@ -5053,6 +6767,24 @@ def _fresh_loop_manifest(
         "sparse_provider_row_flag": provider_feature_coverage_report[
             "sparse_provider_row_flag"
         ],
+        "public_chainlink_rtds_price_row_count": provider_feature_coverage_report[
+            "public_chainlink_rtds_price_row_count"
+        ],
+        "chainlink_price_at_decision_available_count": (
+            provider_feature_coverage_report[
+                "chainlink_price_at_decision_available_count"
+            ]
+        ),
+        "chainlink_market_start_reference_available_count": (
+            provider_feature_coverage_report[
+                "chainlink_market_start_reference_available_count"
+            ]
+        ),
+        "chainlink_feature_provenance_violation_count": (
+            provider_feature_coverage_report[
+                "chainlink_feature_provenance_violation_count"
+            ]
+        ),
         "paper_fresh_loop_enabled": run_report["paper_fresh_loop_enabled"],
         "paper_fresh_loop_mode": run_report["paper_fresh_loop_mode"],
         "paper_fresh_loop_cycle_count": run_report["paper_fresh_loop_cycle_count"],
@@ -5144,6 +6876,25 @@ def _fresh_loop_manifest(
     return _with_report_id(manifest, "o_v8_paper_fresh_loop_manifest_id")
 
 
+def _chainlink_decision_time_field_payload(
+    *rows: dict[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for field_name in _CHAINLINK_DECISION_TIME_FIELDS:
+        value: Any = None
+        for row in rows:
+            if row.get(field_name) is not None:
+                value = row[field_name]
+                break
+        payload[field_name] = (
+            dict(value)
+            if field_name == "chainlink_regime_feature_provenance"
+            and isinstance(value, dict)
+            else value
+        )
+    return payload
+
+
 def _guard_input_from_public_row(
     *,
     public_row: dict[str, Any],
@@ -5198,6 +6949,43 @@ def _guard_input_from_public_row(
         "decision_time_feature_max_input_ts": public_row.get(
             "decision_time_feature_max_input_ts", decision_ts
         ),
+        "btc_momentum": public_row.get("btc_momentum"),
+        "btc_momentum_provenance": dict(
+            public_row.get("btc_momentum_provenance") or {}
+        ),
+        "reference_price_to_beat_at_decision": public_row.get(
+            "reference_price_to_beat_at_decision"
+        ),
+        "reference_price_to_beat_distance_at_decision": public_row.get(
+            "reference_price_to_beat_distance_at_decision"
+        ),
+        "reference_price_to_beat_distance_provenance": dict(
+            public_row.get("reference_price_to_beat_distance_provenance") or {}
+        ),
+        "time_since_market_start_seconds": public_row.get(
+            "time_since_market_start_seconds"
+        ),
+        "time_since_market_start_provenance": dict(
+            public_row.get("time_since_market_start_provenance") or {}
+        ),
+        "action_score_margin": public_row.get("action_score_margin"),
+        "action_score_margin_provenance": dict(
+            public_row.get("action_score_margin_provenance") or {}
+        ),
+        "side_specific_action_score_margin": public_row.get(
+            "side_specific_action_score_margin"
+        ),
+        "side_specific_action_score_margin_provenance": dict(
+            public_row.get("side_specific_action_score_margin_provenance") or {}
+        ),
+        "decision_time_regime_feature_provenance": dict(
+            public_row.get("decision_time_regime_feature_provenance") or {}
+        ),
+        "decision_time_regime_feature_max_input_ts": public_row.get(
+            "decision_time_regime_feature_max_input_ts",
+            public_row.get("decision_time_feature_max_input_ts", decision_ts),
+        ),
+        **_chainlink_decision_time_field_payload(public_row),
     }
 
 def _resolve_unlock_artifact_path(unlock_dir: Path, raw_path: str) -> Path:
@@ -5225,6 +7013,33 @@ def _fresh_order_intent_from_guard_row(
         "source_selected_action": guard_row.get("source_selected_action"),
         "source_selected_family": guard_row.get("source_selected_family"),
         "source_selected_side": guard_row.get("source_selected_side"),
+        "original_action": guard_row.get("original_action")
+        or guard_row.get("source_selected_action"),
+        "original_family": guard_row.get("original_family")
+        or guard_row.get("source_selected_family"),
+        "original_side": guard_row.get("original_side")
+        or guard_row.get("source_selected_side"),
+        "remapped_action": guard_row.get("remapped_action"),
+        "remapped_family": guard_row.get("remapped_family"),
+        "remapped_side": guard_row.get("remapped_side"),
+        "hts_time_window_remap_applied": bool(
+            guard_row.get("hts_time_window_remap_applied")
+        ),
+        "remap_reason_codes": list(guard_row.get("remap_reason_codes") or []),
+        "hts_time_window_remap_calibrated_ev": (
+            _float(guard_row.get("hts_time_window_remap_calibrated_ev"))
+            if guard_row.get("hts_time_window_remap_calibrated_ev") is not None
+            else None
+        ),
+        "hts_time_window_remap_calibrated_ev_source": guard_row.get(
+            "hts_time_window_remap_calibrated_ev_source"
+        ),
+        "original_execution_blocking_reason_codes": list(
+            guard_row.get("original_execution_blocking_reason_codes") or []
+        ),
+        "original_execution_guard_reason_codes": list(
+            guard_row.get("original_execution_guard_reason_codes") or []
+        ),
         "execution_guarded_action": guard_row.get("execution_guarded_action"),
         "execution_guarded_family": guard_row.get("execution_guarded_family"),
         "execution_guarded_side": guard_row.get("execution_guarded_side"),
@@ -5242,6 +7057,40 @@ def _fresh_order_intent_from_guard_row(
         "time_to_close_seconds": _float(micro.get("time_to_close_seconds")),
         "entry_ask": _float(micro.get("entry_ask")),
         "executable_exit_bid_proxy": _float(micro.get("executable_exit_bid_proxy")),
+        "btc_momentum": guard_row.get("btc_momentum"),
+        "btc_momentum_provenance": dict(guard_row.get("btc_momentum_provenance") or {}),
+        "reference_price_to_beat_at_decision": guard_row.get(
+            "reference_price_to_beat_at_decision"
+        ),
+        "reference_price_to_beat_distance_at_decision": guard_row.get(
+            "reference_price_to_beat_distance_at_decision"
+        ),
+        "reference_price_to_beat_distance_provenance": dict(
+            guard_row.get("reference_price_to_beat_distance_provenance") or {}
+        ),
+        "time_since_market_start_seconds": guard_row.get(
+            "time_since_market_start_seconds"
+        ),
+        "time_since_market_start_provenance": dict(
+            guard_row.get("time_since_market_start_provenance") or {}
+        ),
+        "action_score_margin": guard_row.get("action_score_margin"),
+        "action_score_margin_provenance": dict(
+            guard_row.get("action_score_margin_provenance") or {}
+        ),
+        "side_specific_action_score_margin": guard_row.get(
+            "side_specific_action_score_margin"
+        ),
+        "side_specific_action_score_margin_provenance": dict(
+            guard_row.get("side_specific_action_score_margin_provenance") or {}
+        ),
+        "decision_time_regime_feature_provenance": dict(
+            guard_row.get("decision_time_regime_feature_provenance") or {}
+        ),
+        "decision_time_regime_feature_max_input_ts": guard_row.get(
+            "decision_time_regime_feature_max_input_ts"
+        ),
+        **_chainlink_decision_time_field_payload(guard_row),
         "pre_decision_exposure_state": guard_row.get("pre_decision_exposure_state"),
         "post_decision_exposure_state": guard_row.get("post_decision_exposure_state"),
         "execution_guard_reason_codes": guard_row.get("execution_guard_reason_codes", []),
@@ -5284,6 +7133,40 @@ def _fresh_paper_fills_from_intents(
             "filled_size": size,
             "fill_probability": _float(intent.get("queue_fill_proxy")),
             "paper_fill_price": fill_price,
+            "btc_momentum": intent.get("btc_momentum"),
+            "btc_momentum_provenance": dict(intent.get("btc_momentum_provenance") or {}),
+            "reference_price_to_beat_at_decision": intent.get(
+                "reference_price_to_beat_at_decision"
+            ),
+            "reference_price_to_beat_distance_at_decision": intent.get(
+                "reference_price_to_beat_distance_at_decision"
+            ),
+            "reference_price_to_beat_distance_provenance": dict(
+                intent.get("reference_price_to_beat_distance_provenance") or {}
+            ),
+            "time_since_market_start_seconds": intent.get(
+                "time_since_market_start_seconds"
+            ),
+            "time_since_market_start_provenance": dict(
+                intent.get("time_since_market_start_provenance") or {}
+            ),
+            "action_score_margin": intent.get("action_score_margin"),
+            "action_score_margin_provenance": dict(
+                intent.get("action_score_margin_provenance") or {}
+            ),
+            "side_specific_action_score_margin": intent.get(
+                "side_specific_action_score_margin"
+            ),
+            "side_specific_action_score_margin_provenance": dict(
+                intent.get("side_specific_action_score_margin_provenance") or {}
+            ),
+            "decision_time_regime_feature_provenance": dict(
+                intent.get("decision_time_regime_feature_provenance") or {}
+            ),
+            "decision_time_regime_feature_max_input_ts": intent.get(
+                "decision_time_regime_feature_max_input_ts"
+            ),
+            **_chainlink_decision_time_field_payload(intent),
             "spread_cost": spread_cost,
             "fee_cost": 0.0,
             "slippage_cost": 0.0,
@@ -5530,6 +7413,28 @@ def _top_action_margin(ranking: list[dict[str, Any]]) -> float | None:
         reverse=True,
     )
     return scores[0] - scores[1]
+
+
+def _top_action_side_margin(
+    ranking: list[dict[str, Any]],
+    *,
+    selected_action: str,
+) -> float | None:
+    selected = _ranking_action(ranking, selected_action)
+    if not selected:
+        return None
+    selected_side = _side_from_action(selected_action)
+    if selected_side not in {"UP", "DOWN"}:
+        return None
+    opposite_side = "DOWN" if selected_side == "UP" else "UP"
+    opposite_scores = [
+        _float(row.get("corrected_model_score"))
+        for row in ranking
+        if _side_from_action(str(row.get("selected_action") or "")) == opposite_side
+    ]
+    if not opposite_scores:
+        return None
+    return _float(selected.get("corrected_model_score")) - max(opposite_scores)
 
 
 def _numeric_summary(values: list[float]) -> dict[str, Any]:

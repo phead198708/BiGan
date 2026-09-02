@@ -1,0 +1,89 @@
+{
+  "audit_only_complete_captures": [
+    {
+      "attempt_id": "BTC-15M-MoE-confirmatory-v2-collection-001-round886-20260808T134500Z",
+      "attempt_index": 886,
+      "capture_manifest": {
+        "path": "examples/v8/polymarket_runs/BTC-15M-MoE-confirmatory-v2-outcome-blind-collection-001/captures/BTC-15M-MoE-confirmatory-v2-collection-001-round886-20260808T134500Z/pending_round_capture_manifest.json",
+        "sha256": "02cf9063c5b0c511b5090b6ed1401a387b6849b1bcc4e2d5b489bc5b9b8b3f23"
+      },
+      "capture_report": {
+        "path": "examples/v8/polymarket_runs/BTC-15M-MoE-confirmatory-v2-outcome-blind-collection-001/captures/BTC-15M-MoE-confirmatory-v2-collection-001-round886-20260808T134500Z/pending_round_capture_report.json",
+        "sha256": "9260673aaea22f1e563615ead7e9e8c580d00ddadc65640deb8752dfaa691ab8"
+      },
+      "market_id": "0xde31fee561057f66e7c49336c9ebf8995a80f3a5bb7b43148e3994d627720a6c"
+    },
+    {
+      "attempt_id": "BTC-15M-MoE-confirmatory-v2-collection-001-round887-20260808T140000Z",
+      "attempt_index": 887,
+      "capture_manifest": {
+        "path": "examples/v8/polymarket_runs/BTC-15M-MoE-confirmatory-v2-outcome-blind-collection-001/captures/BTC-15M-MoE-confirmatory-v2-collection-001-round887-20260808T140000Z/pending_round_capture_manifest.json",
+        "sha256": "d842253f1accc87ac33047646aca5ccd6c0c141f1a200f169677d66203a7d896"
+      },
+      "capture_report": {
+        "path": "examples/v8/polymarket_runs/BTC-15M-MoE-confirmatory-v2-outcome-blind-collection-001/captures/BTC-15M-MoE-confirmatory-v2-collection-001-round887-20260808T140000Z/pending_round_capture_report.json",
+        "sha256": "2555dfce039d7d82cfef831d0257055c074b6ee01993f65105e0c944ab41c345"
+      },
+      "market_id": "0x6460601692e56ef3c09f759c2c4fce6950494f10c2dce5fb07b732aee442bd3b"
+    },
+    {
+      "attempt_id": "BTC-15M-MoE-confirmatory-v2-collection-001-round888-20260808T141459Z",
+      "attempt_index": 888,
+      "capture_manifest": {
+        "path": "examples/v8/polymarket_runs/BTC-15M-MoE-confirmatory-v2-outcome-blind-collection-001/captures/BTC-15M-MoE-confirmatory-v2-collection-001-round888-20260808T141459Z/pending_round_capture_manifest.json",
+        "sha256": "653368cdeb7cd4032dcef6bb1fc885f34dab7f40b13ef1aa124d8ee850a860f6"
+      },
+      "capture_report": {
+        "path": "examples/v8/polymarket_runs/BTC-15M-MoE-confirmatory-v2-outcome-blind-collection-001/captures/BTC-15M-MoE-confirmatory-v2-collection-001-round888-20260808T141459Z/pending_round_capture_report.json",
+        "sha256": "606b4e66e875695591f27ed97c3d3d081143ff89c86b86130d66a2820c12bda2"
+      },
+      "market_id": "0x540aede299efef2c953486e590af04f1f32a5c548c93313e7bd9cd56e25e9ae2"
+    },
+    {
+      "attempt_id": "BTC-15M-MoE-confirmatory-v2-collection-001-round889-20260808T143000Z",
+      "attempt_index": 889,
+      "capture_manifest": {
+        "path": "examples/v8/polymarket_runs/BTC-15M-MoE-confirmatory-v2-outcome-blind-collection-001/captures/BTC-15M-MoE-confirmatory-v2-collection-001-round889-20260808T143000Z/pending_round_capture_manifest.json",
+        "sha256": "56dec9d126ce8dd6fd38f9f041b4840f6f3b08558f72a64d2f2e1232084a2799"
+      },
+      "capture_report": {
+        "path": "examples/v8/polymarket_runs/BTC-15M-MoE-confirmatory-v2-outcome-blind-collection-001/captures/BTC-15M-MoE-confirmatory-v2-collection-001-round889-20260808T143000Z/pending_round_capture_report.json",
+        "sha256": "9a2af0192f57107c999653b9e8d1b862f80945d155313754d6f4f5cbaf6f12f7"
+      },
+      "market_id": "0xcab20ef326385f317c33fbffadc798b5cdcd4baffe2f4194f82358d0c7da1624"
+    }
+  ],
+  "audit_only_post_boundary_attempt_indices": [
+    886,
+    887,
+    888,
+    889
+  ],
+  "evaluation_population_membership": false,
+  "incomplete_capture_directories": [
+    "examples/v8/polymarket_runs/BTC-15M-MoE-confirmatory-v2-outcome-blind-collection-001/captures/BTC-15M-MoE-confirmatory-v2-collection-001-round890-20260808T144459Z"
+  ],
+  "incomplete_capture_reason": "not_in_frozen_completed_batch_ledger",
+  "lineage_id": "BTC-15M-MoE-confirmatory-v2",
+  "outcomes_accessed": false,
+  "pnl_accessed": false,
+  "promotion_evidence_eligible": false,
+  "raw_captures_deleted": false,
+  "role": "preserved_audit_only_never_evaluation_population",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-post-boundary-quarantine-v1",
+  "settlement_accessed": false,
+  "window_stop_attempt_index": 885
+}

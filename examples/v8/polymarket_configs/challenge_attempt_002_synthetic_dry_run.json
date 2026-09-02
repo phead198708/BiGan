@@ -1,0 +1,81 @@
+{
+  "evaluator_commit": "461ea48116dd42680c3e019f279b7eea3b2134b5",
+  "executed_at": "2026-07-26T17:57:02Z",
+  "purpose": "pre_collection_pipeline_integrity_dry_run_not_statistical_evidence",
+  "real_collection_started": false,
+  "real_labels_outcomes_settlement_or_pnl_opened": false,
+  "result": {
+    "all_future_success_criteria_passed": true,
+    "attempt_id": "v8-1-challenger-future-attempt-002",
+    "automatic_promotion_allowed": false,
+    "baseline_id": "matched_frozen_v6_7",
+    "bootstrap": {
+      "candidate_absolute_97_5_lcb": 0.2,
+      "first_half_candidate_97_5_ucb": 1.4000000000000001,
+      "paired_delta_97_5_lcb": 1.4000000000000001,
+      "second_half_candidate_97_5_ucb": 1.0
+    },
+    "candidate_id": "v8_1_entry_price_floor_0_30_sized_1_0",
+    "checks": {
+      "all_market_rows_in_full_window_pair": true,
+      "all_safety_unlocks_remain_false": true,
+      "candidate_absolute_bootstrap_97_5_lcb_positive": true,
+      "exact_120_unique_chronological_future_markets": true,
+      "first_half_not_significantly_negative": true,
+      "largest_winner_removed_candidate_pnl_positive": true,
+      "minimum_candidate_support_not_required": true,
+      "paired_bootstrap_97_5_lcb_positive": true,
+      "second_half_not_significantly_negative": true,
+      "single_use_future_evidence_only": true
+    },
+    "concentration_diagnostics": {
+      "hard_gate": false,
+      "largest_absolute_single_market_pnl_share": 0.2,
+      "largest_winner_share_of_positive_pnl": 0.2,
+      "selected_action_distribution": {
+        "BUY_DOWN_SELL_BEFORE_CLOSE": 5,
+        "NO_TRADE": 115
+      },
+      "selected_side_distribution": {
+        "DOWN": 5,
+        "NONE": 115
+      }
+    },
+    "historical_development_result_used_as_promotion_evidence": false,
+    "market_count": 120,
+    "metrics": {
+      "acceptance_rate": 0.041666666666666664,
+      "accepted_market_count": 5,
+      "baseline_total_after_cost_pnl": -1.2,
+      "candidate_largest_winner_after_cost_pnl": 0.2,
+      "candidate_largest_winner_removed_after_cost_pnl": 0.8,
+      "candidate_minus_baseline_total_after_cost_pnl": 2.2,
+      "candidate_total_after_cost_pnl": 1.0,
+      "first_half_candidate_total_after_cost_pnl": 0.6000000000000001,
+      "second_half_candidate_total_after_cost_pnl": 0.4
+    },
+    "promotion_audit_required": true,
+    "promotion_evidence_eligible": true,
+    "safety": {
+      "capital_at_risk": false,
+      "collection_start_allowed": false,
+      "handoff_allowed": false,
+      "live_allowed": false,
+      "paper_allowed": false,
+      "promotion_allowed": false,
+      "wallet_allowed": false,
+      "write_allowed": false
+    },
+    "schema_version": "bigan-v8-challenge-attempt-002-future-evaluation-result-v1"
+  },
+  "schema_version": "bigan-v8-challenge-attempt-002-synthetic-dry-run-v1",
+  "synthetic_market_count": 120,
+  "synthetic_only": true,
+  "synthetic_selected_market_indices": [
+    0,
+    24,
+    48,
+    72,
+    96
+  ]
+}

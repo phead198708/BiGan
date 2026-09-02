@@ -1,0 +1,45 @@
+{
+  "all_historical_success_criteria_passed": false,
+  "attempt_002_preregistration_allowed": false,
+  "candidate_comparison": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-high-price-support-recovery-0-30-development-iteration-002-20260726T174000Z/candidate_market_comparison.jsonl",
+    "sha256": "033691126fd73f5695a50354c3304bdbcfca76696ddbd30a8069ee299c691f39",
+    "size_bytes": 157596
+  },
+  "candidate_id": "v8_1_high_price_support_recovery_0_30",
+  "collection_started": false,
+  "historical_development_only": true,
+  "historical_evaluation_manifest": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-high-price-support-recovery-0-30-development-iteration-002-20260726T174000Z/evaluation/challenge_historical_development_manifest.json",
+    "sha256": "bcb4828c5a5db95b82d05162e0dfb96ffac464ede477ff948affafb320a14b41",
+    "size_bytes": 1309
+  },
+  "historical_evaluation_report": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-high-price-support-recovery-0-30-development-iteration-002-20260726T174000Z/evaluation/challenge_historical_development_result.json",
+    "sha256": "f79269fa22b6fb2b140e280416177026f2b68d37922f2096c4ce301939277619",
+    "size_bytes": 4925
+  },
+  "iteration_entry": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-high-price-support-recovery-0-30-development-iteration-002-20260726T174000Z/evaluation/challenge_historical_development_iteration_entry.json",
+    "sha256": "89b22557bef072be4a7df437bc4f2f126a2175a0469f6562d2652bd20ff2b253",
+    "size_bytes": 2038
+  },
+  "promotion_evidence_eligible": false,
+  "run_id": "challenge-v8-1-high-price-support-recovery-0-30-development-iteration-002-20260726T174000Z",
+  "safety": {
+    "capital_at_risk": false,
+    "collection_start_allowed": false,
+    "handoff_allowed": false,
+    "live_allowed": false,
+    "paper_allowed": false,
+    "promotion_allowed": false,
+    "wallet_allowed": false,
+    "write_allowed": false
+  },
+  "schema_version": "bigan-v8-challenge-high-price-support-recovery-development-manifest-v1",
+  "target_free_manifest": {
+    "path": "/Users/tcscoder/Workspaces/BiGan-Challenge-Model/examples/v8/polymarket_runs/challenge-v8-1-high-price-support-recovery-0-30-development-iteration-002-20260726T174000Z/candidate_target_free_manifest.json",
+    "sha256": "6427015444f496ae2ac66ba6a7fe716c8775fec20f50a8f85eeae2f151106fbf",
+    "size_bytes": 2862
+  }
+}

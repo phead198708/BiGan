@@ -1,0 +1,129 @@
+{
+  "schema_version": "bigan-v8-parallel-future-collection-plan-v1",
+  "issue": 254,
+  "goal": "challenge_model_promote_to_champion_model",
+  "fresh_attempt_id": "v8-5-challenger-parallel-future-attempt-001-provider-complete-corrective-refreeze",
+  "freeze_created_ts": 1785057938000,
+  "freeze_created_at": "2026-07-26T09:25:38Z",
+  "frozen": true,
+  "preregistered_before_collection": true,
+  "lineage": {
+    "implementation_commit": "0f0e94192ae88bc84ad2dfeeae2045d1b2d3ba76",
+    "parallel_candidate_protocol_sha256": "fdd0e3f8808cf831f22e0b5ff319d1668e3c0bd80add28de170b7d7c11639ca4",
+    "candidate_contract_sha256s": {
+      "v8_1_primary_no_fallback": "b06919aadbea6821f44c1decf4f488fd3e34fc2612a115466caad3fe6173ad90",
+      "v8_3_primary_with_fallback": "7865728c35662653dba9650f706bac3539754768c4a5ccb9f956d7166b775171",
+      "matched_frozen_v6_7": "2b0fb579e39e960bfaf57a039a39a8907493256cfb4058b3066fa035369edfc5"
+    },
+    "persistent_collector_protocol_sha256": "9a4020f173c3ee7f1f396ceb5387672f67939c64906d2f263cabe623a1d7c083",
+    "feature_contract_sha256": "a4819ad6beec8d72612aa25ef2af751c357e807d514dcf1d2c94b37eba07c959",
+    "feature_missingness_contract_sha256": "4eb9cb453a684170e3db64dd0db803f4f0e44055a105806368d48428b5d3a107",
+    "feature_missingness_runtime_schema_sha256": "2d97a7102c983afed2e9ea8a71b77cd5af5855c8860a5669842338a5fdca527c",
+    "challenge_promotion_evidence_protocol_sha256": "b9eaaf37c214cea59abdea7bc682a12e0e12a23837f626bd815e4d37c14dee52",
+    "frozen_model_binding_sha256": "64fa0f227ce97ec8ea238c3d8285d55efd96be65c95bf7c091aa95c1c185ccfd",
+    "prefreeze_checklist_sha256": "6557bdd0325d4f27befdf124d8c28ee93e37af2192d77f6b6e0b47f5aae71c06",
+    "excluded_capture_ledger_sha256": "90b3374c04abecb3ac4ac235faa7f94c2d892ae08e2b7940cafccd6a72833e97"
+  },
+  "collection": {
+    "market_family": "btc_updown_5m",
+    "mode": "bounded_candidate_agnostic_outcome_blind_raw_collection",
+    "service_root": "examples/v8/polymarket_live_runs/challenge-model-v8-5-provider-complete-corrective-attempt-001",
+    "selection_rule": "chronological_earliest_quality_valid_after_freeze_boundary",
+    "strictly_later_minimum_market_start_ts_exclusive": 1785057938000,
+    "quality_valid_market_target": 120,
+    "maximum_attempted_market_count": 180,
+    "bounded_batch_market_count": 12,
+    "maximum_batch_count": 15,
+    "same_source_rows_for_all_candidates": true,
+    "market_id_slug_decision_id_and_source_row_hash_disjointness_required": true,
+    "raw_artifact_hash_verification_required": true,
+    "feature_timestamp_causality_required": true,
+    "outcomes_resolution_labels_or_pnl_opened": false,
+    "candidate_scoring_during_raw_capture_allowed": false,
+    "settlement_finalizer_enabled_during_collection": false,
+    "resolution_provider_enabled_during_collection": false,
+    "result_dependent_extension_allowed": false,
+    "operator_collection_authorization_required": true,
+    "operator_collection_authorization_granted_at_refreeze": false,
+    "collection_started": false,
+    "start_requires_separate_operator_decision_after_issue_254_comment": true
+  },
+  "historical_replay_prerequisite": {
+    "gate_contract_sha256": "3ba70dc0c589b0c891dd60ec254e6a733eb203e224598460415be34cffa825fd",
+    "report_sha256": "558a1802513e70426d9bd4c589b2e7736ea0ed11a704f51fdaa613e18ef45988",
+    "candidate_id": "v8_1_primary_no_fallback",
+    "evaluation_completed_ts": 1785051694862,
+    "historical_superiority_gate_passed": true,
+    "future_collection_prerequisite_satisfied": true,
+    "historical_replay_is_promotion_evidence": false
+  },
+  "supersession": {
+    "sequence_number": 5,
+    "corrective_prerequisite_supersession": true,
+    "prior_plan_was_marked_fourth_and_final": true,
+    "fourth_and_final_supersession": false,
+    "prior_plan_collection_started": false,
+    "prior_plan_capture_count": 0,
+    "superseded_collection_plan_sha256": "7188e1ec0dacbdc24352dc179c346ed3f8cdfd363df2ad95857834636a547fb6",
+    "previous_superseded_collection_plan_sha256": "4e1e75e14835e12d133d3709a67a7e9c287a2a32525e99f105e744f43e736498",
+    "earlier_superseded_collection_plan_sha256": "72c009459e59972702b3f67f485f889510bf49d568b004ac50d904b73f6f81b1",
+    "second_superseded_collection_plan_sha256": "f754088a4494cb7908f3b3640fd47d8784ce9063d676245d16c9d3d20dccf3cd",
+    "initial_superseded_collection_plan_sha256": "35fca6bfa3e4d4337b3fecc5106a930982d8640373695d74933131aa1b254e95",
+    "full_supersession_chain_sha256s": [
+      "35fca6bfa3e4d4337b3fecc5106a930982d8640373695d74933131aa1b254e95",
+      "f754088a4494cb7908f3b3640fd47d8784ce9063d676245d16c9d3d20dccf3cd",
+      "72c009459e59972702b3f67f485f889510bf49d568b004ac50d904b73f6f81b1",
+      "4e1e75e14835e12d133d3709a67a7e9c287a2a32525e99f105e744f43e736498",
+      "7188e1ec0dacbdc24352dc179c346ed3f8cdfd363df2ad95857834636a547fb6"
+    ],
+    "reason": "issue_257_provider_health_and_trade_tape_prerequisites_missing_before_collection",
+    "excluded_capture_ledger_sha256": "90b3374c04abecb3ac4ac235faa7f94c2d892ae08e2b7940cafccd6a72833e97",
+    "excluded_pre_replay_probe": {
+      "batch_id": "challenge-v8-5-probe-20260726T0649Z",
+      "service_root": "examples/v8/polymarket_live_runs/challenge-model-v8-5-fresh-attempt-001",
+      "market_start_ts": 1785048600000,
+      "index_entry_sha256": "8f6600e054d6705aa154cd3961661fd9b5e5fb71bc2875ebf12536adb606768f",
+      "index_sha256": "c7426e2bbded23043f3ea6c73f224a15c97de911875f914dcf5b0542812a494c",
+      "excluded_from_fresh_attempt": true,
+      "labels_outcomes_or_pnl_opened": false,
+      "consumes_attempt_or_alpha": false
+    },
+    "excluded_pre_model_binding_capture": {
+      "capture_id": "persistent-outcome-blind-000001-20260726T071829Z-round01-20260726T072000Z",
+      "service_root": "examples/v8/polymarket_live_runs/challenge-model-v8-5-post-historical-attempt-001",
+      "market_start_ts": 1785050400000,
+      "index_entry_written": false,
+      "excluded_from_fresh_attempt": true,
+      "labels_outcomes_or_pnl_opened": false,
+      "consumes_attempt_or_alpha": false
+    },
+    "excluded_pre_exact_model_replay_capture": {
+      "capture_id": "persistent-outcome-blind-000001-20260726T072852Z-round01-20260726T073000Z",
+      "service_root": "examples/v8/polymarket_live_runs/challenge-model-v8-5-model-bound-attempt-001",
+      "market_start_ts": 1785051000000,
+      "capture_manifest_sha256": "fe444425aa7a9ec44efa71e999d8f8871c170ada111985101f72e372a8cb74c0",
+      "capture_report_sha256": "d7ff68ab580ab6384af92fdde86573dad1f2c7f9beb5b960a2dc825d583f58af",
+      "raw_resolution_row_count": 0,
+      "index_entry_written": false,
+      "excluded_from_fresh_attempt": true,
+      "labels_outcomes_or_pnl_opened": false,
+      "consumes_attempt_or_alpha": false
+    }
+  },
+  "alpha_spending": {
+    "fresh_attempt_number": 1,
+    "familywise_window_alpha": 0.025,
+    "parallel_tested_candidate_count": 2,
+    "per_candidate_alpha": 0.0125,
+    "attempt_consumed": false,
+    "consumption_event": "single_use_target_access_claim"
+  },
+  "safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false,
+    "promotion_unlocked": false,
+    "live_unlocked": false
+  }
+}
