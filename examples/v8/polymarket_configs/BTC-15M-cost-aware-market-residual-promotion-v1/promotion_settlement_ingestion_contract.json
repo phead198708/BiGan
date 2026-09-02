@@ -1,0 +1,62 @@
+{
+  "attempt_consumed_on_any_provider_call": true,
+  "automatic_evaluation_or_promotion": false,
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "cli": {
+    "path": "examples/v8/run_residual_promotion_settlement.py",
+    "sha256": "1a302652cccbcddc6a72156b0e3f3761c2c2bcce6bee1e9b1f8fc1ed5c56aa55"
+  },
+  "created_at": "2026-08-10T17:05:54+00:00",
+  "evaluation_execution_contract": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/promotion_evaluation_execution_contract_v4.json",
+    "sha256": "054d84c204c5d02a7e27fc0d9f45116ed511f35a79e75d5fd0363a5596136c29"
+  },
+  "exact_population_order_required": true,
+  "finalization_implementation": {
+    "path": "src/bigan/v8/polymarket/residual_promotion_finalization.py",
+    "sha256": "0136da63bb666479a77c0c1576c31064e432b9cd173f295c46d3686103ae9b9c"
+  },
+  "fresh_outcomes_accessed_when_frozen": false,
+  "implementation": {
+    "path": "src/bigan/v8/polymarket/residual_promotion_settlement.py",
+    "sha256": "930f494fb22ff3c3de245fd2645e04ed8ccb194e0337831a7d85f146313dbc89"
+  },
+  "inferred_settlement_allowed": false,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "max_workers": 16,
+  "official_settlement_only": true,
+  "outcome_access_claim_before_provider_call": true,
+  "partial_failure_terminalizes_lineage": true,
+  "pnl_accessed_when_frozen": false,
+  "provider_attempts": 1,
+  "provider_implementation": {
+    "path": "src/bigan/v8/polymarket/recorder/public_provider.py",
+    "sha256": "1fb0b7a73f02f74a2fa7531729eb368e39b57364611adb54881ec07c48b3d65f"
+  },
+  "recorder_config_implementation": {
+    "path": "src/bigan/v8/polymarket/recorder/async_settlement.py",
+    "sha256": "ea24ad8cddae1bdc6675a8e01be2a424f5db44caaa7d6116d21a111f89c5efce"
+  },
+  "rerun_allowed": false,
+  "resolution_normalization_implementation": {
+    "path": "src/bigan/v8/polymarket/recorder/resolution.py",
+    "sha256": "d3156783ce8597b63b992c417ac8323ee7bb39984b4376a89f1f9ed0f237933e"
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-settlement-ingestion-contract-v1",
+  "settlement_accessed_when_frozen": false,
+  "target_market_count": 2500,
+  "unresolved_market_allowed": false
+}

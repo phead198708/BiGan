@@ -1,0 +1,31 @@
+{
+  "collection_start_record_sha256": null,
+  "evaluation_exactly_once_authorized": false,
+  "execution_contract": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/promotion_evaluation_execution_contract.json",
+    "sha256": "d6d57deec0598d257362b41e2ac37789cb8969120fa1f17244b76edc39248870"
+  },
+  "fresh_outcome_access_authorized": false,
+  "interim_evaluation_authorized": false,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "official_settlement_ingestion_authorized": false,
+  "paper_live_wallet_write_or_capital_authorized": false,
+  "population_manifest_sha256": null,
+  "rerun_authorized": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-outcome-evaluation-authorization-template-v1",
+  "service_root_id": "BTC-15M-cost-aware-market-residual-promotion-v1-corrected-v2",
+  "template_is_executable": false
+}

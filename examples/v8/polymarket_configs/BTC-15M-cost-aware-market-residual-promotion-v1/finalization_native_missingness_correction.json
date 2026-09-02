@@ -1,0 +1,59 @@
+{
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "correction": {
+    "collector_quality_eligibility_changed": false,
+    "finalizer_requires_all_existing_quality_observations_true": true,
+    "finalizer_requires_missing_count_sum_reconciliation": true,
+    "finalizer_requires_nonnegative_integer_missing_counts": true,
+    "missing_values_encoded_as_zero": false,
+    "model_prediction_behavior_changed": false,
+    "native_missing_values_remain_nan": true,
+    "population_selection_changed": false,
+    "statistical_gate_changed": false
+  },
+  "created_at": "2026-08-10T16:10:00+00:00",
+  "defect": "collector_quality_contract_allows_native_missing_values_but_finalizer_required_missing_feature_count_equal_zero",
+  "fresh_outcomes_accessed": false,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "outcome_blind_observation": {
+    "attempt_hash": "05bf716040e913d2a566334b78cabd6f50c39d82f89e26018802da47960e31e0",
+    "attempt_index": 2,
+    "capture_report_sha256": "c56443908df6781d058cf6d7f020dde7829120d22810fb6f41cd056859b223d5",
+    "missing_feature_count": 12,
+    "missing_feature_counts": {
+      "opposite_recent_trade_volume": 4,
+      "selected_minus_opposite_recent_trade_volume": 4,
+      "selected_recent_trade_volume": 4
+    },
+    "missing_values_encoded_as_zero": false,
+    "outcomes_accessed": false,
+    "pnl_accessed": false,
+    "quality_valid": true,
+    "settlement_accessed": false
+  },
+  "prior_artifacts_rewritten": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-finalization-native-missingness-correction-v1",
+  "supersedes_for_future_execution_only": {
+    "evaluation_execution_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/promotion_evaluation_execution_contract.json",
+      "sha256": "d6d57deec0598d257362b41e2ac37789cb8969120fa1f17244b76edc39248870"
+    },
+    "micro_live_preapproval_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/micro_live_preapproval_contract.json",
+      "sha256": "5eb69c0ee94bf85ced18437c2c93d5d01cec65c8836570e6d1a041f7280de222"
+    }
+  }
+}

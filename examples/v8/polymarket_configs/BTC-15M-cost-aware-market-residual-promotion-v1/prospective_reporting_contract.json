@@ -1,0 +1,27 @@
+{
+  "no_post_hoc_exclusions": true,
+  "no_route_side_missingness_or_outlier_filtering": true,
+  "population": "exact_chronological_first_2500_quality_valid_unique_markets",
+  "required_panels": [
+    "overall_candidate_baseline_and_paired_delta",
+    "chronological_five_blocks",
+    "chronological_halves",
+    "largest_winner_removed_candidate_and_delta",
+    "cost_stress_1.2x_1.5x_2.0x",
+    "identity_missingness_and_runtime_parity"
+  ],
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-v1-prospective-reporting-contract"
+}

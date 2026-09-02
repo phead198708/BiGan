@@ -1,0 +1,68 @@
+{
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "correction": {
+    "collector_quality_eligibility_changed": false,
+    "execution_values_changed": false,
+    "finalizer_reads_frozen_features_envelope": true,
+    "missing_or_nonnumeric_execution_fields_fail_closed": true,
+    "model_prediction_behavior_changed": false,
+    "population_selection_changed": false,
+    "required_execution_fields_unchanged": true,
+    "statistical_gate_changed": false
+  },
+  "created_at": "2026-08-10T16:40:00+00:00",
+  "defect": "finalizer_read_execution_fields_from_feature_row_outer_object_instead_of_frozen_features_envelope",
+  "fresh_outcomes_accessed": false,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "outcome_blind_observation": {
+    "attempt_hash": "05bf716040e913d2a566334b78cabd6f50c39d82f89e26018802da47960e31e0",
+    "attempt_index": 2,
+    "capture_report_sha256": "c56443908df6781d058cf6d7f020dde7829120d22810fb6f41cd056859b223d5",
+    "feature_row_schema": {
+      "execution_feature_envelope": "features",
+      "outer_decision_ts": true,
+      "outer_market_id": true,
+      "required_execution_fields": [
+        "up_ask",
+        "up_bid",
+        "up_liquidity_depth",
+        "down_ask",
+        "down_bid",
+        "down_liquidity_depth"
+      ]
+    },
+    "outcomes_accessed": false,
+    "pnl_accessed": false,
+    "quality_valid": true,
+    "settlement_accessed": false
+  },
+  "prior_artifacts_rewritten": false,
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-finalization-feature-envelope-correction-v1",
+  "supersedes_for_future_execution_only": {
+    "evaluation_execution_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/promotion_evaluation_execution_contract_v2.json",
+      "sha256": "b2e3543aabdaf09a046035da44054d63c11fd3ef26027fad6192efbd5ea87e2f"
+    },
+    "micro_live_preapproval_contract": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/micro_live_preapproval_contract_v2.json",
+      "sha256": "a4dd8e33e500e9f2d79825625c1bf4963da7e66720939321b5ee353d0c77b34c"
+    },
+    "outcome_evaluation_authorization_template": {
+      "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/promotion_outcome_evaluation_authorization_template_v2.json",
+      "sha256": "2f0dd952da0a56093da09c903eb4b260255a147292f9b1273f1b03f2d6048690"
+    }
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "automatic_promotion_or_live_unlock": false,
+  "baseline_artifact": {
+    "path": "examples/v8/polymarket_artifacts/sha256/fa6b1429e22b26a7aba32be264431ace0818a4cf613043e3f7e054a5c837b807/moe_global_fallback.json",
+    "sha256": "a601380d8a76c9094d3a7b3ad71c3ff429ab8bbec8c009cc7e2859dee062c409"
+  },
+  "candidate_bundle": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/bundle_manifest.json",
+    "sha256": "7a5b872b5a2a010a0868bf7d22fb4bdc39a941dd04464bb53890d34aa1846b3e"
+  },
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "cost_contract": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_cost_and_action_contract.json",
+    "sha256": "7a2d2f170cd6b042188f8282014dfbfb7d379e49085bd00807aace1881d7bf43"
+  },
+  "created_at": "2026-08-10T15:02:41Z",
+  "evaluation_authorized_by_contract": false,
+  "evaluation_exactly_once": true,
+  "feature_contract": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-MoE-confirmatory-v2/moe_feature_contract.json",
+    "sha256": "dbc6e5e000a79548c5e5c74a38366ede4fe112fd3157850b8e3571599ef642bc"
+  },
+  "finalization_implementation": {
+    "path": "src/bigan/v8/polymarket/residual_promotion_finalization.py",
+    "sha256": "03487ed5cbea7f9a0c0cf9db566bafbd55f836846616845933448aad4892bdfc"
+  },
+  "gate_implementation": {
+    "path": "src/bigan/v8/polymarket/cost_aware_residual.py",
+    "sha256": "491a329f708a16d5aecdd952552cbff3fa13d8f7446bfe3e0c78fade3b36f78c"
+  },
+  "implementation": {
+    "path": "src/bigan/v8/polymarket/residual_promotion_evaluation.py",
+    "sha256": "69f1750117d239fb50b06ee9c0f29e08b322740548379a96dfb8bad734d98ebd"
+  },
+  "interim_evaluation_allowed": false,
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "market_level_rows_required": true,
+  "official_settlement_input_contract": {
+    "exact_population_order_required": true,
+    "inferred_settlement_allowed": false,
+    "official_final_required": true,
+    "official_resolution_reference_required": true,
+    "settlement_finalized_at_required": true,
+    "settlement_source": "official_polymarket",
+    "unresolved_market_allowed": false
+  },
+  "optional_stopping_allowed": false,
+  "outcomes_accessed_when_frozen": false,
+  "reporting_contract": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/prospective_reporting_contract.json",
+    "sha256": "ba6f36b48c392ae1e85e9af61b1b9a51e1111cf4dd6958437d99dc2fc1295d64"
+  },
+  "required_gate_names": [
+    "absolute_candidate_bootstrap_97_5pct_lcb_gt_zero",
+    "both_chronological_halves_candidate_total_gte_zero",
+    "both_chronological_halves_delta_total_gte_zero",
+    "cost_stress_1_2_1_5_2x_candidate_and_delta_totals_gte_zero",
+    "every_one_of_five_chronological_500_market_blocks_candidate_total_gte_zero",
+    "every_one_of_five_chronological_500_market_blocks_delta_total_gte_zero",
+    "largest_positive_delta_removed_total_gte_zero",
+    "largest_winner_removed_candidate_total_gte_zero",
+    "market_identity_and_population_reconciliation",
+    "missingness_and_causality_reconciliation",
+    "offline_live_prediction_and_decision_parity",
+    "paired_delta_bootstrap_97_5pct_lcb_gt_zero",
+    "stable_score_to_realized_pnl_ordering"
+  ],
+  "rerun_allowed": false,
+  "runtime_parity_report": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/candidate_bundle/offline_live_parity_report.json",
+    "sha256": "a0aceffe6e1c73110732d11ea0ada288b6eb0658c74b201c8042e3eecbb52943"
+  },
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-evaluation-execution-contract-v1",
+  "statistical_protocol": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/prospective_statistical_protocol.json",
+    "sha256": "d8b8af9afc2d7d79124e89ec5d92fefea46b1c35b510fbd4612f626df7fac4d1"
+  },
+  "target_quality_valid_market_count": 2500
+}

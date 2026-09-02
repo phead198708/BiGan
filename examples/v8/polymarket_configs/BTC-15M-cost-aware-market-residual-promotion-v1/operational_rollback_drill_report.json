@@ -1,0 +1,961 @@
+{
+  "candidate_bundle_sha256": "7a5b872b5a2a010a0868bf7d22fb4bdc39a941dd04464bb53890d34aa1846b3e",
+  "candidate_id": "residual-v4-challenger-carry-forward-final-fit-001",
+  "capital_at_risk": false,
+  "cli": {
+    "path": "examples/v8/run_residual_promotion_operational_rollback.py",
+    "sha256": "2c5f25547453a5e216c8dd8140756bea1777d2f6ce7ba14976b7a41f5e1ba8cb"
+  },
+  "created_at": "2026-08-10T20:05:00Z",
+  "development_fixture_only": true,
+  "development_fixture_sha256": "77abc5ad6a41c66a19d1407aa8102408cfd259cdf09446c62575810d58416389",
+  "development_outcome_scope": "development_only_forever",
+  "development_outcomes_accessed": true,
+  "fresh_outcomes_accessed": false,
+  "fresh_population_used": false,
+  "functional_rollback_report": {
+    "path": "examples/v8/polymarket_configs/BTC-15M-cost-aware-market-residual-promotion-v1/zero_capital_rollback_drill_report.json",
+    "sha256": "7a05845f2684225775e46dd2a737a0af84a8a337351409745d31bd3f75813aea"
+  },
+  "functional_rollback_report_sha256": "7a05845f2684225775e46dd2a737a0af84a8a337351409745d31bd3f75813aea",
+  "implementation": {
+    "path": "src/bigan/v8/polymarket/residual_promotion_release_evidence.py",
+    "sha256": "258d083aef44b400aa39815a783e105d5fcf903f6e0a5ff278dbb17d51d9fdc3"
+  },
+  "latency_measurements_ms": [
+    0.00725,
+    0.004125,
+    0.002666,
+    0.002125,
+    0.002125,
+    0.001833,
+    0.00175,
+    0.001792,
+    0.001708,
+    0.001709,
+    0.001834,
+    0.001917,
+    0.001833,
+    0.00175,
+    0.001833,
+    0.001917,
+    0.001875,
+    0.001833,
+    0.00175,
+    0.001709,
+    0.001833,
+    0.001792,
+    0.001875,
+    0.001667,
+    0.001791,
+    0.00175,
+    0.001792,
+    0.001709,
+    0.001709,
+    0.001708,
+    0.001708,
+    0.001667,
+    0.001708,
+    0.001667,
+    0.00175,
+    0.001708,
+    0.001708,
+    0.001667,
+    0.001708,
+    0.001667,
+    0.00175,
+    0.00175,
+    0.001709,
+    0.001666,
+    0.001667,
+    0.001666,
+    0.001667,
+    0.001708,
+    0.001708,
+    0.001667,
+    0.001667,
+    0.001667,
+    0.001708,
+    0.001708,
+    0.001709,
+    0.001709,
+    0.00175,
+    0.001791,
+    0.001667,
+    0.00175,
+    0.001708,
+    0.001667,
+    0.001667,
+    0.001708,
+    0.00175,
+    0.00175,
+    0.001708,
+    0.00175,
+    0.00175,
+    0.001708,
+    0.001708,
+    0.00175,
+    0.001709,
+    0.001667,
+    0.001708,
+    0.00175,
+    0.001708,
+    0.00175,
+    0.001708,
+    0.001667,
+    0.001708,
+    0.001667,
+    0.001666,
+    0.001667,
+    0.001708,
+    0.001666,
+    0.001709,
+    0.001709,
+    0.001708,
+    0.001708,
+    0.001709,
+    0.001708,
+    0.001667,
+    0.00175,
+    0.001666,
+    0.001667,
+    0.001708,
+    0.001708,
+    0.001708,
+    0.001709
+  ],
+  "lineage_id": "BTC-15M-cost-aware-market-residual-promotion-v1",
+  "live_trading_allowed": false,
+  "maximum_allowed_latency_ms": 250,
+  "maximum_observed_latency_ms": 0.00725,
+  "micro_live_authorized": false,
+  "observations": [
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 1,
+      "latency_ms": 0.00725,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 2,
+      "latency_ms": 0.004125,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 3,
+      "latency_ms": 0.002666,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 4,
+      "latency_ms": 0.002125,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 5,
+      "latency_ms": 0.002125,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 6,
+      "latency_ms": 0.001833,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 7,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 8,
+      "latency_ms": 0.001792,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 9,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 10,
+      "latency_ms": 0.001709,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 11,
+      "latency_ms": 0.001834,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 12,
+      "latency_ms": 0.001917,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 13,
+      "latency_ms": 0.001833,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 14,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 15,
+      "latency_ms": 0.001833,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 16,
+      "latency_ms": 0.001917,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 17,
+      "latency_ms": 0.001875,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 18,
+      "latency_ms": 0.001833,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 19,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 20,
+      "latency_ms": 0.001709,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 21,
+      "latency_ms": 0.001833,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 22,
+      "latency_ms": 0.001792,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 23,
+      "latency_ms": 0.001875,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 24,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 25,
+      "latency_ms": 0.001791,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 26,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 27,
+      "latency_ms": 0.001792,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 28,
+      "latency_ms": 0.001709,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 29,
+      "latency_ms": 0.001709,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 30,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 31,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 32,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 33,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 34,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 35,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 36,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 37,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 38,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 39,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 40,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 41,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 42,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 43,
+      "latency_ms": 0.001709,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 44,
+      "latency_ms": 0.001666,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 45,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 46,
+      "latency_ms": 0.001666,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 47,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 48,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 49,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 50,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 51,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 52,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 53,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 54,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 55,
+      "latency_ms": 0.001709,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 56,
+      "latency_ms": 0.001709,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 57,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 58,
+      "latency_ms": 0.001791,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 59,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 60,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 61,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 62,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 63,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 64,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 65,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 66,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 67,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 68,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 69,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 70,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 71,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 72,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 73,
+      "latency_ms": 0.001709,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 74,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 75,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 76,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 77,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 78,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 79,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 80,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 81,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 82,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 83,
+      "latency_ms": 0.001666,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 84,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 85,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 86,
+      "latency_ms": 0.001666,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 87,
+      "latency_ms": 0.001709,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 88,
+      "latency_ms": 0.001709,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 89,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 90,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 91,
+      "latency_ms": 0.001709,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 92,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 93,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 94,
+      "latency_ms": 0.00175,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 95,
+      "latency_ms": 0.001666,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 96,
+      "latency_ms": 0.001667,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 97,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 98,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 99,
+      "latency_ms": 0.001708,
+      "rollback_to_no_trade_passed": true
+    },
+    {
+      "fail_closed_reasons": [
+        "runtime input is not BTC 15m"
+      ],
+      "iteration": 100,
+      "latency_ms": 0.001709,
+      "rollback_to_no_trade_passed": true
+    }
+  ],
+  "outcomes_accessed": true,
+  "phase6_zero_capital_authorized": false,
+  "pnl_accessed": false,
+  "polymarket_write_allowed": false,
+  "rollback_drill_passed": true,
+  "rollback_target": "NO_TRADE",
+  "safe_parameters": {
+    "action": "NO_TRADE",
+    "capital_fraction": 0.0
+  },
+  "safe_parameters_sha256": "7d12f2493eb6031f1d3037a51414751056fcaa82d00b1526917246f59c92f890",
+  "safety": {
+    "#134_resume_allowed": false,
+    "#146_start_allowed": false,
+    "capital_at_risk": false,
+    "freeze_ready": false,
+    "live_trading_allowed": false,
+    "paper_candidate_allowed": false,
+    "polymarket_write_allowed": false,
+    "promotion_evidence_eligible": false,
+    "source_model_candidate_eligible": false,
+    "v8_execution_handoff_allowed": false,
+    "wallet_signing_allowed": false
+  },
+  "schema_version": "bigan-btc-15m-residual-promotion-operational-rollback-report-v1",
+  "settlement_accessed": false,
+  "wallet_signing_allowed": false
+}
