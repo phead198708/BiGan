@@ -7,6 +7,7 @@ import pytest
 from bigan.data.polymarket_clob import MarketSnapshot, PolymarketFeedHandler
 from bigan.execution.polymarket_oms import REJECT_SPREAD_TOO_WIDE, PolymarketOMS
 from bigan.features.binance_ofi import BinanceOFICalculator, TopOfBook
+from bigan.pipeline.events import DecisionDisposition, DecisionReason
 from bigan.pipeline.strategy_runner import PricingInputs, StrategyRunner
 from bigan.strategies.polymarket_pricing import MarketWindow, PolymarketPricingEngine
 
@@ -29,6 +30,8 @@ def _runner(
     max_spread_allowed: float = 0.08,
     ofi_bid_qty: float = 1.0,
     ofi_ask_qty: float = 1.0,
+    fee_bps: float = 0.0,
+    execution_history_limit: int = 10_000,
 ) -> StrategyRunner:
     market = window or _window()
     feed = PolymarketFeedHandler(
@@ -47,6 +50,8 @@ def _runner(
         spot_price=market.strike_price,
         ofi_bid_qty=ofi_bid_qty,
         ofi_ask_qty=ofi_ask_qty,
+        fee_bps=fee_bps,
+        execution_history_limit=execution_history_limit,
         pricing_inputs_provider=lambda timestamp_ms: PricingInputs(
             timestamp_ms=timestamp_ms,
             spot_price=market.strike_price,
@@ -196,7 +201,7 @@ async def test_e2e_tail_cutoff_blocks_trade() -> None:
 
     assert runner.ofi_engine.get_normalized_ofi() > 0.0
     assert runner.oms_calls == 0
-    assert runner.execution_history == []
+    assert not runner.execution_history
     assert runner.current_bankroll == pytest.approx(starting)
     assert runner.oms.positions() == ()
     assert runner.callback_errors == 0
@@ -254,3 +259,185 @@ async def test_e2e_wide_spread_rejection() -> None:
     assert runner.current_bankroll == pytest.approx(starting)
     assert runner.oms.positions() == ()
     assert runner.callback_errors == 0
+
+
+def _snapshot(
+    runner: StrategyRunner,
+    *,
+    timestamp_ms: int = 100_000,
+    window_id: str | None = None,
+    yes_bid: float = 0.39,
+    yes_ask: float = 0.40,
+    no_bid: float = 0.39,
+    no_ask: float = 0.90,
+) -> MarketSnapshot:
+    return MarketSnapshot(
+        timestamp_ms=timestamp_ms,
+        window_id=window_id or runner.window.window_id,
+        yes_bid=yes_bid,
+        yes_ask=yes_ask,
+        no_bid=no_bid,
+        no_ask=no_ask,
+        last_traded_price=yes_ask,
+        yes_bid_size=100.0,
+        yes_ask_size=100.0,
+        no_bid_size=100.0,
+        no_ask_size=100.0,
+    )
+
+
+def test_every_fail_closed_and_hold_path_emits_a_decision() -> None:
+    runner = _runner()
+    events = []
+    runner.on_decision(events.append)
+
+    runner.process_snapshot_sync(
+        _snapshot(runner, window_id="different-window")
+    )
+    runner.pricing_inputs_provider = lambda _timestamp: None
+    runner.process_snapshot_sync(_snapshot(runner, timestamp_ms=100_001))
+    runner.pricing_inputs_provider = lambda timestamp: PricingInputs(
+        timestamp_ms=timestamp - runner.reference_max_age_ms - 1,
+        spot_price=100_000.0,
+        oracle_twap_so_far=100_000.0,
+        twap_weight=0.0,
+        volatility_annualized=0.60,
+    )
+    runner.process_snapshot_sync(_snapshot(runner, timestamp_ms=100_002))
+    runner.pricing_inputs_provider = lambda timestamp: PricingInputs(
+        timestamp_ms=timestamp,
+        spot_price=100_000.0,
+        oracle_twap_so_far=100_000.0,
+        twap_weight=0.0,
+        volatility_annualized=0.60,
+    )
+    runner.process_snapshot_sync(
+        _snapshot(runner, timestamp_ms=runner.window.end_ts_ms - 1)
+    )
+
+    assert [event.disposition for event in events] == [
+        DecisionDisposition.DROPPED,
+        DecisionDisposition.DROPPED,
+        DecisionDisposition.DROPPED,
+        DecisionDisposition.HOLD,
+    ]
+    assert [event.reason_code for event in events] == [
+        DecisionReason.WINDOW_MISMATCH,
+        DecisionReason.PRICING_INPUTS_MISSING,
+        DecisionReason.PRICING_INPUTS_STALE,
+        DecisionReason.SIGNAL_HOLD,
+    ]
+    assert runner.oms_calls == 0
+    assert runner.decision_count == 4
+
+
+def test_buy_yes_fee_and_cash_are_recorded_consistently() -> None:
+    runner = _runner(fee_bps=100.0)
+
+    result = runner.process_snapshot_sync(_snapshot(runner))
+
+    assert result is not None and result.status == "FILLED"
+    assert result.side == "YES"
+    expected_fee = result.shares * result.price * 0.01
+    assert result.fee_usdc == pytest.approx(expected_fee)
+    assert runner.current_bankroll == pytest.approx(
+        1_000.0 - result.shares * result.price - expected_fee
+    )
+    assert runner.current_bankroll == pytest.approx(runner.oms.bankroll)
+    assert runner.execution_history[-1] == result
+    assert runner.last_decision is not None
+    assert runner.last_decision.disposition is DecisionDisposition.FILLED
+    assert runner.last_decision.fee_usdc == pytest.approx(expected_fee)
+    assert runner.last_decision.to_dict()["disposition"] == "FILLED"
+
+
+def test_buy_no_rejection_and_no_order_events() -> None:
+    buy_no = _runner()
+    buy_no.pricing_inputs_provider = lambda timestamp: PricingInputs(
+        timestamp_ms=timestamp,
+        spot_price=90_000.0,
+        oracle_twap_so_far=100_000.0,
+        twap_weight=0.0,
+        volatility_annualized=0.10,
+    )
+    no_result = buy_no.process_snapshot_sync(
+        _snapshot(buy_no, yes_bid=0.09, yes_ask=0.90, no_bid=0.39, no_ask=0.40)
+    )
+    assert no_result is not None and no_result.side == "NO"
+    assert buy_no.last_decision is not None
+    assert buy_no.last_decision.disposition is DecisionDisposition.FILLED
+
+    rejected = _runner(max_spread_allowed=0.01)
+    reject_result = rejected.process_snapshot_sync(
+        _snapshot(rejected, yes_bid=0.30, yes_ask=0.40)
+    )
+    assert reject_result is not None and reject_result.status == "REJECTED"
+    assert rejected.last_decision is not None
+    assert rejected.last_decision.disposition is DecisionDisposition.REJECTED
+    assert rejected.last_decision.cash_before == rejected.last_decision.cash_after
+
+    duplicate = _runner()
+    snapshot = _snapshot(duplicate)
+    assert duplicate.process_snapshot_sync(snapshot) is not None
+    assert duplicate.process_snapshot_sync(snapshot) is None
+    assert duplicate.last_decision is not None
+    assert duplicate.last_decision.disposition is DecisionDisposition.NO_ORDER
+
+
+def test_alpha_missing_stale_and_fresh_are_distinguishable() -> None:
+    runner = _runner()
+    runner.process_snapshot_sync(_snapshot(runner, timestamp_ms=100_000))
+    missing = runner.last_decision
+    assert missing is not None
+    assert missing.alpha_reason_code is DecisionReason.ALPHA_MISSING
+    assert missing.z_ofi == 0.0
+
+    runner.push_alpha_tick(_alpha_book(timestamp_ms=90_000, bid_indicator=0.3))
+    runner.process_snapshot_sync(_snapshot(runner, timestamp_ms=100_001))
+    stale = runner.last_decision
+    assert stale is not None
+    assert stale.alpha_reason_code is DecisionReason.ALPHA_STALE
+    assert stale.alpha_timestamp_ms == 90_000
+    assert stale.z_ofi == 0.0
+
+
+def test_decision_callback_failure_is_isolated_from_fill_and_other_callbacks() -> None:
+    runner = _runner()
+    observed = []
+
+    def broken(_event: object) -> None:
+        raise RuntimeError("subscriber failed")
+
+    runner.on_decision(broken)
+    runner.on_decision(observed.append)
+    result = runner.process_snapshot_sync(_snapshot(runner))
+
+    assert result is not None and result.status == "FILLED"
+    assert len(observed) == 1
+    assert runner.decision_callback_errors == 1
+    assert runner.current_bankroll < 1_000.0
+
+
+def test_execution_history_is_bounded_but_count_remains_monotonic() -> None:
+    runner = _runner(max_spread_allowed=0.01, execution_history_limit=2)
+    for index in range(3):
+        result = runner.process_snapshot_sync(
+            _snapshot(
+                runner,
+                timestamp_ms=100_000 + index,
+                yes_bid=0.20,
+                yes_ask=0.40,
+            )
+        )
+        assert result is not None and result.status == "REJECTED"
+
+    assert len(runner.execution_history) == 2
+    assert runner.execution_count == 3
+    assert runner.last_execution == runner.execution_history[-1]
+    assert runner.execution_history[0].order_id == "oms-2"
+
+
+@pytest.mark.parametrize("fee_bps", [-1.0, float("nan"), float("inf")])
+def test_invalid_paper_fee_is_rejected(fee_bps: float) -> None:
+    with pytest.raises(ValueError, match="fee_bps"):
+        _runner(fee_bps=fee_bps)

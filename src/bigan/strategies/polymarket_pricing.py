@@ -131,6 +131,17 @@ class PolymarketPricingEngine:
         self.kelly_fraction = fraction
         self.tail_cutoff_ms = cutoff
 
+    def config_identity(self) -> dict[str, object]:
+        """Return every pricing parameter that can change a decision."""
+
+        return {
+            "ofi_gamma": self.ofi_gamma,
+            "min_edge_5m": self.min_edge_5m,
+            "min_edge_15m": self.min_edge_15m,
+            "kelly_fraction": self.kelly_fraction,
+            "tail_cutoff_ms": self.tail_cutoff_ms,
+        }
+
     def effective_strike(
         self,
         *,

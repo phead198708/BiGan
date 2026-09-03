@@ -185,6 +185,18 @@ class BinanceOFICalculator:
             return 0.0
         return self._last_z
 
+    def config_identity(self) -> dict[str, object]:
+        """Return the complete stable configuration used by this calculator."""
+
+        return {
+            "ema_alpha": self.ema_alpha,
+            "window_ms": self.window_ms,
+            "zscore_min_samples": self.zscore_min_samples,
+            "zscore_clip": self.zscore_clip,
+            "max_events_cap": self.max_events_cap,
+            "symbol": self.symbol,
+        }
+
     def on_depth_update(
         self,
         *,

@@ -137,6 +137,21 @@ class PolymarketFeedHandler:
 
         self._callbacks.append(callback)
 
+    def config_identity(self) -> dict[str, object]:
+        """Return stable source settings that determine accepted snapshots."""
+
+        return {
+            "window_id": self.window_id,
+            "yes_token_id": self.yes_token_id,
+            "no_token_id": self.no_token_id,
+            "ws_url": self.ws_url,
+            "mock": self.mock,
+            "reconnect_min_seconds": self.reconnect_min_seconds,
+            "reconnect_max_seconds": self.reconnect_max_seconds,
+            "heartbeat_interval_seconds": self.heartbeat_interval_seconds,
+            "max_quote_age_ms": self.max_quote_age_ms,
+        }
+
     def subscription_message(self) -> dict[str, object]:
         return {
             "assets_ids": [self.yes_token_id, self.no_token_id],
