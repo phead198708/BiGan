@@ -56,6 +56,7 @@ class _GridJob:
     updates: dict[str, object]
     base: StrategyBacktestParams
     window: MarketWindow
+    windows: dict[str, MarketWindow]
     folds: tuple[_GridFold, ...]
     settlement: dict[str, float]
     score: str
@@ -124,30 +125,18 @@ def time_series_folds(
     n_splits: int = 1,
     train_ratio: float = 0.70,
 ) -> tuple[tuple[tuple[MarketSnapshot, ...], tuple[MarketSnapshot, ...]], ...]:
-    """Expanding-window time-series folds; ``n_splits=1`` is a single IS/OOS cut."""
+    """Build expanding folds without splitting any ``window_id`` outcome."""
 
     splits = int(n_splits)
     if splits < 1:
         raise ValueError("n_splits must be positive")
     tape = tuple(snapshots)
-    if splits == 1:
-        return (split_snapshots_by_time(tape, train_ratio=train_ratio),)
-    if len(tape) < splits + 1:
-        raise ValueError("not enough snapshots for the requested n_splits")
-    fold_size = max(1, len(tape) // (splits + 1))
-    folds: list[tuple[tuple[MarketSnapshot, ...], tuple[MarketSnapshot, ...]]] = []
-    for i in range(splits):
-        train_end = fold_size * (i + 1)
-        test_end = min(len(tape), train_end + fold_size)
-        if i == splits - 1:
-            test_end = len(tape)
-        train = tape[:train_end]
-        test = tape[train_end:test_end]
-        if train and test:
-            folds.append((train, test))
-    if not folds:
-        raise ValueError("time-series split produced no usable folds")
-    return tuple(folds)
+    window_groups = _contiguous_window_groups(tape)
+    return _window_group_folds(
+        window_groups,
+        n_splits=splits,
+        train_ratio=train_ratio,
+    )
 
 
 def run_grid_search(
@@ -155,6 +144,7 @@ def run_grid_search(
     grid: Mapping[str, Sequence[object]],
     *,
     window: MarketWindow,
+    windows: Mapping[str, MarketWindow] | None = None,
     base: StrategyBacktestParams | None = None,
     train_ratio: float = 0.70,
     n_splits: int = 1,
@@ -164,10 +154,11 @@ def run_grid_search(
     spot_prices: Sequence[float] | None = None,
     alpha_books: Sequence[TopOfBook] | None = None,
 ) -> GridSearchReport:
-    """Score every grid combination; the winner is the best mean OOS metric.
+    """Score combinations on complete-window IS/OOS folds.
 
     ``max_workers is None`` uses ``os.cpu_count()``. ``max_workers <= 1``
-    stays in-process so unit tests do not need a process pool.
+    stays in-process so unit tests do not need a process pool. At least two
+    contiguous window groups and metadata for every ``window_id`` are required.
     """
 
     if score not in _SCORE_NAMES:
@@ -187,11 +178,13 @@ def run_grid_search(
         for train, test in snapshot_folds
     )
     payouts = dict(settlement) if settlement is not None else {}
+    window_metadata = dict(windows) if windows is not None else {}
     jobs = tuple(
         _GridJob(
             updates=combo,
             base=params,
             window=window,
+            windows=window_metadata,
             folds=folds,
             settlement=payouts,
             score=score,
@@ -228,7 +221,11 @@ def _run_grid_job(job: _GridJob) -> GridSearchTrial:
     out_of_sample: list[StrategyBacktestMetrics] = []
     for fold in job.folds:
         if fold.train:
-            is_engine = BacktestEngine(window=job.window, params=params)
+            is_engine = BacktestEngine(
+                window=job.window,
+                windows=job.windows,
+                params=params,
+            )
             in_sample.append(
                 is_engine.run(
                     fold.train,
@@ -238,7 +235,11 @@ def _run_grid_job(job: _GridJob) -> GridSearchTrial:
                 ).metrics
             )
         if fold.test:
-            oos_engine = BacktestEngine(window=job.window, params=params)
+            oos_engine = BacktestEngine(
+                window=job.window,
+                windows=job.windows,
+                params=params,
+            )
             out_of_sample.append(
                 oos_engine.run(
                     fold.test,
@@ -273,6 +274,74 @@ def _aligned_fold(
         train_alpha=None if alpha_books is None else alpha_books[:train_end],
         test_alpha=None if alpha_books is None else alpha_books[train_end:test_end],
     )
+
+
+def _contiguous_window_groups(
+    tape: tuple[MarketSnapshot, ...],
+) -> tuple[tuple[MarketSnapshot, ...], ...]:
+    groups: list[list[MarketSnapshot]] = []
+    seen: set[str] = set()
+    current_window: str | None = None
+    for snapshot in tape:
+        if snapshot.window_id != current_window:
+            if snapshot.window_id in seen:
+                raise ValueError("each window_id must occupy one contiguous block")
+            seen.add(snapshot.window_id)
+            current_window = snapshot.window_id
+            groups.append([])
+        groups[-1].append(snapshot)
+    return tuple(tuple(group) for group in groups)
+
+
+def _window_group_folds(
+    groups: tuple[tuple[MarketSnapshot, ...], ...],
+    *,
+    n_splits: int,
+    train_ratio: float,
+) -> tuple[tuple[tuple[MarketSnapshot, ...], tuple[MarketSnapshot, ...]], ...]:
+    if not 0.0 < float(train_ratio) < 1.0:
+        raise ValueError("train_ratio must be in (0, 1)")
+    if len(groups) < n_splits + 1:
+        raise ValueError("not enough complete windows for the requested n_splits")
+    if n_splits == 1:
+        tape = _flatten_window_groups(groups)
+        cut_ts = tape[0].timestamp_ms + int(
+            (tape[-1].timestamp_ms - tape[0].timestamp_ms) * train_ratio
+        )
+        train_group_count = 1
+        for count in range(1, len(groups)):
+            if groups[count - 1][-1].timestamp_ms <= cut_ts:
+                train_group_count = count
+            else:
+                break
+        train_group_count = min(train_group_count, len(groups) - 1)
+        return (
+            (
+                _flatten_window_groups(groups[:train_group_count]),
+                _flatten_window_groups(groups[train_group_count:]),
+            ),
+        )
+
+    fold_size = max(1, len(groups) // (n_splits + 1))
+    folds: list[tuple[tuple[MarketSnapshot, ...], tuple[MarketSnapshot, ...]]] = []
+    for i in range(n_splits):
+        train_end = fold_size * (i + 1)
+        test_end = min(len(groups), train_end + fold_size)
+        if i == n_splits - 1:
+            test_end = len(groups)
+        train = _flatten_window_groups(groups[:train_end])
+        test = _flatten_window_groups(groups[train_end:test_end])
+        if train and test:
+            folds.append((train, test))
+    if not folds:
+        raise ValueError("complete-window split produced no usable folds")
+    return tuple(folds)
+
+
+def _flatten_window_groups(
+    groups: Sequence[tuple[MarketSnapshot, ...]],
+) -> tuple[MarketSnapshot, ...]:
+    return tuple(snapshot for group in groups for snapshot in group)
 
 
 def _mean_score(rows: Sequence[StrategyBacktestMetrics], score: str) -> float:

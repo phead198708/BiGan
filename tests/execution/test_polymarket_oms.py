@@ -255,3 +255,27 @@ def test_duplicate_signal_is_idempotent() -> None:
     assert first is not None and first.status == "FILLED"
     assert second is None
     assert len(oms.positions()) == 1
+
+
+def test_local_rejection_does_not_consume_signal_idempotency_key() -> None:
+    oms = PolymarketOMS()
+    signal = _signal(direction=SignalDirection.BUY_YES)
+    rejected = oms.process_signal(
+        signal,
+        current_bankroll=1_000.0,
+        current_bid=0.49,
+        current_ask_size=0.0,
+    )
+    assert rejected is not None
+    assert rejected.status == "REJECTED"
+    assert rejected.reject_reason == REJECT_LIQUIDITY_UNAVAILABLE
+
+    retried = oms.process_signal(
+        signal,
+        current_bankroll=1_000.0,
+        current_bid=0.49,
+        current_ask_size=100.0,
+    )
+    assert retried is not None
+    assert retried.status == "FILLED"
+    assert oms.get_position("btc-updown-test", "YES") is not None

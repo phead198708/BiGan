@@ -163,7 +163,6 @@ class PolymarketOMS:
         )
         if signal_key in self._processed_signals:
             return None
-        self._remember_signal(signal_key)
 
         bankroll = _finite_float("current_bankroll", current_bankroll)
         bid = _finite_float("current_bid", current_bid)
@@ -235,6 +234,7 @@ class PolymarketOMS:
             fill_price=fill_price,
             cost_usdc=cost,
         )
+        self._remember_signal(signal_key)
         self.bankroll = bankroll - cost
         return OrderResult(
             order_id=self._next_order_id(),

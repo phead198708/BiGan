@@ -132,6 +132,21 @@ async def test_snapshot_callback_trigger() -> None:
     assert received[1].no_ask == pytest.approx(0.43)
     assert received[1].yes_bid == pytest.approx(0.56)
 
+    trade = await handler.ingest_payload(
+        {
+            "event_type": "last_trade_price",
+            "asset_id": "yes-token",
+            "timestamp": "1700000000300",
+            "sequence": 13,
+            "price": "0.55",
+        }
+    )
+    assert trade is not None
+    assert trade.timestamp_ms == 1_700_000_000_300
+    assert trade.last_traded_price == pytest.approx(0.55)
+    assert len(received) == 3
+    assert received[-1] == trade
+
 
 @pytest.mark.asyncio
 async def test_application_heartbeat_and_pong_handling() -> None:

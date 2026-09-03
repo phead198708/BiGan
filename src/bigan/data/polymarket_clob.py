@@ -277,6 +277,7 @@ class PolymarketFeedHandler:
         coerced = _optional_float(last_price)
         if coerced is not None:
             self._last_traded_price = coerced
+            updated_sides.add("TRADE")
         return updated_sides
 
     def _update_named_quotes(self, payload: Mapping[str, object]) -> set[str]:

@@ -231,6 +231,31 @@ class BacktestEngine:
                     ask_qty=alpha.ask_qty,
                     ts_ms=alpha.ts_ms,
                 )
+            if mode == "limit" and resting is not None:
+                (
+                    oms_calls,
+                    cash,
+                    yes_shares,
+                    no_shares,
+                    commission,
+                    resting,
+                    rejected,
+                ) = _maybe_execute(
+                    signal=resting[0],
+                    snapshot=snap,
+                    oms=oms,
+                    cash=cash,
+                    yes_shares=yes_shares,
+                    no_shares=no_shares,
+                    lots=lots,
+                    fills=fills,
+                    mode=mode,
+                    resting=resting,
+                    fee_bps=params.fee_bps,
+                    oms_calls=oms_calls,
+                    rejected=rejected,
+                    commission=commission,
+                )
             spot = (
                 float(spot_prices[i])
                 if spot_prices is not None
@@ -255,30 +280,35 @@ class BacktestEngine:
                 abs(z_ofi) >= params.min_abs_z_ofi
                 and signal.direction is not SignalDirection.HOLD
             ):
-                (
-                    oms_calls,
-                    cash,
-                    yes_shares,
-                    no_shares,
-                    commission,
-                    resting,
-                    rejected,
-                ) = _maybe_execute(
-                    signal=signal,
-                    snapshot=snap,
-                    oms=oms,
-                    cash=cash,
-                    yes_shares=yes_shares,
-                    no_shares=no_shares,
-                    lots=lots,
-                    fills=fills,
-                    mode=mode,
-                    resting=resting,
-                    fee_bps=params.fee_bps,
-                    oms_calls=oms_calls,
-                    rejected=rejected,
-                    commission=commission,
-                )
+                if mode == "limit":
+                    if resting is None:
+                        bid, _, _ = _book_for_signal(signal, snap)
+                        resting = (signal, bid)
+                else:
+                    (
+                        oms_calls,
+                        cash,
+                        yes_shares,
+                        no_shares,
+                        commission,
+                        resting,
+                        rejected,
+                    ) = _maybe_execute(
+                        signal=signal,
+                        snapshot=snap,
+                        oms=oms,
+                        cash=cash,
+                        yes_shares=yes_shares,
+                        no_shares=no_shares,
+                        lots=lots,
+                        fills=fills,
+                        mode=mode,
+                        resting=resting,
+                        fee_bps=params.fee_bps,
+                        oms_calls=oms_calls,
+                        rejected=rejected,
+                        commission=commission,
+                    )
             elif signal.direction is SignalDirection.HOLD:
                 resting = None
 
@@ -373,8 +403,7 @@ def _maybe_execute(
     max_fill_price: float | None = None
     if mode == "limit":
         if resting is None:
-            bid, _, _ = _book_for_signal(signal, snapshot)
-            return oms_calls, cash, yes_shares, no_shares, commission, (signal, bid), rejected
+            raise ValueError("limit execution requires a resting order")
         active, limit_px = resting
         bid, ask, ask_size = _book_for_signal(active, snapshot)
         if ask > limit_px:
@@ -407,7 +436,16 @@ def _maybe_execute(
                 cash_after=cash,
             )
         )
-        return oms_calls, cash, yes_shares, no_shares, commission, None, rejected
+        next_resting = resting if mode == "limit" else None
+        return (
+            oms_calls,
+            cash,
+            yes_shares,
+            no_shares,
+            commission,
+            next_resting,
+            rejected,
+        )
     notional = result.shares * result.price
     fee = notional * float(fee_bps) / _BPS
     cash = oms.bankroll - fee

@@ -230,6 +230,53 @@ def test_limit_order_rests_then_fills_when_ask_crosses() -> None:
     assert filled[0].order.price <= 0.38
 
 
+def test_resting_limit_fills_before_tail_cutoff_cancels_new_signal() -> None:
+    window = MarketWindow(
+        window_id=WINDOW_ID,
+        symbol="BTC",
+        strike_price=100_000.0,
+        start_ts_ms=0,
+        end_ts_ms=145_000,
+        window_type="15m",
+    )
+    snapshots = (
+        MarketSnapshot(
+            timestamp_ms=100_000,
+            window_id=WINDOW_ID,
+            yes_bid=0.38,
+            yes_ask=0.42,
+            no_bid=0.09,
+            no_ask=0.90,
+            last_traded_price=0.38,
+            yes_bid_size=10_000.0,
+            yes_ask_size=10_000.0,
+            no_bid_size=10_000.0,
+            no_ask_size=10_000.0,
+        ),
+        MarketSnapshot(
+            timestamp_ms=115_000,
+            window_id=WINDOW_ID,
+            yes_bid=0.36,
+            yes_ask=0.37,
+            no_bid=0.09,
+            no_ask=0.90,
+            last_traded_price=0.37,
+            yes_bid_size=10_000.0,
+            yes_ask_size=10_000.0,
+            no_bid_size=10_000.0,
+            no_ask_size=10_000.0,
+        ),
+    )
+    result = BacktestEngine(
+        window=window,
+        params=_params(execution_mode="limit", ofi_zscore_min_samples=1),
+    ).run(snapshots, settlement={WINDOW_ID: 1.0})
+    filled = [row for row in result.fills if row.order.status == "FILLED"]
+    assert len(filled) == 1
+    assert filled[0].timestamp_ms == 115_000
+    assert filled[0].order.price <= 0.38
+
+
 def test_multi_window_replay_uses_each_window_metadata() -> None:
     first_window = MarketWindow(
         window_id="window-1",
