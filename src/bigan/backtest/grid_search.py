@@ -17,7 +17,23 @@ from .engine import BacktestEngine, StrategyBacktestParams
 from .metrics import StrategyBacktestMetrics
 
 _PARAM_NAMES = {item.name for item in fields(StrategyBacktestParams)}
-_SCORE_NAMES = {item.name for item in fields(StrategyBacktestMetrics)}
+_SCORE_MAXIMIZES = {
+    "total_return": True,
+    "cagr": True,
+    "win_rate": True,
+    "profit_factor": True,
+    "max_drawdown": False,
+    "sharpe_ratio": True,
+    "sortino_ratio": True,
+    "calmar_ratio": True,
+    "total_trades": True,
+    "avg_trade_duration_ms": False,
+    "avg_pnl_per_trade": True,
+    "commission_paid": False,
+}
+_SCORE_NAMES = set(_SCORE_MAXIMIZES)
+if {item.name for item in fields(StrategyBacktestMetrics)} != _SCORE_NAMES:
+    raise RuntimeError("grid-search score directions must cover every metric")
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +49,7 @@ class GridSearchTrial:
 
 @dataclass(frozen=True, slots=True)
 class GridSearchReport:
-    """Ranked grid-search output. ``best_params`` maximizes the OOS score."""
+    """Grid-search output with the direction-aware best OOS parameters."""
 
     score: str
     best_params: dict[str, object]
@@ -60,6 +76,7 @@ class _GridJob:
     folds: tuple[_GridFold, ...]
     settlement: dict[str, float]
     score: str
+    alpha_symbol: str | None
 
 
 def expand_param_grid(grid: Mapping[str, Sequence[object]]) -> tuple[dict[str, object], ...]:
@@ -158,6 +175,7 @@ def run_grid_search(
     settlement: Mapping[str, float] | None = None,
     spot_prices: Sequence[float] | None = None,
     alpha_books: Sequence[TopOfBook] | None = None,
+    alpha_symbol: str | None = None,
 ) -> GridSearchReport:
     """Score combinations on complete-window IS/OOS folds.
 
@@ -165,7 +183,9 @@ def run_grid_search(
     stays in-process so unit tests do not need a process pool. At least two
     contiguous window groups and metadata for every ``window_id`` are required.
     ``spot_prices`` remains snapshot-aligned; ``alpha_books`` is an independent
-    ordered event tape and is sliced into each fold by event time.
+    ordered event tape, bound by ``alpha_symbol``, and sliced into each fold by
+    event time. Drawdown, duration, and commission scores are minimized; all
+    other supported metrics are maximized.
     """
 
     if score not in _SCORE_NAMES:
@@ -178,6 +198,17 @@ def run_grid_search(
     snapshot_folds = time_series_folds(tape, n_splits=n_splits, train_ratio=train_ratio)
     spots = tuple(float(value) for value in spot_prices) if spot_prices is not None else None
     alpha = tuple(alpha_books) if alpha_books is not None else None
+    if alpha and (not isinstance(alpha_symbol, str) or not alpha_symbol.strip()):
+        raise ValueError("alpha_symbol is required when alpha_books is non-empty")
+    if alpha:
+        market_symbol = str(window.symbol).strip().upper()
+        expected_alpha_symbol = (
+            market_symbol if market_symbol.endswith("USDT") else f"{market_symbol}USDT"
+        )
+        if alpha_symbol is None or alpha_symbol.strip().upper() != expected_alpha_symbol:
+            raise ValueError(
+                f"alpha_symbol must match backtest symbol {expected_alpha_symbol}"
+            )
     if alpha is not None and any(
         current.ts_ms < previous.ts_ms
         for previous, current in zip(alpha, alpha[1:], strict=False)
@@ -198,6 +229,7 @@ def run_grid_search(
             folds=folds,
             settlement=payouts,
             score=score,
+            alpha_symbol=alpha_symbol,
         )
         for combo in combos
     )
@@ -212,9 +244,11 @@ def run_grid_search(
             trials = tuple(pool.map(_run_grid_job, jobs))
     best_index = 0
     best_score = trials[0].out_of_sample_score
+    maximize = _SCORE_MAXIMIZES[score]
     for i, trial in enumerate(trials):
-        if trial.out_of_sample_score > best_score:
-            best_score = trial.out_of_sample_score
+        candidate = trial.out_of_sample_score
+        if (maximize and candidate > best_score) or (not maximize and candidate < best_score):
+            best_score = candidate
             best_index = i
     best = trials[best_index]
     return GridSearchReport(
@@ -242,6 +276,7 @@ def _run_grid_job(job: _GridJob) -> GridSearchTrial:
                     settlement=job.settlement,
                     spot_prices=fold.train_spots,
                     alpha_books=fold.train_alpha,
+                    alpha_symbol=job.alpha_symbol,
                 ).metrics
             )
         if fold.test:
@@ -256,6 +291,7 @@ def _run_grid_job(job: _GridJob) -> GridSearchTrial:
                     settlement=job.settlement,
                     spot_prices=fold.test_spots,
                     alpha_books=fold.test_alpha,
+                    alpha_symbol=job.alpha_symbol,
                 ).metrics
             )
     return GridSearchTrial(

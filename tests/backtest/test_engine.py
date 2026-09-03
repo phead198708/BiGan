@@ -339,12 +339,42 @@ def test_backtest_replays_independent_alpha_events_and_reuses_fresh_z() -> None:
     ).run(
         snapshots,
         alpha_books=alpha_updates,
+        alpha_symbol="BTCUSDT",
         settlement={WINDOW_ID: 1.0},
     )
 
     filled_at = [row.timestamp_ms for row in result.fills if row.order.status == "FILLED"]
     assert filled_at == [100_300]
     assert result.oms_calls == 2
+
+
+def test_backtest_requires_matching_alpha_symbol() -> None:
+    snapshot = MarketSnapshot(
+        timestamp_ms=100_000,
+        window_id=WINDOW_ID,
+        yes_bid=0.39,
+        yes_ask=0.40,
+        no_bid=0.09,
+        no_ask=0.90,
+        last_traded_price=0.40,
+        yes_ask_size=10_000.0,
+        no_ask_size=10_000.0,
+    )
+    alpha = (TopOfBook(100_000, 4_000.0, 10.0, 4_001.0, 10.0),)
+
+    with pytest.raises(ValueError, match="alpha_symbol is required"):
+        _engine().run(
+            (snapshot,),
+            alpha_books=alpha,
+            settlement={WINDOW_ID: 1.0},
+        )
+    with pytest.raises(ValueError, match="alpha_symbol must match.*BTCUSDT"):
+        _engine().run(
+            (snapshot,),
+            alpha_books=alpha,
+            alpha_symbol="ETHUSDT",
+            settlement={WINDOW_ID: 1.0},
+        )
 
 
 def test_early_tape_appends_settlement_at_window_expiry() -> None:
@@ -369,39 +399,79 @@ def test_early_tape_appends_settlement_at_window_expiry() -> None:
 
 
 def test_backtest_requires_true_settlement_instead_of_post_expiry_quote() -> None:
-    snapshots = (
-        MarketSnapshot(
-            timestamp_ms=100_000,
-            window_id=WINDOW_ID,
-            yes_bid=0.39,
-            yes_ask=0.40,
-            no_bid=0.59,
-            no_ask=0.60,
-            last_traded_price=0.40,
-            yes_ask_size=10_000.0,
-            no_ask_size=10_000.0,
-        ),
-        MarketSnapshot(
-            timestamp_ms=900_100,
-            window_id=WINDOW_ID,
-            yes_bid=0.90,
-            yes_ask=0.91,
-            no_bid=0.09,
-            no_ask=0.10,
-            last_traded_price=0.90,
-            yes_ask_size=10_000.0,
-            no_ask_size=10_000.0,
-        ),
+    snapshot = MarketSnapshot(
+        timestamp_ms=100_000,
+        window_id=WINDOW_ID,
+        yes_bid=0.39,
+        yes_ask=0.40,
+        no_bid=0.59,
+        no_ask=0.60,
+        last_traded_price=0.40,
+        yes_ask_size=10_000.0,
+        no_ask_size=10_000.0,
     )
 
     with pytest.raises(ValueError, match="missing settlement payout"):
-        _engine().run(snapshots)
+        _engine().run((snapshot,))
 
-    settled = _engine().run(snapshots, settlement={WINDOW_ID: 0.0})
-    assert settled.trades
-    assert {trade.exit_price for trade in settled.trades} == {0.0}
-    assert {trade.exit_ts_ms for trade in settled.trades} == {_window().end_ts_ms}
-    assert settled.equity_ts_ms[-1] == _window().end_ts_ms
+    post_expiry = MarketSnapshot(
+        timestamp_ms=900_100,
+        window_id=WINDOW_ID,
+        yes_bid=0.90,
+        yes_ask=0.91,
+        no_bid=0.09,
+        no_ask=0.10,
+        last_traded_price=0.90,
+        yes_ask_size=10_000.0,
+        no_ask_size=10_000.0,
+    )
+    with pytest.raises(ValueError, match="outside MarketWindow"):
+        _engine().run(
+            (snapshot, post_expiry),
+            settlement={WINDOW_ID: 0.0},
+        )
+
+
+def test_backtest_rejects_snapshot_before_window_start() -> None:
+    window = MarketWindow(
+        window_id=WINDOW_ID,
+        symbol="BTC",
+        strike_price=100_000.0,
+        start_ts_ms=100_000,
+        end_ts_ms=200_000,
+        window_type="5m",
+    )
+    snapshot = MarketSnapshot(
+        timestamp_ms=50_000,
+        window_id=WINDOW_ID,
+        yes_bid=0.39,
+        yes_ask=0.40,
+        no_bid=0.59,
+        no_ask=0.60,
+        last_traded_price=0.40,
+        yes_ask_size=10_000.0,
+        no_ask_size=10_000.0,
+    )
+
+    with pytest.raises(ValueError, match="outside MarketWindow"):
+        BacktestEngine(window=window, params=_params()).run(
+            (snapshot,),
+            settlement={WINDOW_ID: 1.0},
+        )
+
+
+def test_backtest_rejects_non_positive_window_duration() -> None:
+    invalid = MarketWindow(
+        window_id=WINDOW_ID,
+        symbol="BTC",
+        strike_price=100_000.0,
+        start_ts_ms=100_000,
+        end_ts_ms=100_000,
+        window_type="5m",
+    )
+
+    with pytest.raises(ValueError, match="end_ts_ms must be greater"):
+        BacktestEngine(window=invalid, params=_params())
 
 
 def test_limit_order_rests_then_fills_when_ask_crosses() -> None:

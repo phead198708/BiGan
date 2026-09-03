@@ -115,6 +115,8 @@ class BacktestEngine:
                 raise ValueError("windows mapping keys must match MarketWindow.window_id")
             if metadata.symbol != window.symbol:
                 raise ValueError("all backtest windows must use the same symbol")
+            if metadata.end_ts_ms <= metadata.start_ts_ms:
+                raise ValueError("MarketWindow end_ts_ms must be greater than start_ts_ms")
         self.windows = registered
         self.params = params if params is not None else StrategyBacktestParams()
         mode = str(self.params.execution_mode).strip().lower()
@@ -133,13 +135,15 @@ class BacktestEngine:
         *,
         spot_prices: Sequence[float] | None = None,
         alpha_books: Sequence[TopOfBook] | None = None,
+        alpha_symbol: str | None = None,
         settlement: Mapping[str, float] | None = None,
     ) -> BacktestResult:
         """Drive event-time tapes and return scored equity.
 
         ``alpha_books`` is an independent, ordered Binance event stream; every
         event available by a Polymarket snapshot is ingested before its pricing
-        decision. ``settlement`` must contain a payout for every replay window.
+        decision, and non-empty tapes require a matching ``alpha_symbol``.
+        ``settlement`` must contain a payout for every replay window.
         """
 
         tape = tuple(snapshots)
@@ -148,6 +152,14 @@ class BacktestEngine:
         if spot_prices is not None and len(spot_prices) != n:
             raise ValueError("spot_prices must match snapshots length")
         alpha_tape = tuple(alpha_books) if alpha_books is not None else ()
+        if alpha_tape:
+            expected_alpha_symbol = _binance_symbol(self.window.symbol)
+            if not isinstance(alpha_symbol, str) or not alpha_symbol.strip():
+                raise ValueError("alpha_symbol is required when alpha_books is non-empty")
+            if alpha_symbol.strip().upper() != expected_alpha_symbol:
+                raise ValueError(
+                    f"alpha_symbol must match backtest symbol {expected_alpha_symbol}"
+                )
         if any(
             current.ts_ms < previous.ts_ms
             for previous, current in zip(alpha_tape, alpha_tape[1:], strict=False)
@@ -156,6 +168,12 @@ class BacktestEngine:
         missing_windows = sorted({row.window_id for row in tape} - set(self.windows))
         if missing_windows:
             raise ValueError(f"missing MarketWindow metadata for: {missing_windows}")
+        for snapshot in tape:
+            metadata = self.windows[snapshot.window_id]
+            if not metadata.start_ts_ms <= snapshot.timestamp_ms <= metadata.end_ts_ms:
+                raise ValueError(
+                    f"snapshot timestamp is outside MarketWindow {snapshot.window_id!r}"
+                )
         payouts = _validated_settlement_payouts(settlement)
         missing_payouts = sorted({row.window_id for row in tape} - set(payouts))
         if missing_payouts:
@@ -432,7 +450,7 @@ def _build_stack(
         ema_alpha=params.ofi_ema_alpha,
         window_ms=params.ofi_window_ms,
         zscore_min_samples=params.ofi_zscore_min_samples,
-        symbol=f"{symbol}USDT",
+        symbol=_binance_symbol(symbol),
     )
     pricing = PolymarketPricingEngine(
         ofi_gamma=params.ofi_gamma,
@@ -449,6 +467,11 @@ def _build_stack(
         symbol=symbol,
     )
     return ofi, pricing, oms
+
+
+def _binance_symbol(market_symbol: str) -> str:
+    symbol = str(market_symbol).strip().upper()
+    return symbol if symbol.endswith("USDT") else f"{symbol}USDT"
 
 
 def _execute_market_signal(

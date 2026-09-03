@@ -151,6 +151,28 @@ def test_grid_search_selects_tradeable_spread_in_process() -> None:
     assert scores[0.20] > scores[0.01]
 
 
+def test_grid_search_minimizes_max_drawdown() -> None:
+    windows, snapshots = _multi_window_tape()
+    report = run_grid_search(
+        snapshots,
+        {"max_spread_allowed": (0.01, 0.20)},
+        window=windows[0],
+        windows={row.window_id: row for row in windows[1:]},
+        base=_base(),
+        train_ratio=0.65,
+        max_workers=1,
+        score="max_drawdown",
+        settlement={row.window_id: 1.0 for row in windows},
+    )
+
+    scores = {
+        trial.params["max_spread_allowed"]: trial.out_of_sample_score
+        for trial in report.trials
+    }
+    assert scores[0.01] < scores[0.20]
+    assert report.best_params == {"max_spread_allowed": 0.01}
+
+
 def test_grid_search_parallel_matches_sequential_winner() -> None:
     windows, snapshots = _multi_window_tape(n_ticks=12)
     grid = {
@@ -212,6 +234,7 @@ def test_grid_search_splits_and_uses_dynamic_spot_and_alpha_inputs() -> None:
         settlement={row.window_id: 1.0 for row in windows},
         spot_prices=spots,
         alpha_books=alpha_books,
+        alpha_symbol="BTCUSDT",
     )
     scores = {trial.params["ofi_gamma"]: trial.out_of_sample_score for trial in report.trials}
     assert scores[100.0] > scores[0.0]
@@ -246,6 +269,7 @@ def test_grid_search_accepts_independent_alpha_event_tape() -> None:
         max_workers=1,
         settlement={row.window_id: 1.0 for row in windows},
         alpha_books=alpha_books,
+        alpha_symbol="BTCUSDT",
     )
 
     assert len(alpha_books) != len(snapshots)
@@ -312,5 +336,6 @@ def test_multi_window_grid_search_keeps_complete_windows_in_each_fold() -> None:
         settlement={window.window_id: 1.0 for window in windows},
         spot_prices=spots,
         alpha_books=alpha_books,
+        alpha_symbol="BTCUSDT",
     )
     assert len(report.trials) == 1
