@@ -8,6 +8,7 @@ from bigan.execution.polymarket_oms import (
     REJECT_LIQUIDITY_UNAVAILABLE,
     REJECT_SIZE_BELOW_MINIMUM,
     REJECT_SPREAD_TOO_WIDE,
+    LimitOrder,
     PolymarketOMS,
 )
 from bigan.strategies.polymarket_pricing import PricingSignal, SignalDirection
@@ -279,3 +280,69 @@ def test_local_rejection_does_not_consume_signal_idempotency_key() -> None:
     assert retried is not None
     assert retried.status == "FILLED"
     assert oms.get_position("btc-updown-test", "YES") is not None
+
+
+@pytest.mark.parametrize("crossed_ask", [0.37, 0.20])
+def test_limit_order_fixes_shares_before_price_improvement(crossed_ask: float) -> None:
+    oms = PolymarketOMS(slippage_tolerance=0.01)
+    placed = oms.prepare_limit_order(
+        _signal(
+            direction=SignalDirection.BUY_YES,
+            market_price=0.42,
+            recommended_size_pct=0.10,
+        ),
+        current_bankroll=1_000.0,
+        current_bid=0.38,
+    )
+    assert isinstance(placed, LimitOrder)
+    assert placed.shares == pytest.approx(50.0 / 0.38)
+
+    filled, remaining = oms.fill_limit_order(
+        placed,
+        current_bankroll=1_000.0,
+        current_ask=crossed_ask,
+        current_ask_size=10_000.0,
+    )
+
+    assert filled is not None and filled.status == "FILLED"
+    assert filled.shares == pytest.approx(placed.shares)
+    assert filled.price <= placed.limit_price
+    assert remaining is None
+
+
+def test_limit_order_partial_fills_only_its_remaining_shares() -> None:
+    oms = PolymarketOMS(slippage_tolerance=0.0)
+    placed = oms.prepare_limit_order(
+        _signal(
+            direction=SignalDirection.BUY_YES,
+            market_price=0.42,
+            recommended_size_pct=0.10,
+        ),
+        current_bankroll=1_000.0,
+        current_bid=0.38,
+    )
+    assert isinstance(placed, LimitOrder)
+
+    first, remaining = oms.fill_limit_order(
+        placed,
+        current_bankroll=1_000.0,
+        current_ask=0.37,
+        current_ask_size=10.0,
+    )
+    assert first is not None and first.status == "FILLED"
+    assert first.shares == pytest.approx(10.0)
+    assert remaining is not None
+    assert remaining.remaining_shares == pytest.approx(placed.shares - 10.0)
+
+    second, completed = oms.fill_limit_order(
+        remaining,
+        current_bankroll=oms.bankroll,
+        current_ask=0.20,
+        current_ask_size=10_000.0,
+    )
+    assert second is not None and second.status == "FILLED"
+    assert second.shares == pytest.approx(placed.shares - 10.0)
+    assert completed is None
+    position = oms.get_position(placed.window_id, placed.side)
+    assert position is not None
+    assert position.shares == pytest.approx(placed.shares)

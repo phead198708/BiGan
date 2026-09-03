@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 
 from bigan.backtest.data_loader import (
     generate_synthetic_clob,
     load_clob_snapshots,
+    snapshots_from_table,
     write_clob_snapshots,
 )
 from bigan.backtest.engine import BacktestEngine, StrategyBacktestParams
@@ -118,6 +120,27 @@ def test_clob_loader_roundtrip_csv_and_parquet(tmp_path: Path) -> None:
     assert csv_loaded.spot_prices == pytest.approx(spots)
     assert pq_loaded.spot_prices == pytest.approx(spots)
     assert csv_loaded.dropped_stale == 0
+
+
+def test_clob_loader_drops_invalid_spot_rows_atomically() -> None:
+    table = pa.table(
+        {
+            "timestamp_ms": [100, 200, 300, 400, 500],
+            "window_id": [WINDOW_ID] * 5,
+            "yes_bid": [0.38] * 5,
+            "yes_ask": [0.42] * 5,
+            "no_bid": [0.38] * 5,
+            "no_ask": [0.42] * 5,
+            "spot_price": [100_000.0, None, 0.0, float("nan"), 100_004.0],
+        }
+    )
+
+    loaded = snapshots_from_table(table)
+
+    assert [row.timestamp_ms for row in loaded.snapshots] == [100, 500]
+    assert loaded.spot_prices == pytest.approx((100_000.0, 100_004.0))
+    assert len(loaded.snapshots) == len(loaded.spot_prices or ())
+    assert loaded.dropped_stale == 3
 
 
 def test_engine_fills_match_strategy_runner_and_oms_cash() -> None:
@@ -275,6 +298,95 @@ def test_resting_limit_fills_before_tail_cutoff_cancels_new_signal() -> None:
     assert len(filled) == 1
     assert filled[0].timestamp_ms == 115_000
     assert filled[0].order.price <= 0.38
+
+
+def test_limit_direction_reversal_replaces_old_resting_order() -> None:
+    snapshots = (
+        MarketSnapshot(
+            timestamp_ms=100_000,
+            window_id=WINDOW_ID,
+            yes_bid=0.38,
+            yes_ask=0.42,
+            no_bid=0.38,
+            no_ask=0.42,
+            last_traded_price=0.40,
+            yes_ask_size=10_000.0,
+            no_ask_size=10_000.0,
+        ),
+        MarketSnapshot(
+            timestamp_ms=100_200,
+            window_id=WINDOW_ID,
+            yes_bid=0.38,
+            yes_ask=0.42,
+            no_bid=0.38,
+            no_ask=0.42,
+            last_traded_price=0.40,
+            yes_ask_size=10_000.0,
+            no_ask_size=10_000.0,
+        ),
+        MarketSnapshot(
+            timestamp_ms=100_400,
+            window_id=WINDOW_ID,
+            yes_bid=0.20,
+            yes_ask=0.37,
+            no_bid=0.36,
+            no_ask=0.37,
+            last_traded_price=0.37,
+            yes_ask_size=10_000.0,
+            no_ask_size=10_000.0,
+        ),
+    )
+    result = _engine(execution_mode="limit").run(
+        snapshots,
+        spot_prices=(101_000.0, 99_000.0, 99_000.0),
+        settlement={WINDOW_ID: 0.0},
+    )
+
+    filled = [row for row in result.fills if row.order.status == "FILLED"]
+    assert len(filled) == 1
+    assert filled[0].timestamp_ms == 100_400
+    assert filled[0].order.side == "NO"
+
+
+def test_limit_order_shares_are_fixed_before_price_improvement() -> None:
+    def filled_shares(crossed_ask: float) -> float:
+        snapshots = (
+            MarketSnapshot(
+                timestamp_ms=100_000,
+                window_id=WINDOW_ID,
+                yes_bid=0.38,
+                yes_ask=0.42,
+                no_bid=0.38,
+                no_ask=0.42,
+                last_traded_price=0.40,
+                yes_ask_size=10_000.0,
+                no_ask_size=10_000.0,
+            ),
+            MarketSnapshot(
+                timestamp_ms=100_200,
+                window_id=WINDOW_ID,
+                yes_bid=0.20 if crossed_ask > 0.20 else 0.19,
+                yes_ask=crossed_ask,
+                no_bid=0.38,
+                no_ask=0.42,
+                last_traded_price=crossed_ask,
+                yes_ask_size=10_000.0,
+                no_ask_size=10_000.0,
+            ),
+        )
+        result = _engine(execution_mode="limit").run(
+            snapshots,
+            spot_prices=(101_000.0, 101_000.0),
+            settlement={WINDOW_ID: 1.0},
+        )
+        filled = [row for row in result.fills if row.order.status == "FILLED"]
+        assert len(filled) == 1
+        return filled[0].order.shares
+
+    at_037 = filled_shares(0.37)
+    at_020 = filled_shares(0.20)
+    assert at_037 == pytest.approx(50.0 / 0.38)
+    assert at_020 == pytest.approx(at_037)
 
 
 def test_multi_window_replay_uses_each_window_metadata() -> None:

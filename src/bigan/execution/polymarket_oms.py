@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from bigan.strategies.polymarket_pricing import PricingSignal, SignalDirection
 
@@ -47,6 +47,19 @@ class OrderResult:
     price: float
     fee_usdc: float
     reject_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LimitOrder:
+    """A submitted passive order whose quantity and limit are fixed."""
+
+    order_id: str
+    window_id: str
+    placed_ts_ms: int
+    side: str
+    shares: float
+    remaining_shares: float
+    limit_price: float
 
 
 class PolymarketOMS:
@@ -154,13 +167,7 @@ class PolymarketOMS:
         if signal.direction is SignalDirection.HOLD:
             return None
 
-        signal_key = (
-            signal.window_id,
-            signal.ts_ms,
-            signal.direction.value,
-            signal.market_price,
-            signal.recommended_size_pct,
-        )
+        signal_key = _signal_key(signal)
         if signal_key in self._processed_signals:
             return None
 
@@ -188,22 +195,13 @@ class PolymarketOMS:
         if ask_size <= 0.0:
             return self._rejected(side=side, reason=REJECT_LIQUIDITY_UNAVAILABLE)
 
-        capital = bankroll + sum(position.total_cost_usdc for position in self._positions.values())
-        existing = self.get_position(signal.window_id, side)
-        existing_usd = 0.0 if existing is None else existing.total_cost_usdc
-        window_usd = sum(
-            position.total_cost_usdc
-            for position in self._positions.values()
-            if position.window_id == signal.window_id
+        risk_budget_usd = self._risk_budget_usd(
+            window_id=signal.window_id,
+            side=side,
+            size_pct=size_pct,
+            bankroll=bankroll,
         )
-        target_pct = min(max(0.0, size_pct), self.max_position_pct)
-        target_usd = capital * target_pct
-        remaining_target_usd = max(0.0, target_usd - existing_usd)
-        remaining_window_usd = max(
-            0.0,
-            capital * self.max_window_exposure_pct - window_usd,
-        )
-        if remaining_target_usd <= 0.0 or remaining_window_usd <= 0.0:
+        if risk_budget_usd <= 0.0:
             return None
 
         fill_price = min(1.0, ask * (1.0 + self.slippage_tolerance))
@@ -216,10 +214,7 @@ class PolymarketOMS:
             return self._rejected(side=side, reason="Invalid fill price")
         liquidity_usd = ask_size * fill_price
         execution_usd = min(
-            remaining_target_usd,
-            remaining_window_usd,
-            capital * self.max_single_trade_pct,
-            bankroll,
+            risk_budget_usd,
             liquidity_usd,
         )
         if execution_usd < self.min_order_usd:
@@ -244,6 +239,158 @@ class PolymarketOMS:
             price=fill_price,
             fee_usdc=0.0,
             reject_reason=None,
+        )
+
+    def prepare_limit_order(
+        self,
+        signal: PricingSignal,
+        current_bankroll: float,
+        current_bid: float,
+    ) -> LimitOrder | OrderResult | None:
+        """Validate and size a passive order without filling it.
+
+        The returned order fixes its side, total shares, and limit price at
+        submission time. Ask liquidity is intentionally not consumed while
+        the order is resting.
+        """
+
+        if signal.direction is SignalDirection.HOLD:
+            return None
+        signal_key = _signal_key(signal)
+        if signal_key in self._processed_signals:
+            return None
+
+        bankroll = _finite_float("current_bankroll", current_bankroll)
+        bid = _finite_float("current_bid", current_bid)
+        ask = _finite_float("market_price", signal.market_price)
+        size_pct = _finite_float("recommended_size_pct", signal.recommended_size_pct)
+        if bankroll < 0.0:
+            raise ValueError("current_bankroll must be non-negative")
+        side = _side_from_direction(signal.direction)
+        if side is None:
+            return self._rejected(
+                side="YES",
+                reason=f"Unsupported signal direction {signal.direction!r}",
+            )
+        if not 0.0 < bid <= ask <= 1.0:
+            return self._rejected(side=side, reason="Invalid bid/ask market")
+        if (ask - bid) > self.max_spread_allowed:
+            return self._rejected(side=side, reason=REJECT_SPREAD_TOO_WIDE)
+
+        execution_usd = self._risk_budget_usd(
+            window_id=signal.window_id,
+            side=side,
+            size_pct=size_pct,
+            bankroll=bankroll,
+        )
+        if execution_usd <= 0.0:
+            return None
+        if execution_usd < self.min_order_usd:
+            return self._rejected(side=side, reason=REJECT_SIZE_BELOW_MINIMUM)
+
+        shares = execution_usd / bid
+        order = LimitOrder(
+            order_id=self._next_order_id(),
+            window_id=signal.window_id,
+            placed_ts_ms=signal.ts_ms,
+            side=side,
+            shares=shares,
+            remaining_shares=shares,
+            limit_price=bid,
+        )
+        self._remember_signal(signal_key)
+        return order
+
+    def fill_limit_order(
+        self,
+        order: LimitOrder,
+        current_bankroll: float,
+        current_ask: float,
+        current_ask_size: float | None,
+    ) -> tuple[OrderResult | None, LimitOrder | None]:
+        """Fill a crossed passive order without re-sizing or re-gating spread."""
+
+        bankroll = _finite_float("current_bankroll", current_bankroll)
+        ask = _finite_float("current_ask", current_ask)
+        limit_price = _finite_float("limit_price", order.limit_price)
+        remaining = _finite_float("remaining_shares", order.remaining_shares)
+        if bankroll < 0.0:
+            raise ValueError("current_bankroll must be non-negative")
+        if order.side not in {"YES", "NO"}:
+            raise ValueError("limit order side must be YES or NO")
+        if not 0.0 < ask <= 1.0 or not 0.0 < limit_price <= 1.0:
+            raise ValueError("limit and ask prices must be in (0, 1]")
+        if remaining <= 0.0 or remaining > order.shares:
+            raise ValueError("remaining_shares must be in (0, shares]")
+        if ask > limit_price:
+            return None, order
+        if current_ask_size is None:
+            return self._limit_rejected(order, REJECT_LIQUIDITY_UNAVAILABLE), order
+        ask_size = _finite_float("current_ask_size", current_ask_size)
+        if ask_size <= 0.0:
+            return self._limit_rejected(order, REJECT_LIQUIDITY_UNAVAILABLE), order
+
+        fill_price = min(limit_price, ask * (1.0 + self.slippage_tolerance))
+        fill_shares = min(remaining, ask_size, bankroll / fill_price)
+        if fill_shares <= 0.0:
+            return self._limit_rejected(order, REJECT_SIZE_BELOW_MINIMUM), order
+        cost = fill_shares * fill_price
+        self._apply_fill(
+            window_id=order.window_id,
+            side=order.side,
+            shares=fill_shares,
+            fill_price=fill_price,
+            cost_usdc=cost,
+        )
+        self.bankroll = bankroll - cost
+        remaining_after = max(0.0, remaining - fill_shares)
+        next_order = (
+            replace(order, remaining_shares=remaining_after)
+            if remaining_after > 1e-12
+            else None
+        )
+        return (
+            OrderResult(
+                order_id=order.order_id,
+                status="FILLED",
+                side=order.side,
+                shares=fill_shares,
+                price=fill_price,
+                fee_usdc=0.0,
+                reject_reason=None,
+            ),
+            next_order,
+        )
+
+    def _risk_budget_usd(
+        self,
+        *,
+        window_id: str,
+        side: str,
+        size_pct: float,
+        bankroll: float,
+    ) -> float:
+        capital = bankroll + sum(
+            position.total_cost_usdc for position in self._positions.values()
+        )
+        existing = self.get_position(window_id, side)
+        existing_usd = 0.0 if existing is None else existing.total_cost_usdc
+        window_usd = sum(
+            position.total_cost_usdc
+            for position in self._positions.values()
+            if position.window_id == window_id
+        )
+        target_pct = min(max(0.0, size_pct), self.max_position_pct)
+        remaining_target_usd = max(0.0, capital * target_pct - existing_usd)
+        remaining_window_usd = max(
+            0.0,
+            capital * self.max_window_exposure_pct - window_usd,
+        )
+        return min(
+            remaining_target_usd,
+            remaining_window_usd,
+            capital * self.max_single_trade_pct,
+            bankroll,
         )
 
     def _remember_signal(self, key: tuple[object, ...]) -> None:
@@ -297,6 +444,18 @@ class PolymarketOMS:
             reject_reason=reason,
         )
 
+    @staticmethod
+    def _limit_rejected(order: LimitOrder, reason: str) -> OrderResult:
+        return OrderResult(
+            order_id=order.order_id,
+            status="REJECTED",
+            side=order.side,
+            shares=0.0,
+            price=0.0,
+            fee_usdc=0.0,
+            reject_reason=reason,
+        )
+
     def _next_order_id(self) -> str:
         self._order_seq += 1
         return f"oms-{self._order_seq}"
@@ -308,6 +467,16 @@ def _side_from_direction(direction: SignalDirection) -> str | None:
     if direction is SignalDirection.BUY_NO:
         return "NO"
     return None
+
+
+def _signal_key(signal: PricingSignal) -> tuple[object, ...]:
+    return (
+        signal.window_id,
+        signal.ts_ms,
+        signal.direction.value,
+        signal.market_price,
+        signal.recommended_size_pct,
+    )
 
 
 def _finite_float(name: str, value: float) -> float:

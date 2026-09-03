@@ -127,6 +127,11 @@ def snapshots_from_table(table: pa.Table) -> LoadedClob:
                 )
                 for column, values in sizes.items()
             }
+            spot = (
+                None
+                if spots_raw is None
+                else _finite_price(SPOT_COLUMN, spots_raw[i])
+            )
         except (TypeError, ValueError):
             dropped_stale += 1
             continue
@@ -139,21 +144,20 @@ def snapshots_from_table(table: pa.Table) -> LoadedClob:
         if last_ts is not None and ts_ms < last_ts:
             dropped_stale += 1
             continue
-        last_ts = ts_ms
-        snapshots.append(
-            MarketSnapshot(
-                timestamp_ms=ts_ms,
-                window_id=window_id,
-                yes_bid=yes_bid,
-                yes_ask=yes_ask,
-                no_bid=no_bid,
-                no_ask=no_ask,
-                last_traded_price=last_px,
-                **quote_sizes,
-            )
+        snapshot = MarketSnapshot(
+            timestamp_ms=ts_ms,
+            window_id=window_id,
+            yes_bid=yes_bid,
+            yes_ask=yes_ask,
+            no_bid=no_bid,
+            no_ask=no_ask,
+            last_traded_price=last_px,
+            **quote_sizes,
         )
-        if spots is not None and spots_raw is not None:
-            spots.append(_finite_price(SPOT_COLUMN, spots_raw[i]))
+        last_ts = ts_ms
+        snapshots.append(snapshot)
+        if spots is not None and spot is not None:
+            spots.append(spot)
     return LoadedClob(
         snapshots=tuple(snapshots),
         spot_prices=tuple(spots) if spots is not None else None,

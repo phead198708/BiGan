@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import numpy as np
 
 from bigan.data.polymarket_clob import MarketSnapshot
-from bigan.execution.polymarket_oms import OrderResult, PolymarketOMS
+from bigan.execution.polymarket_oms import LimitOrder, OrderResult, PolymarketOMS
 from bigan.features.binance_ofi import BinanceOFICalculator, TopOfBook
 from bigan.strategies.polymarket_pricing import (
     MarketWindow,
@@ -156,7 +156,7 @@ class BacktestEngine:
         fills: list[BacktestFill] = []
         trades: list[ClosedTrade] = []
         settled_windows: set[str] = set()
-        resting: tuple[PricingSignal, float] | None = None
+        resting: LimitOrder | None = None
         oms_calls = 0
         rejected = 0
         commission = 0.0
@@ -240,8 +240,8 @@ class BacktestEngine:
                     commission,
                     resting,
                     rejected,
-                ) = _maybe_execute(
-                    signal=resting[0],
+                ) = _maybe_fill_limit_order(
+                    order=resting,
                     snapshot=snap,
                     oms=oms,
                     cash=cash,
@@ -249,8 +249,6 @@ class BacktestEngine:
                     no_shares=no_shares,
                     lots=lots,
                     fills=fills,
-                    mode=mode,
-                    resting=resting,
                     fee_bps=params.fee_bps,
                     oms_calls=oms_calls,
                     rejected=rejected,
@@ -281,9 +279,25 @@ class BacktestEngine:
                 and signal.direction is not SignalDirection.HOLD
             ):
                 if mode == "limit":
+                    side = _side_for_signal(signal)
+                    if resting is not None and resting.side != side:
+                        resting = None
                     if resting is None:
-                        bid, _, _ = _book_for_signal(signal, snap)
-                        resting = (signal, bid)
+                        bid, ask, _ = _book_for_signal(signal, snap)
+                        oms_calls += 1
+                        placement = oms.prepare_limit_order(signal, cash, bid)
+                        if isinstance(placement, LimitOrder):
+                            resting = placement
+                        elif placement is not None:
+                            rejected += 1
+                            _append_rejected_order(
+                                result=placement,
+                                snapshot=snap,
+                                ask=ask,
+                                bid=bid,
+                                cash=cash,
+                                fills=fills,
+                            )
                 else:
                     (
                         oms_calls,
@@ -291,9 +305,8 @@ class BacktestEngine:
                         yes_shares,
                         no_shares,
                         commission,
-                        resting,
                         rejected,
-                    ) = _maybe_execute(
+                    ) = _execute_market_signal(
                         signal=signal,
                         snapshot=snap,
                         oms=oms,
@@ -302,8 +315,6 @@ class BacktestEngine:
                         no_shares=no_shares,
                         lots=lots,
                         fills=fills,
-                        mode=mode,
-                        resting=resting,
                         fee_bps=params.fee_bps,
                         oms_calls=oms_calls,
                         rejected=rejected,
@@ -382,7 +393,7 @@ def _build_stack(
     return ofi, pricing, oms
 
 
-def _maybe_execute(
+def _execute_market_signal(
     *,
     signal: PricingSignal,
     snapshot: MarketSnapshot,
@@ -392,60 +403,137 @@ def _maybe_execute(
     no_shares: float,
     lots: list[_OpenLot],
     fills: list[BacktestFill],
-    mode: str,
-    resting: tuple[PricingSignal, float] | None,
     fee_bps: float,
     oms_calls: int,
     rejected: int,
     commission: float,
-) -> tuple[int, float, float, float, float, tuple[PricingSignal, float] | None, int]:
-    active = signal
-    max_fill_price: float | None = None
-    if mode == "limit":
-        if resting is None:
-            raise ValueError("limit execution requires a resting order")
-        active, limit_px = resting
-        bid, ask, ask_size = _book_for_signal(active, snapshot)
-        if ask > limit_px:
-            return oms_calls, cash, yes_shares, no_shares, commission, resting, rejected
-        active = replace(active, market_price=ask)
-        max_fill_price = limit_px
-    else:
-        bid, ask, ask_size = _book_for_signal(active, snapshot)
+) -> tuple[int, float, float, float, float, int]:
+    bid, ask, ask_size = _book_for_signal(signal, snapshot)
     oms_calls += 1
     result = oms.process_signal(
-        active,
+        signal,
         cash,
         bid,
         ask_size,
-        max_fill_price=max_fill_price,
     )
     if result is None:
-        return oms_calls, cash, yes_shares, no_shares, commission, None, rejected
+        return oms_calls, cash, yes_shares, no_shares, commission, rejected
     if result.status != "FILLED":
         rejected += 1
-        fills.append(
-            BacktestFill(
-                timestamp_ms=snapshot.timestamp_ms,
-                window_id=snapshot.window_id,
-                order=result,
-                ask_price=ask,
-                bid_price=bid,
-                slippage=0.0,
-                fee_usdc=0.0,
-                cash_after=cash,
-            )
+        _append_rejected_order(
+            result=result,
+            snapshot=snapshot,
+            ask=ask,
+            bid=bid,
+            cash=cash,
+            fills=fills,
         )
-        next_resting = resting if mode == "limit" else None
         return (
             oms_calls,
             cash,
             yes_shares,
             no_shares,
             commission,
-            next_resting,
             rejected,
         )
+    cash, yes_shares, no_shares, commission = _record_filled_order(
+        result=result,
+        snapshot=snapshot,
+        oms=oms,
+        cash=cash,
+        yes_shares=yes_shares,
+        no_shares=no_shares,
+        lots=lots,
+        fills=fills,
+        ask=ask,
+        bid=bid,
+        fee_bps=fee_bps,
+        commission=commission,
+    )
+    return oms_calls, cash, yes_shares, no_shares, commission, rejected
+
+
+def _maybe_fill_limit_order(
+    *,
+    order: LimitOrder,
+    snapshot: MarketSnapshot,
+    oms: PolymarketOMS,
+    cash: float,
+    yes_shares: float,
+    no_shares: float,
+    lots: list[_OpenLot],
+    fills: list[BacktestFill],
+    fee_bps: float,
+    oms_calls: int,
+    rejected: int,
+    commission: float,
+) -> tuple[int, float, float, float, float, LimitOrder | None, int]:
+    bid, ask, ask_size = _book_for_limit_order(order, snapshot)
+    if ask > order.limit_price:
+        return oms_calls, cash, yes_shares, no_shares, commission, order, rejected
+    oms_calls += 1
+    result, next_order = oms.fill_limit_order(order, cash, ask, ask_size)
+    if result is None:
+        return oms_calls, cash, yes_shares, no_shares, commission, next_order, rejected
+    if result.status != "FILLED":
+        rejected += 1
+        _append_rejected_order(
+            result=result,
+            snapshot=snapshot,
+            ask=ask,
+            bid=bid,
+            cash=cash,
+            fills=fills,
+        )
+        return (
+            oms_calls,
+            cash,
+            yes_shares,
+            no_shares,
+            commission,
+            next_order,
+            rejected,
+        )
+    cash, yes_shares, no_shares, commission = _record_filled_order(
+        result=result,
+        snapshot=snapshot,
+        oms=oms,
+        cash=cash,
+        yes_shares=yes_shares,
+        no_shares=no_shares,
+        lots=lots,
+        fills=fills,
+        ask=ask,
+        bid=bid,
+        fee_bps=fee_bps,
+        commission=commission,
+    )
+    return (
+        oms_calls,
+        cash,
+        yes_shares,
+        no_shares,
+        commission,
+        next_order,
+        rejected,
+    )
+
+
+def _record_filled_order(
+    *,
+    result: OrderResult,
+    snapshot: MarketSnapshot,
+    oms: PolymarketOMS,
+    cash: float,
+    yes_shares: float,
+    no_shares: float,
+    lots: list[_OpenLot],
+    fills: list[BacktestFill],
+    ask: float,
+    bid: float,
+    fee_bps: float,
+    commission: float,
+) -> tuple[float, float, float, float]:
     notional = result.shares * result.price
     fee = notional * float(fee_bps) / _BPS
     cash = oms.bankroll - fee
@@ -477,7 +565,30 @@ def _maybe_execute(
             cash_after=cash,
         )
     )
-    return oms_calls, cash, yes_shares, no_shares, commission, None, rejected
+    return cash, yes_shares, no_shares, commission
+
+
+def _append_rejected_order(
+    *,
+    result: OrderResult,
+    snapshot: MarketSnapshot,
+    ask: float,
+    bid: float,
+    cash: float,
+    fills: list[BacktestFill],
+) -> None:
+    fills.append(
+        BacktestFill(
+            timestamp_ms=snapshot.timestamp_ms,
+            window_id=snapshot.window_id,
+            order=result,
+            ask_price=ask,
+            bid_price=bid,
+            slippage=0.0,
+            fee_usdc=0.0,
+            cash_after=cash,
+        )
+    )
 
 
 def _book_for_signal(
@@ -487,6 +598,23 @@ def _book_for_signal(
     if signal.direction is SignalDirection.BUY_NO:
         return snapshot.no_bid, snapshot.no_ask, snapshot.no_ask_size
     return snapshot.yes_bid, snapshot.yes_ask, snapshot.yes_ask_size
+
+
+def _book_for_limit_order(
+    order: LimitOrder,
+    snapshot: MarketSnapshot,
+) -> tuple[float, float, float]:
+    if order.side == "NO":
+        return snapshot.no_bid, snapshot.no_ask, snapshot.no_ask_size
+    return snapshot.yes_bid, snapshot.yes_ask, snapshot.yes_ask_size
+
+
+def _side_for_signal(signal: PricingSignal) -> str:
+    if signal.direction is SignalDirection.BUY_NO:
+        return "NO"
+    if signal.direction is SignalDirection.BUY_YES:
+        return "YES"
+    raise ValueError("HOLD has no executable side")
 
 
 def _settle_window(
