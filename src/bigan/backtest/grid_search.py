@@ -164,6 +164,8 @@ def run_grid_search(
     ``max_workers is None`` uses ``os.cpu_count()``. ``max_workers <= 1``
     stays in-process so unit tests do not need a process pool. At least two
     contiguous window groups and metadata for every ``window_id`` are required.
+    ``spot_prices`` remains snapshot-aligned; ``alpha_books`` is an independent
+    ordered event tape and is sliced into each fold by event time.
     """
 
     if score not in _SCORE_NAMES:
@@ -171,13 +173,16 @@ def run_grid_search(
     tape = tuple(snapshots)
     if spot_prices is not None and len(spot_prices) != len(tape):
         raise ValueError("spot_prices must match snapshots length")
-    if alpha_books is not None and len(alpha_books) != len(tape):
-        raise ValueError("alpha_books must match snapshots length")
     params = base if base is not None else StrategyBacktestParams()
     combos = expand_param_grid(grid)
     snapshot_folds = time_series_folds(tape, n_splits=n_splits, train_ratio=train_ratio)
     spots = tuple(float(value) for value in spot_prices) if spot_prices is not None else None
     alpha = tuple(alpha_books) if alpha_books is not None else None
+    if alpha is not None and any(
+        current.ts_ms < previous.ts_ms
+        for previous, current in zip(alpha, alpha[1:], strict=False)
+    ):
+        raise ValueError("alpha_books must be non-decreasing by event time")
     folds = tuple(
         _aligned_fold(train, test, spot_prices=spots, alpha_books=alpha)
         for train, test in snapshot_folds
@@ -276,9 +281,24 @@ def _aligned_fold(
         test=test,
         train_spots=None if spot_prices is None else spot_prices[:train_end],
         test_spots=None if spot_prices is None else spot_prices[train_end:test_end],
-        train_alpha=None if alpha_books is None else alpha_books[:train_end],
-        test_alpha=None if alpha_books is None else alpha_books[train_end:test_end],
+        train_alpha=(
+            None
+            if alpha_books is None
+            else _alpha_events_through(alpha_books, train[-1].timestamp_ms)
+        ),
+        test_alpha=(
+            None
+            if alpha_books is None
+            else _alpha_events_through(alpha_books, test[-1].timestamp_ms)
+        ),
     )
+
+
+def _alpha_events_through(
+    alpha_books: tuple[TopOfBook, ...],
+    timestamp_ms: int,
+) -> tuple[TopOfBook, ...]:
+    return tuple(book for book in alpha_books if book.ts_ms <= timestamp_ms)
 
 
 def _contiguous_window_groups(

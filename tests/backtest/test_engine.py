@@ -307,10 +307,11 @@ def test_zscore_gate_blocks_oms() -> None:
     assert result.fills == ()
     assert result.final_cash == pytest.approx(1_000.0)
     assert result.metrics.total_trades == 0
+    assert result.equity_ts_ms[-1] == _window().end_ts_ms
 
 
-def test_backtest_reuses_fresh_asof_alpha_without_reingesting_duplicates() -> None:
-    timestamps = (100_000, 100_100, 100_200, 100_300, 102_201)
+def test_backtest_replays_independent_alpha_events_and_reuses_fresh_z() -> None:
+    timestamps = (100_000, 100_300, 100_400, 102_201)
     snapshots = tuple(
         MarketSnapshot(
             timestamp_ms=timestamp_ms,
@@ -330,7 +331,6 @@ def test_backtest_reuses_fresh_asof_alpha_without_reingesting_duplicates() -> No
         TopOfBook(100_100, 100_000.0, 11.0, 100_001.0, 10.0),
         TopOfBook(100_200, 100_000.0, 13.0, 100_001.0, 10.0),
     )
-    alpha_books = (*alpha_updates, alpha_updates[-1], alpha_updates[-1])
 
     result = _engine(
         ofi_zscore_min_samples=2,
@@ -338,12 +338,12 @@ def test_backtest_reuses_fresh_asof_alpha_without_reingesting_duplicates() -> No
         ofi_max_age_ms=2_000,
     ).run(
         snapshots,
-        alpha_books=alpha_books,
+        alpha_books=alpha_updates,
         settlement={WINDOW_ID: 1.0},
     )
 
     filled_at = [row.timestamp_ms for row in result.fills if row.order.status == "FILLED"]
-    assert filled_at == [100_200]
+    assert filled_at == [100_300]
     assert result.oms_calls == 2
 
 
@@ -366,6 +366,42 @@ def test_early_tape_appends_settlement_at_window_expiry() -> None:
     assert result.equity[0] != result.equity[-1]
     assert result.trades
     assert {trade.exit_ts_ms for trade in result.trades} == {_window().end_ts_ms}
+
+
+def test_backtest_requires_true_settlement_instead_of_post_expiry_quote() -> None:
+    snapshots = (
+        MarketSnapshot(
+            timestamp_ms=100_000,
+            window_id=WINDOW_ID,
+            yes_bid=0.39,
+            yes_ask=0.40,
+            no_bid=0.59,
+            no_ask=0.60,
+            last_traded_price=0.40,
+            yes_ask_size=10_000.0,
+            no_ask_size=10_000.0,
+        ),
+        MarketSnapshot(
+            timestamp_ms=900_100,
+            window_id=WINDOW_ID,
+            yes_bid=0.90,
+            yes_ask=0.91,
+            no_bid=0.09,
+            no_ask=0.10,
+            last_traded_price=0.90,
+            yes_ask_size=10_000.0,
+            no_ask_size=10_000.0,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="missing settlement payout"):
+        _engine().run(snapshots)
+
+    settled = _engine().run(snapshots, settlement={WINDOW_ID: 0.0})
+    assert settled.trades
+    assert {trade.exit_price for trade in settled.trades} == {0.0}
+    assert {trade.exit_ts_ms for trade in settled.trades} == {_window().end_ts_ms}
+    assert settled.equity_ts_ms[-1] == _window().end_ts_ms
 
 
 def test_limit_order_rests_then_fills_when_ask_crosses() -> None:

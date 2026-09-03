@@ -90,6 +90,8 @@ def test_expand_param_grid_is_cartesian() -> None:
 def test_expand_param_grid_rejects_unknown_keys() -> None:
     with pytest.raises(ValueError, match="unknown grid"):
         expand_param_grid({"not_a_param": (1,)})
+    with pytest.raises(ValueError, match="unknown grid"):
+        expand_param_grid({"ofi_bid_qty": (1.0, 2.0)})
 
 
 def test_time_split_is_causal() -> None:
@@ -215,18 +217,39 @@ def test_grid_search_splits_and_uses_dynamic_spot_and_alpha_inputs() -> None:
     assert scores[100.0] > scores[0.0]
 
 
-@pytest.mark.parametrize("field", ["spot_prices", "alpha_books"])
-def test_grid_search_rejects_misaligned_auxiliary_inputs(field: str) -> None:
+def test_grid_search_rejects_misaligned_spot_prices() -> None:
     snapshots = generate_synthetic_clob(n_ticks=10, window_id=WINDOW_ID)
-    kwargs: dict[str, object] = {field: (1.0,)}
-    with pytest.raises(ValueError, match=f"{field} must match snapshots length"):
+    with pytest.raises(ValueError, match="spot_prices must match snapshots length"):
         run_grid_search(
             snapshots,
             {"ofi_gamma": (0.0,)},
             window=_window(),
             max_workers=1,
-            **kwargs,  # type: ignore[arg-type]
+            spot_prices=(1.0,),
         )
+
+
+def test_grid_search_accepts_independent_alpha_event_tape() -> None:
+    windows, snapshots = _multi_window_tape(n_windows=4, n_ticks=5)
+    alpha_books = (
+        TopOfBook(100_000, 100_000.0, 10.0, 100_001.0, 10.0),
+        TopOfBook(100_100, 100_000.0, 11.0, 100_001.0, 10.0),
+        TopOfBook(100_200, 100_000.0, 13.0, 100_001.0, 10.0),
+    )
+
+    report = run_grid_search(
+        snapshots,
+        {"ofi_gamma": (0.0,)},
+        window=windows[0],
+        windows={row.window_id: row for row in windows[1:]},
+        base=_base(),
+        max_workers=1,
+        settlement={row.window_id: 1.0 for row in windows},
+        alpha_books=alpha_books,
+    )
+
+    assert len(alpha_books) != len(snapshots)
+    assert len(report.trials) == 1
 
 
 def test_multi_window_grid_search_keeps_complete_windows_in_each_fold() -> None:
