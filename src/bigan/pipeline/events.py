@@ -31,6 +31,7 @@ class DecisionReason(StrEnum):
     ALPHA_MISSING = "alpha_missing"
     ALPHA_STALE = "alpha_stale"
     SIGNAL_HOLD = "signal_hold"
+    DUPLICATE_SIGNAL = "duplicate_signal"
     OMS_NO_RESULT = "oms_no_result"
     OMS_FILLED = "oms_filled"
     OMS_REJECTED = "oms_rejected"

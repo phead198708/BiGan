@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from bigan.execution.polymarket_oms import SignalIdentity
 from bigan.pipeline.events import DecisionDisposition
 
 from .contracts import (
@@ -26,6 +30,7 @@ POSITION_SNAPSHOTS_FILE = "position_snapshots.jsonl"
 PNL_SNAPSHOTS_FILE = "pnl_snapshots.jsonl"
 SETTLEMENT_EVENTS_FILE = "settlement_events.jsonl"
 SNAPSHOT_FILE = "paper_snapshot.json"
+IDEMPOTENCY_INDEX_FILE = "paper_idempotency.sqlite3"
 JSONL_FILES = (
     SIGNAL_EVENTS_FILE,
     EXECUTION_EVENTS_FILE,
@@ -61,6 +66,7 @@ class PaperRunStore:
         store._write_atomic_json(MANIFEST_FILE, manifest.to_dict())
         for name in JSONL_FILES:
             (run_dir / name).touch(exist_ok=False)
+        store._rebuild_idempotency_index(())
         store._write_atomic_json(
             SNAPSHOT_FILE,
             PaperAccountLedger(
@@ -108,6 +114,7 @@ class PaperRunStore:
             raise ValueError("paper run manifest/config identity mismatch")
         store = cls(run_dir=run_dir, manifest=actual_manifest, fsync=bool(fsync))
         store.recover_ledger()
+        store._rebuild_idempotency_index(store.load_decision_events())
         return store
 
     def append_decision(
@@ -138,9 +145,33 @@ class PaperRunStore:
         }:
             self._append_jsonl(EXECUTION_EVENTS_FILE, decision.to_dict())
         self._append_observation(ledger_event, snapshot)
+        self._index_decision(decision)
+
+    def contains_source_snapshot(self, source_snapshot_id: str) -> bool:
+        """Query the complete disk-backed snapshot idempotency index."""
+
+        if not source_snapshot_id:
+            raise ValueError("source_snapshot_id must be non-empty")
+        with self._open_idempotency_index() as database:
+            row = database.execute(
+                "SELECT 1 FROM source_snapshots WHERE source_snapshot_id = ?",
+                (source_snapshot_id,),
+            ).fetchone()
+        return row is not None
+
+    def contains_filled_signal(self, identity: SignalIdentity) -> bool:
+        """Query the complete disk-backed filled-signal idempotency index."""
+
+        identity_json = _signal_identity_json(identity)
+        with self._open_idempotency_index() as database:
+            row = database.execute(
+                "SELECT 1 FROM filled_signals WHERE identity_json = ?",
+                (identity_json,),
+            ).fetchone()
+        return row is not None
 
     def load_decision_events(self) -> tuple[PaperDecisionEvent, ...]:
-        """Load validated decisions for durable pre-OMS snapshot deduplication."""
+        """Load validated decisions for replay and derived-index rebuilding."""
 
         decisions = tuple(
             PaperDecisionEvent.from_dict(row)
@@ -269,6 +300,44 @@ class PaperRunStore:
         self._append_jsonl(PNL_SNAPSHOTS_FILE, snapshot.to_dict())
         self._write_atomic_json(SNAPSHOT_FILE, snapshot.to_dict())
 
+    def _index_decision(self, decision: PaperDecisionEvent) -> None:
+        with self._open_idempotency_index() as database:
+            _insert_decision_index(database, decision)
+
+    def _rebuild_idempotency_index(
+        self,
+        decisions: tuple[PaperDecisionEvent, ...],
+    ) -> None:
+        path = self.run_dir / IDEMPOTENCY_INDEX_FILE
+        temporary = self.run_dir / f".{IDEMPOTENCY_INDEX_FILE}.{os.getpid()}.tmp"
+        temporary.unlink(missing_ok=True)
+        try:
+            with sqlite3.connect(temporary) as database:
+                _create_idempotency_schema(database)
+                for decision in decisions:
+                    _insert_decision_index(database, decision)
+            os.replace(temporary, path)
+            if self.fsync:
+                directory_fd = os.open(self.run_dir, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @contextmanager
+    def _open_idempotency_index(self) -> Iterator[sqlite3.Connection]:
+        path = self.run_dir / IDEMPOTENCY_INDEX_FILE
+        if not path.is_file():
+            raise ValueError("paper idempotency index is missing")
+        database = sqlite3.connect(path)
+        try:
+            with database:
+                yield database
+        finally:
+            database.close()
+
     def _validate_artifact_identity(self, *run_ids: str) -> None:
         if any(run_id != self.manifest.run_id for run_id in run_ids):
             raise ValueError("artifact run_id does not match paper run manifest")
@@ -354,3 +423,85 @@ def _validate_stream_order(events: list[Any], name: str) -> None:
         if event.event_sequence < previous:
             raise ValueError(f"event_sequence moves backwards in {name}")
         previous = event.event_sequence
+
+
+def _create_idempotency_schema(database: sqlite3.Connection) -> None:
+    database.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_snapshots (
+            source_snapshot_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL
+        )
+        """
+    )
+    database.execute(
+        """
+        CREATE TABLE IF NOT EXISTS filled_signals (
+            identity_json TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _insert_decision_index(
+    database: sqlite3.Connection,
+    decision: PaperDecisionEvent,
+) -> None:
+    snapshot_row = database.execute(
+        "SELECT event_id FROM source_snapshots WHERE source_snapshot_id = ?",
+        (decision.source_snapshot_id,),
+    ).fetchone()
+    if snapshot_row is None:
+        database.execute(
+            "INSERT INTO source_snapshots(source_snapshot_id, event_id) VALUES (?, ?)",
+            (decision.source_snapshot_id, decision.event_id),
+        )
+    elif snapshot_row[0] != decision.event_id:
+        raise ValueError("conflicting source snapshot in idempotency index")
+
+    identity = _filled_signal_identity(decision)
+    if identity is None:
+        return
+    identity_json = _signal_identity_json(identity)
+    signal_row = database.execute(
+        "SELECT event_id FROM filled_signals WHERE identity_json = ?",
+        (identity_json,),
+    ).fetchone()
+    if signal_row is None:
+        database.execute(
+            "INSERT INTO filled_signals(identity_json, event_id) VALUES (?, ?)",
+            (identity_json, decision.event_id),
+        )
+    elif signal_row[0] != decision.event_id:
+        raise ValueError("duplicate filled signal identity in paper history")
+
+
+def _filled_signal_identity(event: PaperDecisionEvent) -> SignalIdentity | None:
+    decision = event.decision
+    if decision.disposition is not DecisionDisposition.FILLED:
+        return None
+    if (
+        decision.direction not in {"BUY_YES", "BUY_NO"}
+        or decision.market_price is None
+        or decision.recommended_size_pct is None
+    ):
+        raise ValueError("persisted fill is missing its OMS signal identity")
+    return (
+        decision.window_id,
+        decision.timestamp_ms,
+        decision.direction,
+        decision.market_price,
+        decision.recommended_size_pct,
+    )
+
+
+def _signal_identity_json(identity: SignalIdentity) -> str:
+    if len(identity) != 5:
+        raise ValueError("signal identity must contain five fields")
+    return json.dumps(
+        identity,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    )

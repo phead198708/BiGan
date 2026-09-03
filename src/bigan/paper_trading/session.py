@@ -5,14 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Iterable, Mapping
+from collections import OrderedDict
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
 from bigan.data.polymarket_clob import MarketSnapshot
-from bigan.execution.polymarket_oms import OrderResult, Position, SignalIdentity
+from bigan.execution.polymarket_oms import OrderResult, Position
 from bigan.pipeline.events import (
-    DecisionDisposition,
     StrategyDecisionEvent,
     market_snapshot_identity,
 )
@@ -35,6 +35,9 @@ class PaperSessionFailedError(RuntimeError):
     """Raised after a ledger or durability failure permanently closes a session."""
 
 
+DEFAULT_SNAPSHOT_DEDUPE_CACHE_SIZE = 10_000
+
+
 class PaperTradingSession:
     """Connect one fixed-window StrategyRunner to ledger and durable storage."""
 
@@ -44,17 +47,24 @@ class PaperTradingSession:
         runner: StrategyRunner,
         ledger: PaperAccountLedger,
         store: PaperRunStore,
-        processed_snapshot_ids: Iterable[str] = (),
+        snapshot_dedupe_cache_size: int = DEFAULT_SNAPSHOT_DEDUPE_CACHE_SIZE,
     ) -> None:
+        cache_size = _validated_snapshot_cache_size(snapshot_dedupe_cache_size)
         self.runner = runner
         self.ledger = ledger
         self.store = store
         self.failed = False
         self.failure_reason: str | None = None
         self._feed_callback_registered = False
-        self._processed_snapshot_ids = set(processed_snapshot_ids)
-        self.runner.on_decision(self._on_decision)
+        self._snapshot_dedupe_cache_size = cache_size
+        self._snapshot_id_cache: OrderedDict[str, None] = OrderedDict()
+        self._runner_owner_token = object()
         self._assert_cash_consistency()
+        self.runner.bind_paper_session(
+            owner_token=self._runner_owner_token,
+            decision_callback=self._on_decision,
+            processed_signal_checker=self.store.contains_filled_signal,
+        )
 
     @classmethod
     def create_new(
@@ -67,9 +77,11 @@ class PaperTradingSession:
         config: Mapping[str, object] | None = None,
         created_at: str | None = None,
         fsync: bool = False,
+        snapshot_dedupe_cache_size: int = DEFAULT_SNAPSHOT_DEDUPE_CACHE_SIZE,
     ) -> PaperTradingSession:
         """Create a new fixed-window session and its immutable manifest."""
 
+        cache_size = _validated_snapshot_cache_size(snapshot_dedupe_cache_size)
         _require_fresh_runner(runner)
         manifest = _manifest_for(
             runner=runner,
@@ -88,7 +100,12 @@ class PaperTradingSession:
             manifest=manifest,
             fsync=fsync,
         )
-        return cls(runner=runner, ledger=ledger, store=store)
+        return cls(
+            runner=runner,
+            ledger=ledger,
+            store=store,
+            snapshot_dedupe_cache_size=cache_size,
+        )
 
     @classmethod
     def resume_existing(
@@ -100,9 +117,11 @@ class PaperTradingSession:
         source_commit: str,
         config: Mapping[str, object] | None = None,
         fsync: bool = False,
+        snapshot_dedupe_cache_size: int = DEFAULT_SNAPSHOT_DEDUPE_CACHE_SIZE,
     ) -> PaperTradingSession:
         """Replay and verify an existing run before accepting another decision."""
 
+        cache_size = _validated_snapshot_cache_size(snapshot_dedupe_cache_size)
         _require_fresh_runner(runner)
         actual = PaperRunStore.load_manifest(output_dir=output_dir, run_id=run_id)
         expected = _manifest_for(
@@ -118,7 +137,6 @@ class PaperTradingSession:
             fsync=fsync,
         )
         ledger = store.recover_ledger()
-        decisions = store.load_decision_events()
         snapshot = ledger.snapshot()
         oms_positions = tuple(
             Position(
@@ -135,18 +153,13 @@ class PaperTradingSession:
             current_bankroll=snapshot.cash,
             positions=oms_positions,
             order_sequence_floor=snapshot.last_event_sequence,
-            processed_signal_identities=tuple(
-                identity
-                for event in decisions
-                if (identity := _filled_signal_identity(event)) is not None
-            ),
         )
         runner.current_bankroll = snapshot.cash
         return cls(
             runner=runner,
             ledger=ledger,
             store=store,
-            processed_snapshot_ids=(event.source_snapshot_id for event in decisions),
+            snapshot_dedupe_cache_size=cache_size,
         )
 
     @property
@@ -154,6 +167,12 @@ class PaperTradingSession:
         """Return the current immutable account state."""
 
         return self.ledger.snapshot()
+
+    @property
+    def snapshot_dedupe_cache_entries(self) -> int:
+        """Return the bounded number of hot snapshot identities in memory."""
+
+        return len(self._snapshot_id_cache)
 
     async def start(self) -> None:
         """Connect the configured feed through the session's fail-closed path."""
@@ -173,7 +192,7 @@ class PaperTradingSession:
         """Process one snapshot and fail closed if persistence did not complete."""
 
         self._require_healthy()
-        if _snapshot_id(snapshot) in self._processed_snapshot_ids:
+        if self._source_snapshot_processed(_snapshot_id(snapshot)):
             return None
         try:
             result = self.runner.process_snapshot_sync(snapshot)
@@ -188,7 +207,7 @@ class PaperTradingSession:
         """Async wrapper retaining StrategyRunner's return contract."""
 
         self._require_healthy()
-        if _snapshot_id(snapshot) in self._processed_snapshot_ids:
+        if self._source_snapshot_processed(_snapshot_id(snapshot)):
             return None
         try:
             result = await self.runner.process_snapshot(snapshot)
@@ -238,7 +257,7 @@ class PaperTradingSession:
             raise PaperSessionFailedError(self.failure_reason or "paper session failed")
         sequence = self.ledger.last_event_sequence + 1
         source_snapshot_id = decision.source_snapshot_id
-        if source_snapshot_id in self._processed_snapshot_ids:
+        if self._source_snapshot_processed(source_snapshot_id):
             raise ValueError("source snapshot reached decision callback twice")
         event_id = f"{self.store.manifest.run_id}:decision:{source_snapshot_id}"
         paper_event = PaperDecisionEvent(
@@ -259,7 +278,7 @@ class PaperTradingSession:
                 ledger_event=ledger_event,
                 snapshot=self.ledger.snapshot(),
             )
-            self._processed_snapshot_ids.add(source_snapshot_id)
+            self._remember_snapshot_id(source_snapshot_id)
         except Exception as exc:
             self._fail(exc)
             raise
@@ -268,6 +287,21 @@ class PaperTradingSession:
         if not math.isclose(self.ledger.cash, decision.cash_after, abs_tol=1e-8):
             raise ValueError("ledger cash differs from decision cash_after")
         self._assert_cash_consistency()
+
+    def _source_snapshot_processed(self, source_snapshot_id: str) -> bool:
+        if source_snapshot_id in self._snapshot_id_cache:
+            self._snapshot_id_cache.move_to_end(source_snapshot_id)
+            return True
+        if self.store.contains_source_snapshot(source_snapshot_id):
+            self._remember_snapshot_id(source_snapshot_id)
+            return True
+        return False
+
+    def _remember_snapshot_id(self, source_snapshot_id: str) -> None:
+        self._snapshot_id_cache[source_snapshot_id] = None
+        self._snapshot_id_cache.move_to_end(source_snapshot_id)
+        while len(self._snapshot_id_cache) > self._snapshot_dedupe_cache_size:
+            self._snapshot_id_cache.popitem(last=False)
 
     def _assert_cash_consistency(self) -> None:
         values = (self.ledger.cash, self.runner.current_bankroll, self.runner.oms.bankroll)
@@ -359,30 +393,19 @@ def _snapshot_id(snapshot: MarketSnapshot) -> str:
     )
 
 
-def _filled_signal_identity(event: PaperDecisionEvent) -> SignalIdentity | None:
-    decision = event.decision
-    if decision.disposition is not DecisionDisposition.FILLED:
-        return None
-    if (
-        decision.direction not in {"BUY_YES", "BUY_NO"}
-        or decision.market_price is None
-        or decision.recommended_size_pct is None
-    ):
-        raise ValueError("persisted fill is missing its OMS signal identity")
-    return (
-        decision.window_id,
-        decision.timestamp_ms,
-        decision.direction,
-        decision.market_price,
-        decision.recommended_size_pct,
-    )
-
-
 def _require_fresh_runner(runner: StrategyRunner) -> None:
     if (
-        runner.decision_count != 0
+        runner.paper_session_bound
+        or runner.decision_count != 0
         or runner.execution_count != 0
         or runner.oms.positions()
         or runner.oms.open_limit_orders()
     ):
-        raise ValueError("paper session requires a fresh StrategyRunner/OMS")
+        raise ValueError("paper session requires an unbound fresh StrategyRunner/OMS")
+
+
+def _validated_snapshot_cache_size(value: int) -> int:
+    size = int(value)
+    if size < 1:
+        raise ValueError("snapshot_dedupe_cache_size must be positive")
+    return size

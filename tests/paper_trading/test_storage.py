@@ -12,6 +12,7 @@ from bigan.paper_trading.contracts import PaperSettlementInput
 from bigan.paper_trading.ledger import PaperAccountLedger
 from bigan.paper_trading.storage import (
     EXECUTION_EVENTS_FILE,
+    IDEMPOTENCY_INDEX_FILE,
     JSONL_FILES,
     LEDGER_EVENTS_FILE,
     MANIFEST_FILE,
@@ -49,7 +50,20 @@ def test_create_new_layout_append_and_atomic_snapshot(tmp_path: Path) -> None:
     store, ledger = _created_store(tmp_path)
     assert (store.run_dir / MANIFEST_FILE).is_file()
     assert all((store.run_dir / name).is_file() for name in JSONL_FILES)
+    assert (store.run_dir / IDEMPOTENCY_INDEX_FILE).is_file()
     _append_fill(store, ledger)
+
+    decision = paper_decision(1)
+    assert store.contains_source_snapshot(decision.source_snapshot_id)
+    assert store.contains_filled_signal(
+        (
+            decision.decision.window_id,
+            decision.decision.timestamp_ms,
+            "BUY_YES",
+            0.40,
+            0.05,
+        )
+    )
 
     signal_rows = [
         json.loads(line) for line in (store.run_dir / SIGNAL_EVENTS_FILE).read_text().splitlines()
@@ -90,6 +104,29 @@ def test_resume_replays_exact_state_and_sequence(tmp_path: Path) -> None:
     mutation = recovered.apply_decision(second)
     assert mutation is not None
     assert recovered.last_event_sequence == 2
+
+
+def test_resume_rebuilds_missing_derived_idempotency_index(tmp_path: Path) -> None:
+    store, ledger = _created_store(tmp_path)
+    _append_fill(store, ledger)
+    decision = paper_decision(1)
+    (store.run_dir / IDEMPOTENCY_INDEX_FILE).unlink()
+
+    resumed = PaperRunStore.resume_existing(
+        output_dir=tmp_path,
+        expected_manifest=manifest(),
+    )
+
+    assert resumed.contains_source_snapshot(decision.source_snapshot_id)
+    assert resumed.contains_filled_signal(
+        (
+            decision.decision.window_id,
+            decision.decision.timestamp_ms,
+            "BUY_YES",
+            0.40,
+            0.05,
+        )
+    )
 
 
 def test_storage_recovers_settlement(tmp_path: Path) -> None:

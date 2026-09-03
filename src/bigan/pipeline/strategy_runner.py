@@ -10,7 +10,12 @@ from dataclasses import dataclass, replace
 from typing import TypeAlias
 
 from bigan.data.polymarket_clob import MarketSnapshot, PolymarketFeedHandler
-from bigan.execution.polymarket_oms import OrderResult, PolymarketOMS
+from bigan.execution.polymarket_oms import (
+    OrderResult,
+    PolymarketOMS,
+    SignalIdentity,
+    signal_identity,
+)
 from bigan.features.binance_ofi import BinanceOFICalculator, OFISnapshot, TopOfBook
 from bigan.strategies.polymarket_pricing import (
     MarketWindow,
@@ -47,6 +52,7 @@ class PricingInputs:
 
 PricingInputsProvider = Callable[[int], PricingInputs | None]
 DecisionCallback = Callable[[StrategyDecisionEvent], None]
+ProcessedSignalChecker = Callable[[SignalIdentity], bool]
 
 
 class StrategyRunner:
@@ -83,6 +89,8 @@ class StrategyRunner:
         "decision_callback_errors",
         "_decision_callbacks",
         "_callback_registered",
+        "_paper_session_owner_token",
+        "_paper_processed_signal_checker",
     )
 
     def __init__(
@@ -162,12 +170,39 @@ class StrategyRunner:
         self.decision_callback_errors = 0
         self._decision_callbacks: list[DecisionCallback] = []
         self._callback_registered = False
+        self._paper_session_owner_token: object | None = None
+        self._paper_processed_signal_checker: ProcessedSignalChecker | None = None
         self.oms.bankroll = bankroll
 
     def on_decision(self, callback: DecisionCallback) -> None:
         """Register a lightweight isolated callback for every decision event."""
 
         self._decision_callbacks.append(callback)
+
+    @property
+    def paper_session_bound(self) -> bool:
+        """Return whether this runner is exclusively owned by a paper session."""
+
+        return self._paper_session_owner_token is not None
+
+    def bind_paper_session(
+        self,
+        *,
+        owner_token: object,
+        decision_callback: DecisionCallback,
+        processed_signal_checker: ProcessedSignalChecker,
+    ) -> None:
+        """Exclusively bind one durable paper-session boundary to this runner."""
+
+        if owner_token is None:
+            raise ValueError("paper session owner_token must not be None")
+        if not callable(decision_callback) or not callable(processed_signal_checker):
+            raise TypeError("paper session callbacks must be callable")
+        if self._paper_session_owner_token is not None:
+            raise ValueError("StrategyRunner is already bound to a paper session")
+        self._paper_session_owner_token = owner_token
+        self._paper_processed_signal_checker = processed_signal_checker
+        self._decision_callbacks.append(decision_callback)
 
     @property
     def last_execution(self) -> OrderResult | None:
@@ -273,6 +308,10 @@ class StrategyRunner:
     async def start(self) -> None:
         """Connect the feed and register the isolated snapshot callback."""
 
+        if self.paper_session_bound:
+            raise RuntimeError(
+                "paper-owned StrategyRunner must be started via PaperTradingSession"
+            )
         if not self._callback_registered:
             self.feed_handler.on_snapshot(self._on_snapshot)
             self._callback_registered = True
@@ -374,6 +413,30 @@ class StrategyRunner:
                     cash_after=cash_before,
                     disposition=DecisionDisposition.HOLD,
                     reason=DecisionReason.SIGNAL_HOLD,
+                )
+            )
+            return None
+        if (
+            self._paper_processed_signal_checker is not None
+            and self._paper_processed_signal_checker(signal_identity(signal))
+        ):
+            self._emit_decision(
+                self._decision_event(
+                    snapshot,
+                    alpha_ts=alpha_ts,
+                    alpha_age=alpha_age,
+                    alpha_fresh=alpha_fresh,
+                    alpha_reason=alpha_reason,
+                    z_ofi=z_ofi,
+                    inputs=inputs,
+                    inputs_age=inputs_age,
+                    inputs_fresh=True,
+                    signal=signal,
+                    result=None,
+                    cash_before=cash_before,
+                    cash_after=cash_before,
+                    disposition=DecisionDisposition.NO_ORDER,
+                    reason=DecisionReason.DUPLICATE_SIGNAL,
                 )
             )
             return None

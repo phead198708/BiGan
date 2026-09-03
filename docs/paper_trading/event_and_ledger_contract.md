@@ -41,9 +41,10 @@ from `StrategyRunner.process_snapshot_sync()`. It captures:
 Dispositions are `DROPPED`, `HOLD`, `NO_ORDER`, `FILLED`, and `REJECTED`.
 Reason codes are `window_mismatch`, `pricing_inputs_missing`,
 `pricing_inputs_stale`, `alpha_missing`, `alpha_stale`, `signal_hold`,
-`oms_no_result`, `oms_filled`, and `oms_rejected`. Missing or stale alpha is
-explicitly distinguishable from a real zero Z-score. Missing/stale pricing
-inputs produce no fabricated signal and fail closed as `DROPPED`.
+`duplicate_signal`, `oms_no_result`, `oms_filled`, and `oms_rejected`. Missing
+or stale alpha is explicitly distinguishable from a real zero Z-score.
+Missing/stale pricing inputs produce no fabricated signal and fail closed as
+`DROPPED`.
 
 Callbacks are synchronous and isolated. A failing subscriber increments
 `decision_callback_errors`, is logged, and cannot undo an OMS result or prevent
@@ -113,10 +114,20 @@ the online session and checks persisted derived ledger events byte-for-value
 against regenerated contracts.
 
 Each decision also persists `source_snapshot_id`, a canonical SHA-256 over the
-complete immutable market snapshot. Recovery rebuilds this identity set and
-`PaperTradingSession` checks it before calling the pricing engine or OMS. A
-redelivered snapshot therefore cannot create another fill after reconnect or
-restart. The decision event ID is derived from the run ID and snapshot hash.
+complete immutable market snapshot. A rebuildable on-disk SQLite index covers
+every persisted snapshot and every filled OMS signal identity. The JSONL event
+streams remain authoritative; recovery verifies them first and recreates the
+derived index from those records. `PaperTradingSession` keeps only a bounded
+10,000-entry LRU of hot snapshot IDs and falls back to the disk index before
+calling the pricing engine or OMS. Filled-signal replay protection therefore
+does not depend on the OMS's bounded performance cache. A redelivered snapshot
+or an older filled signal cannot create another fill after reconnect, cache
+eviction, or restart. The decision event ID is derived from the run ID and
+snapshot hash.
+
+A `StrategyRunner` has exclusive paper-session ownership. Binding a second
+`PaperTradingSession` to the same runner is rejected before a new run directory
+is created, preventing one decision callback from writing into multiple runs.
 
 ## Artifacts and recovery
 
@@ -131,7 +142,12 @@ position_snapshots.jsonl
 pnl_snapshots.jsonl
 settlement_events.jsonl
 paper_snapshot.json
+paper_idempotency.sqlite3
 ```
+
+`paper_idempotency.sqlite3` is a derived lookup sidecar, not an authoritative
+ledger. It is replaced from validated JSONL history on every resume and may be
+recreated if missing.
 
 The manifest fixes source commit, initial bankroll, fee, registered window,
 configuration SHA-256, and the safety boundary. The hash covers complete OFI,

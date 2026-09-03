@@ -40,6 +40,7 @@ def _runner(
     spot_price: float = 100_000.0,
     oms_symbol: str = "BTC",
     provider_identity: str | None = "fixed-pricing-inputs-v1",
+    signal_cache_size: int = 100_000,
 ) -> StrategyRunner:
     return StrategyRunner(
         ofi_engine=BinanceOFICalculator(
@@ -47,7 +48,11 @@ def _runner(
             ema_alpha=ema_alpha,
         ),
         pricing_engine=PolymarketPricingEngine(),
-        oms=PolymarketOMS(max_spread_allowed=0.08, symbol=oms_symbol),
+        oms=PolymarketOMS(
+            max_spread_allowed=0.08,
+            symbol=oms_symbol,
+            signal_cache_size=signal_cache_size,
+        ),
         feed_handler=PolymarketFeedHandler(window_id=WINDOW.window_id, mock=True),
         window=WINDOW,
         initial_bankroll=1_000.0,
@@ -270,6 +275,119 @@ def test_dynamic_pricing_provider_requires_explicit_identity(tmp_path: Path) -> 
             run_id="missing-provider-identity",
             source_commit="commit-a",
         )
+
+
+def test_runner_can_be_owned_by_only_one_paper_session(tmp_path: Path) -> None:
+    runner = _runner()
+    first = PaperTradingSession.create_new(
+        runner=runner,
+        output_dir=tmp_path,
+        run_id="exclusive-run-a",
+        source_commit="commit-a",
+    )
+
+    assert first.runner.paper_session_bound is True
+    with pytest.raises(ValueError, match="unbound fresh StrategyRunner"):
+        PaperTradingSession.create_new(
+            runner=runner,
+            output_dir=tmp_path,
+            run_id="exclusive-run-b",
+            source_commit="commit-a",
+        )
+    assert not (tmp_path / "exclusive-run-b").exists()
+
+
+@pytest.mark.asyncio
+async def test_paper_owned_runner_cannot_start_outside_session(tmp_path: Path) -> None:
+    runner = _runner()
+    PaperTradingSession.create_new(
+        runner=runner,
+        output_dir=tmp_path,
+        run_id="exclusive-start",
+        source_commit="commit-a",
+    )
+
+    with pytest.raises(RuntimeError, match="PaperTradingSession"):
+        await runner.start()
+
+
+def test_snapshot_dedupe_uses_bounded_lru_with_complete_disk_fallback(
+    tmp_path: Path,
+) -> None:
+    session = PaperTradingSession.create_new(
+        runner=_runner(),
+        output_dir=tmp_path,
+        run_id="bounded-snapshot-dedupe",
+        source_commit="commit-a",
+        snapshot_dedupe_cache_size=2,
+    )
+    snapshots = [
+        _snapshot(
+            100_000 + index,
+            yes_bid=0.98,
+            yes_ask=0.99,
+            no_bid=0.0,
+            no_ask=0.99,
+        )
+        for index in range(3)
+    ]
+    for snapshot in snapshots:
+        assert session.process_snapshot_sync(snapshot) is None
+
+    assert session.snapshot_dedupe_cache_entries == 2
+    assert session.runner.decision_count == 3
+    assert session.process_snapshot_sync(snapshots[0]) is None
+    assert session.snapshot_dedupe_cache_entries == 2
+    assert session.runner.decision_count == 3
+
+
+def test_resume_signal_dedupe_is_not_limited_by_oms_cache(tmp_path: Path) -> None:
+    first_runner = _runner(
+        spot_price=200_000.0,
+        zscore_min_samples=1,
+        signal_cache_size=1,
+    )
+    session = PaperTradingSession.create_new(
+        runner=first_runner,
+        output_dir=tmp_path,
+        run_id="durable-signal-dedupe",
+        source_commit="commit-a",
+    )
+    first_snapshot = replace(
+        _snapshot(
+            100_000,
+            yes_bid=0.39,
+            yes_ask=0.40,
+            no_bid=0.09,
+            no_ask=0.90,
+        ),
+        yes_ask_size=10.0,
+    )
+    second_snapshot = replace(first_snapshot, timestamp_ms=100_100)
+    first_fill = session.process_snapshot_sync(first_snapshot)
+    second_fill = session.process_snapshot_sync(second_snapshot)
+    assert first_fill is not None and first_fill.status == "FILLED"
+    assert second_fill is not None and second_fill.status == "FILLED"
+    before_resume = session.current_snapshot
+
+    resumed = PaperTradingSession.resume_existing(
+        runner=_runner(
+            spot_price=200_000.0,
+            zscore_min_samples=1,
+            signal_cache_size=1,
+        ),
+        output_dir=tmp_path,
+        run_id="durable-signal-dedupe",
+        source_commit="commit-a",
+    )
+    replay_with_different_liquidity = replace(first_snapshot, yes_ask_size=200.0)
+
+    assert resumed.process_snapshot_sync(replay_with_different_liquidity) is None
+    assert resumed.current_snapshot.cash == before_resume.cash
+    assert resumed.current_snapshot.open_lots == before_resume.open_lots
+    assert resumed.runner.oms_calls == 0
+    assert resumed.runner.last_decision is not None
+    assert resumed.runner.last_decision.reason_code.value == "duplicate_signal"
 
 
 def test_all_cash_fill_reserves_fee_and_keeps_every_ledger_consistent(

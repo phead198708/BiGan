@@ -174,7 +174,9 @@ class PolymarketOMS:
 
         This deliberately refuses to overwrite live in-memory state. Resting
         orders are not recoverable from the BUY-only paper ledger and must be
-        absent when this recovery boundary is used.
+        absent when this recovery boundary is used. Restored signal identities
+        seed only the bounded OMS hot cache; durable paper replay protection is
+        owned by ``PaperRunStore`` and checked by ``StrategyRunner``.
         """
 
         bankroll = _finite_float("current_bankroll", current_bankroll)
