@@ -179,7 +179,8 @@ class PublicWebSocketTransport:
             try:
                 async with self.connect_factory(self.endpoint) as socket:
                     self.connected = True
-                    await _maybe_await(self.on_generation(generation))
+                    while self.queue.size:
+                        await self.queue.get()
                     await socket.send(
                         json.dumps(
                             self.subscription,
@@ -188,41 +189,40 @@ class PublicWebSocketTransport:
                             allow_nan=False,
                         )
                     )
+                    receiver = asyncio.create_task(
+                        self._receive_to_queue(socket, generation, stop_event),
+                        name=f"public-feed-receiver-{generation}",
+                    )
                     logger.info(
                         "paper_operator.feed.connected",
                         extra={"endpoint_host": urlsplit(self.endpoint).hostname, "generation": generation},
                     )
-                    while not stop_event.is_set():
-                        try:
-                            raw = await asyncio.wait_for(
-                                socket.recv(), timeout=self.heartbeat_interval_seconds
-                            )
-                        except TimeoutError:
-                            if self.application_heartbeat is not None:
-                                await socket.send(self.application_heartbeat)
-                            pong = await socket.ping()
-                            if inspect.isawaitable(pong):
-                                await asyncio.wait_for(
-                                    pong,
-                                    timeout=self.heartbeat_interval_seconds,
-                                )
-                            continue
-                        received = self.clock_ms()
-                        self.last_message_received_ms = received
-                        for payload in _decode_payloads(raw):
-                            self.queue.put_nowait((payload, generation, received))
-                        while self.queue.size:
-                            payload, queued_generation, queued_received = await self.queue.get()
+                    try:
+                        # The receive pump starts before bootstrap so diff-depth events
+                        # are boundedly buffered while the REST snapshot is in flight.
+                        await _maybe_await(self.on_generation(generation))
+                        while not stop_event.is_set():
+                            if self.queue.size:
+                                item = await self.queue.get()
+                            else:
+                                item = await self._next_queue_item(receiver, stop_event)
+                                if item is None:
+                                    break
+                            payload, queued_generation, queued_received = item
                             await _maybe_await(
                                 self.on_payload(payload, queued_generation, queued_received)
                             )
                             self.message_count += 1
-                        backoff = self.reconnect_min_seconds
+                            backoff = self.reconnect_min_seconds
+                    finally:
+                        receiver.cancel()
+                        await asyncio.gather(receiver, return_exceptions=True)
             except asyncio.CancelledError:
                 raise
             except (
                 OSError,
                 ConnectionError,
+                aiohttp.ClientError,
                 ConnectionClosed,
                 WebSocketException,
                 ValueError,
@@ -241,6 +241,58 @@ class PublicWebSocketTransport:
             if not stop_event.is_set():
                 await self.sleep(backoff)
                 backoff = min(backoff * 2.0, self.reconnect_max_seconds)
+
+    async def _receive_to_queue(
+        self,
+        socket: PublicSocket,
+        generation: int,
+        stop_event: asyncio.Event,
+    ) -> None:
+        while not stop_event.is_set():
+            try:
+                raw = await asyncio.wait_for(
+                    socket.recv(), timeout=self.heartbeat_interval_seconds
+                )
+            except TimeoutError:
+                if self.application_heartbeat is not None:
+                    await socket.send(self.application_heartbeat)
+                pong = await socket.ping()
+                if inspect.isawaitable(pong):
+                    await asyncio.wait_for(
+                        pong,
+                        timeout=self.heartbeat_interval_seconds,
+                    )
+                continue
+            received = self.clock_ms()
+            self.last_message_received_ms = received
+            for payload in _decode_payloads(raw):
+                self.queue.put_nowait((payload, generation, received))
+
+    async def _next_queue_item(
+        self,
+        receiver: asyncio.Task[None],
+        stop_event: asyncio.Event,
+    ) -> tuple[Mapping[str, object], int, int] | None:
+        queued = asyncio.create_task(self.queue.get())
+        stopped = asyncio.create_task(stop_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {queued, stopped, receiver},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stopped in done and stop_event.is_set():
+                return None
+            if queued in done:
+                return queued.result()
+            if receiver in done:
+                await receiver
+                raise ConnectionError("public websocket receive pump stopped")
+            return None
+        finally:
+            for task in (queued, stopped):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(queued, stopped, return_exceptions=True)
 
     def health(self) -> TransportHealth:
         return TransportHealth(
@@ -269,10 +321,9 @@ class GammaDiscoveryClient:
         duration_name = {
             300_000: "5m",
             900_000: "15m",
-            3_600_000: "1h",
         }.get(filters.window_duration_ms)
         if filters.market_type != "binary_up_down" or duration_name is None:
-            raise ValueError("public Gamma discovery supports exact 5m/15m/1h up/down families")
+            raise ValueError("public Gamma discovery supports exact 5m/15m up/down families")
         current_start = now_ms - (now_ms % filters.window_duration_ms)
         lookahead = max(1, (filters.max_preopen_ms + filters.window_duration_ms - 1) // filters.window_duration_ms)
         rows: list[object] = []
@@ -325,11 +376,13 @@ class BinanceReadonlyFeed:
             raise ValueError("Binance depth bootstrap failed")
 
     def on_payload(self, payload: Mapping[str, object], generation: int, received: int) -> None:
-        self.synchronizer.ingest_delta(
+        accepted = self.synchronizer.ingest_delta(
             payload,
             generation=generation,
             received_at_ms=received,
         )
+        if not accepted and self.synchronizer.needs_bootstrap:
+            raise ConnectionError("Binance depth gap requires immediate re-bootstrap")
 
     def on_disconnect(self) -> None:
         self.synchronizer.disconnect()

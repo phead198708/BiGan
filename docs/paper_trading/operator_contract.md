@@ -35,11 +35,15 @@ creation, cancellation, allowance, wallet, or signing adapter.
    selection are separate. `parse_gamma_markets` validates identities and
    structure; `select_market_windows` applies exact family filters and a stable
    ordering.
-3. `PublicWebSocketTransport` owns public subscription, PING, bounded
-   drop-oldest queue, bounded exponential reconnect, and connection generation.
-4. `BinanceDepthSynchronizer` applies REST snapshot plus `U/u` deltas. A gap,
-   reconnect, symbol mismatch, future/out-of-order event, or buffer overflow
-   invalidates alpha and requires a new snapshot.
+3. `PublicWebSocketTransport` sends the public subscription before bootstrap,
+   then owns PING, a bounded drop-oldest queue, bounded exponential reconnect,
+   and connection generation. Binance deltas are buffered while REST depth is
+   in flight.
+4. `BinanceDepthSynchronizer` builds a local price-level book from the REST
+   snapshot and applies absolute-quantity `U/u` deltas, including one-sided
+   updates and zero-quantity deletes. A gap, reconnect, symbol mismatch,
+   future/out-of-order event, or buffer overflow invalidates alpha and requests
+   an immediate reconnect/bootstrap.
 5. `PolymarketBookSynchronizer` requires full books for both discovered token
    IDs. A missing/stale token, sequence gap, window mismatch, or old generation
    cannot produce a tradable snapshot.
@@ -73,9 +77,10 @@ Candidate rows must contain a market ID, condition ID, exact start/end,
 distinct YES/NO (or UP/DOWN) token IDs, public resolution source, and active,
 closed, and accepting-order flags. Native Gamma JSON string arrays are
 supported. For the known family, classification may be derived only from an
-exact structural slug (`<underlying>-updown-(5m|15m|1h)-<epoch>`), never a
+exact structural slug (`<underlying>-updown-(5m|15m)-<epoch>`), never a
 fuzzy title substring. Explicit classification fields, when supplied, are
-validated against configured filters.
+validated against configured filters. This operator currently rejects all
+durations except 5m and 15m; 1h is not silently mapped onto 15m pricing.
 
 Eligible rows must match underlying, market type, exact duration, optional
 full-match slug/title regex, and the active/pre-open interval. Current windows
@@ -93,8 +98,9 @@ the SHA-256 of the parsed source row.
   public REST + WebSocket book.
 - Oracle source: public Polymarket RTDS `crypto_prices_chainlink` for the exact
   configured symbol.
-- TWAP: arithmetic mean of accepted oracle event-time samples in
-  `twap_window_ms`.
+- TWAP: left-continuous event-time integral over the known oracle path, bounded
+  by both `twap_window_ms` and the active market start. A pre-open sample may
+  establish the price at the start boundary, but pre-open duration is excluded.
 - Returns: log returns using samples at least
   `volatility_return_interval_ms` apart.
 - Volatility: population standard deviation over `volatility_window_ms`,

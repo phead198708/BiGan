@@ -137,7 +137,7 @@ async def _ready_operator(
             "U": 11,
             "u": 11,
             "b": [["101", "4"]],
-            "a": [["103", "1"]],
+            "a": [["101", "0"], ["103", "1"]],
         },
         generation=generation,
         received_at_ms=now,
@@ -326,6 +326,40 @@ async def test_no_decision_after_expiry_and_settlement_replay_does_not_duplicate
     await operator.poll()
     assert operator.counters["settlement_completed"] == 1
     assert len(operator.session.store.recent_settlements(limit=2)) == 1
+
+
+async def test_settled_window_retries_when_next_market_is_temporarily_unavailable(
+    tmp_path: Path,
+) -> None:
+    market = _market(1)
+    clock = FakeClock(10_000)
+
+    class TemporarilyUnavailableDiscovery:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def discover(self, **_kwargs: object) -> DiscoverySelection:
+            self.calls += 1
+            if self.calls == 1:
+                return _selection(market)
+            raise RuntimeError("next market is not published yet")
+
+    operator = PaperTradingOperator(
+        config=_config(tmp_path),
+        discovery=TemporarilyUnavailableDiscovery(),
+        resolution=FakeResolution([_final(market)]),
+        clock_ms=clock,
+    )
+    await operator.start()
+    clock.now_ms = market.end_ts_ms + 1
+
+    await operator.poll()
+    assert operator.state is OperatorState.DEGRADED
+    assert operator.counters["settlement_completed"] == 1
+    await operator.poll()
+    assert operator.state is OperatorState.DEGRADED
+    assert operator.state_reason.startswith("rollover_discovery_unavailable")
+    assert operator.counters["settlement_completed"] == 1
 
 
 async def test_persistence_failure_is_permanent_fail_closed(tmp_path: Path, monkeypatch) -> None:

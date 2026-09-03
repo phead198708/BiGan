@@ -179,6 +179,8 @@ class OperatorConfig:
             raise ValueError("reconnect bounds are invalid")
         if self.max_position_pct > self.max_window_exposure_pct:
             raise ValueError("risk position cap cannot exceed window exposure cap")
+        if self.window_duration_ms not in {300_000, 900_000}:
+            raise ValueError("paper operator supports only 5m and 15m windows")
         if self.recent_query_default > self.recent_query_max:
             raise ValueError("recent query default cannot exceed its hard maximum")
         if self.logging_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:

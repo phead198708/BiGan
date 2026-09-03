@@ -151,6 +151,10 @@ class BinanceDepthSynchronizer:
         self.buffer_overflow_count = 0
         self.last_bid_price: float | None = None
         self.last_ask_price: float | None = None
+        self.last_top_changed = False
+        self._has_applied_delta = False
+        self._bids: dict[float, float] = {}
+        self._asks: dict[float, float] = {}
         self._buffer: deque[tuple[dict[str, object], int]] = deque()
         self._buffer_compromised = False
 
@@ -179,6 +183,8 @@ class BinanceDepthSynchronizer:
         if generation != self.generation:
             self.dropped_generation_count += 1
             return False
+        if _is_binance_subscription_ack(payload):
+            return False
         try:
             delta = _unwrap_binance(payload)
             if _binance_symbol(payload, delta) != self.symbol:
@@ -189,9 +195,17 @@ class BinanceDepthSynchronizer:
             self.last_message_received_ms = received
             if event_ts > received:
                 self.out_of_order_count += 1
+                if not self.needs_bootstrap:
+                    self._invalidate(clear_buffer=True)
                 return False
-            if self.last_event_ts_ms is not None and event_ts < self.last_event_ts_ms:
+            if (
+                self.last_event_ts_ms is not None
+                and event_ts < self.last_event_ts_ms
+                and (self.needs_bootstrap or self._has_applied_delta)
+            ):
                 self.out_of_order_count += 1
+                if not self.needs_bootstrap:
+                    self._invalidate(clear_buffer=True)
                 return False
             if self.needs_bootstrap:
                 if len(self._buffer) >= self.delta_buffer_size:
@@ -203,6 +217,8 @@ class BinanceDepthSynchronizer:
             return self._apply_delta(delta, received_at_ms=received)
         except (TypeError, ValueError):
             self.error_count += 1
+            if not self.needs_bootstrap:
+                self._invalidate(clear_buffer=True)
             return False
 
     def ingest_snapshot(
@@ -220,22 +236,34 @@ class BinanceDepthSynchronizer:
             return False
         try:
             update_id = _positive_int(payload.get("lastUpdateId"), "lastUpdateId")
-            bid_price, bid_qty, ask_price, ask_qty = _depth_top(payload)
+            bids = _depth_side(payload.get("bids"), "bids", allow_empty=False)
+            asks = _depth_side(payload.get("asks"), "asks", allow_empty=False)
+            bid_price, bid_qty, ask_price, ask_qty = _book_top(bids, asks)
+            buffered = tuple(self._buffer)
+            applicable_event_times = [
+                _positive_int(delta.get("E"), "Binance event timestamp")
+                for delta, _received in buffered
+                if _positive_int(delta.get("u"), "final update id") > update_id
+            ]
+            seed_ts = min((int(received_at_ms), *applicable_event_times))
             self.calculator.reset()
             self.calculator.update_and_get_z(
                 bid_price=bid_price,
                 bid_qty=bid_qty,
                 ask_price=ask_price,
                 ask_qty=ask_qty,
-                ts_ms=int(received_at_ms),
+                ts_ms=seed_ts,
             )
+            self._bids = bids
+            self._asks = asks
             self.last_bid_price = bid_price
             self.last_ask_price = ask_price
+            self.last_top_changed = True
+            self._has_applied_delta = False
             self.last_update_id = update_id
-            self.last_event_ts_ms = int(received_at_ms)
+            self.last_event_ts_ms = seed_ts
             self.last_message_received_ms = int(received_at_ms)
             self.needs_bootstrap = False
-            buffered = tuple(self._buffer)
             self._buffer.clear()
             for delta, received in buffered:
                 final_update = _positive_int(delta.get("u"), "final update id")
@@ -297,25 +325,65 @@ class BinanceDepthSynchronizer:
             self.gap_count += 1
             self._invalidate(clear_buffer=True)
             return False
-        bid_price, bid_qty, ask_price, ask_qty = _depth_top(delta, bid_key="b", ask_key="a")
         event_ts = _positive_int(delta.get("E"), "Binance event timestamp")
-        if self.last_event_ts_ms is not None and event_ts < self.last_event_ts_ms:
-            self.out_of_order_count += 1
-            return False
-        self.calculator.update_and_get_z(
-            bid_price=bid_price,
-            bid_qty=bid_qty,
-            ask_price=ask_price,
-            ask_qty=ask_qty,
-            ts_ms=event_ts,
+        rebase_snapshot_clock = bool(
+            not self._has_applied_delta
+            and self.last_event_ts_ms is not None
+            and event_ts < self.last_event_ts_ms
         )
+        if (
+            not rebase_snapshot_clock
+            and self.last_event_ts_ms is not None
+            and event_ts < self.last_event_ts_ms
+        ):
+            self.out_of_order_count += 1
+            self._invalidate(clear_buffer=True)
+            return False
+        bids = dict(self._bids)
+        asks = dict(self._asks)
+        _apply_depth_updates(bids, delta.get("b"), "bids")
+        _apply_depth_updates(asks, delta.get("a"), "asks")
+        bid_price, bid_qty, ask_price, ask_qty = _book_top(bids, asks)
+        previous_top = self._current_top()
+        current_top = (bid_price, bid_qty, ask_price, ask_qty)
+        top_changed = current_top != previous_top
+        if rebase_snapshot_clock and previous_top is not None:
+            self.calculator.reset()
+            self.calculator.update_and_get_z(
+                bid_price=previous_top[0],
+                bid_qty=previous_top[1],
+                ask_price=previous_top[2],
+                ask_qty=previous_top[3],
+                ts_ms=event_ts,
+            )
+        if top_changed:
+            self.calculator.update_and_get_z(
+                bid_price=bid_price,
+                bid_qty=bid_qty,
+                ask_price=ask_price,
+                ask_qty=ask_qty,
+                ts_ms=event_ts,
+            )
+        self._bids = bids
+        self._asks = asks
         self.last_bid_price = bid_price
         self.last_ask_price = ask_price
+        self.last_top_changed = top_changed
+        self._has_applied_delta = True
         self.last_update_id = final_update
         self.last_event_ts_ms = event_ts
         self.last_message_received_ms = received_at_ms
         self.state = FeedConnectionState.READY
         return True
+
+    def _current_top(self) -> tuple[float, float, float, float] | None:
+        if self.last_bid_price is None or self.last_ask_price is None:
+            return None
+        bid_qty = self._bids.get(self.last_bid_price)
+        ask_qty = self._asks.get(self.last_ask_price)
+        if bid_qty is None or ask_qty is None:
+            return None
+        return self.last_bid_price, bid_qty, self.last_ask_price, ask_qty
 
     def _invalidate(self, *, clear_buffer: bool) -> None:
         self.state = FeedConnectionState.SYNCING
@@ -324,6 +392,10 @@ class BinanceDepthSynchronizer:
         self.last_event_ts_ms = None
         self.last_bid_price = None
         self.last_ask_price = None
+        self.last_top_changed = False
+        self._has_applied_delta = False
+        self._bids.clear()
+        self._asks.clear()
         self.calculator.reset()
         if clear_buffer:
             self._buffer.clear()
@@ -586,6 +658,10 @@ def _unwrap_binance(payload: Mapping[str, object]) -> Mapping[str, object]:
     return data if isinstance(data, Mapping) else payload
 
 
+def _is_binance_subscription_ack(payload: Mapping[str, object]) -> bool:
+    return set(payload) <= {"id", "result"} and "id" in payload and "result" in payload
+
+
 def _binance_symbol(
     outer: Mapping[str, object],
     payload: Mapping[str, object],
@@ -599,25 +675,51 @@ def _binance_symbol(
     raise ValueError("Binance delta is missing symbol identity")
 
 
-def _depth_top(
-    payload: Mapping[str, object],
+def _depth_side(
+    value: object,
+    name: str,
     *,
-    bid_key: str = "bids",
-    ask_key: str = "asks",
+    allow_empty: bool,
+) -> dict[float, float]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise ValueError(f"depth {name} must be an array")
+    if not value and not allow_empty:
+        raise ValueError(f"depth {name} must not be empty")
+    levels: dict[float, float] = {}
+    for raw_level in value:
+        price, quantity = _level(raw_level)
+        if quantity > 0:
+            levels[price] = quantity
+    if not levels and not allow_empty:
+        raise ValueError(f"depth {name} has no positive-quantity levels")
+    return levels
+
+
+def _apply_depth_updates(
+    book: dict[float, float],
+    value: object,
+    name: str,
+) -> None:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise ValueError(f"depth {name} must be an array")
+    for raw_level in value:
+        price, quantity = _level(raw_level)
+        if quantity == 0:
+            book.pop(price, None)
+        else:
+            book[price] = quantity
+
+
+def _book_top(
+    bids: Mapping[float, float],
+    asks: Mapping[float, float],
 ) -> tuple[float, float, float, float]:
-    bids = payload.get(bid_key)
-    asks = payload.get(ask_key)
-    if (
-        not isinstance(bids, Sequence)
-        or isinstance(bids, (str, bytes))
-        or not bids
-        or not isinstance(asks, Sequence)
-        or isinstance(asks, (str, bytes))
-        or not asks
-    ):
-        raise ValueError("depth payload requires non-empty bids and asks")
-    bid_price, bid_qty = _level(bids[0])
-    ask_price, ask_qty = _level(asks[0])
+    if not bids or not asks:
+        raise ValueError("local depth book requires at least one bid and ask")
+    bid_price = max(bids)
+    ask_price = min(asks)
+    bid_qty = bids[bid_price]
+    ask_qty = asks[ask_price]
     if bid_price >= ask_price:
         raise ValueError("depth top is crossed")
     return bid_price, bid_qty, ask_price, ask_qty

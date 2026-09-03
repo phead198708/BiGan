@@ -177,7 +177,7 @@ class PaperTradingOperator:
                 generation=generation,
                 received_at_ms=received,
             )
-            if accepted:
+            if accepted and self.binance_sync.last_top_changed:
                 self._ingest_spot_from_binance(received)
             self._update_gate_state()
             self._publish_status()
@@ -199,7 +199,7 @@ class PaperTradingOperator:
                 generation=generation,
                 received_at_ms=received,
             )
-            if accepted:
+            if accepted and self.binance_sync.last_top_changed:
                 event_ts = self.binance_sync.last_event_ts_ms
                 self._ingest_spot_from_binance(received if event_ts is None else event_ts)
             self._update_gate_state()
@@ -270,7 +270,7 @@ class PaperTradingOperator:
                 generation=generation,
                 received_at_ms=received_at_ms,
             )
-            if accepted:
+            if accepted and self.binance_sync.last_top_changed:
                 self._ingest_spot_from_binance(received_at_ms)
             self._update_gate_state()
             self._publish_status()
@@ -293,7 +293,7 @@ class PaperTradingOperator:
                 generation=generation,
                 received_at_ms=received_at_ms,
             )
-            if accepted:
+            if accepted and self.binance_sync.last_top_changed:
                 self._ingest_spot_from_binance(
                     self.binance_sync.last_event_ts_ms or received_at_ms
                 )
@@ -406,7 +406,12 @@ class PaperTradingOperator:
             self._accepting_snapshots = False
             self._transition(OperatorState.SETTLEMENT_PENDING, "window_expired_waiting_final_resolution")
             if market.window_id in session.current_snapshot.settled_window_ids:
-                await self._rollover_locked(session.current_snapshot.cash)
+                try:
+                    await self._rollover_locked(session.current_snapshot.cash)
+                except AuthoritativeReferenceUnavailable as exc:
+                    self._degrade("next_window_reference_unavailable", exc)
+                except Exception as exc:
+                    self._degrade("rollover_discovery_unavailable", exc)
                 return
             self.counters["settlement_pending"] += 1
             try:
@@ -628,7 +633,14 @@ class PaperTradingOperator:
 
     async def _rollover_locked(self, bankroll: float) -> None:
         self._transition(OperatorState.ROLLING_OVER, "discovering_next_window")
-        selection = await self.discovery.discover(filters=self._filters(), now_ms=self.clock_ms())
+        try:
+            selection = await self.discovery.discover(
+                filters=self._filters(),
+                now_ms=self.clock_ms(),
+            )
+        except Exception as exc:
+            self._degrade("rollover_discovery_unavailable", exc)
+            return
         market = selection.current or selection.next
         if market is None or (
             self.active_market is not None and market.window_id == self.active_market.window_id
@@ -636,13 +648,16 @@ class PaperTradingOperator:
             self._transition(OperatorState.SETTLEMENT_PENDING, "next_window_not_yet_discoverable")
             return
         self.next_market = selection.next if selection.current is not None else None
-        self.counters["rollovers"] += 1
         try:
             self._activate_market(market, bankroll=bankroll)
-        except AuthoritativeReferenceUnavailable:
-            raise
+        except AuthoritativeReferenceUnavailable as exc:
+            self._degrade("next_window_reference_unavailable", exc)
+            return
         except Exception as exc:
             self._fail_permanently("rollover_session_create_or_resume_failure", exc)
+            return
+        self.counters["rollovers"] += 1
+        self._publish_status(force=True)
 
     def _activate_market(self, market: DiscoveredMarket, *, bankroll: float | None) -> None:
         if market.reference_price_at_start is None:
@@ -758,13 +773,19 @@ class PaperTradingOperator:
                 allow_nan=False,
             ).encode("utf-8")
         ).hexdigest()
+        window_type = {
+            300_000: "5m",
+            900_000: "15m",
+        }.get(market.window_duration_ms)
+        if window_type is None:
+            raise ValueError("paper operator supports only 5m and 15m pricing windows")
         window = MarketWindow(
             window_id=market.window_id,
             symbol=self.config.underlying,
             strike_price=reference_price,
             start_ts_ms=market.start_ts_ms,
             end_ts_ms=market.end_ts_ms,
-            window_type="5m" if market.window_duration_ms == 300_000 else "15m",
+            window_type=window_type,
         )
         feed_handler = PolymarketFeedHandler(
             window_id=market.window_id,

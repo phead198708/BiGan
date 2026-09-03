@@ -61,6 +61,36 @@ def test_provider_requires_both_sources_and_minimum_volatility_samples() -> None
     assert math.isfinite(inputs.volatility_annualized)
 
 
+def test_oracle_twap_is_window_scoped_and_time_weighted() -> None:
+    provider = RollingPricingInputsProvider(
+        window_start_ts_ms=1_000,
+        window_end_ts_ms=11_000,
+        spot_source="binance:BTCUSDT",
+        oracle_source="polymarket-rtds:btc/usd",
+        max_age_ms=1_000,
+        max_samples=10,
+        twap_window_ms=10_000,
+        return_interval_ms=1_000,
+        volatility_window_ms=10_000,
+        volatility_min_samples=1,
+        volatility_max_abs_log_return=0.20,
+        annualization_seconds=31_536_000,
+    )
+    provider.ingest_spot(_sample(1_000, 100.0, "binance:BTCUSDT"))
+    provider.ingest_spot(_sample(2_000, 101.0, "binance:BTCUSDT"))
+    provider.ingest_oracle(_sample(900, 10.0, "polymarket-rtds:btc/usd"))
+    provider.ingest_oracle(_sample(1_100, 20.0, "polymarket-rtds:btc/usd"))
+    provider.ingest_oracle(_sample(2_000, 30.0, "polymarket-rtds:btc/usd"))
+
+    inputs = provider(2_000)
+
+    assert inputs is not None
+    # The pre-open sample is carried from the 1,000 window boundary, not
+    # integrated before it. The event at decision time has zero duration.
+    assert inputs.oracle_twap_so_far == pytest.approx(19.0)
+    assert provider.config_identity()["twap_sampling"] == "event_time_left_continuous"
+
+
 def test_future_stale_wrong_source_and_outlier_inputs_fail_closed() -> None:
     provider = _provider(min_returns=1)
     assert provider.ingest_spot(_sample(1_000, 100.0, "wrong")) is False

@@ -37,8 +37,8 @@ def _delta(
 def _snapshot(update_id: int = 10) -> dict[str, object]:
     return {
         "lastUpdateId": update_id,
-        "bids": [["99.0", "9"]],
-        "asks": [["102.0", "7"]],
+        "bids": [["99.0", "9"], ["98.0", "6"]],
+        "asks": [["102.0", "7"], ["103.0", "5"]],
     }
 
 
@@ -84,6 +84,68 @@ def test_binance_gap_invalidates_alpha_until_new_bootstrap() -> None:
     assert feed.state is FeedConnectionState.READY
 
 
+def test_binance_diff_depth_updates_a_local_book_one_side_at_a_time() -> None:
+    feed = _binance()
+    feed.begin_generation(1)
+    assert feed.ingest_snapshot(_snapshot(10), generation=1, received_at_ms=1_000)
+
+    assert feed.ingest_delta(
+        {
+            "s": "BTCUSDT",
+            "E": 1_100,
+            "U": 11,
+            "u": 11,
+            "b": [["98", "12"]],
+            "a": [],
+        },
+        generation=1,
+    )
+    assert feed.last_update_id == 11
+    assert feed.mid_price == pytest.approx(100.5)
+    assert feed.last_top_changed is False
+    assert feed.calculator.last_timestamp_ms == 1_000
+
+    assert feed.ingest_delta(
+        {
+            "s": "BTCUSDT",
+            "E": 1_200,
+            "U": 12,
+            "u": 12,
+            "b": [["99", "0"]],
+            "a": [],
+        },
+        generation=1,
+    )
+    assert feed.last_update_id == 12
+    assert feed.last_bid_price == 98.0
+    assert feed.last_ask_price == 102.0
+    assert feed.mid_price == pytest.approx(100.0)
+    assert feed.last_top_changed is True
+    assert feed.calculator.last_timestamp_ms == 1_200
+
+
+def test_binance_first_delta_can_predate_rest_snapshot_receipt() -> None:
+    feed = _binance()
+    feed.begin_generation(1)
+    assert feed.ingest_snapshot(_snapshot(10), generation=1, received_at_ms=1_200)
+
+    assert feed.ingest_delta(_delta(11, 11, ts_ms=1_100), generation=1, received_at_ms=1_250)
+    assert feed.last_update_id == 11
+    assert feed.calculator.last_timestamp_ms == 1_100
+    assert feed.needs_bootstrap is False
+
+
+def test_binance_subscription_ack_is_not_treated_as_a_depth_failure() -> None:
+    feed = _binance()
+    feed.begin_generation(1)
+    assert feed.ingest_snapshot(_snapshot(10), generation=1, received_at_ms=1_000)
+
+    assert feed.ingest_delta({"result": None, "id": 1}, generation=1) is False
+    assert feed.needs_bootstrap is False
+    assert feed.last_update_id == 10
+    assert feed.error_count == 0
+
+
 def test_binance_symbol_time_generation_and_buffer_bounds_fail_closed() -> None:
     feed = _binance(buffer_size=1)
     feed.begin_generation(3)
@@ -102,7 +164,8 @@ def test_binance_symbol_time_generation_and_buffer_bounds_fail_closed() -> None:
     assert feed.symbol_mismatch_count == 1
     assert feed.ingest_delta(_delta(21, 21, ts_ms=2_100), generation=3) is False
     assert feed.dropped_generation_count == 1
-    assert feed.ingest_delta(_delta(21, 21, ts_ms=1_900), generation=4) is False
+    assert feed.ingest_delta(_delta(21, 21, ts_ms=2_100), generation=4) is True
+    assert feed.ingest_delta(_delta(22, 22, ts_ms=1_900), generation=4) is False
     assert feed.out_of_order_count == 1
     assert (
         feed.ingest_delta(

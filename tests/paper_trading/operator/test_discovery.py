@@ -56,6 +56,15 @@ def _filters() -> DiscoveryFilters:
     )
 
 
+def test_discovery_rejects_unsupported_one_hour_family() -> None:
+    with pytest.raises(ValueError, match="only 5m and 15m"):
+        DiscoveryFilters(
+            underlying="BTC",
+            market_type="binary_up_down",
+            window_duration_ms=3_600_000,
+        )
+
+
 def test_selects_unique_active_and_deterministic_next_window() -> None:
     rows = [
         _row("next-late", start=NOW + DURATION),

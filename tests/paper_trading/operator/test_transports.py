@@ -49,6 +49,8 @@ class FakeSocket:
         self.sent.append(message)
 
     async def recv(self) -> str | bytes:
+        if not self.messages:
+            await asyncio.Future()
         value = self.messages.pop(0)
         if isinstance(value, Exception):
             raise value
@@ -118,6 +120,43 @@ async def test_public_websocket_reconnects_resubscribes_and_fences_generations()
     assert sleeps == [1.0]
     assert transport.health().reconnect_count == 1
     assert len(first.sent) == len(second.sent) == 1
+
+
+async def test_public_websocket_subscribes_and_buffers_before_bootstrap() -> None:
+    stop = asyncio.Event()
+    bootstrap_started = asyncio.Event()
+    release_bootstrap = asyncio.Event()
+    socket = FakeSocket([json.dumps({"value": 7})])
+
+    async def on_generation(_generation: int) -> None:
+        assert socket.sent, "subscription must be sent before REST bootstrap starts"
+        bootstrap_started.set()
+        await release_bootstrap.wait()
+
+    async def on_payload(*_args: object) -> None:
+        stop.set()
+
+    transport = PublicWebSocketTransport(
+        endpoint="wss://stream.binance.com/ws",
+        subscription=binance_subscription("BTCUSDT"),
+        queue_size=2,
+        reconnect_min_seconds=1,
+        reconnect_max_seconds=2,
+        heartbeat_interval_seconds=5,
+        clock_ms=lambda: 1_000,
+        on_payload=on_payload,
+        on_generation=on_generation,
+        on_disconnect=lambda: None,
+        connect_factory=FakeConnector([socket]),
+    )
+    task = asyncio.create_task(transport.run(stop))
+    await bootstrap_started.wait()
+    await asyncio.sleep(0)
+    assert transport.queue.size == 1
+    release_bootstrap.set()
+    await task
+
+    assert transport.message_count == 1
 
 
 async def test_public_websocket_supports_application_ping_and_protocol_pong() -> None:
@@ -203,6 +242,21 @@ async def test_binance_readonly_feed_bootstraps_then_applies_delta() -> None:
     assert synchronizer.last_update_id == 11
     assert synchronizer.health(now_ms=1_002).fresh
     assert http.calls[0][1] == {"symbol": "BTCUSDT", "limit": 1000}
+
+    with pytest.raises(ConnectionError, match="immediate re-bootstrap"):
+        feed.on_payload(
+            {
+                "s": "BTCUSDT",
+                "E": 1_003,
+                "U": 13,
+                "u": 13,
+                "b": [],
+                "a": [],
+            },
+            1,
+            1_003,
+        )
+    assert synchronizer.needs_bootstrap is True
 
 
 async def test_polymarket_wrapper_emits_only_complete_dual_token_snapshot() -> None:

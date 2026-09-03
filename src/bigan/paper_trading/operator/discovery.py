@@ -35,6 +35,8 @@ class DiscoveryFilters:
             raise ValueError("market_type must be non-empty")
         if self.window_duration_ms <= 0 or self.max_preopen_ms <= 0:
             raise ValueError("discovery durations must be positive")
+        if self.window_duration_ms not in {300_000, 900_000}:
+            raise ValueError("paper discovery supports only 5m and 15m windows")
         for pattern in (self.slug_pattern, self.title_pattern):
             if pattern is not None:
                 re.compile(pattern)

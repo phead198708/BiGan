@@ -52,11 +52,12 @@ class PricingProviderHealth:
 class RollingPricingInputsProvider:
     """Point-in-time spot, oracle TWAP, and annualized realized volatility.
 
-    Spot and oracle samples are independent. Oracle TWAP is the arithmetic
-    mean of accepted event-time samples in ``twap_window_ms``. Volatility uses
-    non-overlapping-at-least-interval log returns and population variance,
-    annualized by ``sqrt(annualization_seconds / return_interval_seconds)``.
-    Buffers are bounded and reconnect explicitly clears warm state.
+    Spot and oracle samples are independent. Oracle TWAP is a left-continuous,
+    event-time integral, bounded by both ``twap_window_ms`` and the market
+    window start. Volatility uses non-overlapping-at-least-interval log returns
+    and population variance, annualized by
+    ``sqrt(annualization_seconds / return_interval_seconds)``. Buffers are
+    bounded and reconnect explicitly clears warm state.
     """
 
     def __init__(
@@ -149,7 +150,7 @@ class RollingPricingInputsProvider:
             "volatility_min_samples": self.volatility_min_samples,
             "volatility_max_abs_log_return": self.volatility_max_abs_log_return,
             "annualization_seconds": self.annualization_seconds,
-            "twap_sampling": "event_time_arithmetic_mean",
+            "twap_sampling": "event_time_left_continuous",
             "volatility_returns": "log_non_overlapping_min_interval",
             "volatility_variance": "population",
         }
@@ -219,16 +220,10 @@ class RollingPricingInputsProvider:
         if len(self._returns) < self.volatility_min_samples:
             self.missing_input_count += 1
             return None
-        oracle_cutoff = decision_ts_ms - self.twap_window_ms
-        oracle_prices = [
-            sample.price
-            for sample in self._oracle_samples
-            if oracle_cutoff <= sample.timestamp_ms <= decision_ts_ms
-        ]
-        if not oracle_prices:
+        twap = self._oracle_twap(decision_ts_ms)
+        if twap is None:
             self.missing_input_count += 1
             return None
-        twap = math.fsum(oracle_prices) / len(oracle_prices)
         volatility = self._annualized_volatility()
         progress = (decision_ts_ms - self.window_start_ts_ms) / (
             self.window_end_ts_ms - self.window_start_ts_ms
@@ -240,6 +235,53 @@ class RollingPricingInputsProvider:
             twap_weight=min(1.0, max(0.0, progress)),
             volatility_annualized=volatility,
         )
+
+    def _oracle_twap(self, decision_ts_ms: int) -> float | None:
+        if decision_ts_ms < self.window_start_ts_ms:
+            return None
+        cutoff = max(
+            self.window_start_ts_ms,
+            decision_ts_ms - self.twap_window_ms,
+        )
+        samples = [
+            sample
+            for sample in self._oracle_samples
+            if sample.timestamp_ms <= decision_ts_ms
+        ]
+        if not samples:
+            return None
+
+        boundary = next(
+            (sample for sample in reversed(samples) if sample.timestamp_ms <= cutoff),
+            None,
+        )
+        if boundary is None:
+            boundary = next(
+                (sample for sample in samples if sample.timestamp_ms > cutoff),
+                None,
+            )
+            if boundary is None:
+                return None
+            cursor = boundary.timestamp_ms
+        else:
+            cursor = cutoff
+        price = boundary.price
+        start = cursor
+        weighted = 0.0
+        for sample in samples:
+            if sample.timestamp_ms <= cursor:
+                continue
+            weighted += price * (sample.timestamp_ms - cursor)
+            cursor = sample.timestamp_ms
+            price = sample.price
+        weighted += price * (decision_ts_ms - cursor)
+        duration = decision_ts_ms - start
+        if duration == 0:
+            return price
+        result = weighted / duration
+        if not math.isfinite(result) or result <= 0.0:
+            raise ValueError("oracle TWAP is non-positive or non-finite")
+        return result
 
     def health(self, *, now_ms: int) -> PricingProviderHealth:
         latest = (

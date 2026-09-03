@@ -33,36 +33,38 @@ class LiveFeedSupervisor:
         self.http = http or AiohttpPublicJSONClient()
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        await self.operator.start()
-        while not stop_event.is_set():
-            if self.operator.state is OperatorState.FAILED:
-                stop_event.set()
-                break
-            if self.operator.session is None or self.operator.active_market is None:
-                await self._wait_interval(stop_event)
-                if not stop_event.is_set():
-                    await self.operator.start()
-                continue
-            window_generation = self.operator.generation
-            tasks = self._start_window_feeds(window_generation, stop_event)
-            try:
-                while (
-                    not stop_event.is_set()
-                    and window_generation == self.operator.generation
-                    and self.operator.state is not OperatorState.FAILED
-                ):
-                    await self._wait_interval(stop_event)
-                    if not stop_event.is_set():
-                        await self.operator.poll()
+        try:
+            await self.operator.start()
+            while not stop_event.is_set():
                 if self.operator.state is OperatorState.FAILED:
                     stop_event.set()
-            finally:
-                for task in tasks:
-                    task.cancel()
-                for task in tasks:
-                    with suppress(asyncio.CancelledError):
-                        await task
-        await self.operator.shutdown()
+                    break
+                if self.operator.session is None or self.operator.active_market is None:
+                    await self._wait_interval(stop_event)
+                    if not stop_event.is_set():
+                        await self.operator.start()
+                    continue
+                window_generation = self.operator.generation
+                tasks = self._start_window_feeds(window_generation, stop_event)
+                try:
+                    while (
+                        not stop_event.is_set()
+                        and window_generation == self.operator.generation
+                        and self.operator.state is not OperatorState.FAILED
+                    ):
+                        await self._wait_interval(stop_event)
+                        if not stop_event.is_set():
+                            await self.operator.poll()
+                    if self.operator.state is OperatorState.FAILED:
+                        stop_event.set()
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                    for task in tasks:
+                        with suppress(asyncio.CancelledError):
+                            await task
+        finally:
+            await self.operator.shutdown()
 
     def _start_window_feeds(
         self,
@@ -81,24 +83,29 @@ class LiveFeedSupervisor:
             )
             if not isinstance(snapshot, dict):
                 raise ValueError("Binance depth snapshot must be an object")
-            await self.operator.begin_binance_connection(
+            accepted = await self.operator.begin_binance_connection(
                 window_generation=window_generation,
                 connection_generation=connection_generation,
                 snapshot=snapshot,
                 received_at_ms=self.operator.clock_ms(),
             )
+            if not accepted:
+                raise ConnectionError("Binance depth bootstrap did not synchronize")
 
         async def binance_payload(
             payload: Mapping[str, object],
             connection_generation: int,
             received_at_ms: int,
         ) -> None:
-            await self.operator.ingest_binance_connection_delta(
+            accepted = await self.operator.ingest_binance_connection_delta(
                 dict(payload),
                 window_generation=window_generation,
                 connection_generation=connection_generation,
                 received_at_ms=received_at_ms,
             )
+            synchronizer = self.operator.binance_sync
+            if not accepted and synchronizer is not None and synchronizer.needs_bootstrap:
+                raise ConnectionError("Binance depth gap requires immediate re-bootstrap")
 
         async def market_payload(
             payload: Mapping[str, object],
