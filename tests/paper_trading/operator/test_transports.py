@@ -44,6 +44,7 @@ class FakeSocket:
         self.messages = list(messages)
         self.sent: list[str | bytes] = []
         self.pings = 0
+        self.message_delivered = asyncio.Event()
 
     async def send(self, message: str | bytes) -> None:
         self.sent.append(message)
@@ -54,6 +55,7 @@ class FakeSocket:
         value = self.messages.pop(0)
         if isinstance(value, Exception):
             raise value
+        self.message_delivered.set()
         return value
 
     async def ping(self) -> object:
@@ -150,11 +152,19 @@ async def test_public_websocket_subscribes_and_buffers_before_bootstrap() -> Non
         connect_factory=FakeConnector([socket]),
     )
     task = asyncio.create_task(transport.run(stop))
-    await bootstrap_started.wait()
-    await asyncio.sleep(0)
-    assert transport.queue.size == 1
-    release_bootstrap.set()
-    await task
+    try:
+        await bootstrap_started.wait()
+
+        await asyncio.wait_for(socket.message_delivered.wait(), timeout=1.0)
+        assert transport.queue.size == 1
+        release_bootstrap.set()
+        await task
+    finally:
+        release_bootstrap.set()
+        stop.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert transport.message_count == 1
 
