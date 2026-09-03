@@ -10,6 +10,7 @@ from itertools import product
 from multiprocessing import get_context
 
 from bigan.data.polymarket_clob import MarketSnapshot
+from bigan.features.binance_ofi import TopOfBook
 from bigan.strategies.polymarket_pricing import MarketWindow
 
 from .engine import BacktestEngine, StrategyBacktestParams
@@ -41,11 +42,21 @@ class GridSearchReport:
 
 
 @dataclass(frozen=True, slots=True)
+class _GridFold:
+    train: tuple[MarketSnapshot, ...]
+    test: tuple[MarketSnapshot, ...]
+    train_spots: tuple[float, ...] | None
+    test_spots: tuple[float, ...] | None
+    train_alpha: tuple[TopOfBook, ...] | None
+    test_alpha: tuple[TopOfBook, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
 class _GridJob:
     updates: dict[str, object]
     base: StrategyBacktestParams
     window: MarketWindow
-    folds: tuple[tuple[tuple[MarketSnapshot, ...], tuple[MarketSnapshot, ...]], ...]
+    folds: tuple[_GridFold, ...]
     settlement: dict[str, float]
     score: str
 
@@ -150,6 +161,8 @@ def run_grid_search(
     max_workers: int | None = None,
     score: str = "total_return",
     settlement: Mapping[str, float] | None = None,
+    spot_prices: Sequence[float] | None = None,
+    alpha_books: Sequence[TopOfBook] | None = None,
 ) -> GridSearchReport:
     """Score every grid combination; the winner is the best mean OOS metric.
 
@@ -159,9 +172,20 @@ def run_grid_search(
 
     if score not in _SCORE_NAMES:
         raise ValueError(f"unknown score '{score}'")
+    tape = tuple(snapshots)
+    if spot_prices is not None and len(spot_prices) != len(tape):
+        raise ValueError("spot_prices must match snapshots length")
+    if alpha_books is not None and len(alpha_books) != len(tape):
+        raise ValueError("alpha_books must match snapshots length")
     params = base if base is not None else StrategyBacktestParams()
     combos = expand_param_grid(grid)
-    folds = time_series_folds(snapshots, n_splits=n_splits, train_ratio=train_ratio)
+    snapshot_folds = time_series_folds(tape, n_splits=n_splits, train_ratio=train_ratio)
+    spots = tuple(float(value) for value in spot_prices) if spot_prices is not None else None
+    alpha = tuple(alpha_books) if alpha_books is not None else None
+    folds = tuple(
+        _aligned_fold(train, test, spot_prices=spots, alpha_books=alpha)
+        for train, test in snapshot_folds
+    )
     payouts = dict(settlement) if settlement is not None else {}
     jobs = tuple(
         _GridJob(
@@ -202,19 +226,52 @@ def _run_grid_job(job: _GridJob) -> GridSearchTrial:
     params = apply_param_updates(job.base, job.updates)
     in_sample: list[StrategyBacktestMetrics] = []
     out_of_sample: list[StrategyBacktestMetrics] = []
-    for train, test in job.folds:
-        if train:
+    for fold in job.folds:
+        if fold.train:
             is_engine = BacktestEngine(window=job.window, params=params)
-            in_sample.append(is_engine.run(train, settlement=job.settlement).metrics)
-        if test:
+            in_sample.append(
+                is_engine.run(
+                    fold.train,
+                    settlement=job.settlement,
+                    spot_prices=fold.train_spots,
+                    alpha_books=fold.train_alpha,
+                ).metrics
+            )
+        if fold.test:
             oos_engine = BacktestEngine(window=job.window, params=params)
-            out_of_sample.append(oos_engine.run(test, settlement=job.settlement).metrics)
+            out_of_sample.append(
+                oos_engine.run(
+                    fold.test,
+                    settlement=job.settlement,
+                    spot_prices=fold.test_spots,
+                    alpha_books=fold.test_alpha,
+                ).metrics
+            )
     return GridSearchTrial(
         params=dict(job.updates),
         in_sample_score=_mean_score(in_sample, job.score),
         out_of_sample_score=_mean_score(out_of_sample, job.score),
         in_sample=tuple(in_sample),
         out_of_sample=tuple(out_of_sample),
+    )
+
+
+def _aligned_fold(
+    train: tuple[MarketSnapshot, ...],
+    test: tuple[MarketSnapshot, ...],
+    *,
+    spot_prices: tuple[float, ...] | None,
+    alpha_books: tuple[TopOfBook, ...] | None,
+) -> _GridFold:
+    train_end = len(train)
+    test_end = train_end + len(test)
+    return _GridFold(
+        train=train,
+        test=test,
+        train_spots=None if spot_prices is None else spot_prices[:train_end],
+        test_spots=None if spot_prices is None else spot_prices[train_end:test_end],
+        train_alpha=None if alpha_books is None else alpha_books[:train_end],
+        test_alpha=None if alpha_books is None else alpha_books[train_end:test_end],
     )
 
 

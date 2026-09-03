@@ -12,6 +12,7 @@ from bigan.backtest.grid_search import (
     split_snapshots_by_time,
     time_series_folds,
 )
+from bigan.features.binance_ofi import TopOfBook
 from bigan.strategies.polymarket_pricing import MarketWindow
 
 WINDOW_ID = "btc-updown-15m-bt"
@@ -108,3 +109,60 @@ def test_grid_search_parallel_matches_sequential_winner() -> None:
     assert sequential.best_trial.out_of_sample_score == pytest.approx(
         parallel.best_trial.out_of_sample_score
     )
+
+
+def test_grid_search_splits_and_uses_dynamic_spot_and_alpha_inputs() -> None:
+    snapshots = generate_synthetic_clob(
+        n_ticks=60,
+        window_id=WINDOW_ID,
+        yes_ask=0.49,
+        start_yes_bid=0.47,
+        lift=0.0,
+        seed=17,
+    )
+    spots = tuple(100_000.0 for _ in snapshots)
+    alpha_books = tuple(
+        TopOfBook(
+            ts_ms=snapshot.timestamp_ms,
+            bid_price=100_000.0,
+            bid_qty=10.0 + (i % 2),
+            ask_price=100_001.0,
+            ask_qty=10.0,
+        )
+        for i, snapshot in enumerate(snapshots)
+    )
+    base = StrategyBacktestParams(
+        ofi_zscore_min_samples=2,
+        ofi_ema_alpha=1.0,
+        initial_bankroll=1_000.0,
+        spot_price=90_000.0,
+        fee_bps=0.0,
+    )
+    report = run_grid_search(
+        snapshots,
+        {"ofi_gamma": (0.0, 100.0)},
+        window=_window(),
+        base=base,
+        train_ratio=0.65,
+        max_workers=2,
+        score="total_return",
+        settlement={WINDOW_ID: 1.0},
+        spot_prices=spots,
+        alpha_books=alpha_books,
+    )
+    scores = {trial.params["ofi_gamma"]: trial.out_of_sample_score for trial in report.trials}
+    assert scores[100.0] > scores[0.0]
+
+
+@pytest.mark.parametrize("field", ["spot_prices", "alpha_books"])
+def test_grid_search_rejects_misaligned_auxiliary_inputs(field: str) -> None:
+    snapshots = generate_synthetic_clob(n_ticks=10, window_id=WINDOW_ID)
+    kwargs: dict[str, object] = {field: (1.0,)}
+    with pytest.raises(ValueError, match=f"{field} must match snapshots length"):
+        run_grid_search(
+            snapshots,
+            {"ofi_gamma": (0.0,)},
+            window=_window(),
+            max_workers=1,
+            **kwargs,  # type: ignore[arg-type]
+        )

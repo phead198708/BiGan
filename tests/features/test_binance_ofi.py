@@ -330,6 +330,35 @@ def test_stale_depth_and_ticker_do_not_poison_next_transition() -> None:
     assert calc.last_timestamp_ms == 1_001
 
 
+def test_partial_depth_rejects_stale_last_update_id_without_state_pollution() -> None:
+    calc = BinanceOFICalculator(symbol="BTCUSDT", ema_alpha=1.0)
+    assert calc.on_book_ticker(
+        {"u": 10, "s": "BTCUSDT", "b": "100", "B": "2", "a": "101", "A": "3"},
+        ts_ms=1_000,
+    ) is None
+    assert calc.on_partial_depth(
+        {
+            "stream": "btcusdt@depth5",
+            "data": {
+                "lastUpdateId": 9,
+                "bids": [["99", "100"]],
+                "asks": [["100", "100"]],
+            },
+        },
+        ts_ms=1_001,
+    ) is None
+    assert calc.last_update_id == 10
+    assert calc.last_timestamp_ms == 1_000
+
+    current = calc.on_book_ticker(
+        {"u": 11, "s": "BTCUSDT", "b": "100", "B": "4", "a": "101", "A": "3"},
+        ts_ms=1_002,
+    )
+    assert current is not None
+    assert current.raw_ofi == pytest.approx(2.0)
+    assert calc.last_update_id == 11
+
+
 def test_update_and_get_z_matches_snapshot_and_reset_clears_state() -> None:
     snapshot_calc = BinanceOFICalculator(ema_alpha=1.0)
     hot_calc = BinanceOFICalculator(ema_alpha=1.0)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -97,15 +97,27 @@ class BacktestEngine:
     trades through that limit. Window settlement pays $1 / $0 per share.
     """
 
-    __slots__ = ("window", "params")
+    __slots__ = ("window", "windows", "params")
 
     def __init__(
         self,
         *,
         window: MarketWindow,
+        windows: Mapping[str, MarketWindow] | None = None,
         params: StrategyBacktestParams | None = None,
     ) -> None:
         self.window = window
+        registered = dict(windows) if windows is not None else {}
+        existing = registered.get(window.window_id)
+        if existing is not None and existing != window:
+            raise ValueError("primary window conflicts with windows mapping")
+        registered[window.window_id] = window
+        for window_id, metadata in registered.items():
+            if window_id != metadata.window_id:
+                raise ValueError("windows mapping keys must match MarketWindow.window_id")
+            if metadata.symbol != window.symbol:
+                raise ValueError("all backtest windows must use the same symbol")
+        self.windows = registered
         self.params = params if params is not None else StrategyBacktestParams()
         mode = str(self.params.execution_mode).strip().lower()
         if mode not in {"market", "limit"}:
@@ -125,17 +137,16 @@ class BacktestEngine:
     ) -> BacktestResult:
         """Drive ``snapshots`` in timestamp order and return scored equity."""
 
-        n = len(snapshots)
+        tape = tuple(snapshots)
+        n = len(tape)
         params = self.params
         if spot_prices is not None and len(spot_prices) != n:
             raise ValueError("spot_prices must match snapshots length")
         if alpha_books is not None and len(alpha_books) != n:
             raise ValueError("alpha_books must match snapshots length")
-        default_spot = (
-            float(params.spot_price)
-            if params.spot_price is not None
-            else float(self.window.strike_price)
-        )
+        missing_windows = sorted({row.window_id for row in tape} - set(self.windows))
+        if missing_windows:
+            raise ValueError(f"missing MarketWindow metadata for: {missing_windows}")
         payouts = dict(settlement) if settlement is not None else {}
         ofi, pricing, oms = _build_stack(params, symbol=self.window.symbol)
         cash = float(params.initial_bankroll)
@@ -151,15 +162,16 @@ class BacktestEngine:
         commission = 0.0
         equity_ts = np.empty(n, dtype=np.int64)
         equity = np.empty(n, dtype=np.float64)
-        last_window = self.window.window_id
-        last_ts = self.window.start_ts_ms
+        last_window = tape[0].window_id if tape else self.window.window_id
+        active_window = self.windows[last_window]
+        last_ts = active_window.start_ts_ms
         last_yes_bid = 0.0
         last_no_bid = 0.0
         mode = str(params.execution_mode).strip().lower()
-        twap = float(self.window.strike_price)
+        twap = float(active_window.strike_price)
 
         for i in range(n):
-            snap = snapshots[i]
+            snap = tape[i]
             ts_ms = snap.timestamp_ms
             if snap.window_id != last_window:
                 cash, yes_shares, no_shares, commission = _settle_window(
@@ -173,10 +185,13 @@ class BacktestEngine:
                     yes_bid=last_yes_bid,
                     no_bid=last_no_bid,
                 )
+                oms.close_window(last_window, current_bankroll=cash)
                 settled_windows.add(last_window)
                 ofi.reset()
                 resting = None
                 last_window = snap.window_id
+                active_window = self.windows[last_window]
+                twap = float(active_window.strike_price)
             last_ts = ts_ms
             last_yes_bid = snap.yes_bid
             last_no_bid = snap.no_bid
@@ -184,7 +199,7 @@ class BacktestEngine:
                 equity_ts[i] = ts_ms
                 equity[i] = cash
                 continue
-            if ts_ms >= self.window.end_ts_ms and snap.window_id == self.window.window_id:
+            if ts_ms >= active_window.end_ts_ms:
                 cash, yes_shares, no_shares, commission = _settle_window(
                     window_id=snap.window_id,
                     timestamp_ms=ts_ms,
@@ -196,6 +211,7 @@ class BacktestEngine:
                     yes_bid=snap.yes_bid,
                     no_bid=snap.no_bid,
                 )
+                oms.close_window(snap.window_id, current_bankroll=cash)
                 settled_windows.add(snap.window_id)
                 resting = None
                 equity_ts[i] = ts_ms
@@ -215,9 +231,17 @@ class BacktestEngine:
                     ask_qty=alpha.ask_qty,
                     ts_ms=alpha.ts_ms,
                 )
-            spot = float(spot_prices[i]) if spot_prices is not None else default_spot
+            spot = (
+                float(spot_prices[i])
+                if spot_prices is not None
+                else (
+                    float(params.spot_price)
+                    if params.spot_price is not None
+                    else float(active_window.strike_price)
+                )
+            )
             signal = pricing.evaluate_signal(
-                window=self.window,
+                window=active_window,
                 current_ts_ms=ts_ms,
                 spot_price=spot,
                 oracle_twap_so_far=twap,
@@ -274,6 +298,7 @@ class BacktestEngine:
                 yes_bid=last_yes_bid,
                 no_bid=last_no_bid,
             )
+            oms.close_window(last_window, current_bankroll=cash)
             if n:
                 equity[-1] = cash
 
@@ -344,17 +369,28 @@ def _maybe_execute(
     rejected: int,
     commission: float,
 ) -> tuple[int, float, float, float, float, tuple[PricingSignal, float] | None, int]:
-    bid, ask, ask_size = _book_for_signal(signal, snapshot)
     active = signal
+    max_fill_price: float | None = None
     if mode == "limit":
         if resting is None:
+            bid, _, _ = _book_for_signal(signal, snapshot)
             return oms_calls, cash, yes_shares, no_shares, commission, (signal, bid), rejected
         active, limit_px = resting
+        bid, ask, ask_size = _book_for_signal(active, snapshot)
         if ask > limit_px:
             return oms_calls, cash, yes_shares, no_shares, commission, resting, rejected
+        active = replace(active, market_price=ask)
+        max_fill_price = limit_px
+    else:
         bid, ask, ask_size = _book_for_signal(active, snapshot)
     oms_calls += 1
-    result = oms.process_signal(active, cash, bid, ask_size)
+    result = oms.process_signal(
+        active,
+        cash,
+        bid,
+        ask_size,
+        max_fill_price=max_fill_price,
+    )
     if result is None:
         return oms_calls, cash, yes_shares, no_shares, commission, None, rejected
     if result.status != "FILLED":

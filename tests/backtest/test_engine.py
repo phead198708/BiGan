@@ -225,3 +225,70 @@ def test_limit_order_rests_then_fills_when_ask_crosses() -> None:
     assert filled
     assert filled[0].timestamp_ms == 101_400
     assert filled[0].order.side == "YES"
+    assert filled[0].ask_price == pytest.approx(0.37)
+    assert filled[0].order.price == pytest.approx(0.37 * 1.01)
+    assert filled[0].order.price <= 0.38
+
+
+def test_multi_window_replay_uses_each_window_metadata() -> None:
+    first_window = MarketWindow(
+        window_id="window-1",
+        symbol="BTC",
+        strike_price=100_000.0,
+        start_ts_ms=0,
+        end_ts_ms=300_000,
+        window_type="5m",
+    )
+    second_window = MarketWindow(
+        window_id="window-2",
+        symbol="BTC",
+        strike_price=100_000.0,
+        start_ts_ms=300_000,
+        end_ts_ms=1_200_000,
+        window_type="15m",
+    )
+    snapshots = tuple(
+        MarketSnapshot(
+            timestamp_ms=timestamp_ms,
+            window_id=window_id,
+            yes_bid=0.39,
+            yes_ask=0.40,
+            no_bid=0.09,
+            no_ask=0.90,
+            last_traded_price=0.40,
+            yes_bid_size=10_000.0,
+            yes_ask_size=10_000.0,
+            no_bid_size=10_000.0,
+            no_ask_size=10_000.0,
+        )
+        for timestamp_ms, window_id in ((100_000, "window-1"), (400_000, "window-2"))
+    )
+    engine = BacktestEngine(
+        window=first_window,
+        windows={second_window.window_id: second_window},
+        params=_params(),
+    )
+    result = engine.run(
+        snapshots,
+        settlement={"window-1": 1.0, "window-2": 1.0},
+    )
+    filled_windows = [row.window_id for row in result.fills if row.order.status == "FILLED"]
+    assert filled_windows == ["window-1", "window-2"]
+
+
+def test_multi_window_replay_rejects_missing_metadata() -> None:
+    snapshot = MarketSnapshot(
+        timestamp_ms=400_000,
+        window_id="window-2",
+        yes_bid=0.39,
+        yes_ask=0.40,
+        no_bid=0.09,
+        no_ask=0.90,
+        last_traded_price=0.40,
+        yes_bid_size=10_000.0,
+        yes_ask_size=10_000.0,
+        no_bid_size=10_000.0,
+        no_ask_size=10_000.0,
+    )
+    with pytest.raises(ValueError, match="missing MarketWindow metadata"):
+        _engine().run((snapshot,))

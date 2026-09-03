@@ -124,12 +124,25 @@ class PolymarketOMS:
     def positions(self) -> tuple[Position, ...]:
         return tuple(self._positions.values())
 
+    def close_window(self, window_id: str, *, current_bankroll: float) -> None:
+        """Release settled positions so they are not counted as live capital."""
+
+        bankroll = _finite_float("current_bankroll", current_bankroll)
+        if bankroll < 0.0:
+            raise ValueError("current_bankroll must be non-negative")
+        keys = [key for key in self._positions if key[0] == window_id]
+        for key in keys:
+            del self._positions[key]
+        self.bankroll = bankroll
+
     def process_signal(
         self,
         signal: PricingSignal,
         current_bankroll: float,
         current_bid: float,
         current_ask_size: float | None = None,
+        *,
+        max_fill_price: float | None = None,
     ) -> OrderResult | None:
         """Gate, size, and optionally fill one pricing signal.
 
@@ -195,6 +208,11 @@ class PolymarketOMS:
             return None
 
         fill_price = min(1.0, ask * (1.0 + self.slippage_tolerance))
+        if max_fill_price is not None:
+            fill_cap = _finite_float("max_fill_price", max_fill_price)
+            if not ask <= fill_cap <= 1.0:
+                return self._rejected(side=side, reason="Invalid maximum fill price")
+            fill_price = min(fill_price, fill_cap)
         if fill_price <= 0.0 or not math.isfinite(fill_price):
             return self._rejected(side=side, reason="Invalid fill price")
         liquidity_usd = ask_size * fill_price

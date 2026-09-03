@@ -326,21 +326,38 @@ class BinanceOFICalculator:
     def on_partial_depth(self, payload: Mapping[str, object], *, ts_ms: int) -> OFISnapshot | None:
         """Receive a Binance partial depth snapshot and use the best bid/ask."""
 
-        bids = payload.get("bids")
-        asks = payload.get("asks")
+        wrapped = payload.get("data")
+        depth = wrapped if isinstance(wrapped, Mapping) else payload
+        update_id = _optional_int(depth.get("lastUpdateId"))
+        if (
+            update_id is not None
+            and self._last_update_id is not None
+            and update_id <= self._last_update_id
+        ):
+            return None
+        update_ts = int(ts_ms)
+        if self._last_ts_ms is not None and update_ts < self._last_ts_ms:
+            return None
+        bids = depth.get("bids")
+        asks = depth.get("asks")
         if not isinstance(bids, (list, tuple)) or not isinstance(asks, (list, tuple)):
             raise ValueError("partial depth payload must include bids and asks")
         if not bids or not asks:
             raise ValueError("partial depth payload is missing the best level")
         best_bid = bids[0]
         best_ask = asks[0]
-        return self.on_depth_update(
+        result = self.on_depth_update(
             bid_price=float(best_bid[0]),
             bid_qty=float(best_bid[1]),
             ask_price=float(best_ask[0]),
             ask_qty=float(best_ask[1]),
-            ts_ms=int(ts_ms),
+            ts_ms=update_ts,
         )
+        if update_id is not None and (
+            self._last_update_id is None or update_id > self._last_update_id
+        ):
+            self._last_update_id = update_id
+        return result
 
     def reset(self) -> None:
         """Drop all book and window state."""
