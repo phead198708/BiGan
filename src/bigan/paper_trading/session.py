@@ -5,13 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
 from bigan.data.polymarket_clob import MarketSnapshot
-from bigan.execution.polymarket_oms import OrderResult, Position
-from bigan.pipeline.events import StrategyDecisionEvent
+from bigan.execution.polymarket_oms import OrderResult, Position, SignalIdentity
+from bigan.pipeline.events import (
+    DecisionDisposition,
+    StrategyDecisionEvent,
+    market_snapshot_identity,
+)
 from bigan.pipeline.strategy_runner import StrategyRunner
 
 from .contracts import (
@@ -40,6 +44,7 @@ class PaperTradingSession:
         runner: StrategyRunner,
         ledger: PaperAccountLedger,
         store: PaperRunStore,
+        processed_snapshot_ids: Iterable[str] = (),
     ) -> None:
         self.runner = runner
         self.ledger = ledger
@@ -47,6 +52,7 @@ class PaperTradingSession:
         self.failed = False
         self.failure_reason: str | None = None
         self._feed_callback_registered = False
+        self._processed_snapshot_ids = set(processed_snapshot_ids)
         self.runner.on_decision(self._on_decision)
         self._assert_cash_consistency()
 
@@ -112,6 +118,7 @@ class PaperTradingSession:
             fsync=fsync,
         )
         ledger = store.recover_ledger()
+        decisions = store.load_decision_events()
         snapshot = ledger.snapshot()
         oms_positions = tuple(
             Position(
@@ -128,9 +135,19 @@ class PaperTradingSession:
             current_bankroll=snapshot.cash,
             positions=oms_positions,
             order_sequence_floor=snapshot.last_event_sequence,
+            processed_signal_identities=tuple(
+                identity
+                for event in decisions
+                if (identity := _filled_signal_identity(event)) is not None
+            ),
         )
         runner.current_bankroll = snapshot.cash
-        return cls(runner=runner, ledger=ledger, store=store)
+        return cls(
+            runner=runner,
+            ledger=ledger,
+            store=store,
+            processed_snapshot_ids=(event.source_snapshot_id for event in decisions),
+        )
 
     @property
     def current_snapshot(self) -> PaperAccountSnapshot:
@@ -156,7 +173,13 @@ class PaperTradingSession:
         """Process one snapshot and fail closed if persistence did not complete."""
 
         self._require_healthy()
-        result = self.runner.process_snapshot_sync(snapshot)
+        if _snapshot_id(snapshot) in self._processed_snapshot_ids:
+            return None
+        try:
+            result = self.runner.process_snapshot_sync(snapshot)
+        except Exception as exc:
+            self._fail_after_runner_exception(exc)
+            raise
         self._require_healthy()
         self._assert_cash_consistency()
         return result
@@ -165,7 +188,13 @@ class PaperTradingSession:
         """Async wrapper retaining StrategyRunner's return contract."""
 
         self._require_healthy()
-        result = await self.runner.process_snapshot(snapshot)
+        if _snapshot_id(snapshot) in self._processed_snapshot_ids:
+            return None
+        try:
+            result = await self.runner.process_snapshot(snapshot)
+        except Exception as exc:
+            self._fail_after_runner_exception(exc)
+            raise
         self._require_healthy()
         self._assert_cash_consistency()
         return result
@@ -208,12 +237,16 @@ class PaperTradingSession:
         if self.failed:
             raise PaperSessionFailedError(self.failure_reason or "paper session failed")
         sequence = self.ledger.last_event_sequence + 1
-        event_id = _event_id(self.store.manifest.run_id, "decision", sequence)
+        source_snapshot_id = decision.source_snapshot_id
+        if source_snapshot_id in self._processed_snapshot_ids:
+            raise ValueError("source snapshot reached decision callback twice")
+        event_id = f"{self.store.manifest.run_id}:decision:{source_snapshot_id}"
         paper_event = PaperDecisionEvent(
             schema_version=PAPER_SCHEMA_VERSION,
             run_id=self.store.manifest.run_id,
             event_id=event_id,
             event_sequence=sequence,
+            source_snapshot_id=source_snapshot_id,
             decision=decision,
         )
         try:
@@ -226,6 +259,7 @@ class PaperTradingSession:
                 ledger_event=ledger_event,
                 snapshot=self.ledger.snapshot(),
             )
+            self._processed_snapshot_ids.add(source_snapshot_id)
         except Exception as exc:
             self._fail(exc)
             raise
@@ -246,6 +280,14 @@ class PaperTradingSession:
         self.failed = True
         self.failure_reason = f"{type(exc).__name__}: {exc}"
 
+    def _fail_after_runner_exception(self, exc: Exception) -> None:
+        try:
+            self._assert_cash_consistency()
+        except Exception as consistency_error:
+            self._fail(consistency_error)
+        else:
+            self._fail(exc)
+
     def _require_healthy(self) -> None:
         if self.failed:
             raise PaperSessionFailedError(self.failure_reason or "paper session failed")
@@ -259,6 +301,13 @@ def _manifest_for(
     config: Mapping[str, object] | None,
     created_at: str,
 ) -> PaperRunManifest:
+    if (
+        runner.pricing_inputs_provider is not None
+        and runner.pricing_inputs_provider_identity is None
+    ):
+        raise ValueError(
+            "paper sessions require pricing_inputs_provider_identity for dynamic inputs"
+        )
     window = runner.window
     registration = PaperWindowRegistration(
         window_id=window.window_id,
@@ -267,25 +316,7 @@ def _manifest_for(
         end_ts_ms=window.end_ts_ms,
     )
     identity = {
-        "window": registration.to_dict(),
-        "fee_bps": runner.fee_bps,
-        "reference_max_age_ms": runner.reference_max_age_ms,
-        "ofi_max_age_ms": runner.ofi_max_age_ms,
-        "pricing": {
-            "ofi_gamma": runner.pricing_engine.ofi_gamma,
-            "min_edge_5m": runner.pricing_engine.min_edge_5m,
-            "min_edge_15m": runner.pricing_engine.min_edge_15m,
-            "kelly_fraction": runner.pricing_engine.kelly_fraction,
-            "tail_cutoff_ms": runner.pricing_engine.tail_cutoff_ms,
-        },
-        "oms": {
-            "max_single_trade_pct": runner.oms.max_single_trade_pct,
-            "max_position_pct": runner.oms.max_position_pct,
-            "max_window_exposure_pct": runner.oms.max_window_exposure_pct,
-            "min_order_usd": runner.oms.min_order_usd,
-            "max_spread_allowed": runner.oms.max_spread_allowed,
-            "slippage_tolerance": runner.oms.slippage_tolerance,
-        },
+        "strategy": runner.config_identity(),
         "session_config": dict(config or {}),
     }
     encoded = json.dumps(
@@ -312,10 +343,45 @@ def _event_id(run_id: str, kind: str, sequence: int) -> str:
     return f"{run_id}:{kind}:{sequence:020d}"
 
 
+def _snapshot_id(snapshot: MarketSnapshot) -> str:
+    return market_snapshot_identity(
+        timestamp_ms=snapshot.timestamp_ms,
+        window_id=snapshot.window_id,
+        yes_bid=snapshot.yes_bid,
+        yes_ask=snapshot.yes_ask,
+        yes_bid_size=snapshot.yes_bid_size,
+        yes_ask_size=snapshot.yes_ask_size,
+        no_bid=snapshot.no_bid,
+        no_ask=snapshot.no_ask,
+        no_bid_size=snapshot.no_bid_size,
+        no_ask_size=snapshot.no_ask_size,
+        last_traded_price=snapshot.last_traded_price,
+    )
+
+
+def _filled_signal_identity(event: PaperDecisionEvent) -> SignalIdentity | None:
+    decision = event.decision
+    if decision.disposition is not DecisionDisposition.FILLED:
+        return None
+    if (
+        decision.direction not in {"BUY_YES", "BUY_NO"}
+        or decision.market_price is None
+        or decision.recommended_size_pct is None
+    ):
+        raise ValueError("persisted fill is missing its OMS signal identity")
+    return (
+        decision.window_id,
+        decision.timestamp_ms,
+        decision.direction,
+        decision.market_price,
+        decision.recommended_size_pct,
+    )
+
+
 def _require_fresh_runner(runner: StrategyRunner) -> None:
     if (
         runner.decision_count != 0
-        or runner.execution_history
+        or runner.execution_count != 0
         or runner.oms.positions()
         or runner.oms.open_limit_orders()
     ):

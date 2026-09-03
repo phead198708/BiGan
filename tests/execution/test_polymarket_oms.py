@@ -511,3 +511,47 @@ def test_cancel_limit_order_releases_reserved_capacity() -> None:
     )
     assert isinstance(replacement, LimitOrder)
     assert replacement.shares * replacement.limit_price == pytest.approx(250.0)
+
+
+def test_fee_is_reserved_before_an_all_cash_fill_is_committed() -> None:
+    oms = PolymarketOMS(
+        max_single_trade_pct=1.0,
+        max_position_pct=1.0,
+        max_window_exposure_pct=1.0,
+        slippage_tolerance=0.0,
+    )
+
+    result = oms.process_signal(
+        _signal(
+            direction=SignalDirection.BUY_YES,
+            recommended_size_pct=1.0,
+            market_price=0.50,
+        ),
+        current_bankroll=1_000.0,
+        current_bid=0.50,
+        current_ask_size=10_000.0,
+        fee_bps=100.0,
+    )
+
+    assert result is not None and result.status == "FILLED"
+    assert result.shares == pytest.approx(1_000.0 / 1.01 / 0.50)
+    assert result.fee_usdc == pytest.approx(result.shares * result.price * 0.01)
+    assert oms.bankroll == pytest.approx(0.0, abs=1e-9)
+    position = oms.get_position("btc-updown-test", "YES")
+    assert position is not None
+    assert position.shares == pytest.approx(result.shares)
+
+
+@pytest.mark.parametrize("fee_bps", [-1.0, float("nan"), float("inf"), 10_001.0])
+def test_invalid_fee_is_rejected_before_oms_mutation(fee_bps: float) -> None:
+    oms = PolymarketOMS()
+    with pytest.raises(ValueError, match="fee_bps"):
+        oms.process_signal(
+            _signal(direction=SignalDirection.BUY_YES),
+            current_bankroll=1_000.0,
+            current_bid=0.49,
+            current_ask_size=10_000.0,
+            fee_bps=fee_bps,
+        )
+    assert oms.positions() == ()
+    assert oms.bankroll == 0.0

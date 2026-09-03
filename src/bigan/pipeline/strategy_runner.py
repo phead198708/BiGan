@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import TypeAlias
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 OFIEngine: TypeAlias = BinanceOFICalculator
 DEFAULT_REFERENCE_MAX_AGE_MS = 5_000
 DEFAULT_OFI_MAX_AGE_MS = 2_000
+DEFAULT_EXECUTION_HISTORY_LIMIT = 10_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +73,9 @@ class StrategyRunner:
         "reference_max_age_ms",
         "ofi_max_age_ms",
         "fee_bps",
+        "pricing_inputs_provider_identity",
+        "execution_history_limit",
+        "execution_count",
         "stale_pricing_inputs",
         "dropped_window_mismatch",
         "last_decision",
@@ -100,6 +105,8 @@ class StrategyRunner:
         reference_max_age_ms: int = DEFAULT_REFERENCE_MAX_AGE_MS,
         ofi_max_age_ms: int = DEFAULT_OFI_MAX_AGE_MS,
         fee_bps: float = 0.0,
+        pricing_inputs_provider_identity: str | None = None,
+        execution_history_limit: int = DEFAULT_EXECUTION_HISTORY_LIMIT,
     ) -> None:
         bankroll = float(initial_bankroll)
         if bankroll <= 0.0 or not math.isfinite(bankroll):
@@ -107,13 +114,25 @@ class StrategyRunner:
         paper_fee_bps = float(fee_bps)
         if not math.isfinite(paper_fee_bps) or not 0.0 <= paper_fee_bps <= 10_000.0:
             raise ValueError("fee_bps must be finite and in [0, 10_000]")
+        history_limit = int(execution_history_limit)
+        if history_limit < 1:
+            raise ValueError("execution_history_limit must be positive")
+        provider_identity = (
+            None
+            if pricing_inputs_provider_identity is None
+            else str(pricing_inputs_provider_identity).strip()
+        )
+        if pricing_inputs_provider_identity is not None and not provider_identity:
+            raise ValueError("pricing_inputs_provider_identity must be non-empty")
         self.ofi_engine = ofi_engine
         self.pricing_engine = pricing_engine
         self.oms = oms
         self.feed_handler = feed_handler
         self.window = window
         self.current_bankroll = bankroll
-        self.execution_history: list[OrderResult] = []
+        self.execution_history: deque[OrderResult] = deque(maxlen=history_limit)
+        self.execution_history_limit = history_limit
+        self.execution_count = 0
         self.callback_errors = 0
         self.oms_calls = 0
         self.spot_price = float(spot_price)
@@ -133,6 +152,7 @@ class StrategyRunner:
         self.reference_max_age_ms = int(reference_max_age_ms)
         self.ofi_max_age_ms = int(ofi_max_age_ms)
         self.fee_bps = paper_fee_bps
+        self.pricing_inputs_provider_identity = provider_identity
         if self.reference_max_age_ms < 0 or self.ofi_max_age_ms < 0:
             raise ValueError("input freshness bounds must be non-negative")
         self.stale_pricing_inputs = 0
@@ -148,6 +168,45 @@ class StrategyRunner:
         """Register a lightweight isolated callback for every decision event."""
 
         self._decision_callbacks.append(callback)
+
+    @property
+    def last_execution(self) -> OrderResult | None:
+        """Return the newest retained execution result, if any."""
+
+        return self.execution_history[-1] if self.execution_history else None
+
+    def config_identity(self) -> dict[str, object]:
+        """Return the complete stable configuration that can affect decisions."""
+
+        return {
+            "window": {
+                "window_id": self.window.window_id,
+                "symbol": self.window.symbol,
+                "strike_price": self.window.strike_price,
+                "start_ts_ms": self.window.start_ts_ms,
+                "end_ts_ms": self.window.end_ts_ms,
+                "window_type": self.window.window_type,
+            },
+            "feed": self.feed_handler.config_identity(),
+            "ofi": self.ofi_engine.config_identity(),
+            "pricing": self.pricing_engine.config_identity(),
+            "oms": self.oms.config_identity(),
+            "runner": {
+                "spot_price": self.spot_price,
+                "volatility_annualized": self.volatility_annualized,
+                "oracle_twap_so_far": self.oracle_twap_so_far,
+                "twap_weight": self.twap_weight,
+                "ofi_bid_qty": self.ofi_bid_qty,
+                "ofi_ask_qty": self.ofi_ask_qty,
+                "pricing_state_ts_ms": self.pricing_state_ts_ms,
+                "reference_max_age_ms": self.reference_max_age_ms,
+                "ofi_max_age_ms": self.ofi_max_age_ms,
+                "fee_bps": self.fee_bps,
+                "pricing_inputs_provider_present": self.pricing_inputs_provider is not None,
+                "pricing_inputs_provider_identity": self.pricing_inputs_provider_identity,
+                "execution_history_limit": self.execution_history_limit,
+            },
+        }
 
     def push_alpha_tick(self, book: TopOfBook) -> float:
         """Push one Binance top-of-book event into the alpha engine."""
@@ -334,6 +393,7 @@ class StrategyRunner:
             self.current_bankroll,
             current_bid,
             current_ask_size,
+            fee_bps=self.fee_bps,
         )
         if result is None:
             self._emit_decision(
@@ -358,12 +418,13 @@ class StrategyRunner:
             return None
         if result.status == "FILLED":
             fee = result.shares * result.price * self.fee_bps / 10_000.0
-            cash_after = self.oms.bankroll - fee
-            if cash_after < -1e-12:
-                raise RuntimeError("paper fee would make bankroll negative")
-            cash_after = max(0.0, cash_after)
+            if not math.isclose(result.fee_usdc, fee, rel_tol=1e-12, abs_tol=1e-12):
+                raise RuntimeError("OMS fee differs from StrategyRunner fee")
+            expected_cash = cash_before - result.shares * result.price - fee
+            cash_after = self.oms.bankroll
+            if not math.isclose(cash_after, expected_cash, rel_tol=1e-12, abs_tol=1e-9):
+                raise RuntimeError("OMS cash differs from StrategyRunner fill accounting")
             self.current_bankroll = cash_after
-            self.oms.bankroll = cash_after
             result = replace(result, fee_usdc=fee)
             disposition = DecisionDisposition.FILLED
             reason = DecisionReason.OMS_FILLED
@@ -372,6 +433,7 @@ class StrategyRunner:
             disposition = DecisionDisposition.REJECTED
             reason = DecisionReason.OMS_REJECTED
         self.execution_history.append(result)
+        self.execution_count += 1
         self._emit_decision(
             self._decision_event(
                 snapshot,

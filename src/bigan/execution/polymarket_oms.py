@@ -24,6 +24,7 @@ REJECT_SIZE_BELOW_MINIMUM = "Order size below minimum threshold"
 REJECT_LIQUIDITY_UNAVAILABLE = "Available ask liquidity unavailable"
 REJECT_UNKNOWN_LIMIT_ORDER = "Unknown or closed limit order"
 REJECT_STALE_LIMIT_ORDER = "Stale limit order version"
+SignalIdentity = tuple[str, int, str, float, float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,12 +148,27 @@ class PolymarketOMS:
 
         return tuple(self._open_limit_orders.values())
 
+    def config_identity(self) -> dict[str, object]:
+        """Return every OMS setting that can affect a simulated order."""
+
+        return {
+            "max_single_trade_pct": self.max_single_trade_pct,
+            "max_position_pct": self.max_position_pct,
+            "max_window_exposure_pct": self.max_window_exposure_pct,
+            "min_order_usd": self.min_order_usd,
+            "max_spread_allowed": self.max_spread_allowed,
+            "slippage_tolerance": self.slippage_tolerance,
+            "symbol": self.symbol,
+            "signal_cache_size": self._signal_cache_size,
+        }
+
     def restore_paper_state(
         self,
         *,
         current_bankroll: float,
         positions: tuple[Position, ...],
         order_sequence_floor: int = 0,
+        processed_signal_identities: tuple[SignalIdentity, ...] = (),
     ) -> None:
         """Hydrate a fresh OMS from a verified paper-ledger snapshot.
 
@@ -164,7 +180,7 @@ class PolymarketOMS:
         bankroll = _finite_float("current_bankroll", current_bankroll)
         if bankroll < 0.0:
             raise ValueError("current_bankroll must be non-negative")
-        if self._positions or self._open_limit_orders:
+        if self._positions or self._open_limit_orders or self._processed_signals:
             raise ValueError("OMS must be empty before paper-state recovery")
         restored: dict[tuple[str, str], Position] = {}
         for position in positions:
@@ -184,8 +200,14 @@ class PolymarketOMS:
         sequence_floor = int(order_sequence_floor)
         if sequence_floor < 0:
             raise ValueError("order_sequence_floor must be non-negative")
+        validated_identities = tuple(
+            _validated_signal_identity(identity)
+            for identity in processed_signal_identities
+        )
         self._positions = restored
         self._order_seq = max(self._order_seq, sequence_floor)
+        for identity in validated_identities:
+            self._remember_signal(identity)
         self.bankroll = bankroll
 
     def close_window(self, window_id: str, *, current_bankroll: float) -> None:
@@ -214,6 +236,7 @@ class PolymarketOMS:
         current_ask_size: float | None = None,
         *,
         max_fill_price: float | None = None,
+        fee_bps: float = 0.0,
     ) -> OrderResult | None:
         """Gate, size, and optionally fill one pricing signal.
 
@@ -233,6 +256,10 @@ class PolymarketOMS:
         bid = _finite_float("current_bid", current_bid)
         ask = _finite_float("market_price", signal.market_price)
         size_pct = _finite_float("recommended_size_pct", signal.recommended_size_pct)
+        fee_rate_bps = _finite_float("fee_bps", fee_bps)
+        if not 0.0 <= fee_rate_bps <= 10_000.0:
+            raise ValueError("fee_bps must be in [0, 10_000]")
+        fee_rate = fee_rate_bps / 10_000.0
         if bankroll < 0.0:
             raise ValueError("current_bankroll must be non-negative")
         side = _side_from_direction(signal.direction)
@@ -274,12 +301,14 @@ class PolymarketOMS:
         execution_usd = min(
             risk_budget_usd,
             liquidity_usd,
+            bankroll / (1.0 + fee_rate),
         )
         if execution_usd < self.min_order_usd:
             return self._rejected(side=side, reason=REJECT_SIZE_BELOW_MINIMUM)
 
         shares = execution_usd / fill_price
         cost = shares * fill_price
+        fee = cost * fee_rate
         self._apply_fill(
             window_id=signal.window_id,
             side=side,
@@ -288,14 +317,14 @@ class PolymarketOMS:
             cost_usdc=cost,
         )
         self._remember_signal(signal_key)
-        self.bankroll = bankroll - cost
+        self.bankroll = max(0.0, bankroll - cost - fee)
         return OrderResult(
             order_id=self._next_order_id(),
             status="FILLED",
             side=side,
             shares=shares,
             price=fill_price,
-            fee_usdc=0.0,
+            fee_usdc=fee,
             reject_reason=None,
         )
 
@@ -574,7 +603,9 @@ def _side_from_direction(direction: SignalDirection) -> str | None:
     return None
 
 
-def _signal_key(signal: PricingSignal) -> tuple[object, ...]:
+def signal_identity(signal: PricingSignal) -> SignalIdentity:
+    """Return the stable OMS idempotency identity for a pricing signal."""
+
     return (
         signal.window_id,
         signal.ts_ms,
@@ -582,6 +613,23 @@ def _signal_key(signal: PricingSignal) -> tuple[object, ...]:
         signal.market_price,
         signal.recommended_size_pct,
     )
+
+
+def _signal_key(signal: PricingSignal) -> SignalIdentity:
+    return signal_identity(signal)
+
+
+def _validated_signal_identity(identity: SignalIdentity) -> SignalIdentity:
+    if len(identity) != 5:
+        raise ValueError("processed signal identity must contain five fields")
+    window_id, ts_ms, direction, market_price, size_pct = identity
+    if not str(window_id).strip() or direction not in {"BUY_YES", "BUY_NO"}:
+        raise ValueError("processed signal identity is invalid")
+    price = _finite_float("processed signal market_price", market_price)
+    size = _finite_float("processed signal recommended_size_pct", size_pct)
+    if not 0.0 < price <= 1.0 or not 0.0 <= size <= 1.0:
+        raise ValueError("processed signal identity values are invalid")
+    return str(window_id), int(ts_ms), direction, price, size
 
 
 def _finite_float(name: str, value: float) -> float:

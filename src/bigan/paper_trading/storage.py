@@ -139,6 +139,22 @@ class PaperRunStore:
             self._append_jsonl(EXECUTION_EVENTS_FILE, decision.to_dict())
         self._append_observation(ledger_event, snapshot)
 
+    def load_decision_events(self) -> tuple[PaperDecisionEvent, ...]:
+        """Load validated decisions for durable pre-OMS snapshot deduplication."""
+
+        decisions = tuple(
+            PaperDecisionEvent.from_dict(row)
+            for row in self._read_jsonl(SIGNAL_EVENTS_FILE)
+        )
+        _validate_stream_order(list(decisions), SIGNAL_EVENTS_FILE)
+        seen: dict[str, PaperDecisionEvent] = {}
+        for event in decisions:
+            existing = seen.get(event.source_snapshot_id)
+            if existing is not None and existing != event:
+                raise ValueError("conflicting duplicate source_snapshot_id")
+            seen[event.source_snapshot_id] = event
+        return decisions
+
     def append_settlement(
         self,
         *,

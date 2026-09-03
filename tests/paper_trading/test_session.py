@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -31,23 +32,35 @@ WINDOW = MarketWindow(
 )
 
 
-def _runner(*, fee_bps: float = 100.0) -> StrategyRunner:
+def _runner(
+    *,
+    fee_bps: float = 100.0,
+    ema_alpha: float = 1.0,
+    zscore_min_samples: int = 2,
+    spot_price: float = 100_000.0,
+    oms_symbol: str = "BTC",
+    provider_identity: str | None = "fixed-pricing-inputs-v1",
+) -> StrategyRunner:
     return StrategyRunner(
-        ofi_engine=BinanceOFICalculator(zscore_min_samples=2, ema_alpha=1.0),
+        ofi_engine=BinanceOFICalculator(
+            zscore_min_samples=zscore_min_samples,
+            ema_alpha=ema_alpha,
+        ),
         pricing_engine=PolymarketPricingEngine(),
-        oms=PolymarketOMS(max_spread_allowed=0.08),
+        oms=PolymarketOMS(max_spread_allowed=0.08, symbol=oms_symbol),
         feed_handler=PolymarketFeedHandler(window_id=WINDOW.window_id, mock=True),
         window=WINDOW,
         initial_bankroll=1_000.0,
-        spot_price=WINDOW.strike_price,
+        spot_price=spot_price,
         pricing_inputs_provider=lambda timestamp_ms: PricingInputs(
             timestamp_ms=timestamp_ms,
-            spot_price=WINDOW.strike_price,
+            spot_price=spot_price,
             oracle_twap_so_far=WINDOW.strike_price,
             twap_weight=0.0,
             volatility_annualized=0.60,
         ),
         fee_bps=fee_bps,
+        pricing_inputs_provider_identity=provider_identity,
     )
 
 
@@ -112,9 +125,11 @@ def test_fixed_window_e2e_resume_and_settlement(tmp_path: Path) -> None:
         _snapshot(100_000, yes_bid=0.98, yes_ask=0.99, no_bid=0.0, no_ask=0.99)
     )
     runner.push_alpha_tick(_alpha(100_100, 100_010.0))
-    fill = session.process_snapshot_sync(
-        _snapshot(100_100, yes_bid=0.39, yes_ask=0.40, no_bid=0.09, no_ask=0.90)
+    fill_snapshot = replace(
+        _snapshot(100_100, yes_bid=0.39, yes_ask=0.40, no_bid=0.09, no_ask=0.90),
+        yes_ask_size=10.0,
     )
+    fill = session.process_snapshot_sync(fill_snapshot)
     runner.push_alpha_tick(_alpha(100_200, 100_020.0))
     rejection = session.process_snapshot_sync(
         _snapshot(100_200, yes_bid=0.20, yes_ask=0.40, no_bid=0.09, no_ask=0.90)
@@ -149,17 +164,34 @@ def test_fixed_window_e2e_resume_and_settlement(tmp_path: Path) -> None:
     )
     assert resumed.current_snapshot == before_resume
     assert resumed.runner.oms.positions()
+    resumed.runner.push_alpha_tick(_alpha(100_100, 100_010.0))
+    assert resumed.process_snapshot_sync(fill_snapshot) is None
+    assert resumed.current_snapshot == before_resume
+    assert resumed.runner.decision_count == 0
+    assert len(
+        (resumed.store.run_dir / SIGNAL_EVENTS_FILE).read_text().splitlines()
+    ) == 3
+    variant = replace(
+        _snapshot(100_100, yes_bid=0.39, yes_ask=0.40, no_bid=0.09, no_ask=0.90),
+        yes_ask_size=200.0,
+    )
+    assert resumed.process_snapshot_sync(variant) is None
+    after_signal_replay = resumed.current_snapshot
+    assert after_signal_replay.cash == before_resume.cash
+    assert after_signal_replay.open_lots == before_resume.open_lots
+    assert resumed.runner.last_decision is not None
+    assert resumed.runner.last_decision.disposition is DecisionDisposition.NO_ORDER
     settlement = resumed.settle(_settlement())
     final = resumed.current_snapshot
-    assert settlement.event_sequence == 4
-    assert final.last_event_sequence == 4
+    assert settlement.event_sequence == 5
+    assert final.last_event_sequence == 5
     assert final.positions == final.open_lots == ()
     assert final.equity == final.cash
     assert resumed.runner.oms.positions() == ()
     assert final.cash == pytest.approx(resumed.runner.current_bankroll)
     assert final.cash == pytest.approx(resumed.runner.oms.bankroll)
     assert len((resumed.store.run_dir / SETTLEMENT_EVENTS_FILE).read_text().splitlines()) == 1
-    assert len((resumed.store.run_dir / LEDGER_EVENTS_FILE).read_text().splitlines()) == 4
+    assert len((resumed.store.run_dir / LEDGER_EVENTS_FILE).read_text().splitlines()) == 5
 
 
 def test_resume_rejects_changed_configuration(tmp_path: Path) -> None:
@@ -177,6 +209,118 @@ def test_resume_rejects_changed_configuration(tmp_path: Path) -> None:
             run_id="config-test",
             source_commit="commit-a",
         )
+
+
+@pytest.mark.parametrize(
+    (
+        "ema_alpha",
+        "zscore_min_samples",
+        "spot_price",
+        "oms_symbol",
+        "provider_identity",
+    ),
+    [
+        (1.0, 20, 100_000.0, "BTC", "pricing-feed-v1"),
+        (0.2, 1, 100_000.0, "BTC", "pricing-feed-v1"),
+        (0.2, 20, 90_000.0, "BTC", "pricing-feed-v1"),
+        (0.2, 20, 100_000.0, "ETH", "pricing-feed-v1"),
+        (0.2, 20, 100_000.0, "BTC", "pricing-feed-v2"),
+    ],
+)
+def test_resume_rejects_each_strategy_identity_change(
+    tmp_path: Path,
+    ema_alpha: float,
+    zscore_min_samples: int,
+    spot_price: float,
+    oms_symbol: str,
+    provider_identity: str,
+) -> None:
+    PaperTradingSession.create_new(
+        runner=_runner(
+            ema_alpha=0.2,
+            zscore_min_samples=20,
+            spot_price=100_000.0,
+            oms_symbol="BTC",
+            provider_identity="pricing-feed-v1",
+        ),
+        output_dir=tmp_path,
+        run_id="strategy-identity-test",
+        source_commit="commit-a",
+    )
+    with pytest.raises(ValueError, match="identity mismatch"):
+        PaperTradingSession.resume_existing(
+            runner=_runner(
+                ema_alpha=ema_alpha,
+                zscore_min_samples=zscore_min_samples,
+                spot_price=spot_price,
+                oms_symbol=oms_symbol,
+                provider_identity=provider_identity,
+            ),
+            output_dir=tmp_path,
+            run_id="strategy-identity-test",
+            source_commit="commit-a",
+        )
+
+
+def test_dynamic_pricing_provider_requires_explicit_identity(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="pricing_inputs_provider_identity"):
+        PaperTradingSession.create_new(
+            runner=_runner(provider_identity=None),
+            output_dir=tmp_path,
+            run_id="missing-provider-identity",
+            source_commit="commit-a",
+        )
+
+
+def test_all_cash_fill_reserves_fee_and_keeps_every_ledger_consistent(
+    tmp_path: Path,
+) -> None:
+    runner = StrategyRunner(
+        ofi_engine=BinanceOFICalculator(zscore_min_samples=1),
+        pricing_engine=PolymarketPricingEngine(kelly_fraction=1.0),
+        oms=PolymarketOMS(
+            max_single_trade_pct=1.0,
+            max_position_pct=1.0,
+            max_window_exposure_pct=1.0,
+            slippage_tolerance=0.0,
+        ),
+        feed_handler=PolymarketFeedHandler(window_id=WINDOW.window_id, mock=True),
+        window=WINDOW,
+        initial_bankroll=1_000.0,
+        spot_price=200_000.0,
+        volatility_annualized=0.10,
+        pricing_inputs_provider=lambda timestamp_ms: PricingInputs(
+            timestamp_ms=timestamp_ms,
+            spot_price=200_000.0,
+            oracle_twap_so_far=100_000.0,
+            twap_weight=0.0,
+            volatility_annualized=0.10,
+        ),
+        pricing_inputs_provider_identity="all-cash-fixture-v1",
+        fee_bps=100.0,
+    )
+    session = PaperTradingSession.create_new(
+        runner=runner,
+        output_dir=tmp_path,
+        run_id="all-cash-fee-test",
+        source_commit="commit-a",
+    )
+
+    result = session.process_snapshot_sync(
+        replace(
+            _snapshot(100_000, yes_bid=0.50, yes_ask=0.50, no_bid=0.0, no_ask=0.99),
+            yes_ask_size=10_000.0,
+        )
+    )
+
+    assert result is not None and result.status == "FILLED"
+    assert result.fee_usdc == pytest.approx(result.shares * result.price * 0.01)
+    assert session.failed is False
+    assert session.current_snapshot.cash == pytest.approx(0.0, abs=1e-9)
+    assert session.current_snapshot.cash == pytest.approx(runner.current_bankroll)
+    assert runner.current_bankroll == pytest.approx(runner.oms.bankroll)
+    assert len(session.current_snapshot.open_lots) == 1
+    assert len(runner.oms.positions()) == 1
 
 
 def test_window_mismatch_is_a_durable_non_mutating_decision(tmp_path: Path) -> None:
@@ -236,3 +380,29 @@ def test_storage_failure_permanently_fails_session(
         session.process_snapshot_sync(
             _snapshot(100_001, yes_bid=0.39, yes_ask=0.40, no_bid=0.09, no_ask=0.90)
         )
+
+
+def test_runner_exception_checks_consistency_and_fails_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = PaperTradingSession.create_new(
+        runner=_runner(),
+        output_dir=tmp_path,
+        run_id="runner-exception-test",
+        source_commit="commit-a",
+    )
+
+    def corrupt_then_raise(self: PolymarketOMS, *_args: object, **_kwargs: object) -> None:
+        self.bankroll = 0.0
+        raise RuntimeError("simulated OMS failure")
+
+    monkeypatch.setattr(PolymarketOMS, "process_signal", corrupt_then_raise)
+    with pytest.raises(RuntimeError, match="simulated OMS failure"):
+        session.process_snapshot_sync(
+            _snapshot(100_000, yes_bid=0.39, yes_ask=0.40, no_bid=0.09, no_ask=0.90)
+        )
+    assert session.failed is True
+    assert session.failure_reason is not None
+    assert "inconsistent" in session.failure_reason
+    assert session.current_snapshot.positions == ()

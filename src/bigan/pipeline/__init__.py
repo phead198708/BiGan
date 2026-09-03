@@ -5,6 +5,7 @@ from .events import (
     DecisionDisposition,
     DecisionReason,
     StrategyDecisionEvent,
+    market_snapshot_identity,
 )
 from .strategy_runner import PricingInputs, StrategyRunner
 
@@ -15,4 +16,5 @@ __all__ = [
     "PricingInputs",
     "StrategyDecisionEvent",
     "StrategyRunner",
+    "market_snapshot_identity",
 ]

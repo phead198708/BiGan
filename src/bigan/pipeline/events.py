@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from dataclasses import dataclass, fields
 from enum import Enum, StrEnum
@@ -144,6 +146,24 @@ class StrategyDecisionEvent:
             payload[field.name] = value.value if isinstance(value, Enum) else value
         return payload
 
+    @property
+    def source_snapshot_id(self) -> str:
+        """Return the stable identity of the immutable source market snapshot."""
+
+        return market_snapshot_identity(
+            timestamp_ms=self.timestamp_ms,
+            window_id=self.window_id,
+            yes_bid=self.yes_bid,
+            yes_ask=self.yes_ask,
+            yes_bid_size=self.yes_bid_size,
+            yes_ask_size=self.yes_ask_size,
+            no_bid=self.no_bid,
+            no_ask=self.no_ask,
+            no_bid_size=self.no_bid_size,
+            no_ask_size=self.no_ask_size,
+            last_traded_price=self.last_traded_price,
+        )
+
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> StrategyDecisionEvent:
         """Parse a persisted event and re-run all constructor validation."""
@@ -159,3 +179,40 @@ class StrategyDecisionEvent:
             None if alpha_reason is None else DecisionReason(str(alpha_reason))
         )
         return cls(**values)
+
+
+def market_snapshot_identity(
+    *,
+    timestamp_ms: int,
+    window_id: str,
+    yes_bid: float,
+    yes_ask: float,
+    yes_bid_size: float,
+    yes_ask_size: float,
+    no_bid: float,
+    no_ask: float,
+    no_bid_size: float,
+    no_ask_size: float,
+    last_traded_price: float,
+) -> str:
+    """Hash the complete immutable source snapshot using canonical JSON."""
+
+    encoded = json.dumps(
+        {
+            "timestamp_ms": timestamp_ms,
+            "window_id": window_id,
+            "yes_bid": yes_bid,
+            "yes_ask": yes_ask,
+            "yes_bid_size": yes_bid_size,
+            "yes_ask_size": yes_ask_size,
+            "no_bid": no_bid,
+            "no_ask": no_ask,
+            "no_bid_size": no_bid_size,
+            "no_ask_size": no_ask_size,
+            "last_traded_price": last_traded_price,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

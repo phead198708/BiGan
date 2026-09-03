@@ -167,8 +167,15 @@ def test_duplicate_decision_is_idempotent_and_conflict_fails() -> None:
     before = ledger.snapshot()
     assert ledger.apply_decision(event) is None
     assert ledger.snapshot() == before
+    conflicting_decision = replace(event.decision, yes_bid=0.20)
     with pytest.raises(ValueError, match="conflicting duplicate"):
-        ledger.apply_decision(replace(event, decision=replace(event.decision, yes_bid=0.20)))
+        ledger.apply_decision(
+            replace(
+                event,
+                decision=conflicting_decision,
+                source_snapshot_id=conflicting_decision.source_snapshot_id,
+            )
+        )
 
 
 def test_sequence_is_strict_and_replay_matches_online_state() -> None:

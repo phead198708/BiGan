@@ -175,9 +175,12 @@ def test_exact_duplicate_authoritative_event_replays_idempotently(tmp_path: Path
 def test_conflicting_duplicate_authoritative_event_fails(tmp_path: Path) -> None:
     store, ledger = _created_store(tmp_path)
     _append_fill(store, ledger)
+    original = paper_decision(1)
+    conflicting_decision = replace(original.decision, yes_bid=0.20)
     conflicting = replace(
-        paper_decision(1),
-        decision=replace(paper_decision(1).decision, yes_bid=0.20),
+        original,
+        decision=conflicting_decision,
+        source_snapshot_id=conflicting_decision.source_snapshot_id,
     )
     with (store.run_dir / SIGNAL_EVENTS_FILE).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(conflicting.to_dict()) + "\n")

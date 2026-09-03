@@ -124,11 +124,15 @@ class PaperDecisionEvent(PaperSafetyBoundary):
     run_id: str
     event_id: str
     event_sequence: int
+    source_snapshot_id: str
     decision: StrategyDecisionEvent
 
     def __post_init__(self) -> None:
         super(PaperDecisionEvent, self).__post_init__()
         _validate_event_identity(self.schema_version, self.run_id, self.event_id, self.event_sequence)
+        _require_text("source_snapshot_id", self.source_snapshot_id)
+        if self.source_snapshot_id != self.decision.source_snapshot_id:
+            raise ValueError("source_snapshot_id does not match strategy decision")
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> PaperDecisionEvent:

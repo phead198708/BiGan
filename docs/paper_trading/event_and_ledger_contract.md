@@ -54,6 +54,10 @@ All contracts serialize through `to_dict()` to JSON-native values. Enum and
 dataclass instances never escape into the payload, schemas have fixed field
 sets, and non-finite floats are rejected.
 
+`StrategyRunner.execution_history` is a bounded deque (10,000 records by
+default). `execution_count` is monotonic; complete execution history belongs
+in the JSONL artifacts.
+
 ## Accounting rules
 
 The ledger starts with cash and equity equal to the initial bankroll and no
@@ -65,7 +69,9 @@ fee = notional * fee_bps / 10_000
 cash_after = cash_before - notional - fee
 ```
 
-Fees are charged once on entry. `StrategyRunner.current_bankroll`,
+The OMS reserves both notional and fee before a fill, so even a 100% allocation
+satisfies `notional + fee <= cash`; position, cash, and fee are then committed
+as one in-memory mutation. Fees are charged once on entry. `StrategyRunner.current_bankroll`,
 `PolymarketOMS.bankroll`, decision `cash_after`, and ledger cash must agree;
 the session raises on any mismatch.
 
@@ -106,6 +112,12 @@ provenance conflict fails. Replay executes the same accounting functions as
 the online session and checks persisted derived ledger events byte-for-value
 against regenerated contracts.
 
+Each decision also persists `source_snapshot_id`, a canonical SHA-256 over the
+complete immutable market snapshot. Recovery rebuilds this identity set and
+`PaperTradingSession` checks it before calling the pricing engine or OMS. A
+redelivered snapshot therefore cannot create another fill after reconnect or
+restart. The decision event ID is derived from the run ID and snapshot hash.
+
 ## Artifacts and recovery
 
 An explicit `<output_dir>/<run_id>/` contains:
@@ -122,7 +134,10 @@ paper_snapshot.json
 ```
 
 The manifest fixes source commit, initial bankroll, fee, registered window,
-configuration SHA-256, and the safety boundary. JSONL is canonical UTF-8 with
+configuration SHA-256, and the safety boundary. The hash covers complete OFI,
+pricing, OMS, Runner/static pricing input settings, retention bounds, and an
+explicit dynamic pricing-provider identity. A session with a dynamic provider
+but no stable provider identity is rejected. JSONL is canonical UTF-8 with
 one complete sorted object per line, flush on every append, optional `fsync`,
 and no NaN/Infinity. `create_new()` refuses an existing run. `resume_existing()`
 requires the explicit output directory and run ID, compares manifest/config

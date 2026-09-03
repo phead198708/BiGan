@@ -47,6 +47,11 @@ def test_non_finite_contract_number_is_rejected() -> None:
         replace(paper_decision(1).decision, cash_after=float("nan"))
 
 
+def test_paper_decision_rejects_a_tampered_source_snapshot_identity() -> None:
+    with pytest.raises(ValueError, match="source_snapshot_id"):
+        replace(paper_decision(1), source_snapshot_id="wrong-snapshot")
+
+
 def test_schema_field_set_is_strict() -> None:
     payload = paper_decision(1).to_dict()
     payload["unexpected"] = True

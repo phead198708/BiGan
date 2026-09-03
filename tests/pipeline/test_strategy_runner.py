@@ -31,6 +31,7 @@ def _runner(
     ofi_bid_qty: float = 1.0,
     ofi_ask_qty: float = 1.0,
     fee_bps: float = 0.0,
+    execution_history_limit: int = 10_000,
 ) -> StrategyRunner:
     market = window or _window()
     feed = PolymarketFeedHandler(
@@ -50,6 +51,7 @@ def _runner(
         ofi_bid_qty=ofi_bid_qty,
         ofi_ask_qty=ofi_ask_qty,
         fee_bps=fee_bps,
+        execution_history_limit=execution_history_limit,
         pricing_inputs_provider=lambda timestamp_ms: PricingInputs(
             timestamp_ms=timestamp_ms,
             spot_price=market.strike_price,
@@ -199,7 +201,7 @@ async def test_e2e_tail_cutoff_blocks_trade() -> None:
 
     assert runner.ofi_engine.get_normalized_ofi() > 0.0
     assert runner.oms_calls == 0
-    assert runner.execution_history == []
+    assert not runner.execution_history
     assert runner.current_bankroll == pytest.approx(starting)
     assert runner.oms.positions() == ()
     assert runner.callback_errors == 0
@@ -414,6 +416,25 @@ def test_decision_callback_failure_is_isolated_from_fill_and_other_callbacks() -
     assert len(observed) == 1
     assert runner.decision_callback_errors == 1
     assert runner.current_bankroll < 1_000.0
+
+
+def test_execution_history_is_bounded_but_count_remains_monotonic() -> None:
+    runner = _runner(max_spread_allowed=0.01, execution_history_limit=2)
+    for index in range(3):
+        result = runner.process_snapshot_sync(
+            _snapshot(
+                runner,
+                timestamp_ms=100_000 + index,
+                yes_bid=0.20,
+                yes_ask=0.40,
+            )
+        )
+        assert result is not None and result.status == "REJECTED"
+
+    assert len(runner.execution_history) == 2
+    assert runner.execution_count == 3
+    assert runner.last_execution == runner.execution_history[-1]
+    assert runner.execution_history[0].order_id == "oms-2"
 
 
 @pytest.mark.parametrize("fee_bps", [-1.0, float("nan"), float("inf")])

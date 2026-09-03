@@ -121,5 +121,6 @@ def paper_decision(
         run_id=RUN_ID,
         event_id=event_id or f"{RUN_ID}:decision:{sequence:020d}",
         event_sequence=sequence,
+        source_snapshot_id=strategy.source_snapshot_id,
         decision=strategy,
     )
