@@ -195,7 +195,10 @@ class PaperTradingSession:
         if self._source_snapshot_processed(_snapshot_id(snapshot)):
             return None
         try:
-            result = self.runner.process_snapshot_sync(snapshot)
+            result = self.runner._process_paper_snapshot_sync(
+                snapshot,
+                owner_token=self._runner_owner_token,
+            )
         except Exception as exc:
             self._fail_after_runner_exception(exc)
             raise
@@ -210,7 +213,10 @@ class PaperTradingSession:
         if self._source_snapshot_processed(_snapshot_id(snapshot)):
             return None
         try:
-            result = await self.runner.process_snapshot(snapshot)
+            result = await self.runner._process_paper_snapshot(
+                snapshot,
+                owner_token=self._runner_owner_token,
+            )
         except Exception as exc:
             self._fail_after_runner_exception(exc)
             raise

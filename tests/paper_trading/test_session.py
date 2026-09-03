@@ -311,6 +311,94 @@ async def test_paper_owned_runner_cannot_start_outside_session(tmp_path: Path) -
         await runner.start()
 
 
+def test_paper_owned_runner_rejects_direct_sync_processing_before_fill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = PaperTradingSession.create_new(
+        runner=_runner(spot_price=200_000.0),
+        output_dir=tmp_path,
+        run_id="exclusive-sync-processing",
+        source_commit="commit-a",
+    )
+
+    def fail_append(**_kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(session.store, "append_decision", fail_append)
+    fill_snapshot = _snapshot(
+        100_000,
+        yes_bid=0.39,
+        yes_ask=0.40,
+        no_bid=0.09,
+        no_ask=0.90,
+    )
+
+    with pytest.raises(RuntimeError, match="PaperTradingSession"):
+        session.runner.process_snapshot_sync(fill_snapshot)
+    assert session.failed is False
+    assert session.runner.decision_count == 0
+    assert session.runner.oms.positions() == ()
+    assert session.current_snapshot.cash == 1_000.0
+
+
+@pytest.mark.asyncio
+async def test_paper_owned_runner_rejects_direct_async_and_wrong_token(
+    tmp_path: Path,
+) -> None:
+    session = PaperTradingSession.create_new(
+        runner=_runner(spot_price=200_000.0),
+        output_dir=tmp_path,
+        run_id="exclusive-async-processing",
+        source_commit="commit-a",
+    )
+    fill_snapshot = _snapshot(
+        100_000,
+        yes_bid=0.39,
+        yes_ask=0.40,
+        no_bid=0.09,
+        no_ask=0.90,
+    )
+
+    with pytest.raises(RuntimeError, match="PaperTradingSession"):
+        await session.runner.process_snapshot(fill_snapshot)
+    with pytest.raises(RuntimeError, match="owner token"):
+        session.runner._process_paper_snapshot_sync(
+            fill_snapshot,
+            owner_token=object(),
+        )
+    assert session.runner.decision_count == 0
+    assert session.runner.oms.positions() == ()
+    assert session.current_snapshot.cash == 1_000.0
+
+
+@pytest.mark.asyncio
+async def test_session_async_path_uses_owner_token_and_persists_fill(
+    tmp_path: Path,
+) -> None:
+    session = PaperTradingSession.create_new(
+        runner=_runner(spot_price=200_000.0),
+        output_dir=tmp_path,
+        run_id="tokenized-async-session",
+        source_commit="commit-a",
+    )
+
+    result = await session.process_snapshot(
+        _snapshot(
+            100_000,
+            yes_bid=0.39,
+            yes_ask=0.40,
+            no_bid=0.09,
+            no_ask=0.90,
+        )
+    )
+
+    assert result is not None and result.status == "FILLED"
+    assert session.failed is False
+    assert session.current_snapshot.last_event_sequence == 1
+    assert len(session.store.load_decision_events()) == 1
+
+
 def test_snapshot_dedupe_uses_bounded_lru_with_complete_disk_fallback(
     tmp_path: Path,
 ) -> None:

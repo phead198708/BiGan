@@ -325,10 +325,35 @@ class StrategyRunner:
     def process_snapshot_sync(self, snapshot: MarketSnapshot) -> OrderResult | None:
         """Run one snapshot through OFI → signal → OMS.
 
+        A runner owned by ``PaperTradingSession`` rejects this public entry;
+        the session must use its tokenized fail-closed path instead.
+        """
+
+        return self._process_snapshot_sync(snapshot, owner_token=None)
+
+    def _process_paper_snapshot_sync(
+        self,
+        snapshot: MarketSnapshot,
+        *,
+        owner_token: object,
+    ) -> OrderResult | None:
+        """Process one paper snapshot only for the bound session owner."""
+
+        return self._process_snapshot_sync(snapshot, owner_token=owner_token)
+
+    def _process_snapshot_sync(
+        self,
+        snapshot: MarketSnapshot,
+        *,
+        owner_token: object | None,
+    ) -> OrderResult | None:
+        """Implement the shared snapshot decision path after access checks.
+
         ``HOLD`` never reaches the OMS. ``FILLED`` results debit
         ``current_bankroll``; every OMS ``OrderResult`` is appended to history.
         """
 
+        self._require_processing_access(owner_token)
         cash_before = self.current_bankroll
         alpha_ts, alpha_age, alpha_fresh, alpha_reason, z_ofi = self._alpha_state(
             snapshot.timestamp_ms
@@ -644,6 +669,37 @@ class StrategyRunner:
         """Async wrapper around :meth:`process_snapshot_sync` for the live feed."""
 
         return self.process_snapshot_sync(snapshot)
+
+    async def _process_paper_snapshot(
+        self,
+        snapshot: MarketSnapshot,
+        *,
+        owner_token: object,
+    ) -> OrderResult | None:
+        """Async wrapper for the tokenized paper-session processing path."""
+
+        return self._process_paper_snapshot_sync(
+            snapshot,
+            owner_token=owner_token,
+        )
+
+    def _require_processing_access(self, owner_token: object | None) -> None:
+        if self._paper_session_owner_token is None:
+            if owner_token is not None:
+                raise RuntimeError("unbound StrategyRunner rejects paper owner token")
+            return
+        if owner_token is None:
+            raise RuntimeError(
+                "paper-owned StrategyRunner must be called via PaperTradingSession"
+            )
+        self._require_paper_owner(owner_token)
+
+    def _require_paper_owner(self, owner_token: object) -> None:
+        if (
+            self._paper_session_owner_token is None
+            or owner_token is not self._paper_session_owner_token
+        ):
+            raise RuntimeError("invalid PaperTradingSession owner token")
 
     async def _on_snapshot(self, snapshot: MarketSnapshot) -> None:
         try:

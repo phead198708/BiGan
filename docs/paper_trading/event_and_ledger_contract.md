@@ -128,6 +128,11 @@ snapshot hash.
 A `StrategyRunner` has exclusive paper-session ownership. Binding a second
 `PaperTradingSession` to the same runner is rejected before a new run directory
 is created, preventing one decision callback from writing into multiple runs.
+Once bound, the Runner's public synchronous/asynchronous snapshot methods and
+its direct `start()` method reject calls. Only the owning session can enter the
+shared processing implementation with its identity-checked token, so callers
+cannot bypass pre-deduplication, post-persistence health checks, cash consistency,
+or fail-closed session semantics.
 
 ## Artifacts and recovery
 
