@@ -122,6 +122,44 @@ def test_clob_loader_roundtrip_csv_and_parquet(tmp_path: Path) -> None:
     assert csv_loaded.dropped_stale == 0
 
 
+def test_clob_loader_requires_execution_ask_sizes() -> None:
+    table = pa.table(
+        {
+            "timestamp_ms": [100],
+            "window_id": [WINDOW_ID],
+            "yes_bid": [0.38],
+            "yes_ask": [0.42],
+            "no_bid": [0.38],
+            "no_ask": [0.42],
+        }
+    )
+
+    with pytest.raises(ValueError, match="yes_ask_size"):
+        snapshots_from_table(table)
+
+
+def test_minimum_documented_clob_schema_can_fill_orders() -> None:
+    table = pa.table(
+        {
+            "timestamp_ms": [100_000, 100_200, 100_400],
+            "window_id": [WINDOW_ID] * 3,
+            "yes_bid": [0.39] * 3,
+            "yes_ask": [0.40] * 3,
+            "no_bid": [0.09] * 3,
+            "no_ask": [0.90] * 3,
+            "yes_ask_size": [100.0] * 3,
+            "no_ask_size": [100.0] * 3,
+        }
+    )
+
+    loaded = snapshots_from_table(table)
+    result = _engine().run(loaded.snapshots, settlement={WINDOW_ID: 1.0})
+
+    assert loaded.dropped_stale == 0
+    assert all(row.yes_ask_size == 100.0 for row in loaded.snapshots)
+    assert any(row.order.status == "FILLED" for row in result.fills)
+
+
 def test_clob_loader_drops_invalid_spot_rows_atomically() -> None:
     table = pa.table(
         {
@@ -131,6 +169,8 @@ def test_clob_loader_drops_invalid_spot_rows_atomically() -> None:
             "yes_ask": [0.42] * 5,
             "no_bid": [0.38] * 5,
             "no_ask": [0.42] * 5,
+            "yes_ask_size": [100.0] * 5,
+            "no_ask_size": [100.0] * 5,
             "spot_price": [100_000.0, None, 0.0, float("nan"), 100_004.0],
         }
     )
@@ -141,6 +181,37 @@ def test_clob_loader_drops_invalid_spot_rows_atomically() -> None:
     assert loaded.spot_prices == pytest.approx((100_000.0, 100_004.0))
     assert len(loaded.snapshots) == len(loaded.spot_prices or ())
     assert loaded.dropped_stale == 3
+
+
+@pytest.mark.parametrize(
+    ("column", "invalid_value", "valid_value"),
+    [
+        ("yes_ask", 1.20, 0.42),
+        ("last_traded_price", -0.50, 0.40),
+        ("last_traded_price", float("nan"), 0.40),
+    ],
+)
+def test_clob_loader_drops_invalid_binary_contract_prices(
+    column: str,
+    invalid_value: float,
+    valid_value: float,
+) -> None:
+    payload: dict[str, list[object]] = {
+        "timestamp_ms": [100, 200],
+        "window_id": [WINDOW_ID, WINDOW_ID],
+        "yes_bid": [0.38, 0.38],
+        "yes_ask": [0.42, 0.42],
+        "no_bid": [0.38, 0.38],
+        "no_ask": [0.42, 0.42],
+        "yes_ask_size": [100.0, 100.0],
+        "no_ask_size": [100.0, 100.0],
+    }
+    payload[column] = [invalid_value, valid_value]
+
+    loaded = snapshots_from_table(pa.table(payload))
+
+    assert [row.timestamp_ms for row in loaded.snapshots] == [200]
+    assert loaded.dropped_stale == 1
 
 
 def test_engine_fills_match_strategy_runner_and_oms_cash() -> None:

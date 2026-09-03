@@ -44,8 +44,9 @@ def load_clob_snapshots(path: str | Path) -> LoadedClob:
     """Load a Parquet or CSV CLOB log into ``MarketSnapshot`` tuples.
 
     Required columns: ``timestamp_ms`` (aliases ``timestamp`` / ``ts_ms`` /
-    ``ts``), ``window_id``, ``yes_bid``, ``yes_ask``, ``no_bid``, ``no_ask``.
-    ``last_traded_price`` and ``spot_price`` are optional.
+    ``ts``), ``window_id``, ``yes_bid``, ``yes_ask``, ``no_bid``, ``no_ask``,
+    ``yes_ask_size``, and ``no_ask_size``. Bid sizes, ``last_traded_price``,
+    and ``spot_price`` are optional.
     """
 
     source = Path(path)
@@ -87,8 +88,10 @@ def snapshots_from_table(table: pa.Table) -> LoadedClob:
     no_ask_col = _require_column(names, "no_ask")
     last_idx = names.get("last_traded_price")
     size_indices = {
-        column: names.get(column)
-        for column in ("yes_bid_size", "yes_ask_size", "no_bid_size", "no_ask_size")
+        "yes_bid_size": names.get("yes_bid_size"),
+        "yes_ask_size": _require_column(names, "yes_ask_size"),
+        "no_bid_size": names.get("no_bid_size"),
+        "no_ask_size": _require_column(names, "no_ask_size"),
     }
     spot_idx = names.get(SPOT_COLUMN)
 
@@ -114,11 +117,15 @@ def snapshots_from_table(table: pa.Table) -> LoadedClob:
         try:
             ts_ms = int(timestamps[i])
             window_id = str(windows[i])
-            yes_bid = _finite_price("yes_bid", yes_bids[i])
-            yes_ask = _finite_price("yes_ask", yes_asks[i])
-            no_bid = _finite_price("no_bid", no_bids[i])
-            no_ask = _finite_price("no_ask", no_asks[i])
-            last_px = 0.0 if lasts is None else _optional_price(lasts[i])
+            yes_bid = _contract_price("yes_bid", yes_bids[i])
+            yes_ask = _contract_price("yes_ask", yes_asks[i])
+            no_bid = _contract_price("no_bid", no_bids[i])
+            no_ask = _contract_price("no_ask", no_asks[i])
+            last_px = (
+                0.0
+                if lasts is None
+                else _optional_contract_price("last_traded_price", lasts[i])
+            )
             quote_sizes = {
                 column: (
                     0.0
@@ -130,7 +137,7 @@ def snapshots_from_table(table: pa.Table) -> LoadedClob:
             spot = (
                 None
                 if spots_raw is None
-                else _finite_price(SPOT_COLUMN, spots_raw[i])
+                else _positive_price(SPOT_COLUMN, spots_raw[i])
             )
         except (TypeError, ValueError):
             dropped_stale += 1
@@ -263,19 +270,26 @@ def _require_column(names: Mapping[str, int], column: str) -> int:
     return names[column]
 
 
-def _finite_price(name: str, value: object) -> float:
+def _positive_price(name: str, value: object) -> float:
     out = float(value)  # type: ignore[arg-type]
     if not math.isfinite(out) or out <= 0.0:
         raise ValueError(f"{name} must be a positive finite price")
     return out
 
 
-def _optional_price(value: object) -> float:
+def _contract_price(name: str, value: object) -> float:
+    out = float(value)  # type: ignore[arg-type]
+    if not math.isfinite(out) or not 0.0 < out <= 1.0:
+        raise ValueError(f"{name} must be a finite price in (0, 1]")
+    return out
+
+
+def _optional_contract_price(name: str, value: object) -> float:
     if value is None:
         return 0.0
     out = float(value)  # type: ignore[arg-type]
-    if not math.isfinite(out):
-        return 0.0
+    if not math.isfinite(out) or not 0.0 <= out <= 1.0:
+        raise ValueError(f"{name} must be a finite price in [0, 1]")
     return out
 
 
