@@ -91,6 +91,41 @@ def test_oracle_twap_is_window_scoped_and_time_weighted() -> None:
     assert provider.config_identity()["twap_sampling"] == "event_time_left_continuous"
 
 
+def test_volatility_annualization_uses_actual_return_intervals() -> None:
+    def measured_volatility(spacing_ms: int) -> float:
+        provider = RollingPricingInputsProvider(
+            window_start_ts_ms=0,
+            window_end_ts_ms=spacing_ms * 3,
+            spot_source="binance:BTCUSDT",
+            oracle_source="polymarket-rtds:btc/usd",
+            max_age_ms=spacing_ms,
+            max_samples=10,
+            twap_window_ms=spacing_ms * 3,
+            return_interval_ms=1_000,
+            volatility_window_ms=spacing_ms * 3,
+            volatility_min_samples=2,
+            volatility_max_abs_log_return=0.20,
+            annualization_seconds=31_536_000,
+        )
+        provider.ingest_spot(_sample(0, 100.0, "binance:BTCUSDT"))
+        provider.ingest_spot(
+            _sample(spacing_ms, 100.0 * math.exp(0.01), "binance:BTCUSDT")
+        )
+        provider.ingest_spot(_sample(spacing_ms * 2, 100.0, "binance:BTCUSDT"))
+        provider.ingest_oracle(_sample(0, 100.0, "polymarket-rtds:btc/usd"))
+        provider.ingest_oracle(
+            _sample(spacing_ms * 2, 100.0, "polymarket-rtds:btc/usd")
+        )
+        inputs = provider(spacing_ms * 2)
+        assert inputs is not None
+        return inputs.volatility_annualized
+
+    one_second = measured_volatility(1_000)
+    ten_seconds = measured_volatility(10_000)
+
+    assert ten_seconds == pytest.approx(one_second / math.sqrt(10.0))
+
+
 def test_future_stale_wrong_source_and_outlier_inputs_fail_closed() -> None:
     provider = _provider(min_returns=1)
     assert provider.ingest_spot(_sample(1_000, 100.0, "wrong")) is False

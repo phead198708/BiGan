@@ -109,6 +109,7 @@ class OperatorConfig:
     binance_queue_size: int = 10_000
     market_queue_size: int = 10_000
     binance_delta_buffer_size: int = 5_000
+    binance_book_level_limit: int = 5_000
     ofi_ema_alpha: float = 0.2
     ofi_window_ms: int = 60_000
     ofi_min_samples: int = 20
@@ -268,6 +269,7 @@ def _validate_positive_ints(config: OperatorConfig) -> None:
         "binance_queue_size",
         "market_queue_size",
         "binance_delta_buffer_size",
+        "binance_book_level_limit",
         "ofi_window_ms",
         "ofi_min_samples",
         "ofi_max_events",

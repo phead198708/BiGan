@@ -41,9 +41,11 @@ creation, cancellation, allowance, wallet, or signing adapter.
    in flight.
 4. `BinanceDepthSynchronizer` builds a local price-level book from the REST
    snapshot and applies absolute-quantity `U/u` deltas, including one-sided
-   updates and zero-quantity deletes. A gap, reconnect, symbol mismatch,
-   future/out-of-order event, or buffer overflow invalidates alpha and requests
-   an immediate reconnect/bootstrap.
+   updates and zero-quantity deletes. Both sides have the fixed
+   `binance_book_level_limit`; reaching it fails closed instead of evicting
+   information required to identify the true top. A gap, reconnect, symbol
+   mismatch, future/out-of-order event, or buffer/level overflow invalidates
+   alpha and requests an immediate reconnect/bootstrap.
 5. `PolymarketBookSynchronizer` requires full books for both discovered token
    IDs. A missing/stale token, sequence gap, window mismatch, or old generation
    cannot produce a tradable snapshot.
@@ -102,9 +104,12 @@ the SHA-256 of the parsed source row.
   by both `twap_window_ms` and the active market start. A pre-open sample may
   establish the price at the start boundary, but pre-open duration is excluded.
 - Returns: log returns using samples at least
-  `volatility_return_interval_ms` apart.
-- Volatility: population standard deviation over `volatility_window_ms`,
-  annualized by `sqrt(annualization_seconds * 1000 / return_interval_ms)`.
+  `volatility_return_interval_ms` apart, with each actual elapsed interval
+  retained.
+- Volatility: elapsed-time-demeaned realized variance over
+  `volatility_window_ms`, normalized by total observed milliseconds and then
+  annualized. Irregular source cadence therefore does not inherit the configured
+  minimum interval as a false sampling frequency.
 - Warm-up: at least `volatility_min_samples` returns. Reconnect clears rolling
   state, so TWAP or volatility is never fabricated.
 - Invalid/outlier handling: non-positive/non-finite, wrong source, out-of-order,
@@ -133,12 +138,13 @@ or projection output. `FAILED` is permanent for an authoritative
 Session/ledger/persistence/cash-consistency failure. No automatic rollover is
 allowed from `FAILED`.
 
-Only `RUNNING` with fresh synchronized Binance, fresh dynamic pricing inputs,
-fresh complete YES/NO books, an active window, and the current window
-generation may submit a snapshot. At `now >= end_ts_ms`, acceptance is fenced
-before resolution polling. Final resolution must match market, condition,
-window, token, resolution identity, and an exact binary 1/0 payout. A missing
-or non-final response remains `SETTLEMENT_PENDING`; the last quote is never a
+Only `RUNNING` with fresh synchronized Binance, a fresh OFI timestamp, an
+actively connected Chainlink stream, fresh dynamic pricing inputs, fresh
+complete YES/NO books, an active window, and the current window generation may
+submit a snapshot. At `now >= end_ts_ms`, acceptance is fenced before
+resolution polling. Final resolution must match market, condition, window,
+token, resolution identity, and an exact binary 1/0 payout. A missing or
+non-final response remains `SETTLEMENT_PENDING`; the last quote is never a
 settlement substitute.
 
 ## Run identity, recovery, and rollover

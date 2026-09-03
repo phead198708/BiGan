@@ -26,6 +26,7 @@ max_pricing_age_ms = 5000
 binance_queue_size = 10000
 market_queue_size = 10000
 binance_delta_buffer_size = 5000
+binance_book_level_limit = 5000
 
 twap_window_ms = 900000
 volatility_return_interval_ms = 1000

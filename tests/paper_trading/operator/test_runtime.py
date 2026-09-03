@@ -176,6 +176,35 @@ async def _ready_operator(
     )
 
 
+async def _emit_market_pair(
+    operator: PaperTradingOperator,
+    market: DiscoveredMarket,
+    *,
+    timestamp_ms: int,
+    sequence: int,
+) -> object | None:
+    base = {
+        "event_type": "book",
+        "sequence": sequence,
+        "timestamp": timestamp_ms,
+        "bids": [{"price": "0.09", "size": "100"}],
+        "asks": [{"price": "0.10", "size": "100"}],
+    }
+    await operator.ingest_market_message(
+        {**base, "asset_id": market.yes_token_id},
+        generation=operator.generation,
+    )
+    return await operator.ingest_market_message(
+        {
+            **base,
+            "asset_id": market.no_token_id,
+            "bids": [{"price": "0.89", "size": "100"}],
+            "asks": [{"price": "0.90", "size": "100"}],
+        },
+        generation=operator.generation,
+    )
+
+
 async def test_start_creates_stable_session_and_restart_resumes_same_run(tmp_path: Path) -> None:
     market = _market(1)
     selection = _selection(market)
@@ -240,6 +269,91 @@ async def test_freshness_gate_blocks_until_all_three_sources_ready(tmp_path: Pat
     assert operator.counters["snapshot_freshness_dropped"] == 1
 
 
+async def test_deep_binance_updates_do_not_refresh_stale_ofi_for_oms(
+    tmp_path: Path,
+) -> None:
+    market = _market(1)
+    clock = FakeClock(10_000)
+    config = replace(
+        _config(tmp_path),
+        max_alpha_age_ms=2_000,
+        max_pricing_age_ms=5_000,
+    )
+    operator = PaperTradingOperator(
+        config=config,
+        discovery=FakeDiscovery([_selection(market)]),
+        resolution=FakeResolution([None]),
+        clock_ms=clock,
+    )
+    await operator.start()
+    await _ready_operator(operator, clock)
+    assert operator.session is not None
+    oms_calls = operator.session.runner.oms_calls
+
+    clock.now_ms = 13_001
+    assert await operator.ingest_binance_delta(
+        {
+            "s": "BTCUSDT",
+            "E": clock.now_ms,
+            "U": 12,
+            "u": 12,
+            "b": [["90", "1"]],
+            "a": [],
+        },
+        generation=operator.generation,
+        received_at_ms=clock.now_ms,
+    )
+    await operator.ingest_oracle(
+        ReferencePriceSample(
+            timestamp_ms=clock.now_ms,
+            received_at_ms=clock.now_ms,
+            price=100.0,
+            source="polymarket_rtds_chainlink:btc/usd",
+        ),
+        generation=operator.generation,
+    )
+    await _emit_market_pair(
+        operator,
+        market,
+        timestamp_ms=clock.now_ms,
+        sequence=2,
+    )
+
+    status = operator.status()
+    assert status.feeds["binance"]["fresh"] is True
+    assert status.alpha["fresh"] is False
+    assert operator.state is OperatorState.SYNCING
+    assert operator.session.runner.oms_calls == oms_calls
+
+
+async def test_chainlink_disconnect_immediately_closes_oms_gate(tmp_path: Path) -> None:
+    market = _market(1)
+    clock = FakeClock(10_000)
+    operator = PaperTradingOperator(
+        config=_config(tmp_path),
+        discovery=FakeDiscovery([_selection(market)]),
+        resolution=FakeResolution([None]),
+        clock_ms=clock,
+    )
+    await operator.start()
+    await _ready_operator(operator, clock)
+    assert operator.session is not None
+    oms_calls = operator.session.runner.oms_calls
+
+    await operator.disconnect_feed("chainlink", window_generation=operator.generation)
+    assert operator.state is OperatorState.SYNCING
+    assert operator.status().feeds["chainlink"]["connected"] is False
+
+    clock.now_ms += 1
+    await _emit_market_pair(
+        operator,
+        market,
+        timestamp_ms=clock.now_ms,
+        sequence=2,
+    )
+    assert operator.session.runner.oms_calls == oms_calls
+
+
 async def test_restart_reconnect_replay_is_disk_deduplicated(tmp_path: Path) -> None:
     market = _market(1)
     clock = FakeClock(10_000)
@@ -296,6 +410,10 @@ async def test_expiry_pending_final_once_and_rollover_fences_old_generation(tmp_
     assert operator.counters["settlement_completed"] == 1
     assert operator.counters["rollovers"] == 1
     assert operator.generation == old_generation + 1
+    assert operator.status().settlement == {
+        "status": "OPEN",
+        "source_reference": None,
+    }
 
     accepted = await operator.ingest_binance_delta(
         {"s": "BTCUSDT", "E": clock.now_ms, "U": 1, "u": 1, "b": [], "a": []},

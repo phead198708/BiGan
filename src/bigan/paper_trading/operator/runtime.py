@@ -462,6 +462,16 @@ class PaperTradingOperator:
         snapshot = None if session is None else session.current_snapshot
         binance_health = None if self.binance_sync is None else self.binance_sync.health(now_ms=now_ms)
         market_health = None if self.market_sync is None else self.market_sync.health(now_ms=now_ms)
+        binance_health_payload = _health_dict(binance_health)
+        if self.binance_sync is not None:
+            binance_health_payload.update(
+                {
+                    "bid_level_count": self.binance_sync.bid_level_count,
+                    "ask_level_count": self.binance_sync.ask_level_count,
+                    "book_level_limit": self.binance_sync.book_level_limit,
+                    "book_overflow_count": self.binance_sync.book_overflow_count,
+                }
+            )
         market_health_payload = _health_dict(market_health)
         if self.market_sync is not None:
             market_health_payload["tokens"] = self.market_sync.token_health(now_ms=now_ms)
@@ -503,7 +513,11 @@ class PaperTradingOperator:
                 if self.state is OperatorState.SETTLEMENT_PENDING
                 else "OPEN"
             )
-        if self._last_settlement is not None:
+        if (
+            market is not None
+            and self._last_settlement is not None
+            and self._last_settlement.window_id == market.window_id
+        ):
             settlement_reference = self._last_settlement.source_reference
         return OperatorStatus(
             schema_version=OPERATOR_STATUS_SCHEMA_VERSION,
@@ -532,7 +546,7 @@ class PaperTradingOperator:
                 }
             ),
             feeds={
-                "binance": _health_dict(binance_health),
+                "binance": binance_health_payload,
                 "polymarket": market_health_payload,
                 "chainlink": {
                     "state": "READY" if oracle_fresh else "STALE" if self._oracle_connected else "DISCONNECTED",
@@ -835,6 +849,7 @@ class PaperTradingOperator:
             symbol=self.config.binance_symbol,
             max_age_ms=self.config.max_alpha_age_ms,
             delta_buffer_size=self.config.binance_delta_buffer_size,
+            book_level_limit=self.config.binance_book_level_limit,
         )
         market_sync = PolymarketBookSynchronizer(
             window_id=market.window_id,
@@ -876,8 +891,15 @@ class PaperTradingOperator:
             or self.pricing_provider is None
         ):
             return False
+        alpha_ts_ms = self.session.runner.ofi_engine.last_timestamp_ms
+        alpha_fresh = bool(
+            alpha_ts_ms is not None
+            and 0 <= now_ms - alpha_ts_ms <= self.config.max_alpha_age_ms
+        )
         return bool(
-            self.binance_sync.health(now_ms=now_ms).fresh
+            self._oracle_connected
+            and alpha_fresh
+            and self.binance_sync.health(now_ms=now_ms).fresh
             and self.market_sync.health(now_ms=now_ms).fresh
             and self.pricing_provider.health(now_ms=now_ms).fresh
         )

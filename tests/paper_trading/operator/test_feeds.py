@@ -42,7 +42,11 @@ def _snapshot(update_id: int = 10) -> dict[str, object]:
     }
 
 
-def _binance(*, buffer_size: int = 10) -> BinanceDepthSynchronizer:
+def _binance(
+    *,
+    buffer_size: int = 10,
+    book_level_limit: int = 5_000,
+) -> BinanceDepthSynchronizer:
     return BinanceDepthSynchronizer(
         calculator=BinanceOFICalculator(
             symbol="BTCUSDT",
@@ -52,6 +56,7 @@ def _binance(*, buffer_size: int = 10) -> BinanceDepthSynchronizer:
         symbol="BTCUSDT",
         max_age_ms=500,
         delta_buffer_size=buffer_size,
+        book_level_limit=book_level_limit,
     )
 
 
@@ -144,6 +149,41 @@ def test_binance_subscription_ack_is_not_treated_as_a_depth_failure() -> None:
     assert feed.needs_bootstrap is False
     assert feed.last_update_id == 10
     assert feed.error_count == 0
+
+
+def test_binance_book_level_limit_forces_fail_closed_rebootstrap() -> None:
+    feed = _binance(book_level_limit=3)
+    feed.begin_generation(1)
+    assert feed.ingest_snapshot(_snapshot(10), generation=1, received_at_ms=1_000)
+
+    assert feed.ingest_delta(
+        {
+            "s": "BTCUSDT",
+            "E": 1_100,
+            "U": 11,
+            "u": 11,
+            "b": [["97", "1"]],
+            "a": [],
+        },
+        generation=1,
+    )
+    assert feed.bid_level_count == 3
+    assert feed.ingest_delta(
+        {
+            "s": "BTCUSDT",
+            "E": 1_200,
+            "U": 12,
+            "u": 12,
+            "b": [["96", "1"]],
+            "a": [],
+        },
+        generation=1,
+    ) is False
+
+    assert feed.book_overflow_count == 1
+    assert feed.needs_bootstrap is True
+    assert feed.bid_level_count == 0
+    assert feed.ask_level_count == 0
 
 
 def test_binance_symbol_time_generation_and_buffer_bounds_fail_closed() -> None:

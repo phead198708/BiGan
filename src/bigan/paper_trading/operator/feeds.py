@@ -16,6 +16,10 @@ from bigan.features.binance_ofi import BinanceOFICalculator
 T = TypeVar("T")
 
 
+class _DepthBookOverflow(ValueError):
+    pass
+
+
 class FeedConnectionState(StrEnum):
     DISCONNECTED = "DISCONNECTED"
     SYNCING = "SYNCING"
@@ -124,10 +128,11 @@ class BinanceDepthSynchronizer:
         symbol: str,
         max_age_ms: int,
         delta_buffer_size: int,
+        book_level_limit: int = 5_000,
     ) -> None:
         if not symbol or symbol != symbol.upper():
             raise ValueError("symbol must be uppercase and non-empty")
-        if max_age_ms < 0 or delta_buffer_size <= 0:
+        if max_age_ms < 0 or delta_buffer_size <= 0 or book_level_limit <= 0:
             raise ValueError("freshness and buffer bounds are invalid")
         if calculator.symbol != symbol:
             raise ValueError("calculator and synchronizer symbols differ")
@@ -135,6 +140,7 @@ class BinanceDepthSynchronizer:
         self.symbol = symbol
         self.max_age_ms = int(max_age_ms)
         self.delta_buffer_size = int(delta_buffer_size)
+        self.book_level_limit = int(book_level_limit)
         self.state = FeedConnectionState.DISCONNECTED
         self.connected = False
         self.generation = 0
@@ -149,6 +155,7 @@ class BinanceDepthSynchronizer:
         self.out_of_order_count = 0
         self.dropped_generation_count = 0
         self.buffer_overflow_count = 0
+        self.book_overflow_count = 0
         self.last_bid_price: float | None = None
         self.last_ask_price: float | None = None
         self.last_top_changed = False
@@ -215,8 +222,10 @@ class BinanceDepthSynchronizer:
                 self._buffer.append((dict(delta), received))
                 return False
             return self._apply_delta(delta, received_at_ms=received)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
             self.error_count += 1
+            if isinstance(exc, _DepthBookOverflow):
+                self.book_overflow_count += 1
             if not self.needs_bootstrap:
                 self._invalidate(clear_buffer=True)
             return False
@@ -236,8 +245,18 @@ class BinanceDepthSynchronizer:
             return False
         try:
             update_id = _positive_int(payload.get("lastUpdateId"), "lastUpdateId")
-            bids = _depth_side(payload.get("bids"), "bids", allow_empty=False)
-            asks = _depth_side(payload.get("asks"), "asks", allow_empty=False)
+            bids = _depth_side(
+                payload.get("bids"),
+                "bids",
+                allow_empty=False,
+                max_levels=self.book_level_limit,
+            )
+            asks = _depth_side(
+                payload.get("asks"),
+                "asks",
+                allow_empty=False,
+                max_levels=self.book_level_limit,
+            )
             bid_price, bid_qty, ask_price, ask_qty = _book_top(bids, asks)
             buffered = tuple(self._buffer)
             applicable_event_times = [
@@ -273,8 +292,10 @@ class BinanceDepthSynchronizer:
                     return False
             self.state = FeedConnectionState.READY
             return True
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
             self.error_count += 1
+            if isinstance(exc, _DepthBookOverflow):
+                self.book_overflow_count += 1
             self._invalidate(clear_buffer=True)
             return False
 
@@ -312,6 +333,14 @@ class BinanceDepthSynchronizer:
             return None
         return (self.last_bid_price + self.last_ask_price) / 2.0
 
+    @property
+    def bid_level_count(self) -> int:
+        return len(self._bids)
+
+    @property
+    def ask_level_count(self) -> int:
+        return len(self._asks)
+
     def _apply_delta(self, delta: Mapping[str, object], *, received_at_ms: int) -> bool:
         if self.last_update_id is None:
             self._invalidate(clear_buffer=True)
@@ -341,8 +370,18 @@ class BinanceDepthSynchronizer:
             return False
         bids = dict(self._bids)
         asks = dict(self._asks)
-        _apply_depth_updates(bids, delta.get("b"), "bids")
-        _apply_depth_updates(asks, delta.get("a"), "asks")
+        _apply_depth_updates(
+            bids,
+            delta.get("b"),
+            "bids",
+            max_levels=self.book_level_limit,
+        )
+        _apply_depth_updates(
+            asks,
+            delta.get("a"),
+            "asks",
+            max_levels=self.book_level_limit,
+        )
         bid_price, bid_qty, ask_price, ask_qty = _book_top(bids, asks)
         previous_top = self._current_top()
         current_top = (bid_price, bid_qty, ask_price, ask_qty)
@@ -680,6 +719,7 @@ def _depth_side(
     name: str,
     *,
     allow_empty: bool,
+    max_levels: int,
 ) -> dict[float, float]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         raise ValueError(f"depth {name} must be an array")
@@ -690,6 +730,8 @@ def _depth_side(
         price, quantity = _level(raw_level)
         if quantity > 0:
             levels[price] = quantity
+            if len(levels) > max_levels:
+                raise _DepthBookOverflow(f"depth {name} exceeds configured level limit")
     if not levels and not allow_empty:
         raise ValueError(f"depth {name} has no positive-quantity levels")
     return levels
@@ -699,6 +741,8 @@ def _apply_depth_updates(
     book: dict[float, float],
     value: object,
     name: str,
+    *,
+    max_levels: int,
 ) -> None:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         raise ValueError(f"depth {name} must be an array")
@@ -708,6 +752,8 @@ def _apply_depth_updates(
             book.pop(price, None)
         else:
             book[price] = quantity
+            if len(book) > max_levels:
+                raise _DepthBookOverflow(f"depth {name} exceeds configured level limit")
 
 
 def _book_top(

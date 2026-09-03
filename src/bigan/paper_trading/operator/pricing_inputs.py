@@ -107,7 +107,7 @@ class RollingPricingInputsProvider:
         self.annualization_seconds = int(annualization_seconds)
         self._spot_samples: deque[ReferencePriceSample] = deque(maxlen=max_samples)
         self._oracle_samples: deque[ReferencePriceSample] = deque(maxlen=max_samples)
-        self._returns: deque[tuple[int, float]] = deque(maxlen=max_samples)
+        self._returns: deque[tuple[int, float, int]] = deque(maxlen=max_samples)
         self._last_volatility_sample: ReferencePriceSample | None = None
         self.source_mismatch_count = 0
         self.out_of_order_count = 0
@@ -151,8 +151,8 @@ class RollingPricingInputsProvider:
             "volatility_max_abs_log_return": self.volatility_max_abs_log_return,
             "annualization_seconds": self.annualization_seconds,
             "twap_sampling": "event_time_left_continuous",
-            "volatility_returns": "log_non_overlapping_min_interval",
-            "volatility_variance": "population",
+            "volatility_returns": "irregular_log_returns_with_elapsed_time",
+            "volatility_variance": "elapsed_time_demeaned_realized_variance",
         }
 
     def ingest_spot(self, sample: ReferencePriceSample) -> bool:
@@ -168,11 +168,12 @@ class RollingPricingInputsProvider:
             volatility_base is not None
             and sample.timestamp_ms - volatility_base.timestamp_ms >= self.return_interval_ms
         ):
+            elapsed_ms = sample.timestamp_ms - volatility_base.timestamp_ms
             log_return = math.log(sample.price / volatility_base.price)
             if abs(log_return) > self.volatility_max_abs_log_return:
                 self.outlier_count += 1
                 return False
-            self._returns.append((sample.timestamp_ms, log_return))
+            self._returns.append((sample.timestamp_ms, log_return, elapsed_ms))
             self._last_volatility_sample = sample
             self._evict_returns(sample.timestamp_ms)
         elif volatility_base is None:
@@ -313,11 +314,17 @@ class RollingPricingInputsProvider:
             self._returns.popleft()
 
     def _annualized_volatility(self) -> float:
-        values = [value for _, value in self._returns]
-        mean = math.fsum(values) / len(values)
-        variance = math.fsum((value - mean) ** 2 for value in values) / len(values)
-        periods_per_year = self.annualization_seconds * 1_000 / self.return_interval_ms
-        result = math.sqrt(max(0.0, variance)) * math.sqrt(periods_per_year)
+        elapsed_ms = math.fsum(duration for _, _, duration in self._returns)
+        if elapsed_ms <= 0.0:
+            raise ValueError("realized-volatility duration must be positive")
+        mean_log_return_per_ms = (
+            math.fsum(value for _, value, _ in self._returns) / elapsed_ms
+        )
+        variance_per_ms = math.fsum(
+            (value - mean_log_return_per_ms * duration) ** 2
+            for _, value, duration in self._returns
+        ) / elapsed_ms
+        result = math.sqrt(max(0.0, variance_per_ms) * self.annualization_seconds * 1_000)
         if not math.isfinite(result):
             raise ValueError("annualized volatility is non-finite")
         return result

@@ -99,6 +99,8 @@ def test_ranges_and_queue_bounds_are_validated(tmp_path: Path) -> None:
         OperatorConfig(**_minimal(tmp_path, max_position_pct=1.1))
     with pytest.raises(ValueError, match="only 5m and 15m"):
         OperatorConfig(**_minimal(tmp_path, window_duration_ms=3_600_000))
+    with pytest.raises(ValueError, match="binance_book_level_limit"):
+        OperatorConfig(**_minimal(tmp_path, binance_book_level_limit=0))
 
 
 def test_toml_loader_rejects_unknown_fields_and_loads_safe_file(tmp_path: Path) -> None:
