@@ -264,6 +264,7 @@ def test_book_ticker_and_partial_depth_ingest() -> None:
             "asks": [["100.02", "2.5"]],
         },
         ts_ms=1_700_000_000_001,
+        symbol="BTCUSDT",
     )
     assert second is not None
     assert second.raw_ofi == pytest.approx(4.5)
@@ -357,6 +358,54 @@ def test_partial_depth_rejects_stale_last_update_id_without_state_pollution() ->
     assert current is not None
     assert current.raw_ofi == pytest.approx(2.0)
     assert calc.last_update_id == 11
+
+
+def test_partial_depth_rejects_other_combined_stream_without_state_pollution() -> None:
+    calc = BinanceOFICalculator(symbol="BTCUSDT", ema_alpha=1.0)
+    assert calc.on_book_ticker(
+        {"u": 10, "s": "BTCUSDT", "b": "100", "B": "2", "a": "101", "A": "3"},
+        ts_ms=1_000,
+    ) is None
+
+    with pytest.raises(ValueError, match="unexpected partial depth symbol ETHUSDT"):
+        calc.on_partial_depth(
+            {
+                "stream": "ethusdt@depth5",
+                "data": {
+                    "lastUpdateId": 100,
+                    "bids": [["4000", "99"]],
+                    "asks": [["4001", "99"]],
+                },
+            },
+            ts_ms=1_001,
+        )
+
+    assert calc.last_update_id == 10
+    assert calc.last_timestamp_ms == 1_000
+    assert calc.last_raw_ofi == 0.0
+    current = calc.on_book_ticker(
+        {"u": 11, "s": "BTCUSDT", "b": "100", "B": "4", "a": "101", "A": "3"},
+        ts_ms=1_002,
+    )
+    assert current is not None
+    assert current.raw_ofi == pytest.approx(2.0)
+
+
+def test_raw_partial_depth_requires_explicit_matching_symbol() -> None:
+    calc = BinanceOFICalculator(symbol="BTCUSDT")
+    payload = {
+        "lastUpdateId": 1,
+        "bids": [["100", "2"]],
+        "asks": [["101", "3"]],
+    }
+
+    with pytest.raises(ValueError, match="raw partial depth payload requires symbol"):
+        calc.on_partial_depth(payload, ts_ms=1_000)
+    with pytest.raises(ValueError, match="unexpected partial depth symbol ETHUSDT"):
+        calc.on_partial_depth(payload, ts_ms=1_000, symbol="ETHUSDT")
+
+    assert calc.on_partial_depth(payload, ts_ms=1_000, symbol="btcusdt") is None
+    assert calc.last_update_id == 1
 
 
 def test_update_and_get_z_matches_snapshot_and_reset_clears_state() -> None:

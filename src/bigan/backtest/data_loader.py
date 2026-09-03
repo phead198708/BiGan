@@ -116,7 +116,7 @@ def snapshots_from_table(table: pa.Table) -> LoadedClob:
     for i in range(n):
         try:
             ts_ms = int(timestamps[i])
-            window_id = str(windows[i])
+            window_id = _window_id(windows[i])
             yes_bid = _contract_price("yes_bid", yes_bids[i])
             yes_ask = _contract_price("yes_ask", yes_asks[i])
             no_bid = _contract_price("no_bid", no_bids[i])
@@ -140,9 +140,6 @@ def snapshots_from_table(table: pa.Table) -> LoadedClob:
                 else _positive_price(SPOT_COLUMN, spots_raw[i])
             )
         except (TypeError, ValueError):
-            dropped_stale += 1
-            continue
-        if not window_id.strip():
             dropped_stale += 1
             continue
         if yes_bid > yes_ask or no_bid > no_ask:
@@ -268,6 +265,12 @@ def _require_column(names: Mapping[str, int], column: str) -> int:
     if column not in names:
         raise ValueError(f"CLOB table is missing column '{column}'")
     return names[column]
+
+
+def _window_id(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("window_id must be a non-empty string")
+    return value.strip()
 
 
 def _positive_price(name: str, value: object) -> float:

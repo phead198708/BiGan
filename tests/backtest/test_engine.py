@@ -183,6 +183,36 @@ def test_clob_loader_drops_invalid_spot_rows_atomically() -> None:
     assert loaded.dropped_stale == 3
 
 
+def test_clob_loader_rejects_null_and_non_string_window_ids() -> None:
+    table = pa.table(
+        {
+            "timestamp_ms": [100, 200, 300, 400],
+            "window_id": [None, "", "   ", f"  {WINDOW_ID}  "],
+            "yes_bid": [0.38] * 4,
+            "yes_ask": [0.42] * 4,
+            "no_bid": [0.38] * 4,
+            "no_ask": [0.42] * 4,
+            "yes_ask_size": [100.0] * 4,
+            "no_ask_size": [100.0] * 4,
+        }
+    )
+
+    loaded = snapshots_from_table(table)
+
+    assert [row.timestamp_ms for row in loaded.snapshots] == [400]
+    assert loaded.snapshots[0].window_id == WINDOW_ID
+    assert loaded.dropped_stale == 3
+
+    numeric_ids = table.set_column(
+        table.schema.get_field_index("window_id"),
+        "window_id",
+        pa.array([1, 2, 3, 4]),
+    )
+    numeric_loaded = snapshots_from_table(numeric_ids)
+    assert numeric_loaded.snapshots == ()
+    assert numeric_loaded.dropped_stale == 4
+
+
 @pytest.mark.parametrize(
     ("column", "invalid_value", "valid_value"),
     [
@@ -550,3 +580,21 @@ def test_multi_window_replay_rejects_missing_metadata() -> None:
     )
     with pytest.raises(ValueError, match="missing MarketWindow metadata"):
         _engine().run((snapshot,))
+
+
+@pytest.mark.parametrize("payout", [2.0, -0.5, float("nan"), float("inf")])
+def test_backtest_rejects_invalid_settlement_payouts_before_replay(payout: float) -> None:
+    snapshot = MarketSnapshot(
+        timestamp_ms=100_000,
+        window_id=WINDOW_ID,
+        yes_bid=0.39,
+        yes_ask=0.40,
+        no_bid=0.09,
+        no_ask=0.90,
+        last_traded_price=0.40,
+        yes_ask_size=100.0,
+        no_ask_size=100.0,
+    )
+
+    with pytest.raises(ValueError, match="settlement payout"):
+        _engine().run((snapshot,), settlement={WINDOW_ID: payout})

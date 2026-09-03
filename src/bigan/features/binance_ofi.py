@@ -323,11 +323,29 @@ class BinanceOFICalculator:
             self._last_update_id = update_id
         return result
 
-    def on_partial_depth(self, payload: Mapping[str, object], *, ts_ms: int) -> OFISnapshot | None:
-        """Receive a Binance partial depth snapshot and use the best bid/ask."""
+    def on_partial_depth(
+        self,
+        payload: Mapping[str, object],
+        *,
+        ts_ms: int,
+        symbol: str | None = None,
+    ) -> OFISnapshot | None:
+        """Receive a symbol-bound Binance partial depth snapshot.
+
+        Combined payloads are bound by their outer ``stream`` name. Raw
+        partial-depth payloads do not contain a symbol, so callers must pass
+        the symbol associated with the WebSocket subscription explicitly.
+        """
 
         wrapped = payload.get("data")
         depth = wrapped if isinstance(wrapped, Mapping) else payload
+        payload_symbol = _partial_depth_symbol(
+            payload,
+            combined=isinstance(wrapped, Mapping),
+            raw_symbol=symbol,
+        )
+        if payload_symbol != self.symbol:
+            raise ValueError(f"unexpected partial depth symbol {payload_symbol}")
         update_id = _optional_int(depth.get("lastUpdateId"))
         if (
             update_id is not None
@@ -453,6 +471,27 @@ def _validated_top_of_book(
         ask_price=ask_px,
         ask_qty=ask_q,
     )
+
+
+def _partial_depth_symbol(
+    payload: Mapping[str, object],
+    *,
+    combined: bool,
+    raw_symbol: str | None,
+) -> str:
+    if combined:
+        stream = payload.get("stream")
+        if not isinstance(stream, str) or not stream.strip():
+            raise ValueError("combined partial depth payload must include stream")
+        stream_symbol, separator, channel = stream.strip().partition("@")
+        if not stream_symbol or not separator or not channel.lower().startswith("depth"):
+            raise ValueError("unexpected partial depth stream")
+        if raw_symbol is not None and raw_symbol.strip().upper() != stream_symbol.upper():
+            raise ValueError("partial depth symbol conflicts with stream")
+        return stream_symbol.upper()
+    if not isinstance(raw_symbol, str) or not raw_symbol.strip():
+        raise ValueError("raw partial depth payload requires symbol")
+    return raw_symbol.strip().upper()
 
 
 def _ticker_float(payload: Mapping[str, object], short_key: str, long_key: str) -> float:

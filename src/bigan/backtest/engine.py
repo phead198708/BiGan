@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -147,7 +148,7 @@ class BacktestEngine:
         missing_windows = sorted({row.window_id for row in tape} - set(self.windows))
         if missing_windows:
             raise ValueError(f"missing MarketWindow metadata for: {missing_windows}")
-        payouts = dict(settlement) if settlement is not None else {}
+        payouts = _validated_settlement_payouts(settlement)
         ofi, pricing, oms = _build_stack(params, symbol=self.window.symbol)
         cash = float(params.initial_bankroll)
         yes_shares = 0.0
@@ -661,7 +662,7 @@ def _settle_window(
     no_bid: float,
 ) -> tuple[float, float, float, float]:
     if window_id in payouts:
-        yes_payout = float(payouts[window_id])
+        yes_payout = payouts[window_id]
         no_payout = 1.0 - yes_payout
     else:
         yes_payout = yes_bid
@@ -685,3 +686,24 @@ def _settle_window(
         )
     lots.clear()
     return cash, 0.0, 0.0, commission
+
+
+def _validated_settlement_payouts(
+    settlement: Mapping[str, float] | None,
+) -> dict[str, float]:
+    if settlement is None:
+        return {}
+    payouts: dict[str, float] = {}
+    for window_id, value in settlement.items():
+        try:
+            payout = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"settlement payout for {window_id!r} must be finite and in [0, 1]"
+            ) from exc
+        if not math.isfinite(payout) or not 0.0 <= payout <= 1.0:
+            raise ValueError(
+                f"settlement payout for {window_id!r} must be finite and in [0, 1]"
+            )
+        payouts[window_id] = payout
+    return payouts
