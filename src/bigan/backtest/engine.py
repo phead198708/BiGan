@@ -281,6 +281,8 @@ class BacktestEngine:
                 if mode == "limit":
                     side = _side_for_signal(signal)
                     if resting is not None and resting.side != side:
+                        if not oms.cancel_limit_order(resting):
+                            raise RuntimeError("OMS rejected canonical limit cancellation")
                         resting = None
                     if resting is None:
                         bid, ask, _ = _book_for_signal(signal, snap)
@@ -288,6 +290,29 @@ class BacktestEngine:
                         placement = oms.prepare_limit_order(signal, cash, bid)
                         if isinstance(placement, LimitOrder):
                             resting = placement
+                            if ask <= resting.limit_price:
+                                (
+                                    oms_calls,
+                                    cash,
+                                    yes_shares,
+                                    no_shares,
+                                    commission,
+                                    resting,
+                                    rejected,
+                                ) = _maybe_fill_limit_order(
+                                    order=resting,
+                                    snapshot=snap,
+                                    oms=oms,
+                                    cash=cash,
+                                    yes_shares=yes_shares,
+                                    no_shares=no_shares,
+                                    lots=lots,
+                                    fills=fills,
+                                    fee_bps=params.fee_bps,
+                                    oms_calls=oms_calls,
+                                    rejected=rejected,
+                                    commission=commission,
+                                )
                         elif placement is not None:
                             rejected += 1
                             _append_rejected_order(
@@ -320,13 +345,19 @@ class BacktestEngine:
                         rejected=rejected,
                         commission=commission,
                     )
-            elif signal.direction is SignalDirection.HOLD:
+            elif signal.direction is SignalDirection.HOLD and resting is not None:
+                if not oms.cancel_limit_order(resting):
+                    raise RuntimeError("OMS rejected canonical limit cancellation")
                 resting = None
 
             mtm = cash + yes_shares * snap.yes_bid + no_shares * snap.no_bid
             equity_ts[i] = ts_ms
             equity[i] = mtm
 
+        if resting is not None:
+            if not oms.cancel_limit_order(resting):
+                raise RuntimeError("OMS rejected canonical limit cancellation")
+            resting = None
         if yes_shares > 0.0 or no_shares > 0.0 or lots:
             cash, yes_shares, no_shares, commission = _settle_window(
                 window_id=last_window,

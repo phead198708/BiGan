@@ -22,6 +22,8 @@ DEFAULT_SLIPPAGE_TOLERANCE = 0.01
 REJECT_SPREAD_TOO_WIDE = "Spread too wide"
 REJECT_SIZE_BELOW_MINIMUM = "Order size below minimum threshold"
 REJECT_LIQUIDITY_UNAVAILABLE = "Available ask liquidity unavailable"
+REJECT_UNKNOWN_LIMIT_ORDER = "Unknown or closed limit order"
+REJECT_STALE_LIMIT_ORDER = "Stale limit order version"
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,9 +53,10 @@ class OrderResult:
 
 @dataclass(frozen=True, slots=True)
 class LimitOrder:
-    """A submitted passive order whose quantity and limit are fixed."""
+    """Versioned handle to an OMS-owned passive order."""
 
     order_id: str
+    version: int
     window_id: str
     placed_ts_ms: int
     side: str
@@ -63,7 +66,7 @@ class LimitOrder:
 
 
 class PolymarketOMS:
-    """Pre-trade risk, bankroll-capped sizing, and simulated fills."""
+    """Pre-trade risk, canonical order reservations, and simulated fills."""
 
     __slots__ = (
         "max_single_trade_pct",
@@ -75,6 +78,7 @@ class PolymarketOMS:
         "symbol",
         "bankroll",
         "_positions",
+        "_open_limit_orders",
         "_order_seq",
         "_processed_signals",
         "_processed_signal_order",
@@ -126,6 +130,7 @@ class PolymarketOMS:
         self.symbol = str(symbol)
         self.bankroll = 0.0
         self._positions: dict[tuple[str, str], Position] = {}
+        self._open_limit_orders: dict[str, LimitOrder] = {}
         self._order_seq = 0
         self._processed_signals: set[tuple[object, ...]] = set()
         self._processed_signal_order: deque[tuple[object, ...]] = deque()
@@ -137,8 +142,13 @@ class PolymarketOMS:
     def positions(self) -> tuple[Position, ...]:
         return tuple(self._positions.values())
 
+    def open_limit_orders(self) -> tuple[LimitOrder, ...]:
+        """Return the current canonical versions of all live passive orders."""
+
+        return tuple(self._open_limit_orders.values())
+
     def close_window(self, window_id: str, *, current_bankroll: float) -> None:
-        """Release settled positions so they are not counted as live capital."""
+        """Release settled positions and cancel the window's open orders."""
 
         bankroll = _finite_float("current_bankroll", current_bankroll)
         if bankroll < 0.0:
@@ -146,6 +156,13 @@ class PolymarketOMS:
         keys = [key for key in self._positions if key[0] == window_id]
         for key in keys:
             del self._positions[key]
+        order_ids = [
+            order_id
+            for order_id, order in self._open_limit_orders.items()
+            if order.window_id == window_id
+        ]
+        for order_id in order_ids:
+            del self._open_limit_orders[order_id]
         self.bankroll = bankroll
 
     def process_signal(
@@ -291,6 +308,7 @@ class PolymarketOMS:
         shares = execution_usd / bid
         order = LimitOrder(
             order_id=self._next_order_id(),
+            version=0,
             window_id=signal.window_id,
             placed_ts_ms=signal.ts_ms,
             side=side,
@@ -298,8 +316,18 @@ class PolymarketOMS:
             remaining_shares=shares,
             limit_price=bid,
         )
+        self._open_limit_orders[order.order_id] = order
         self._remember_signal(signal_key)
         return order
+
+    def cancel_limit_order(self, order: LimitOrder) -> bool:
+        """Cancel an order only when the supplied handle is its current version."""
+
+        canonical = self._open_limit_orders.get(order.order_id)
+        if canonical is None or canonical != order:
+            return False
+        del self._open_limit_orders[order.order_id]
+        return True
 
     def fill_limit_order(
         self,
@@ -308,52 +336,70 @@ class PolymarketOMS:
         current_ask: float,
         current_ask_size: float | None,
     ) -> tuple[OrderResult | None, LimitOrder | None]:
-        """Fill a crossed passive order without re-sizing or re-gating spread."""
+        """Atomically fill the current version of an OMS-owned passive order."""
 
         bankroll = _finite_float("current_bankroll", current_bankroll)
         ask = _finite_float("current_ask", current_ask)
-        limit_price = _finite_float("limit_price", order.limit_price)
-        remaining = _finite_float("remaining_shares", order.remaining_shares)
         if bankroll < 0.0:
             raise ValueError("current_bankroll must be non-negative")
-        if order.side not in {"YES", "NO"}:
-            raise ValueError("limit order side must be YES or NO")
+        canonical = self._open_limit_orders.get(order.order_id)
+        if canonical is None:
+            return self._limit_rejected(order, REJECT_UNKNOWN_LIMIT_ORDER), None
+        if canonical != order:
+            return self._limit_rejected(order, REJECT_STALE_LIMIT_ORDER), canonical
+
+        limit_price = canonical.limit_price
+        remaining = canonical.remaining_shares
         if not 0.0 < ask <= 1.0 or not 0.0 < limit_price <= 1.0:
             raise ValueError("limit and ask prices must be in (0, 1]")
-        if remaining <= 0.0 or remaining > order.shares:
+        if remaining <= 0.0 or remaining > canonical.shares:
             raise ValueError("remaining_shares must be in (0, shares]")
         if ask > limit_price:
-            return None, order
+            return None, canonical
         if current_ask_size is None:
-            return self._limit_rejected(order, REJECT_LIQUIDITY_UNAVAILABLE), order
+            return (
+                self._limit_rejected(canonical, REJECT_LIQUIDITY_UNAVAILABLE),
+                canonical,
+            )
         ask_size = _finite_float("current_ask_size", current_ask_size)
         if ask_size <= 0.0:
-            return self._limit_rejected(order, REJECT_LIQUIDITY_UNAVAILABLE), order
+            return (
+                self._limit_rejected(canonical, REJECT_LIQUIDITY_UNAVAILABLE),
+                canonical,
+            )
 
         fill_price = min(limit_price, ask * (1.0 + self.slippage_tolerance))
         fill_shares = min(remaining, ask_size, bankroll / fill_price)
         if fill_shares <= 0.0:
-            return self._limit_rejected(order, REJECT_SIZE_BELOW_MINIMUM), order
+            return (
+                self._limit_rejected(canonical, REJECT_SIZE_BELOW_MINIMUM),
+                canonical,
+            )
         cost = fill_shares * fill_price
         self._apply_fill(
-            window_id=order.window_id,
-            side=order.side,
+            window_id=canonical.window_id,
+            side=canonical.side,
             shares=fill_shares,
             fill_price=fill_price,
             cost_usdc=cost,
         )
         self.bankroll = bankroll - cost
         remaining_after = max(0.0, remaining - fill_shares)
-        next_order = (
-            replace(order, remaining_shares=remaining_after)
-            if remaining_after > 1e-12
-            else None
-        )
+        if remaining_after > 1e-12:
+            next_order = replace(
+                canonical,
+                version=canonical.version + 1,
+                remaining_shares=remaining_after,
+            )
+            self._open_limit_orders[canonical.order_id] = next_order
+        else:
+            next_order = None
+            del self._open_limit_orders[canonical.order_id]
         return (
             OrderResult(
-                order_id=order.order_id,
+                order_id=canonical.order_id,
                 status="FILLED",
-                side=order.side,
+                side=canonical.side,
                 shares=fill_shares,
                 price=fill_price,
                 fee_usdc=0.0,
@@ -373,6 +419,20 @@ class PolymarketOMS:
         capital = bankroll + sum(
             position.total_cost_usdc for position in self._positions.values()
         )
+        reserved_cash = sum(
+            order.remaining_shares * order.limit_price
+            for order in self._open_limit_orders.values()
+        )
+        reserved_side_usd = sum(
+            order.remaining_shares * order.limit_price
+            for order in self._open_limit_orders.values()
+            if order.window_id == window_id and order.side == side
+        )
+        reserved_window_usd = sum(
+            order.remaining_shares * order.limit_price
+            for order in self._open_limit_orders.values()
+            if order.window_id == window_id
+        )
         existing = self.get_position(window_id, side)
         existing_usd = 0.0 if existing is None else existing.total_cost_usdc
         window_usd = sum(
@@ -381,16 +441,20 @@ class PolymarketOMS:
             if position.window_id == window_id
         )
         target_pct = min(max(0.0, size_pct), self.max_position_pct)
-        remaining_target_usd = max(0.0, capital * target_pct - existing_usd)
+        remaining_target_usd = max(
+            0.0,
+            capital * target_pct - existing_usd - reserved_side_usd,
+        )
         remaining_window_usd = max(
             0.0,
-            capital * self.max_window_exposure_pct - window_usd,
+            capital * self.max_window_exposure_pct - window_usd - reserved_window_usd,
         )
+        available_cash = max(0.0, bankroll - reserved_cash)
         return min(
             remaining_target_usd,
             remaining_window_usd,
             capital * self.max_single_trade_pct,
-            bankroll,
+            available_cash,
         )
 
     def _remember_signal(self, key: tuple[object, ...]) -> None:

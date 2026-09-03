@@ -253,6 +253,34 @@ def test_limit_order_rests_then_fills_when_ask_crosses() -> None:
     assert filled[0].order.price <= 0.38
 
 
+def test_marketable_limit_order_fills_on_submission_snapshot() -> None:
+    snapshot = MarketSnapshot(
+        timestamp_ms=100_000,
+        window_id=WINDOW_ID,
+        yes_bid=0.40,
+        yes_ask=0.40,
+        no_bid=0.09,
+        no_ask=0.90,
+        last_traded_price=0.40,
+        yes_bid_size=10_000.0,
+        yes_ask_size=10_000.0,
+        no_bid_size=10_000.0,
+        no_ask_size=10_000.0,
+    )
+
+    result = _engine(execution_mode="limit").run(
+        (snapshot,),
+        spot_prices=(101_000.0,),
+        settlement={WINDOW_ID: 1.0},
+    )
+
+    filled = [row for row in result.fills if row.order.status == "FILLED"]
+    assert len(filled) == 1
+    assert filled[0].timestamp_ms == snapshot.timestamp_ms
+    assert filled[0].order.price == pytest.approx(0.40)
+    assert filled[0].order.shares == pytest.approx(50.0 / 0.40)
+
+
 def test_resting_limit_fills_before_tail_cutoff_cancels_new_signal() -> None:
     window = MarketWindow(
         window_id=WINDOW_ID,
