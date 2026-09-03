@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import TypeAlias
 
 from bigan.data.polymarket_clob import MarketSnapshot, PolymarketFeedHandler
 from bigan.execution.polymarket_oms import OrderResult, PolymarketOMS
@@ -13,12 +14,20 @@ from bigan.features.binance_ofi import BinanceOFICalculator, OFISnapshot, TopOfB
 from bigan.strategies.polymarket_pricing import (
     MarketWindow,
     PolymarketPricingEngine,
+    PricingSignal,
     SignalDirection,
+)
+
+from .events import (
+    STRATEGY_DECISION_SCHEMA_VERSION,
+    DecisionDisposition,
+    DecisionReason,
+    StrategyDecisionEvent,
 )
 
 logger = logging.getLogger(__name__)
 
-OFIEngine = BinanceOFICalculator
+OFIEngine: TypeAlias = BinanceOFICalculator
 DEFAULT_REFERENCE_MAX_AGE_MS = 5_000
 DEFAULT_OFI_MAX_AGE_MS = 2_000
 
@@ -34,7 +43,8 @@ class PricingInputs:
     volatility_annualized: float
 
 
-PricingInputsProvider = Callable[[int], PricingInputs]
+PricingInputsProvider = Callable[[int], PricingInputs | None]
+DecisionCallback = Callable[[StrategyDecisionEvent], None]
 
 
 class StrategyRunner:
@@ -60,8 +70,13 @@ class StrategyRunner:
         "pricing_inputs_provider",
         "reference_max_age_ms",
         "ofi_max_age_ms",
+        "fee_bps",
         "stale_pricing_inputs",
         "dropped_window_mismatch",
+        "last_decision",
+        "decision_count",
+        "decision_callback_errors",
+        "_decision_callbacks",
         "_callback_registered",
     )
 
@@ -84,10 +99,14 @@ class StrategyRunner:
         pricing_inputs_provider: PricingInputsProvider | None = None,
         reference_max_age_ms: int = DEFAULT_REFERENCE_MAX_AGE_MS,
         ofi_max_age_ms: int = DEFAULT_OFI_MAX_AGE_MS,
+        fee_bps: float = 0.0,
     ) -> None:
         bankroll = float(initial_bankroll)
-        if bankroll <= 0.0:
-            raise ValueError("initial_bankroll must be positive")
+        if bankroll <= 0.0 or not math.isfinite(bankroll):
+            raise ValueError("initial_bankroll must be positive and finite")
+        paper_fee_bps = float(fee_bps)
+        if not math.isfinite(paper_fee_bps) or not 0.0 <= paper_fee_bps <= 10_000.0:
+            raise ValueError("fee_bps must be finite and in [0, 10_000]")
         self.ofi_engine = ofi_engine
         self.pricing_engine = pricing_engine
         self.oms = oms
@@ -113,11 +132,22 @@ class StrategyRunner:
         self.pricing_inputs_provider = pricing_inputs_provider
         self.reference_max_age_ms = int(reference_max_age_ms)
         self.ofi_max_age_ms = int(ofi_max_age_ms)
+        self.fee_bps = paper_fee_bps
         if self.reference_max_age_ms < 0 or self.ofi_max_age_ms < 0:
             raise ValueError("input freshness bounds must be non-negative")
         self.stale_pricing_inputs = 0
         self.dropped_window_mismatch = 0
+        self.last_decision: StrategyDecisionEvent | None = None
+        self.decision_count = 0
+        self.decision_callback_errors = 0
+        self._decision_callbacks: list[DecisionCallback] = []
         self._callback_registered = False
+        self.oms.bankroll = bankroll
+
+    def on_decision(self, callback: DecisionCallback) -> None:
+        """Register a lightweight isolated callback for every decision event."""
+
+        self._decision_callbacks.append(callback)
 
     def push_alpha_tick(self, book: TopOfBook) -> float:
         """Push one Binance top-of-book event into the alpha engine."""
@@ -201,14 +231,61 @@ class StrategyRunner:
         ``current_bankroll``; every OMS ``OrderResult`` is appended to history.
         """
 
+        cash_before = self.current_bankroll
+        alpha_ts, alpha_age, alpha_fresh, alpha_reason, z_ofi = self._alpha_state(
+            snapshot.timestamp_ms
+        )
         if snapshot.window_id != self.window.window_id:
             self.dropped_window_mismatch += 1
+            self._emit_decision(
+                self._decision_event(
+                    snapshot,
+                    alpha_ts=alpha_ts,
+                    alpha_age=alpha_age,
+                    alpha_fresh=alpha_fresh,
+                    alpha_reason=alpha_reason,
+                    z_ofi=z_ofi,
+                    inputs=None,
+                    inputs_age=None,
+                    inputs_fresh=False,
+                    signal=None,
+                    result=None,
+                    cash_before=cash_before,
+                    cash_after=cash_before,
+                    disposition=DecisionDisposition.DROPPED,
+                    reason=DecisionReason.WINDOW_MISMATCH,
+                )
+            )
             return None
-        inputs = self._pricing_inputs_for(snapshot.timestamp_ms)
-        if inputs is None:
+        inputs, inputs_age, inputs_fresh, input_reason = self._pricing_inputs_for(
+            snapshot.timestamp_ms
+        )
+        if not inputs_fresh:
             self.stale_pricing_inputs += 1
+            if input_reason is None:
+                raise RuntimeError("unavailable pricing inputs require a reason")
+            self._emit_decision(
+                self._decision_event(
+                    snapshot,
+                    alpha_ts=alpha_ts,
+                    alpha_age=alpha_age,
+                    alpha_fresh=alpha_fresh,
+                    alpha_reason=alpha_reason,
+                    z_ofi=z_ofi,
+                    inputs=inputs,
+                    inputs_age=inputs_age,
+                    inputs_fresh=False,
+                    signal=None,
+                    result=None,
+                    cash_before=cash_before,
+                    cash_after=cash_before,
+                    disposition=DecisionDisposition.DROPPED,
+                    reason=input_reason,
+                )
+            )
             return None
-        z_ofi = self._current_z_ofi(snapshot.timestamp_ms)
+        if inputs is None:
+            raise RuntimeError("fresh pricing inputs cannot be missing")
         signal = self.pricing_engine.evaluate_signal(
             window=self.window,
             current_ts_ms=snapshot.timestamp_ms,
@@ -221,6 +298,25 @@ class StrategyRunner:
             no_ask_price=snapshot.no_ask,
         )
         if signal.direction is SignalDirection.HOLD:
+            self._emit_decision(
+                self._decision_event(
+                    snapshot,
+                    alpha_ts=alpha_ts,
+                    alpha_age=alpha_age,
+                    alpha_fresh=alpha_fresh,
+                    alpha_reason=alpha_reason,
+                    z_ofi=z_ofi,
+                    inputs=inputs,
+                    inputs_age=inputs_age,
+                    inputs_fresh=True,
+                    signal=signal,
+                    result=None,
+                    cash_before=cash_before,
+                    cash_after=cash_before,
+                    disposition=DecisionDisposition.HOLD,
+                    reason=DecisionReason.SIGNAL_HOLD,
+                )
+            )
             return None
         current_bid = (
             snapshot.yes_bid
@@ -240,15 +336,71 @@ class StrategyRunner:
             current_ask_size,
         )
         if result is None:
+            self._emit_decision(
+                self._decision_event(
+                    snapshot,
+                    alpha_ts=alpha_ts,
+                    alpha_age=alpha_age,
+                    alpha_fresh=alpha_fresh,
+                    alpha_reason=alpha_reason,
+                    z_ofi=z_ofi,
+                    inputs=inputs,
+                    inputs_age=inputs_age,
+                    inputs_fresh=True,
+                    signal=signal,
+                    result=None,
+                    cash_before=cash_before,
+                    cash_after=cash_before,
+                    disposition=DecisionDisposition.NO_ORDER,
+                    reason=DecisionReason.OMS_NO_RESULT,
+                )
+            )
             return None
-        self.execution_history.append(result)
         if result.status == "FILLED":
-            self.current_bankroll = self.oms.bankroll
+            fee = result.shares * result.price * self.fee_bps / 10_000.0
+            cash_after = self.oms.bankroll - fee
+            if cash_after < -1e-12:
+                raise RuntimeError("paper fee would make bankroll negative")
+            cash_after = max(0.0, cash_after)
+            self.current_bankroll = cash_after
+            self.oms.bankroll = cash_after
+            result = replace(result, fee_usdc=fee)
+            disposition = DecisionDisposition.FILLED
+            reason = DecisionReason.OMS_FILLED
+        else:
+            cash_after = cash_before
+            disposition = DecisionDisposition.REJECTED
+            reason = DecisionReason.OMS_REJECTED
+        self.execution_history.append(result)
+        self._emit_decision(
+            self._decision_event(
+                snapshot,
+                alpha_ts=alpha_ts,
+                alpha_age=alpha_age,
+                alpha_fresh=alpha_fresh,
+                alpha_reason=alpha_reason,
+                z_ofi=z_ofi,
+                inputs=inputs,
+                inputs_age=inputs_age,
+                inputs_fresh=True,
+                signal=signal,
+                result=result,
+                cash_before=cash_before,
+                cash_after=cash_after,
+                disposition=disposition,
+                reason=reason,
+            )
+        )
         return result
 
-    def _pricing_inputs_for(self, decision_ts_ms: int) -> PricingInputs | None:
+    def _pricing_inputs_for(
+        self,
+        decision_ts_ms: int,
+    ) -> tuple[PricingInputs | None, int | None, bool, DecisionReason | None]:
         if self.pricing_inputs_provider is not None:
             inputs = self.pricing_inputs_provider(decision_ts_ms)
+            if inputs is None:
+                return None, None, False, DecisionReason.PRICING_INPUTS_MISSING
             self.update_pricing_inputs(inputs)
         else:
             inputs = PricingInputs(
@@ -260,17 +412,108 @@ class StrategyRunner:
             )
         age_ms = decision_ts_ms - inputs.timestamp_ms
         if age_ms < 0 or age_ms > self.reference_max_age_ms:
-            return None
-        return inputs
+            return inputs, age_ms, False, DecisionReason.PRICING_INPUTS_STALE
+        return inputs, age_ms, True, None
 
     def _current_z_ofi(self, decision_ts_ms: int) -> float:
+        return self._alpha_state(decision_ts_ms)[4]
+
+    def _alpha_state(
+        self,
+        decision_ts_ms: int,
+    ) -> tuple[int | None, int | None, bool, DecisionReason | None, float]:
         alpha_ts_ms = self.ofi_engine.last_timestamp_ms
         if alpha_ts_ms is None:
-            return 0.0
+            return None, None, False, DecisionReason.ALPHA_MISSING, 0.0
         age_ms = decision_ts_ms - alpha_ts_ms
         if age_ms < 0 or age_ms > self.ofi_max_age_ms:
-            return 0.0
-        return self.ofi_engine.get_normalized_ofi()
+            return alpha_ts_ms, age_ms, False, DecisionReason.ALPHA_STALE, 0.0
+        return alpha_ts_ms, age_ms, True, None, self.ofi_engine.get_normalized_ofi()
+
+    def _decision_event(
+        self,
+        snapshot: MarketSnapshot,
+        *,
+        alpha_ts: int | None,
+        alpha_age: int | None,
+        alpha_fresh: bool,
+        alpha_reason: DecisionReason | None,
+        z_ofi: float,
+        inputs: PricingInputs | None,
+        inputs_age: int | None,
+        inputs_fresh: bool,
+        signal: PricingSignal | None,
+        result: OrderResult | None,
+        cash_before: float,
+        cash_after: float,
+        disposition: DecisionDisposition,
+        reason: DecisionReason,
+    ) -> StrategyDecisionEvent:
+        return StrategyDecisionEvent(
+            schema_version=STRATEGY_DECISION_SCHEMA_VERSION,
+            timestamp_ms=snapshot.timestamp_ms,
+            window_id=snapshot.window_id,
+            market_symbol=self.window.symbol,
+            window_start_ts_ms=self.window.start_ts_ms,
+            window_end_ts_ms=self.window.end_ts_ms,
+            yes_bid=snapshot.yes_bid,
+            yes_ask=snapshot.yes_ask,
+            yes_bid_size=snapshot.yes_bid_size,
+            yes_ask_size=snapshot.yes_ask_size,
+            no_bid=snapshot.no_bid,
+            no_ask=snapshot.no_ask,
+            no_bid_size=snapshot.no_bid_size,
+            no_ask_size=snapshot.no_ask_size,
+            last_traded_price=snapshot.last_traded_price,
+            alpha_timestamp_ms=alpha_ts,
+            alpha_age_ms=alpha_age,
+            alpha_is_fresh=alpha_fresh,
+            alpha_reason_code=alpha_reason,
+            z_ofi=z_ofi,
+            pricing_inputs_timestamp_ms=None if inputs is None else inputs.timestamp_ms,
+            pricing_inputs_age_ms=inputs_age,
+            pricing_inputs_are_fresh=inputs_fresh,
+            spot_price=None if inputs is None else inputs.spot_price,
+            oracle_twap_so_far=None if inputs is None else inputs.oracle_twap_so_far,
+            twap_weight=None if inputs is None else inputs.twap_weight,
+            volatility_annualized=None if inputs is None else inputs.volatility_annualized,
+            model_probability=None if signal is None else signal.model_prob,
+            market_price=None if signal is None else signal.market_price,
+            effective_strike=(
+                None
+                if signal is None or not math.isfinite(signal.effective_strike)
+                else signal.effective_strike
+            ),
+            edge=None if signal is None else signal.edge,
+            ev=None if signal is None else signal.ev,
+            direction=None if signal is None else signal.direction.value,
+            recommended_size_pct=None if signal is None else signal.recommended_size_pct,
+            order_id=None if result is None else result.order_id,
+            order_status=None if result is None else result.status,
+            order_side=None if result is None else result.side,
+            shares=None if result is None else result.shares,
+            fill_price=None if result is None else result.price,
+            fee_usdc=None if result is None else result.fee_usdc,
+            reject_reason=None if result is None else result.reject_reason,
+            cash_before=cash_before,
+            cash_after=cash_after,
+            disposition=disposition,
+            reason_code=reason,
+        )
+
+    def _emit_decision(self, event: StrategyDecisionEvent) -> None:
+        self.last_decision = event
+        self.decision_count += 1
+        for callback in tuple(self._decision_callbacks):
+            try:
+                callback(event)
+            except Exception:
+                self.decision_callback_errors += 1
+                logger.exception(
+                    "strategy.decision_callback.failed window_id=%s ts_ms=%s",
+                    event.window_id,
+                    event.timestamp_ms,
+                )
 
     async def process_snapshot(self, snapshot: MarketSnapshot) -> OrderResult | None:
         """Async wrapper around :meth:`process_snapshot_sync` for the live feed."""

@@ -8,14 +8,17 @@ on:
       - "src/bigan/execution/polymarket_oms.py"
       - "src/bigan/features/binance_ofi.py"
       - "src/bigan/pipeline/**"
+      - "src/bigan/paper_trading/**"
       - "src/bigan/strategies/polymarket_pricing.py"
       - "tests/backtest/**"
       - "tests/data/test_polymarket_clob.py"
       - "tests/execution/test_polymarket_oms.py"
       - "tests/features/test_binance_ofi.py"
       - "tests/pipeline/**"
+      - "tests/paper_trading/**"
       - "tests/strategies/test_polymarket_pricing.py"
       - "examples/__init__.py"
+      - "docs/paper_trading/**"
       - ".github/workflows/agent-stack.yml"
       - "pyproject.toml"
   workflow_dispatch:
@@ -48,20 +51,25 @@ jobs:
             src/bigan/execution/polymarket_oms.py \
             src/bigan/features/binance_ofi.py \
             src/bigan/pipeline \
+            src/bigan/paper_trading \
             src/bigan/strategies/polymarket_pricing.py \
             tests/backtest \
             tests/data/test_polymarket_clob.py \
             tests/execution/test_polymarket_oms.py \
             tests/features/test_binance_ofi.py \
             tests/pipeline \
+            tests/paper_trading \
             tests/strategies/test_polymarket_pricing.py
-          python -m mypy \
+          python -m mypy --follow-imports=skip \
             src/bigan/backtest \
             src/bigan/data/polymarket_clob.py \
             src/bigan/execution/polymarket_oms.py \
             src/bigan/features/binance_ofi.py \
             src/bigan/pipeline \
+            src/bigan/paper_trading \
             src/bigan/strategies/polymarket_pricing.py
+          python -m compileall -q src tests
+          git diff --check
 
       - name: Run agent stack tests
         run: |
@@ -71,5 +79,6 @@ jobs:
             tests/execution/test_polymarket_oms.py \
             tests/features/test_binance_ofi.py \
             tests/pipeline \
+            tests/paper_trading \
             tests/strategies/test_polymarket_pricing.py \
             -q

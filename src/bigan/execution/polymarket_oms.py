@@ -147,6 +147,47 @@ class PolymarketOMS:
 
         return tuple(self._open_limit_orders.values())
 
+    def restore_paper_state(
+        self,
+        *,
+        current_bankroll: float,
+        positions: tuple[Position, ...],
+        order_sequence_floor: int = 0,
+    ) -> None:
+        """Hydrate a fresh OMS from a verified paper-ledger snapshot.
+
+        This deliberately refuses to overwrite live in-memory state. Resting
+        orders are not recoverable from the BUY-only paper ledger and must be
+        absent when this recovery boundary is used.
+        """
+
+        bankroll = _finite_float("current_bankroll", current_bankroll)
+        if bankroll < 0.0:
+            raise ValueError("current_bankroll must be non-negative")
+        if self._positions or self._open_limit_orders:
+            raise ValueError("OMS must be empty before paper-state recovery")
+        restored: dict[tuple[str, str], Position] = {}
+        for position in positions:
+            if position.side not in {"YES", "NO"}:
+                raise ValueError("restored position side must be YES or NO")
+            values = (
+                position.shares,
+                position.avg_entry_price,
+                position.total_cost_usdc,
+            )
+            if any(not math.isfinite(value) or value <= 0.0 for value in values):
+                raise ValueError("restored position values must be positive and finite")
+            key = (position.window_id, position.side)
+            if key in restored:
+                raise ValueError("duplicate restored position")
+            restored[key] = position
+        sequence_floor = int(order_sequence_floor)
+        if sequence_floor < 0:
+            raise ValueError("order_sequence_floor must be non-negative")
+        self._positions = restored
+        self._order_seq = max(self._order_seq, sequence_floor)
+        self.bankroll = bankroll
+
     def close_window(self, window_id: str, *, current_bankroll: float) -> None:
         """Release settled positions and cancel the window's open orders."""
 
