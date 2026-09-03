@@ -130,10 +130,23 @@ class StrategyRunner:
             ts_ms=book.ts_ms,
         )
 
-    def push_tick(self, book: TopOfBook) -> float:
-        """Backward-compatible alias for :meth:`push_alpha_tick`."""
+    def push_tick(self, tick: MarketSnapshot | TopOfBook) -> float:
+        """Ingest a legacy Polymarket snapshot or a Binance alpha book.
 
-        return self.push_alpha_tick(book)
+        ``MarketSnapshot`` retains the pre-alpha-split compatibility contract
+        and uses the configured synthetic OFI quantities. New integrations
+        should call :meth:`push_alpha_tick` with ``TopOfBook`` explicitly.
+        """
+
+        if isinstance(tick, TopOfBook):
+            return self.push_alpha_tick(tick)
+        return self.ofi_engine.update_and_get_z(
+            bid_price=tick.yes_bid,
+            bid_qty=self.ofi_bid_qty,
+            ask_price=tick.yes_ask,
+            ask_qty=self.ofi_ask_qty,
+            ts_ms=tick.timestamp_ms,
+        )
 
     def ingest_binance_book_ticker(
         self,

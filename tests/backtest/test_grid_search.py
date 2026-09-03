@@ -113,6 +113,24 @@ def test_time_series_folds_reject_single_window_outcome_leakage() -> None:
         time_series_folds(snapshots)
 
 
+def test_multi_fold_train_ratio_controls_initial_training_windows() -> None:
+    _, snapshots = _multi_window_tape(n_windows=10, n_ticks=1)
+
+    low_ratio = time_series_folds(snapshots, n_splits=2, train_ratio=0.20)
+    high_ratio = time_series_folds(snapshots, n_splits=2, train_ratio=0.60)
+
+    assert len({row.window_id for row in low_ratio[0][0]}) == 2
+    assert len({row.window_id for row in high_ratio[0][0]}) == 6
+    assert len(low_ratio) == len(high_ratio) == 2
+
+
+def test_multi_fold_rejects_ratio_without_enough_test_windows() -> None:
+    _, snapshots = _multi_window_tape(n_windows=4, n_ticks=1)
+
+    with pytest.raises(ValueError, match="train_ratio leaves fewer complete test windows"):
+        time_series_folds(snapshots, n_splits=2, train_ratio=0.90)
+
+
 def test_grid_search_selects_tradeable_spread_in_process() -> None:
     windows, snapshots = _multi_window_tape()
     report = run_grid_search(

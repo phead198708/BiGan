@@ -6,8 +6,6 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-import numpy as np
-
 from bigan.data.polymarket_clob import MarketSnapshot
 from bigan.execution.polymarket_oms import LimitOrder, OrderResult, PolymarketOMS
 from bigan.features.binance_ofi import BinanceOFICalculator, TopOfBook
@@ -46,6 +44,7 @@ class StrategyBacktestParams:
     spot_price: float | None = None
     ofi_bid_qty: float = 1.0
     ofi_ask_qty: float = 1.0
+    ofi_max_age_ms: int = 2_000
     execution_mode: str = "market"
 
 
@@ -127,6 +126,8 @@ class BacktestEngine:
             raise ValueError("initial_bankroll must be positive")
         if float(self.params.fee_bps) < 0.0:
             raise ValueError("fee_bps must be non-negative")
+        if int(self.params.ofi_max_age_ms) < 0:
+            raise ValueError("ofi_max_age_ms must be non-negative")
 
     def run(
         self,
@@ -161,49 +162,50 @@ class BacktestEngine:
         oms_calls = 0
         rejected = 0
         commission = 0.0
-        equity_ts = np.empty(n, dtype=np.int64)
-        equity = np.empty(n, dtype=np.float64)
+        equity_ts: list[int] = []
+        equity: list[float] = []
         last_window = tape[0].window_id if tape else self.window.window_id
         active_window = self.windows[last_window]
-        last_ts = active_window.start_ts_ms
         last_yes_bid = 0.0
         last_no_bid = 0.0
         mode = str(params.execution_mode).strip().lower()
         twap = float(active_window.strike_price)
+        last_alpha: TopOfBook | None = None
 
-        for i in range(n):
-            snap = tape[i]
+        for i, snap in enumerate(tape):
             ts_ms = snap.timestamp_ms
             if snap.window_id != last_window:
-                cash, yes_shares, no_shares, commission = _settle_window(
-                    window_id=last_window,
-                    timestamp_ms=ts_ms,
-                    cash=cash,
-                    lots=lots,
-                    trades=trades,
-                    payouts=payouts,
-                    commission=commission,
-                    yes_bid=last_yes_bid,
-                    no_bid=last_no_bid,
-                )
-                oms.close_window(last_window, current_bankroll=cash)
-                settled_windows.add(last_window)
-                ofi.reset()
+                previous_end_ts = active_window.end_ts_ms
+                if ts_ms < previous_end_ts:
+                    raise ValueError("cannot switch windows before the active window expires")
+                if last_window not in settled_windows:
+                    cash, yes_shares, no_shares, commission = _settle_window(
+                        window_id=last_window,
+                        timestamp_ms=previous_end_ts,
+                        cash=cash,
+                        lots=lots,
+                        trades=trades,
+                        payouts=payouts,
+                        commission=commission,
+                        yes_bid=last_yes_bid,
+                        no_bid=last_no_bid,
+                    )
+                    oms.close_window(last_window, current_bankroll=cash)
+                    settled_windows.add(last_window)
+                    _append_equity_point(equity_ts, equity, previous_end_ts, cash)
                 resting = None
                 last_window = snap.window_id
                 active_window = self.windows[last_window]
                 twap = float(active_window.strike_price)
-            last_ts = ts_ms
             last_yes_bid = snap.yes_bid
             last_no_bid = snap.no_bid
             if snap.window_id in settled_windows:
-                equity_ts[i] = ts_ms
-                equity[i] = cash
+                _append_equity_point(equity_ts, equity, ts_ms, cash)
                 continue
             if ts_ms >= active_window.end_ts_ms:
                 cash, yes_shares, no_shares, commission = _settle_window(
                     window_id=snap.window_id,
-                    timestamp_ms=ts_ms,
+                    timestamp_ms=active_window.end_ts_ms,
                     cash=cash,
                     lots=lots,
                     trades=trades,
@@ -215,8 +217,13 @@ class BacktestEngine:
                 oms.close_window(snap.window_id, current_bankroll=cash)
                 settled_windows.add(snap.window_id)
                 resting = None
-                equity_ts[i] = ts_ms
-                equity[i] = cash
+                _append_equity_point(
+                    equity_ts,
+                    equity,
+                    active_window.end_ts_ms,
+                    cash,
+                )
+                _append_equity_point(equity_ts, equity, ts_ms, cash)
                 continue
 
             if alpha_books is None:
@@ -225,12 +232,24 @@ class BacktestEngine:
                 alpha = alpha_books[i]
                 if alpha.ts_ms > ts_ms:
                     raise ValueError("alpha_books cannot contain future observations")
-                z_ofi = ofi.update_and_get_z(
-                    bid_price=alpha.bid_price,
-                    bid_qty=alpha.bid_qty,
-                    ask_price=alpha.ask_price,
-                    ask_qty=alpha.ask_qty,
-                    ts_ms=alpha.ts_ms,
+                if last_alpha is not None and alpha.ts_ms < last_alpha.ts_ms:
+                    raise ValueError("alpha_books must be non-decreasing by event time")
+                if alpha != last_alpha:
+                    ofi.update_and_get_z(
+                        bid_price=alpha.bid_price,
+                        bid_qty=alpha.bid_qty,
+                        ask_price=alpha.ask_price,
+                        ask_qty=alpha.ask_qty,
+                        ts_ms=alpha.ts_ms,
+                    )
+                    last_alpha = alpha
+                alpha_ts_ms = ofi.last_timestamp_ms
+                alpha_age_ms = None if alpha_ts_ms is None else ts_ms - alpha_ts_ms
+                z_ofi = (
+                    ofi.get_normalized_ofi()
+                    if alpha_age_ms is not None
+                    and 0 <= alpha_age_ms <= params.ofi_max_age_ms
+                    else 0.0
                 )
             if mode == "limit" and resting is not None:
                 (
@@ -352,17 +371,17 @@ class BacktestEngine:
                 resting = None
 
             mtm = cash + yes_shares * snap.yes_bid + no_shares * snap.no_bid
-            equity_ts[i] = ts_ms
-            equity[i] = mtm
+            _append_equity_point(equity_ts, equity, ts_ms, mtm)
 
         if resting is not None:
             if not oms.cancel_limit_order(resting):
                 raise RuntimeError("OMS rejected canonical limit cancellation")
             resting = None
         if yes_shares > 0.0 or no_shares > 0.0 or lots:
+            settlement_ts_ms = active_window.end_ts_ms
             cash, yes_shares, no_shares, commission = _settle_window(
                 window_id=last_window,
-                timestamp_ms=last_ts,
+                timestamp_ms=settlement_ts_ms,
                 cash=cash,
                 lots=lots,
                 trades=trades,
@@ -372,12 +391,11 @@ class BacktestEngine:
                 no_bid=last_no_bid,
             )
             oms.close_window(last_window, current_bankroll=cash)
-            if n:
-                equity[-1] = cash
+            _append_equity_point(equity_ts, equity, settlement_ts_ms, cash)
 
         metrics = compute_backtest_metrics(
-            equity_ts_ms=equity_ts.tolist() if n else (),
-            equity=equity.tolist() if n else (),
+            equity_ts_ms=equity_ts,
+            equity=equity,
             trades=trades,
             initial_bankroll=params.initial_bankroll,
             commission_paid=commission,
@@ -386,15 +404,32 @@ class BacktestEngine:
             params=params,
             initial_bankroll=float(params.initial_bankroll),
             final_cash=float(cash),
-            final_equity=float(equity[-1]) if n else float(cash),
-            equity_ts_ms=tuple(int(v) for v in equity_ts) if n else (),
-            equity=tuple(float(v) for v in equity) if n else (),
+            final_equity=float(equity[-1]) if equity else float(cash),
+            equity_ts_ms=tuple(equity_ts),
+            equity=tuple(equity),
             fills=tuple(fills),
             trades=tuple(trades),
             rejected=rejected,
             oms_calls=oms_calls,
             metrics=metrics,
         )
+
+
+def _append_equity_point(
+    timestamps: list[int],
+    values: list[float],
+    timestamp_ms: int,
+    equity: float,
+) -> None:
+    ts_ms = int(timestamp_ms)
+    value = float(equity)
+    if timestamps and ts_ms < timestamps[-1]:
+        raise ValueError("equity timestamps must be non-decreasing")
+    if timestamps and ts_ms == timestamps[-1]:
+        values[-1] = value
+        return
+    timestamps.append(ts_ms)
+    values.append(value)
 
 
 def _build_stack(

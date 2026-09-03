@@ -125,7 +125,12 @@ def time_series_folds(
     n_splits: int = 1,
     train_ratio: float = 0.70,
 ) -> tuple[tuple[tuple[MarketSnapshot, ...], tuple[MarketSnapshot, ...]], ...]:
-    """Build expanding folds without splitting any ``window_id`` outcome."""
+    """Build expanding folds without splitting any ``window_id`` outcome.
+
+    With multiple folds, ``train_ratio`` sets the initial count of complete
+    training windows. The remaining windows are partitioned across the OOS
+    folds, and each preceding OOS partition joins the next fold's training set.
+    """
 
     splits = int(n_splits)
     if splits < 1:
@@ -322,17 +327,23 @@ def _window_group_folds(
             ),
         )
 
-    fold_size = max(1, len(groups) // (n_splits + 1))
+    initial_train_groups = max(1, int(len(groups) * train_ratio))
+    remaining_groups = len(groups) - initial_train_groups
+    if remaining_groups < n_splits:
+        raise ValueError(
+            "train_ratio leaves fewer complete test windows than n_splits"
+        )
+    fold_size, larger_folds = divmod(remaining_groups, n_splits)
     folds: list[tuple[tuple[MarketSnapshot, ...], tuple[MarketSnapshot, ...]]] = []
+    test_start = initial_train_groups
     for i in range(n_splits):
-        train_end = fold_size * (i + 1)
-        test_end = min(len(groups), train_end + fold_size)
-        if i == n_splits - 1:
-            test_end = len(groups)
-        train = _flatten_window_groups(groups[:train_end])
-        test = _flatten_window_groups(groups[train_end:test_end])
+        test_size = fold_size + (1 if i < larger_folds else 0)
+        test_end = test_start + test_size
+        train = _flatten_window_groups(groups[:test_start])
+        test = _flatten_window_groups(groups[test_start:test_end])
         if train and test:
             folds.append((train, test))
+        test_start = test_end
     if not folds:
         raise ValueError("complete-window split produced no usable folds")
     return tuple(folds)

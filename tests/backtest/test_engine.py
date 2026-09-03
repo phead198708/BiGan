@@ -17,7 +17,7 @@ from bigan.backtest.engine import BacktestEngine, StrategyBacktestParams
 from bigan.backtest.metrics import ClosedTrade, compute_backtest_metrics
 from bigan.data.polymarket_clob import MarketSnapshot, PolymarketFeedHandler
 from bigan.execution.polymarket_oms import PolymarketOMS
-from bigan.features.binance_ofi import BinanceOFICalculator
+from bigan.features.binance_ofi import BinanceOFICalculator, TopOfBook
 from bigan.pipeline.strategy_runner import PricingInputs, StrategyRunner
 from bigan.strategies.polymarket_pricing import MarketWindow, PolymarketPricingEngine
 
@@ -307,6 +307,65 @@ def test_zscore_gate_blocks_oms() -> None:
     assert result.fills == ()
     assert result.final_cash == pytest.approx(1_000.0)
     assert result.metrics.total_trades == 0
+
+
+def test_backtest_reuses_fresh_asof_alpha_without_reingesting_duplicates() -> None:
+    timestamps = (100_000, 100_100, 100_200, 100_300, 102_201)
+    snapshots = tuple(
+        MarketSnapshot(
+            timestamp_ms=timestamp_ms,
+            window_id=WINDOW_ID,
+            yes_bid=0.39,
+            yes_ask=0.40,
+            no_bid=0.09,
+            no_ask=0.90,
+            last_traded_price=0.40,
+            yes_ask_size=10_000.0,
+            no_ask_size=10_000.0,
+        )
+        for timestamp_ms in timestamps
+    )
+    alpha_updates = (
+        TopOfBook(100_000, 100_000.0, 10.0, 100_001.0, 10.0),
+        TopOfBook(100_100, 100_000.0, 11.0, 100_001.0, 10.0),
+        TopOfBook(100_200, 100_000.0, 13.0, 100_001.0, 10.0),
+    )
+    alpha_books = (*alpha_updates, alpha_updates[-1], alpha_updates[-1])
+
+    result = _engine(
+        ofi_zscore_min_samples=2,
+        min_abs_z_ofi=0.5,
+        ofi_max_age_ms=2_000,
+    ).run(
+        snapshots,
+        alpha_books=alpha_books,
+        settlement={WINDOW_ID: 1.0},
+    )
+
+    filled_at = [row.timestamp_ms for row in result.fills if row.order.status == "FILLED"]
+    assert filled_at == [100_200]
+    assert result.oms_calls == 2
+
+
+def test_early_tape_appends_settlement_at_window_expiry() -> None:
+    snapshot = MarketSnapshot(
+        timestamp_ms=100_000,
+        window_id=WINDOW_ID,
+        yes_bid=0.39,
+        yes_ask=0.40,
+        no_bid=0.09,
+        no_ask=0.90,
+        last_traded_price=0.40,
+        yes_ask_size=10_000.0,
+        no_ask_size=10_000.0,
+    )
+
+    result = _engine().run((snapshot,), settlement={WINDOW_ID: 1.0})
+
+    assert result.equity_ts_ms == (snapshot.timestamp_ms, _window().end_ts_ms)
+    assert result.equity[0] != result.equity[-1]
+    assert result.trades
+    assert {trade.exit_ts_ms for trade in result.trades} == {_window().end_ts_ms}
 
 
 def test_limit_order_rests_then_fills_when_ask_crosses() -> None:
