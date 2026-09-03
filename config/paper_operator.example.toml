@@ -1,0 +1,53 @@
+# PR-B Paper Trading Operator example. Public read-only data only; no secrets.
+operator_id = "btc-paper-operator"
+strategy_id = "alpha-pricing-v1"
+paper_account_id = "paper-usdc-demo"
+source_commit = "replace-with-deployed-git-commit"
+output_dir = "data/paper_operator"
+
+underlying = "BTC"
+market_type = "binary_up_down"
+window_duration_ms = 900000
+slug_pattern = "btc-updown-15m-\\d+"
+max_preopen_ms = 1800000
+
+gamma_markets_endpoint = "https://gamma-api.polymarket.com/markets"
+resolution_endpoint = "https://gamma-api.polymarket.com/markets"
+binance_depth_endpoint = "https://api.binance.com/api/v3/depth"
+binance_ws_url = "wss://stream.binance.com:9443/ws"
+binance_symbol = "BTCUSDT"
+polymarket_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+chainlink_ws_url = "wss://ws-live-data.polymarket.com"
+chainlink_symbol = "btc/usd"
+
+max_alpha_age_ms = 2000
+max_market_age_ms = 5000
+max_pricing_age_ms = 5000
+binance_queue_size = 10000
+market_queue_size = 10000
+binance_delta_buffer_size = 5000
+
+twap_window_ms = 900000
+volatility_return_interval_ms = 1000
+volatility_window_ms = 300000
+volatility_min_samples = 20
+volatility_max_abs_log_return = 0.20
+pricing_sample_buffer_size = 10000
+
+initial_bankroll = 1000.0
+fee_bps = 0.0
+max_single_trade_pct = 0.05
+max_position_pct = 0.25
+max_window_exposure_pct = 0.25
+snapshot_lru_size = 10000
+
+# Safe first run. Use --mock-demo for a deterministic no-network smoke test.
+mock = true
+dry_run = true
+config_check_only = false
+paper_only = true
+capital_at_risk = false
+broker_exchange_write_enabled = false
+live_exchange_write_enabled = false
+polymarket_write_enabled = false
+wallet_signing_enabled = false

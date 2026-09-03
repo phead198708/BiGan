@@ -186,6 +186,58 @@ class PaperRunStore:
             seen[event.source_snapshot_id] = event
         return decisions
 
+    def recent_decisions(
+        self,
+        *,
+        limit: int = 50,
+        max_limit: int = 500,
+    ) -> tuple[PaperDecisionEvent, ...]:
+        """Return the newest decisions in chronological order with a hard cap."""
+
+        bounded = _bounded_query_limit(limit, max_limit)
+        rows = list(self._read_jsonl_reverse(SIGNAL_EVENTS_FILE, limit=bounded))
+        return tuple(PaperDecisionEvent.from_dict(row) for row in reversed(rows))
+
+    def recent_fills(
+        self,
+        *,
+        limit: int = 50,
+        max_limit: int = 500,
+    ) -> tuple[PaperDecisionEvent, ...]:
+        """Return the newest filled decisions without loading full history."""
+
+        bounded = _bounded_query_limit(limit, max_limit)
+        with self._open_idempotency_index() as database:
+            rows = database.execute(
+                """
+                SELECT payload_json
+                FROM decision_events
+                WHERE disposition = ?
+                ORDER BY event_sequence DESC
+                LIMIT ?
+                """,
+                (DecisionDisposition.FILLED.value, bounded),
+            ).fetchall()
+        events = [
+            PaperDecisionEvent.from_dict(
+                json.loads(row[0], parse_constant=_reject_json_constant)
+            )
+            for row in rows
+        ]
+        return tuple(reversed(events))
+
+    def recent_settlements(
+        self,
+        *,
+        limit: int = 50,
+        max_limit: int = 500,
+    ) -> tuple[PaperSettlementEvent, ...]:
+        """Return newest settlements in chronological order with a hard cap."""
+
+        bounded = _bounded_query_limit(limit, max_limit)
+        rows = list(self._read_jsonl_reverse(SETTLEMENT_EVENTS_FILE, limit=bounded))
+        return tuple(PaperSettlementEvent.from_dict(row) for row in reversed(rows))
+
     def append_settlement(
         self,
         *,
@@ -367,6 +419,43 @@ class PaperRunStore:
             rows.append(value)
         return rows
 
+    def _read_jsonl_reverse(
+        self,
+        name: str,
+        *,
+        limit: int | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield JSONL objects newest-first using bounded reverse line reads."""
+
+        path = self.run_dir / name
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            if position == 0:
+                return
+            handle.seek(position - 1)
+            if handle.read(1) != b"\n":
+                raise ValueError(f"truncated JSONL file: {name}")
+            buffer = b""
+            emitted = 0
+            position -= 1
+            while position > 0 and (limit is None or emitted < limit):
+                chunk_size = min(8192, position)
+                position -= chunk_size
+                handle.seek(position)
+                buffer = handle.read(chunk_size) + buffer
+                lines = buffer.split(b"\n")
+                buffer = lines[0]
+                for line in reversed(lines[1:]):
+                    if not line:
+                        continue
+                    yield _decode_jsonl_line(line, name=name, line_number=None)
+                    emitted += 1
+                    if limit is not None and emitted == limit:
+                        return
+            if buffer and (limit is None or emitted < limit):
+                yield _decode_jsonl_line(buffer, name=name, line_number=1)
+
     def _write_atomic_json(self, name: str, payload: dict[str, object]) -> None:
         path = self.run_dir / name
         temporary = self.run_dir / f".{name}.{os.getpid()}.tmp"
@@ -417,6 +506,32 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON constant is forbidden: {value}")
 
 
+def _decode_jsonl_line(
+    line: bytes,
+    *,
+    name: str,
+    line_number: int | None,
+) -> dict[str, Any]:
+    location = name if line_number is None else f"{name}:{line_number}"
+    try:
+        value = json.loads(line, parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"invalid JSONL at {location}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"JSONL row must be an object at {location}")
+    return value
+
+
+def _bounded_query_limit(limit: int, max_limit: int) -> int:
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValueError("query limit must be a positive integer")
+    if not isinstance(max_limit, int) or isinstance(max_limit, bool) or max_limit < 1:
+        raise ValueError("query maximum must be a positive integer")
+    if limit > max_limit:
+        raise ValueError("query limit exceeds configured hard maximum")
+    return limit
+
+
 def _validate_stream_order(events: list[Any], name: str) -> None:
     previous = 0
     for event in events:
@@ -436,6 +551,21 @@ def _create_idempotency_schema(database: sqlite3.Connection) -> None:
     )
     database.execute(
         """
+        CREATE TABLE IF NOT EXISTS decision_events (
+            event_sequence INTEGER PRIMARY KEY,
+            disposition TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    database.execute(
+        """
+        CREATE INDEX IF NOT EXISTS decision_events_disposition_sequence
+        ON decision_events(disposition, event_sequence DESC)
+        """
+    )
+    database.execute(
+        """
         CREATE TABLE IF NOT EXISTS filled_signals (
             identity_json TEXT PRIMARY KEY,
             event_id TEXT NOT NULL
@@ -448,6 +578,25 @@ def _insert_decision_index(
     database: sqlite3.Connection,
     decision: PaperDecisionEvent,
 ) -> None:
+    payload_json = _encode_json(decision.to_dict()).decode("utf-8")
+    decision_row = database.execute(
+        "SELECT payload_json FROM decision_events WHERE event_sequence = ?",
+        (decision.event_sequence,),
+    ).fetchone()
+    if decision_row is None:
+        database.execute(
+            """
+            INSERT INTO decision_events(event_sequence, disposition, payload_json)
+            VALUES (?, ?, ?)
+            """,
+            (
+                decision.event_sequence,
+                decision.decision.disposition.value,
+                payload_json,
+            ),
+        )
+    elif decision_row[0] != payload_json:
+        raise ValueError("conflicting decision sequence in idempotency index")
     snapshot_row = database.execute(
         "SELECT event_id FROM source_snapshots WHERE source_snapshot_id = ?",
         (decision.source_snapshot_id,),

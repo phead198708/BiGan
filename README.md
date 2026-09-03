@@ -5,6 +5,27 @@ Polymarket prediction-market microstructure signal pipeline for the
 
 See `docs/adr/0001-market-data-source.md` for the data-source decision record.
 
+## Paper trading operator
+
+PR-B provides a paper-only, single-window operator with deterministic
+Polymarket discovery, public Binance/Polymarket/Chainlink feeds, strict
+create/resume and rollover, and an atomic dashboard read model. It contains no
+wallet, signing, or exchange-write capability.
+
+```bash
+# Validate the complete paper-safe TOML without opening network connections.
+python -m bigan.paper_trading.operator \
+  --config config/paper_operator.example.toml --check
+
+# Deterministic local demo; writes a paper run and operator_status.json.
+python -m bigan.paper_trading.operator \
+  --config config/paper_operator.example.toml --mock-demo
+```
+
+The operator contract, recovery rules, status schema, and live-data limitations
+are documented in
+[`docs/paper_trading/operator_contract.md`](docs/paper_trading/operator_contract.md).
+
 ## Layout
 
 ```
