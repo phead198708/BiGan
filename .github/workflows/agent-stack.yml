@@ -1,0 +1,75 @@
+name: Agent stack gates
+
+on:
+  pull_request:
+    paths:
+      - "src/bigan/backtest/**"
+      - "src/bigan/data/polymarket_clob.py"
+      - "src/bigan/execution/polymarket_oms.py"
+      - "src/bigan/features/binance_ofi.py"
+      - "src/bigan/pipeline/**"
+      - "src/bigan/strategies/polymarket_pricing.py"
+      - "tests/backtest/**"
+      - "tests/data/test_polymarket_clob.py"
+      - "tests/execution/test_polymarket_oms.py"
+      - "tests/features/test_binance_ofi.py"
+      - "tests/pipeline/**"
+      - "tests/strategies/test_polymarket_pricing.py"
+      - "examples/__init__.py"
+      - ".github/workflows/agent-stack.yml"
+      - "pyproject.toml"
+  workflow_dispatch:
+
+jobs:
+  agent-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Lint and type-check agent stack
+        run: |
+          python -m ruff check \
+            examples/__init__.py \
+            src/bigan/backtest \
+            src/bigan/data/polymarket_clob.py \
+            src/bigan/execution/polymarket_oms.py \
+            src/bigan/features/binance_ofi.py \
+            src/bigan/pipeline \
+            src/bigan/strategies/polymarket_pricing.py \
+            tests/backtest \
+            tests/data/test_polymarket_clob.py \
+            tests/execution/test_polymarket_oms.py \
+            tests/features/test_binance_ofi.py \
+            tests/pipeline \
+            tests/strategies/test_polymarket_pricing.py
+          python -m mypy \
+            src/bigan/backtest \
+            src/bigan/data/polymarket_clob.py \
+            src/bigan/execution/polymarket_oms.py \
+            src/bigan/features/binance_ofi.py \
+            src/bigan/pipeline \
+            src/bigan/strategies/polymarket_pricing.py
+
+      - name: Run agent stack tests
+        run: |
+          python -m pytest \
+            tests/backtest \
+            tests/data/test_polymarket_clob.py \
+            tests/execution/test_polymarket_oms.py \
+            tests/features/test_binance_ofi.py \
+            tests/pipeline \
+            tests/strategies/test_polymarket_pricing.py \
+            -q

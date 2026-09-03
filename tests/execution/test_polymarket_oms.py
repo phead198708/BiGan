@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from bigan.execution.polymarket_oms import (
+    REJECT_LIQUIDITY_UNAVAILABLE,
     REJECT_SIZE_BELOW_MINIMUM,
     REJECT_SPREAD_TOO_WIDE,
+    REJECT_STALE_LIMIT_ORDER,
+    REJECT_UNKNOWN_LIMIT_ORDER,
+    LimitOrder,
     PolymarketOMS,
 )
 from bigan.strategies.polymarket_pricing import PricingSignal, SignalDirection
@@ -19,9 +25,10 @@ def _signal(
     market_price: float = 0.50,
     window_id: str = "btc-updown-test",
     edge: float = 0.10,
+    ts_ms: int = 1_000,
 ) -> PricingSignal:
     return PricingSignal(
-        ts_ms=1_000,
+        ts_ms=ts_ms,
         window_id=window_id,
         spot_price=100_000.0,
         effective_strike=100_000.0,
@@ -40,6 +47,7 @@ def test_hold_signal_returns_none() -> None:
         _signal(direction=SignalDirection.BUY_YES, recommended_size_pct=0.05),
         current_bankroll=1_000.0,
         current_bid=0.49,
+        current_ask_size=10_000.0,
     )
     assert filled is not None
     assert filled.status == "FILLED"
@@ -69,6 +77,7 @@ def test_max_trade_cap_enforcement() -> None:
         ),
         current_bankroll=bankroll,
         current_bid=0.49,
+        current_ask_size=10_000.0,
     )
     assert result is not None
     assert result.status == "FILLED"
@@ -89,6 +98,7 @@ def test_min_order_threshold_rejection() -> None:
         _signal(direction=SignalDirection.BUY_YES, recommended_size_pct=0.05),
         current_bankroll=10.0,
         current_bid=0.49,
+        current_ask_size=10_000.0,
     )
     assert result is not None
     assert result.status == "REJECTED"
@@ -103,6 +113,7 @@ def test_spread_guard_rejection() -> None:
         _signal(direction=SignalDirection.BUY_YES, market_price=0.60),
         current_bankroll=1_000.0,
         current_bid=0.50,
+        current_ask_size=10_000.0,
     )
     assert result is not None
     assert result.status == "REJECTED"
@@ -113,6 +124,7 @@ def test_spread_guard_rejection() -> None:
         _signal(direction=SignalDirection.BUY_YES, market_price=0.58),
         current_bankroll=1_000.0,
         current_bid=0.50,
+        current_ask_size=10_000.0,
     )
     assert tight is not None
     assert tight.status == "FILLED"
@@ -131,6 +143,7 @@ def test_position_state_update() -> None:
         ),
         current_bankroll=bankroll,
         current_bid=0.39,
+        current_ask_size=10_000.0,
     )
     assert first is not None and first.status == "FILLED"
     first_fill = min(1.0, first_ask * (1.0 + oms.slippage_tolerance))
@@ -146,12 +159,14 @@ def test_position_state_update() -> None:
     second = oms.process_signal(
         _signal(
             direction=SignalDirection.BUY_YES,
-            recommended_size_pct=0.05,
+            recommended_size_pct=0.10,
             market_price=second_ask,
             window_id="window-a",
+            ts_ms=2_000,
         ),
-        current_bankroll=bankroll,
+        current_bankroll=oms.bankroll,
         current_bid=0.59,
+        current_ask_size=10_000.0,
     )
     assert second is not None and second.status == "FILLED"
     second_fill = min(1.0, second_ask * (1.0 + oms.slippage_tolerance))
@@ -174,9 +189,11 @@ def test_position_state_update() -> None:
             recommended_size_pct=0.05,
             market_price=no_ask,
             window_id="window-a",
+            ts_ms=3_000,
         ),
-        current_bankroll=bankroll,
+        current_bankroll=oms.bankroll,
         current_bid=0.29,
+        current_ask_size=10_000.0,
     )
     assert buy_no is not None and buy_no.status == "FILLED"
     assert buy_no.side == "NO"
@@ -187,3 +204,310 @@ def test_position_state_update() -> None:
     assert no_pos.avg_entry_price == pytest.approx(buy_no.price)
     assert oms.get_position("window-a", "YES") is not None
     assert len(oms.positions()) == 2
+
+
+def test_repeated_signal_targets_total_position_instead_of_rebuying_target() -> None:
+    oms = PolymarketOMS(max_single_trade_pct=0.05)
+    cash = 1_000.0
+    for ts_ms in (1_000, 2_000):
+        result = oms.process_signal(
+            _signal(
+                direction=SignalDirection.BUY_YES,
+                recommended_size_pct=0.05,
+                ts_ms=ts_ms,
+            ),
+            current_bankroll=cash,
+            current_bid=0.49,
+            current_ask_size=10_000.0,
+        )
+        if ts_ms == 1_000:
+            assert result is not None and result.status == "FILLED"
+            cash = oms.bankroll
+        else:
+            assert result is None
+    position = oms.get_position("btc-updown-test", "YES")
+    assert position is not None
+    assert position.total_cost_usdc == pytest.approx(50.0)
+
+
+def test_available_ask_liquidity_caps_fill_and_missing_depth_rejects() -> None:
+    oms = PolymarketOMS(min_order_usd=1.0, slippage_tolerance=0.0)
+    missing = oms.process_signal(
+        _signal(direction=SignalDirection.BUY_YES, ts_ms=1_000),
+        current_bankroll=1_000.0,
+        current_bid=0.49,
+    )
+    assert missing is not None
+    assert missing.status == "REJECTED"
+    assert missing.reject_reason == REJECT_LIQUIDITY_UNAVAILABLE
+
+    partial = oms.process_signal(
+        _signal(direction=SignalDirection.BUY_YES, ts_ms=2_000),
+        current_bankroll=1_000.0,
+        current_bid=0.49,
+        current_ask_size=10.0,
+    )
+    assert partial is not None and partial.status == "FILLED"
+    assert partial.shares == pytest.approx(10.0)
+    assert partial.shares * partial.price == pytest.approx(5.0)
+
+
+def test_duplicate_signal_is_idempotent() -> None:
+    oms = PolymarketOMS()
+    signal = _signal(direction=SignalDirection.BUY_YES)
+    first = oms.process_signal(signal, 1_000.0, 0.49, 10_000.0)
+    second = oms.process_signal(signal, oms.bankroll, 0.49, 10_000.0)
+    assert first is not None and first.status == "FILLED"
+    assert second is None
+    assert len(oms.positions()) == 1
+
+
+def test_local_rejection_does_not_consume_signal_idempotency_key() -> None:
+    oms = PolymarketOMS()
+    signal = _signal(direction=SignalDirection.BUY_YES)
+    rejected = oms.process_signal(
+        signal,
+        current_bankroll=1_000.0,
+        current_bid=0.49,
+        current_ask_size=0.0,
+    )
+    assert rejected is not None
+    assert rejected.status == "REJECTED"
+    assert rejected.reject_reason == REJECT_LIQUIDITY_UNAVAILABLE
+
+    retried = oms.process_signal(
+        signal,
+        current_bankroll=1_000.0,
+        current_bid=0.49,
+        current_ask_size=100.0,
+    )
+    assert retried is not None
+    assert retried.status == "FILLED"
+    assert oms.get_position("btc-updown-test", "YES") is not None
+
+
+@pytest.mark.parametrize("crossed_ask", [0.37, 0.20])
+def test_limit_order_fixes_shares_before_price_improvement(crossed_ask: float) -> None:
+    oms = PolymarketOMS(slippage_tolerance=0.01)
+    placed = oms.prepare_limit_order(
+        _signal(
+            direction=SignalDirection.BUY_YES,
+            market_price=0.42,
+            recommended_size_pct=0.10,
+        ),
+        current_bankroll=1_000.0,
+        current_bid=0.38,
+    )
+    assert isinstance(placed, LimitOrder)
+    assert placed.shares == pytest.approx(50.0 / 0.38)
+
+    filled, remaining = oms.fill_limit_order(
+        placed,
+        current_bankroll=1_000.0,
+        current_ask=crossed_ask,
+        current_ask_size=10_000.0,
+    )
+
+    assert filled is not None and filled.status == "FILLED"
+    assert filled.shares == pytest.approx(placed.shares)
+    assert filled.price <= placed.limit_price
+    assert remaining is None
+
+
+def test_limit_order_partial_fills_only_its_remaining_shares() -> None:
+    oms = PolymarketOMS(slippage_tolerance=0.0)
+    placed = oms.prepare_limit_order(
+        _signal(
+            direction=SignalDirection.BUY_YES,
+            market_price=0.42,
+            recommended_size_pct=0.10,
+        ),
+        current_bankroll=1_000.0,
+        current_bid=0.38,
+    )
+    assert isinstance(placed, LimitOrder)
+
+    first, remaining = oms.fill_limit_order(
+        placed,
+        current_bankroll=1_000.0,
+        current_ask=0.37,
+        current_ask_size=10.0,
+    )
+    assert first is not None and first.status == "FILLED"
+    assert first.shares == pytest.approx(10.0)
+    assert remaining is not None
+    assert remaining.remaining_shares == pytest.approx(placed.shares - 10.0)
+
+    second, completed = oms.fill_limit_order(
+        remaining,
+        current_bankroll=oms.bankroll,
+        current_ask=0.20,
+        current_ask_size=10_000.0,
+    )
+    assert second is not None and second.status == "FILLED"
+    assert second.shares == pytest.approx(placed.shares - 10.0)
+    assert completed is None
+    position = oms.get_position(placed.window_id, placed.side)
+    assert position is not None
+    assert position.shares == pytest.approx(placed.shares)
+
+
+def test_open_limit_orders_reserve_position_and_window_capacity() -> None:
+    oms = PolymarketOMS(
+        max_single_trade_pct=0.25,
+        max_position_pct=0.25,
+        max_window_exposure_pct=0.25,
+        slippage_tolerance=0.0,
+    )
+    first = oms.prepare_limit_order(
+        _signal(
+            direction=SignalDirection.BUY_YES,
+            market_price=0.50,
+            recommended_size_pct=0.50,
+            ts_ms=1_000,
+        ),
+        current_bankroll=1_000.0,
+        current_bid=0.50,
+    )
+    second = oms.prepare_limit_order(
+        _signal(
+            direction=SignalDirection.BUY_YES,
+            market_price=0.50,
+            recommended_size_pct=0.50,
+            ts_ms=2_000,
+        ),
+        current_bankroll=1_000.0,
+        current_bid=0.50,
+    )
+
+    assert isinstance(first, LimitOrder)
+    assert first.shares * first.limit_price == pytest.approx(250.0)
+    assert second is None
+    assert oms.open_limit_orders() == (first,)
+    market_order = oms.process_signal(
+        _signal(
+            direction=SignalDirection.BUY_NO,
+            market_price=0.50,
+            recommended_size_pct=0.50,
+            ts_ms=3_000,
+        ),
+        current_bankroll=1_000.0,
+        current_bid=0.49,
+        current_ask_size=10_000.0,
+    )
+    assert market_order is None
+
+    filled, remaining = oms.fill_limit_order(first, 1_000.0, 0.50, 10_000.0)
+    assert filled is not None and filled.status == "FILLED"
+    assert remaining is None
+    position = oms.get_position(first.window_id, first.side)
+    assert position is not None
+    assert position.total_cost_usdc == pytest.approx(250.0)
+
+
+def test_completed_limit_order_cannot_be_replayed() -> None:
+    oms = PolymarketOMS(slippage_tolerance=0.0)
+    placed = oms.prepare_limit_order(
+        _signal(direction=SignalDirection.BUY_YES, market_price=0.50),
+        current_bankroll=1_000.0,
+        current_bid=0.50,
+    )
+    assert isinstance(placed, LimitOrder)
+    first, remaining = oms.fill_limit_order(placed, 1_000.0, 0.50, 10_000.0)
+    assert first is not None and first.status == "FILLED"
+    assert remaining is None
+    position = oms.get_position(placed.window_id, placed.side)
+    assert position is not None
+    shares_after_first_fill = position.shares
+
+    replay, replay_remaining = oms.fill_limit_order(
+        placed,
+        oms.bankroll,
+        0.50,
+        10_000.0,
+    )
+
+    assert replay is not None and replay.status == "REJECTED"
+    assert replay.reject_reason == REJECT_UNKNOWN_LIMIT_ORDER
+    assert replay_remaining is None
+    position = oms.get_position(placed.window_id, placed.side)
+    assert position is not None
+    assert position.shares == pytest.approx(shares_after_first_fill)
+
+
+def test_partial_fill_rejects_stale_limit_order_version() -> None:
+    oms = PolymarketOMS(slippage_tolerance=0.0)
+    placed = oms.prepare_limit_order(
+        _signal(direction=SignalDirection.BUY_YES, market_price=0.50),
+        current_bankroll=1_000.0,
+        current_bid=0.50,
+    )
+    assert isinstance(placed, LimitOrder)
+    first, current = oms.fill_limit_order(placed, 1_000.0, 0.50, 10.0)
+    assert first is not None and first.status == "FILLED"
+    assert current is not None and current.version == placed.version + 1
+    position = oms.get_position(placed.window_id, placed.side)
+    assert position is not None
+    shares_after_first_fill = position.shares
+
+    replay, canonical = oms.fill_limit_order(placed, oms.bankroll, 0.50, 10_000.0)
+
+    assert replay is not None and replay.status == "REJECTED"
+    assert replay.reject_reason == REJECT_STALE_LIMIT_ORDER
+    assert canonical == current
+    position = oms.get_position(placed.window_id, placed.side)
+    assert position is not None
+    assert position.shares == pytest.approx(shares_after_first_fill)
+
+
+def test_unknown_limit_order_is_rejected_without_mutating_canonical_order() -> None:
+    oms = PolymarketOMS(slippage_tolerance=0.0)
+    placed = oms.prepare_limit_order(
+        _signal(direction=SignalDirection.BUY_YES, market_price=0.50),
+        current_bankroll=1_000.0,
+        current_bid=0.50,
+    )
+    assert isinstance(placed, LimitOrder)
+    forged = replace(placed, order_id="unknown-order")
+
+    rejected, canonical = oms.fill_limit_order(forged, 1_000.0, 0.50, 10_000.0)
+
+    assert rejected is not None and rejected.status == "REJECTED"
+    assert rejected.reject_reason == REJECT_UNKNOWN_LIMIT_ORDER
+    assert canonical is None
+    assert oms.open_limit_orders() == (placed,)
+    assert oms.positions() == ()
+
+
+def test_cancel_limit_order_releases_reserved_capacity() -> None:
+    oms = PolymarketOMS(
+        max_single_trade_pct=0.25,
+        max_position_pct=0.25,
+        max_window_exposure_pct=0.25,
+    )
+    first = oms.prepare_limit_order(
+        _signal(
+            direction=SignalDirection.BUY_YES,
+            market_price=0.50,
+            recommended_size_pct=0.50,
+            ts_ms=1_000,
+        ),
+        1_000.0,
+        0.50,
+    )
+    assert isinstance(first, LimitOrder)
+    assert oms.cancel_limit_order(first) is True
+    assert oms.cancel_limit_order(first) is False
+
+    replacement = oms.prepare_limit_order(
+        _signal(
+            direction=SignalDirection.BUY_NO,
+            market_price=0.50,
+            recommended_size_pct=0.50,
+            ts_ms=2_000,
+        ),
+        1_000.0,
+        0.50,
+    )
+    assert isinstance(replacement, LimitOrder)
+    assert replacement.shares * replacement.limit_price == pytest.approx(250.0)

@@ -164,7 +164,7 @@ def test_tail_cutoff_safety() -> None:
         yes_ask_price=0.80,
         no_ask_price=0.20,
     )
-    assert signal.edge == pytest.approx(0.20, abs=1e-6)
+    assert signal.edge == pytest.approx(0.199, abs=1e-6)
     assert signal.direction is SignalDirection.HOLD
     assert signal.recommended_size_pct == 0.0
     assert signal.ev == 0.0
@@ -351,13 +351,33 @@ def test_expired_window_is_deterministic() -> None:
     )
 
 
-def test_fully_sampled_twap_returns_original_strike() -> None:
+def test_fully_sampled_twap_is_deterministic() -> None:
     engine = PolymarketPricingEngine()
-    assert engine.effective_strike(
+    losing_strike = engine.effective_strike(
         strike_price=100_000.0,
         oracle_twap_so_far=90_000.0,
         twap_weight=1.0,
-    ) == pytest.approx(100_000.0)
+    )
+    winning_strike = engine.effective_strike(
+        strike_price=100_000.0,
+        oracle_twap_so_far=110_000.0,
+        twap_weight=1.0,
+    )
+    assert math.isinf(losing_strike)
+    assert winning_strike == 0.0
+
+    no_signal = _signal(
+        engine,
+        _window("15m"),
+        current_ts_ms=100_000,
+        spot_price=120_000.0,
+        oracle_twap_so_far=90_000.0,
+        twap_weight=1.0,
+        yes_ask_price=0.9,
+        no_ask_price=0.5,
+    )
+    assert no_signal.model_prob == 1.0
+    assert no_signal.direction is SignalDirection.BUY_NO
 
 
 def test_zero_volatility_does_not_raise() -> None:
@@ -376,6 +396,39 @@ def test_zero_volatility_does_not_raise() -> None:
         volatility_annualized=0.0,
         z_ofi=0.0,
     )
-    assert itm == 1.0
-    assert otm == 0.0
+    assert itm == 0.999
+    assert otm == 0.001
     assert math.isfinite(itm) and math.isfinite(otm)
+
+
+def test_ofi_is_additive_probability_layer_with_sqrt_time_decay() -> None:
+    gamma = 0.75
+    engine = PolymarketPricingEngine(ofi_gamma=gamma)
+    seconds = 120.0
+    baseline = engine.calculate_probability(
+        spot_price=100_000.0,
+        effective_strike=100_000.0,
+        time_to_expiry_sec=seconds,
+        volatility_annualized=0.60,
+        z_ofi=0.0,
+    )
+    adjusted = engine.calculate_probability(
+        spot_price=100_000.0,
+        effective_strike=100_000.0,
+        time_to_expiry_sec=seconds,
+        volatility_annualized=0.60,
+        z_ofi=2.0,
+    )
+    expected = baseline + gamma * 2.0 * math.sqrt(seconds / (365.0 * 24.0 * 3600.0))
+    assert adjusted == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("weight", [-0.01, 1.01])
+def test_invalid_twap_weight_rejected(weight: float) -> None:
+    engine = PolymarketPricingEngine()
+    with pytest.raises(ValueError, match="twap_weight"):
+        engine.effective_strike(
+            strike_price=100_000.0,
+            oracle_twap_so_far=100_000.0,
+            twap_weight=weight,
+        )

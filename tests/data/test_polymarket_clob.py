@@ -44,6 +44,10 @@ def test_parse_orderbook_payload() -> None:
     assert snapshot.no_bid == pytest.approx(0.42)
     assert snapshot.no_ask == pytest.approx(0.44)
     assert snapshot.last_traded_price == pytest.approx(0.57)
+    assert snapshot.yes_bid_size == pytest.approx(100.0)
+    assert snapshot.yes_ask_size == pytest.approx(120.0)
+    assert snapshot.no_bid_size == pytest.approx(25.0)
+    assert snapshot.no_ask_size == pytest.approx(30.0)
 
     yes_only = handler.parse_orderbook_delta(
         {
@@ -58,6 +62,8 @@ def test_parse_orderbook_payload() -> None:
     assert yes_only is not None
     assert yes_only.yes_bid == pytest.approx(0.60)
     assert yes_only.yes_ask == pytest.approx(0.62)
+    assert yes_only.yes_bid_size == pytest.approx(8.0)
+    assert yes_only.yes_ask_size == pytest.approx(9.0)
     assert yes_only.no_bid == pytest.approx(0.42)
 
     stale = handler.parse_orderbook_delta(
@@ -125,3 +131,83 @@ async def test_snapshot_callback_trigger() -> None:
     assert received[1].no_bid == pytest.approx(0.40)
     assert received[1].no_ask == pytest.approx(0.43)
     assert received[1].yes_bid == pytest.approx(0.56)
+
+    trade = await handler.ingest_payload(
+        {
+            "event_type": "last_trade_price",
+            "asset_id": "yes-token",
+            "timestamp": "1700000000300",
+            "sequence": 13,
+            "price": "0.55",
+        }
+    )
+    assert trade is not None
+    assert trade.timestamp_ms == 1_700_000_000_300
+    assert trade.last_traded_price == pytest.approx(0.55)
+    assert len(received) == 3
+    assert received[-1] == trade
+
+
+@pytest.mark.asyncio
+async def test_application_heartbeat_and_pong_handling() -> None:
+    handler = PolymarketFeedHandler(
+        window_id="btc-updown-15m-1",
+        heartbeat_interval_seconds=0.001,
+    )
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        async def send(self, message: str) -> None:
+            self.messages.append(message)
+            handler._closed = True
+
+    socket = Socket()
+    await handler._heartbeat_loop(socket)
+    assert socket.messages == ["PING"]
+    assert await handler.ingest_raw("PONG") is None
+    assert handler.parse_errors == 0
+
+
+def test_empty_full_book_side_clears_stale_quote() -> None:
+    handler = PolymarketFeedHandler(
+        window_id="btc-updown-15m-1",
+        yes_token_id="yes-token",
+        no_token_id="no-token",
+    )
+    assert handler.parse_orderbook_delta(_book_payload()) is not None
+    cleared = handler.parse_orderbook_delta(
+        {
+            "event_type": "book",
+            "asset_id": "yes-token",
+            "timestamp": "1700000000100",
+            "sequence": 11,
+            "bids": [{"price": "0.56", "size": "100"}],
+            "asks": [],
+        }
+    )
+    assert cleared is None
+    assert handler._yes_ask is None
+    assert handler._yes_ask_size == 0.0
+
+
+def test_snapshot_requires_fresh_quotes_from_both_tokens() -> None:
+    handler = PolymarketFeedHandler(
+        window_id="btc-updown-15m-1",
+        yes_token_id="yes-token",
+        no_token_id="no-token",
+        max_quote_age_ms=5_000,
+    )
+    assert handler.parse_orderbook_delta(_book_payload()) is not None
+    stale_pair = handler.parse_orderbook_delta(
+        {
+            "event_type": "book",
+            "asset_id": "yes-token",
+            "timestamp": "1700000006001",
+            "sequence": 11,
+            "bids": [{"price": "0.57", "size": "100"}],
+            "asks": [{"price": "0.59", "size": "100"}],
+        }
+    )
+    assert stale_pair is None

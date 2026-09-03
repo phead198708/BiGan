@@ -247,14 +247,16 @@ def test_book_ticker_and_partial_depth_ingest() -> None:
     first = calc.on_book_ticker(
         {
             "s": "BTCUSDT",
-            "E": 1_700_000_000_000,
+            "u": 1,
             "b": "100.00",
             "B": "2.0",
             "a": "100.01",
             "A": "3.0",
-        }
+        },
+        ts_ms=1_700_000_000_000,
     )
     assert first is None
+    assert calc.last_update_id == 1
     second = calc.on_partial_depth(
         {
             "lastUpdateId": 2,
@@ -262,9 +264,148 @@ def test_book_ticker_and_partial_depth_ingest() -> None:
             "asks": [["100.02", "2.5"]],
         },
         ts_ms=1_700_000_000_001,
+        symbol="BTCUSDT",
     )
     assert second is not None
     assert second.raw_ofi == pytest.approx(4.5)
+
+
+def test_standard_and_combined_book_ticker_payloads_do_not_require_event_time() -> None:
+    calc = BinanceOFICalculator(symbol="BTCUSDT")
+    assert calc.on_book_ticker(
+        {
+            "u": 4_000_000_000,
+            "s": "BTCUSDT",
+            "b": "100.00",
+            "B": "2.0",
+            "a": "100.01",
+            "A": "3.0",
+        },
+        ts_ms=1_000,
+    ) is None
+    second = calc.on_book_ticker(
+        {
+            "stream": "btcusdt@bookTicker",
+            "data": {
+                "u": 4_000_000_001,
+                "s": "BTCUSDT",
+                "b": "100.01",
+                "B": "1.5",
+                "a": "100.02",
+                "A": "2.5",
+            },
+        },
+        ts_ms=1_001,
+    )
+    assert second is not None
+    assert second.raw_ofi == pytest.approx(4.5)
+    assert calc.last_update_id == 4_000_000_001
+
+
+def test_stale_depth_and_ticker_do_not_poison_next_transition() -> None:
+    calc = BinanceOFICalculator(symbol="BTCUSDT", ema_alpha=1.0)
+    assert calc.on_book_ticker(
+        {"u": 10, "s": "BTCUSDT", "b": "100", "B": "2", "a": "101", "A": "3"},
+        ts_ms=1_000,
+    ) is None
+    assert calc.on_book_ticker(
+        {"u": 11, "s": "BTCUSDT", "b": "99", "B": "99", "a": "100", "A": "99"},
+        ts_ms=999,
+    ) is None
+    assert calc.last_timestamp_ms == 1_000
+    assert calc.last_update_id == 10
+
+    current = calc.on_book_ticker(
+        {"u": 12, "s": "BTCUSDT", "b": "100", "B": "4", "a": "101", "A": "3"},
+        ts_ms=1_001,
+    )
+    assert current is not None
+    assert current.raw_ofi == pytest.approx(2.0)
+    assert calc.last_update_id == 12
+
+    # Replayed update ids are ignored even when their receive timestamp is newer.
+    assert calc.on_book_ticker(
+        {"u": 12, "s": "BTCUSDT", "b": "100", "B": "8", "a": "101", "A": "3"},
+        ts_ms=1_002,
+    ) is None
+    assert calc.last_timestamp_ms == 1_001
+
+
+def test_partial_depth_rejects_stale_last_update_id_without_state_pollution() -> None:
+    calc = BinanceOFICalculator(symbol="BTCUSDT", ema_alpha=1.0)
+    assert calc.on_book_ticker(
+        {"u": 10, "s": "BTCUSDT", "b": "100", "B": "2", "a": "101", "A": "3"},
+        ts_ms=1_000,
+    ) is None
+    assert calc.on_partial_depth(
+        {
+            "stream": "btcusdt@depth5",
+            "data": {
+                "lastUpdateId": 9,
+                "bids": [["99", "100"]],
+                "asks": [["100", "100"]],
+            },
+        },
+        ts_ms=1_001,
+    ) is None
+    assert calc.last_update_id == 10
+    assert calc.last_timestamp_ms == 1_000
+
+    current = calc.on_book_ticker(
+        {"u": 11, "s": "BTCUSDT", "b": "100", "B": "4", "a": "101", "A": "3"},
+        ts_ms=1_002,
+    )
+    assert current is not None
+    assert current.raw_ofi == pytest.approx(2.0)
+    assert calc.last_update_id == 11
+
+
+def test_partial_depth_rejects_other_combined_stream_without_state_pollution() -> None:
+    calc = BinanceOFICalculator(symbol="BTCUSDT", ema_alpha=1.0)
+    assert calc.on_book_ticker(
+        {"u": 10, "s": "BTCUSDT", "b": "100", "B": "2", "a": "101", "A": "3"},
+        ts_ms=1_000,
+    ) is None
+
+    with pytest.raises(ValueError, match="unexpected partial depth symbol ETHUSDT"):
+        calc.on_partial_depth(
+            {
+                "stream": "ethusdt@depth5",
+                "data": {
+                    "lastUpdateId": 100,
+                    "bids": [["4000", "99"]],
+                    "asks": [["4001", "99"]],
+                },
+            },
+            ts_ms=1_001,
+        )
+
+    assert calc.last_update_id == 10
+    assert calc.last_timestamp_ms == 1_000
+    assert calc.last_raw_ofi == 0.0
+    current = calc.on_book_ticker(
+        {"u": 11, "s": "BTCUSDT", "b": "100", "B": "4", "a": "101", "A": "3"},
+        ts_ms=1_002,
+    )
+    assert current is not None
+    assert current.raw_ofi == pytest.approx(2.0)
+
+
+def test_raw_partial_depth_requires_explicit_matching_symbol() -> None:
+    calc = BinanceOFICalculator(symbol="BTCUSDT")
+    payload = {
+        "lastUpdateId": 1,
+        "bids": [["100", "2"]],
+        "asks": [["101", "3"]],
+    }
+
+    with pytest.raises(ValueError, match="raw partial depth payload requires symbol"):
+        calc.on_partial_depth(payload, ts_ms=1_000)
+    with pytest.raises(ValueError, match="unexpected partial depth symbol ETHUSDT"):
+        calc.on_partial_depth(payload, ts_ms=1_000, symbol="ETHUSDT")
+
+    assert calc.on_partial_depth(payload, ts_ms=1_000, symbol="btcusdt") is None
+    assert calc.last_update_id == 1
 
 
 def test_update_and_get_z_matches_snapshot_and_reset_clears_state() -> None:
