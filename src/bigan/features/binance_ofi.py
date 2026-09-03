@@ -9,6 +9,7 @@ payloads in; unit tests inject the same top-of-book tuples.
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -110,6 +111,8 @@ class BinanceOFICalculator:
         "_ema",
         "_last_raw",
         "_last_z",
+        "_last_ts_ms",
+        "_last_update_id",
         "_samples",
         "_sum",
         "_sum_sq",
@@ -148,6 +151,8 @@ class BinanceOFICalculator:
         self._ema: float | None = None
         self._last_raw = 0.0
         self._last_z = 0.0
+        self._last_ts_ms: int | None = None
+        self._last_update_id: int | None = None
         self._samples: deque[tuple[int, float]] = deque()
         self._sum = 0.0
         self._sum_sq = 0.0
@@ -160,6 +165,18 @@ class BinanceOFICalculator:
     @property
     def last_ema_ofi(self) -> float:
         return 0.0 if self._ema is None else self._ema
+
+    @property
+    def last_timestamp_ms(self) -> int | None:
+        """Timestamp of the latest accepted top-of-book observation."""
+
+        return self._last_ts_ms
+
+    @property
+    def last_update_id(self) -> int | None:
+        """Binance ``bookTicker`` update id of the latest accepted event."""
+
+        return self._last_update_id
 
     def get_normalized_ofi(self) -> float:
         """Return the latest clipped Z-score, or 0.0 until the window is ready."""
@@ -237,11 +254,14 @@ class BinanceOFICalculator:
 
     def _apply_depth(self, book: TopOfBook) -> tuple[float, float, float, float, float] | None:
         prev = self._prev
-        self._prev = book
         if prev is None:
+            self._prev = book
+            self._last_ts_ms = book.ts_ms
             return None
         if book.ts_ms < prev.ts_ms:
-            raise ValueError("depth update timestamps must be non-decreasing")
+            return None
+        if book.ts_ms == prev.ts_ms and book == prev:
+            return None
         i_b = cont_bid_imbalance(prev.bid_price, prev.bid_qty, book.bid_price, book.bid_qty)
         i_a = cont_ask_imbalance(prev.ask_price, prev.ask_qty, book.ask_price, book.ask_qty)
         raw_ofi = i_b - i_a
@@ -251,6 +271,8 @@ class BinanceOFICalculator:
             ema_ofi = self.ema_alpha * raw_ofi + (1.0 - self.ema_alpha) * self._ema
         if not math.isfinite(ema_ofi):
             raise ValueError("EMA produced a non-finite OFI")
+        self._prev = book
+        self._last_ts_ms = book.ts_ms
         self._ema = ema_ofi
         self._last_raw = raw_ofi
         self._push_sample(book.ts_ms, ema_ofi)
@@ -266,24 +288,40 @@ class BinanceOFICalculator:
     ) -> OFISnapshot | None:
         """Receive a Binance ``bookTicker`` (WS or REST) best-bid/ask payload."""
 
-        symbol = str(payload.get("s") or payload.get("symbol") or self.symbol).upper()
+        wrapped = payload.get("data")
+        ticker = wrapped if isinstance(wrapped, Mapping) else payload
+        symbol = str(ticker.get("s") or ticker.get("symbol") or self.symbol).upper()
         if symbol != self.symbol:
             raise ValueError(f"unexpected bookTicker symbol {symbol}")
-        bid_price = _ticker_float(payload, "b", "bidPrice")
-        bid_qty = _ticker_float(payload, "B", "bidQty")
-        ask_price = _ticker_float(payload, "a", "askPrice")
-        ask_qty = _ticker_float(payload, "A", "askQty")
-        event_ts = payload.get("E")
-        update_ts = ts_ms if ts_ms is not None else event_ts
+        bid_price = _ticker_float(ticker, "b", "bidPrice")
+        bid_qty = _ticker_float(ticker, "B", "bidQty")
+        ask_price = _ticker_float(ticker, "a", "askPrice")
+        ask_qty = _ticker_float(ticker, "A", "askQty")
+        update_id = _optional_int(ticker.get("u"))
+        if (
+            update_id is not None
+            and self._last_update_id is not None
+            and update_id <= self._last_update_id
+        ):
+            return None
+        event_ts = _optional_int(ticker.get("E"))
+        update_ts = int(ts_ms) if ts_ms is not None else event_ts
         if update_ts is None:
-            raise ValueError("bookTicker timestamp is required")
-        return self.on_depth_update(
+            update_ts = time.time_ns() // 1_000_000
+        if self._last_ts_ms is not None and update_ts < self._last_ts_ms:
+            return None
+        result = self.on_depth_update(
             bid_price=bid_price,
             bid_qty=bid_qty,
             ask_price=ask_price,
             ask_qty=ask_qty,
-            ts_ms=int(update_ts),
+            ts_ms=update_ts,
         )
+        if update_id is not None and (
+            self._last_update_id is None or update_id > self._last_update_id
+        ):
+            self._last_update_id = update_id
+        return result
 
     def on_partial_depth(self, payload: Mapping[str, object], *, ts_ms: int) -> OFISnapshot | None:
         """Receive a Binance partial depth snapshot and use the best bid/ask."""
@@ -311,6 +349,8 @@ class BinanceOFICalculator:
         self._ema = None
         self._last_raw = 0.0
         self._last_z = 0.0
+        self._last_ts_ms = None
+        self._last_update_id = None
         self._samples.clear()
         self._sum = 0.0
         self._sum_sq = 0.0
@@ -404,4 +444,22 @@ def _ticker_float(payload: Mapping[str, object], short_key: str, long_key: str) 
         raw = payload.get(long_key)
     if raw is None:
         raise ValueError(f"Ticker payload missing both '{short_key}' and '{long_key}'")
-    return float(raw)
+    try:
+        return float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Ticker field '{short_key}' must be numeric") from exc
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    return None

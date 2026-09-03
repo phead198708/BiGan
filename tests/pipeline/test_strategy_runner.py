@@ -6,8 +6,8 @@ import pytest
 
 from bigan.data.polymarket_clob import PolymarketFeedHandler
 from bigan.execution.polymarket_oms import REJECT_SPREAD_TOO_WIDE, PolymarketOMS
-from bigan.features.binance_ofi import BinanceOFICalculator
-from bigan.pipeline.strategy_runner import StrategyRunner
+from bigan.features.binance_ofi import BinanceOFICalculator, TopOfBook
+from bigan.pipeline.strategy_runner import PricingInputs, StrategyRunner
 from bigan.strategies.polymarket_pricing import MarketWindow, PolymarketPricingEngine
 
 
@@ -43,6 +43,13 @@ def _runner(
         window=market,
         initial_bankroll=bankroll,
         spot_price=market.strike_price,
+        pricing_inputs_provider=lambda timestamp_ms: PricingInputs(
+            timestamp_ms=timestamp_ms,
+            spot_price=market.strike_price,
+            oracle_twap_so_far=market.strike_price,
+            twap_weight=0.0,
+            volatility_annualized=0.60,
+        ),
     )
 
 
@@ -62,11 +69,11 @@ def _payload(
         "sequence": sequence,
         "yes": {
             "bids": [{"price": str(yes_bid), "size": "10"}],
-            "asks": [{"price": str(yes_ask), "size": "1"}],
+            "asks": [{"price": str(yes_ask), "size": "10000"}],
         },
         "no": {
             "bids": [{"price": str(no_bid), "size": "1"}],
-            "asks": [{"price": str(no_ask), "size": "1"}],
+            "asks": [{"price": str(no_ask), "size": "10000"}],
         },
     }
 
@@ -90,6 +97,17 @@ def _buy_pressure_books(*, count: int = 28) -> list[float]:
     return bids
 
 
+def _alpha_book(*, timestamp_ms: int, bid_indicator: float) -> TopOfBook:
+    bid = 100_000.0 + bid_indicator * 100.0
+    return TopOfBook(
+        ts_ms=timestamp_ms,
+        bid_price=bid,
+        bid_qty=10.0,
+        ask_price=bid + 1.0,
+        ask_qty=10.0,
+    )
+
+
 @pytest.mark.asyncio
 async def test_e2e_bullish_ofi_triggers_buy_yes() -> None:
     runner = _runner()
@@ -97,9 +115,13 @@ async def test_e2e_bullish_ofi_triggers_buy_yes() -> None:
     await runner.start()
     last_z = 0.0
     for i, bid in enumerate(_buy_pressure_books()):
+        timestamp_ms = 100_000 + i * 200
+        runner.push_alpha_tick(
+            _alpha_book(timestamp_ms=timestamp_ms, bid_indicator=bid)
+        )
         await runner.feed_handler.ingest_payload(
             _payload(
-                timestamp_ms=100_000 + i * 200,
+                timestamp_ms=timestamp_ms,
                 sequence=i + 1,
                 yes_bid=bid,
                 yes_ask=0.40,
@@ -127,9 +149,13 @@ async def test_e2e_tail_cutoff_blocks_trade() -> None:
     starting = runner.current_bankroll
     await runner.start()
     for i, bid in enumerate(_buy_pressure_books()):
+        timestamp_ms = window.end_ts_ms - 10_000 + i
+        runner.push_alpha_tick(
+            _alpha_book(timestamp_ms=timestamp_ms, bid_indicator=bid)
+        )
         await runner.feed_handler.ingest_payload(
             _payload(
-                timestamp_ms=window.end_ts_ms - 10_000 + i,
+                timestamp_ms=timestamp_ms,
                 sequence=i + 1,
                 yes_bid=bid,
                 yes_ask=0.40,
@@ -143,6 +169,26 @@ async def test_e2e_tail_cutoff_blocks_trade() -> None:
     assert runner.current_bankroll == pytest.approx(starting)
     assert runner.oms.positions() == ()
     assert runner.callback_errors == 0
+
+
+@pytest.mark.asyncio
+async def test_polymarket_book_never_mutates_binance_ofi_state() -> None:
+    runner = _runner()
+    await runner.start()
+    for i, bid in enumerate(_buy_pressure_books(count=8)):
+        await runner.feed_handler.ingest_payload(
+            _payload(
+                timestamp_ms=100_000 + i * 200,
+                sequence=i + 1,
+                yes_bid=bid,
+                yes_ask=0.40,
+            )
+        )
+    await runner.stop()
+
+    assert runner.ofi_engine.last_timestamp_ms is None
+    assert runner.ofi_engine.last_raw_ofi == 0.0
+    assert runner.ofi_engine.get_normalized_ofi() == 0.0
 
 
 @pytest.mark.asyncio

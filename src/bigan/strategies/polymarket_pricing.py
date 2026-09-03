@@ -1,7 +1,7 @@
 """Polymarket binary pricing and positive-EV signal engine.
 
-Combines a Black-Scholes cash-or-nothing probability (with an OFI drift
-adjustment), oracle TWAP effective-strike magnification, and fractional
+Combines a Black-Scholes cash-or-nothing probability (with an additive OFI
+alpha layer), oracle TWAP effective-strike magnification, and fractional
 Kelly sizing. Both YES and NO asks are scored; the larger qualifying edge
 wins. Tail seconds of a window hard-block every new entry.
 """
@@ -12,12 +12,13 @@ import math
 from dataclasses import dataclass
 from enum import Enum
 
-SECONDS_PER_YEAR = 365.25 * 24.0 * 3600.0
+SECONDS_PER_YEAR = 365.0 * 24.0 * 3600.0
 DEFAULT_OFI_GAMMA = 0.0015
 DEFAULT_MIN_EDGE_5M = 0.08
 DEFAULT_MIN_EDGE_15M = 0.05
 DEFAULT_KELLY_FRACTION = 0.25
 DEFAULT_TAIL_CUTOFF_MS = 30_000
+DEFAULT_PROBABILITY_FLOOR = 0.001
 _VOL_TIME_FLOOR = 1e-18
 
 
@@ -69,14 +70,17 @@ def effective_strike(
     """Implied remaining-path strike that still matches the window TWAP.
 
     ``K_eff = (K - w * P_twap) / (1 - w)`` for ``w ∈ [0, 1)``. A fully
-    sampled window (``w >= 1``) returns the original strike ``K``.
+    sampled window is deterministic from the completed oracle TWAP: it returns
+    ``0`` when YES has won and ``+inf`` when NO has won.
     """
 
     strike = _finite_float("strike_price", strike_price)
     twap = _finite_float("oracle_twap_so_far", oracle_twap_so_far)
-    weight = _finite_float("twap_weight", twap_weight)
-    if weight >= 1.0:
-        return strike
+    weight = _twap_weight(twap_weight)
+    if strike <= 0.0 or twap <= 0.0:
+        raise ValueError("strike_price and oracle_twap_so_far must be positive")
+    if weight == 1.0:
+        return 0.0 if twap >= strike else math.inf
     remaining_weight = 1.0 - weight
     if remaining_weight <= 0.0 or not math.isfinite(remaining_weight):
         return strike
@@ -160,33 +164,53 @@ class PolymarketPricingEngine:
         if not math.isfinite(t_sec) or t_sec <= 0.0:
             return _expired_probability(spot, strike)
 
-        if not math.isfinite(spot) or not math.isfinite(strike):
-            return 0.0
+        if not math.isfinite(spot) or spot <= 0.0:
+            raise ValueError("spot_price must be finite and positive")
+        if math.isnan(strike):
+            raise ValueError("effective_strike must not be NaN")
+        if not math.isfinite(vol) or vol < 0.0:
+            raise ValueError("volatility_annualized must be finite and non-negative")
         if strike <= 0.0:
-            return 1.0 if spot > 0.0 or spot >= strike else 0.0
-        if spot <= 0.0:
-            return 0.0
+            return 1.0 - DEFAULT_PROBABILITY_FLOOR
+        if math.isinf(strike):
+            return DEFAULT_PROBABILITY_FLOOR
 
         t_years = t_sec / SECONDS_PER_YEAR
         if t_years <= 0.0 or not math.isfinite(t_years):
             return _expired_probability(spot, strike)
 
-        mu_adj = self.ofi_gamma * z_value
-        if not math.isfinite(vol) or vol <= 0.0:
-            return _drift_only_probability(spot, strike, mu_adj, t_years)
+        if vol == 0.0:
+            base_probability = _expired_probability(spot, strike)
+            return _apply_probability_alpha(
+                base_probability,
+                gamma=self.ofi_gamma,
+                z_ofi=z_value,
+                t_years=t_years,
+            )
 
         denom = vol * math.sqrt(t_years)
         if denom <= _VOL_TIME_FLOOR or not math.isfinite(denom):
-            return _drift_only_probability(spot, strike, mu_adj, t_years)
+            base_probability = _expired_probability(spot, strike)
+            return _apply_probability_alpha(
+                base_probability,
+                gamma=self.ofi_gamma,
+                z_ofi=z_value,
+                t_years=t_years,
+            )
 
         log_moneyness = math.log(spot / strike)
-        d2 = (log_moneyness + (mu_adj - 0.5 * vol * vol) * t_years) / denom
+        d2 = (log_moneyness - 0.5 * vol * vol * t_years) / denom
         if not math.isfinite(d2):
             return _expired_probability(spot, strike)
         probability = _norm_cdf(d2)
         if not math.isfinite(probability):
             return _expired_probability(spot, strike)
-        return min(1.0, max(0.0, probability))
+        return _apply_probability_alpha(
+            probability,
+            gamma=self.ofi_gamma,
+            z_ofi=z_value,
+            t_years=t_years,
+        )
 
     def evaluate_signal(
         self,
@@ -209,24 +233,34 @@ class PolymarketPricingEngine:
         return rate ``(p / ask) - 1``, or ``0.0`` on HOLD.
         """
 
-        spot = _finite_float("spot_price", spot_price)
-        yes_ask = _finite_float("yes_ask_price", yes_ask_price)
-        no_ask = _finite_float("no_ask_price", no_ask_price)
+        spot = _positive_float("spot_price", spot_price)
+        yes_ask = _market_price("yes_ask_price", yes_ask_price)
+        no_ask = _market_price("no_ask_price", no_ask_price)
         vol = _finite_float("volatility_annualized", volatility_annualized)
+        if vol < 0.0:
+            raise ValueError("volatility_annualized must be non-negative")
         ts_ms = int(current_ts_ms)
+        weight = _twap_weight(twap_weight)
         k_eff = self.effective_strike(
             strike_price=window.strike_price,
             oracle_twap_so_far=oracle_twap_so_far,
-            twap_weight=twap_weight,
+            twap_weight=weight,
         )
         remaining_ms = int(window.end_ts_ms) - ts_ms
-        p_yes = self.calculate_probability(
-            spot_price=spot,
-            effective_strike=k_eff,
-            time_to_expiry_sec=remaining_ms / 1000.0,
-            volatility_annualized=vol,
-            z_ofi=z_ofi,
-        )
+        if weight == 1.0:
+            p_yes = (
+                1.0
+                if float(oracle_twap_so_far) >= float(window.strike_price)
+                else 0.0
+            )
+        else:
+            p_yes = self.calculate_probability(
+                spot_price=spot,
+                effective_strike=k_eff,
+                time_to_expiry_sec=remaining_ms / 1000.0,
+                volatility_annualized=vol,
+                z_ofi=z_ofi,
+            )
         p_no = 1.0 - p_yes
         yes_edge = p_yes - yes_ask
         no_edge = p_no - no_ask
@@ -285,27 +319,45 @@ def _finite_float(name: str, value: float) -> float:
     return out
 
 
+def _positive_float(name: str, value: float) -> float:
+    out = _finite_float(name, value)
+    if out <= 0.0:
+        raise ValueError(f"{name} must be positive")
+    return out
+
+
+def _market_price(name: str, value: float) -> float:
+    out = _finite_float(name, value)
+    if not 0.0 < out <= 1.0:
+        raise ValueError(f"{name} must be in (0, 1]")
+    return out
+
+
+def _twap_weight(value: float) -> float:
+    weight = _finite_float("twap_weight", value)
+    if not 0.0 <= weight <= 1.0:
+        raise ValueError("twap_weight must be in [0, 1]")
+    return weight
+
+
 def _expired_probability(spot: float, strike: float) -> float:
     if not math.isfinite(spot) or not math.isfinite(strike):
         return 0.0
     return 1.0 if spot >= strike else 0.0
 
 
-def _drift_only_probability(
-    spot: float,
-    strike: float,
-    mu_adj: float,
+def _apply_probability_alpha(
+    probability: float,
+    *,
+    gamma: float,
+    z_ofi: float,
     t_years: float,
 ) -> float:
-    if not math.isfinite(mu_adj) or not math.isfinite(t_years):
-        return _expired_probability(spot, strike)
-    try:
-        forward = spot * math.exp(mu_adj * t_years)
-    except OverflowError:
-        return 1.0 if mu_adj > 0.0 else 0.0
-    if not math.isfinite(forward):
-        return 1.0 if mu_adj > 0.0 else 0.0
-    return 1.0 if forward >= strike else 0.0
+    adjusted = probability + gamma * z_ofi * math.sqrt(t_years)
+    if not math.isfinite(adjusted):
+        adjusted = probability
+    floor = DEFAULT_PROBABILITY_FLOOR
+    return min(1.0 - floor, max(floor, adjusted))
 
 
 def _norm_cdf(x: float) -> float:

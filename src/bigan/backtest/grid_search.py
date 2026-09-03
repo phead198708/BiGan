@@ -1,0 +1,227 @@
+"""Parallel parameter grid search with time-series cross-validation."""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, fields, replace
+from itertools import product
+from multiprocessing import get_context
+
+from bigan.data.polymarket_clob import MarketSnapshot
+from bigan.strategies.polymarket_pricing import MarketWindow
+
+from .engine import BacktestEngine, StrategyBacktestParams
+from .metrics import StrategyBacktestMetrics
+
+_PARAM_NAMES = {item.name for item in fields(StrategyBacktestParams)}
+_SCORE_NAMES = {item.name for item in fields(StrategyBacktestMetrics)}
+
+
+@dataclass(frozen=True, slots=True)
+class GridSearchTrial:
+    """One parameter combination scored on in-sample and out-of-sample folds."""
+
+    params: dict[str, object]
+    in_sample_score: float
+    out_of_sample_score: float
+    in_sample: tuple[StrategyBacktestMetrics, ...]
+    out_of_sample: tuple[StrategyBacktestMetrics, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GridSearchReport:
+    """Ranked grid-search output. ``best_params`` maximizes the OOS score."""
+
+    score: str
+    best_params: dict[str, object]
+    best_trial: GridSearchTrial
+    trials: tuple[GridSearchTrial, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _GridJob:
+    updates: dict[str, object]
+    base: StrategyBacktestParams
+    window: MarketWindow
+    folds: tuple[tuple[tuple[MarketSnapshot, ...], tuple[MarketSnapshot, ...]], ...]
+    settlement: dict[str, float]
+    score: str
+
+
+def expand_param_grid(grid: Mapping[str, Sequence[object]]) -> tuple[dict[str, object], ...]:
+    """Cartesian product of a parameter grid, in key-then-value order."""
+
+    if not grid:
+        return ({},)
+    unknown = set(grid) - _PARAM_NAMES
+    if unknown:
+        raise ValueError(f"unknown grid parameters: {sorted(unknown)}")
+    keys = tuple(grid)
+    value_rows = [tuple(grid[key]) for key in keys]
+    if any(len(row) == 0 for row in value_rows):
+        raise ValueError("grid values must be non-empty sequences")
+    combos: list[dict[str, object]] = []
+    for combo in product(*value_rows):
+        combos.append(dict(zip(keys, combo, strict=True)))
+    return tuple(combos)
+
+
+def apply_param_updates(
+    base: StrategyBacktestParams,
+    updates: Mapping[str, object],
+) -> StrategyBacktestParams:
+    unknown = set(updates) - _PARAM_NAMES
+    if unknown:
+        raise ValueError(f"unknown parameters: {sorted(unknown)}")
+    return replace(base, **dict(updates))  # type: ignore[arg-type]
+
+
+def split_snapshots_by_time(
+    snapshots: Sequence[MarketSnapshot],
+    *,
+    train_ratio: float = 0.70,
+) -> tuple[tuple[MarketSnapshot, ...], tuple[MarketSnapshot, ...]]:
+    """Split a tape by elapsed time, not by row count."""
+
+    if not 0.0 < float(train_ratio) < 1.0:
+        raise ValueError("train_ratio must be in (0, 1)")
+    tape = tuple(snapshots)
+    if len(tape) < 2:
+        return tape, ()
+    start = tape[0].timestamp_ms
+    end = tape[-1].timestamp_ms
+    span = end - start
+    if span <= 0:
+        cut = max(1, int(len(tape) * train_ratio))
+        return tape[:cut], tape[cut:]
+    cut_ts = start + int(span * train_ratio)
+    cut = 1
+    for i, row in enumerate(tape):
+        if row.timestamp_ms <= cut_ts:
+            cut = i + 1
+        else:
+            break
+    cut = min(max(cut, 1), len(tape) - 1)
+    return tape[:cut], tape[cut:]
+
+
+def time_series_folds(
+    snapshots: Sequence[MarketSnapshot],
+    *,
+    n_splits: int = 1,
+    train_ratio: float = 0.70,
+) -> tuple[tuple[tuple[MarketSnapshot, ...], tuple[MarketSnapshot, ...]], ...]:
+    """Expanding-window time-series folds; ``n_splits=1`` is a single IS/OOS cut."""
+
+    splits = int(n_splits)
+    if splits < 1:
+        raise ValueError("n_splits must be positive")
+    tape = tuple(snapshots)
+    if splits == 1:
+        return (split_snapshots_by_time(tape, train_ratio=train_ratio),)
+    if len(tape) < splits + 1:
+        raise ValueError("not enough snapshots for the requested n_splits")
+    fold_size = max(1, len(tape) // (splits + 1))
+    folds: list[tuple[tuple[MarketSnapshot, ...], tuple[MarketSnapshot, ...]]] = []
+    for i in range(splits):
+        train_end = fold_size * (i + 1)
+        test_end = min(len(tape), train_end + fold_size)
+        if i == splits - 1:
+            test_end = len(tape)
+        train = tape[:train_end]
+        test = tape[train_end:test_end]
+        if train and test:
+            folds.append((train, test))
+    if not folds:
+        raise ValueError("time-series split produced no usable folds")
+    return tuple(folds)
+
+
+def run_grid_search(
+    snapshots: Sequence[MarketSnapshot],
+    grid: Mapping[str, Sequence[object]],
+    *,
+    window: MarketWindow,
+    base: StrategyBacktestParams | None = None,
+    train_ratio: float = 0.70,
+    n_splits: int = 1,
+    max_workers: int | None = None,
+    score: str = "total_return",
+    settlement: Mapping[str, float] | None = None,
+) -> GridSearchReport:
+    """Score every grid combination; the winner is the best mean OOS metric.
+
+    ``max_workers is None`` uses ``os.cpu_count()``. ``max_workers <= 1``
+    stays in-process so unit tests do not need a process pool.
+    """
+
+    if score not in _SCORE_NAMES:
+        raise ValueError(f"unknown score '{score}'")
+    params = base if base is not None else StrategyBacktestParams()
+    combos = expand_param_grid(grid)
+    folds = time_series_folds(snapshots, n_splits=n_splits, train_ratio=train_ratio)
+    payouts = dict(settlement) if settlement is not None else {}
+    jobs = tuple(
+        _GridJob(
+            updates=combo,
+            base=params,
+            window=window,
+            folds=folds,
+            settlement=payouts,
+            score=score,
+        )
+        for combo in combos
+    )
+    workers = os.cpu_count() or 1 if max_workers is None else int(max_workers)
+    if workers < 1:
+        raise ValueError("max_workers must be positive")
+    if workers == 1 or len(jobs) == 1:
+        trials = tuple(_run_grid_job(job) for job in jobs)
+    else:
+        ctx = get_context("spawn")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
+            trials = tuple(pool.map(_run_grid_job, jobs))
+    best_index = 0
+    best_score = trials[0].out_of_sample_score
+    for i, trial in enumerate(trials):
+        if trial.out_of_sample_score > best_score:
+            best_score = trial.out_of_sample_score
+            best_index = i
+    best = trials[best_index]
+    return GridSearchReport(
+        score=score,
+        best_params=best.params,
+        best_trial=best,
+        trials=trials,
+    )
+
+
+def _run_grid_job(job: _GridJob) -> GridSearchTrial:
+    params = apply_param_updates(job.base, job.updates)
+    in_sample: list[StrategyBacktestMetrics] = []
+    out_of_sample: list[StrategyBacktestMetrics] = []
+    for train, test in job.folds:
+        if train:
+            is_engine = BacktestEngine(window=job.window, params=params)
+            in_sample.append(is_engine.run(train, settlement=job.settlement).metrics)
+        if test:
+            oos_engine = BacktestEngine(window=job.window, params=params)
+            out_of_sample.append(oos_engine.run(test, settlement=job.settlement).metrics)
+    return GridSearchTrial(
+        params=dict(job.updates),
+        in_sample_score=_mean_score(in_sample, job.score),
+        out_of_sample_score=_mean_score(out_of_sample, job.score),
+        in_sample=tuple(in_sample),
+        out_of_sample=tuple(out_of_sample),
+    )
+
+
+def _mean_score(rows: Sequence[StrategyBacktestMetrics], score: str) -> float:
+    if not rows:
+        return float("-inf")
+    total = 0.0
+    for row in rows:
+        total += float(getattr(row, score))
+    return total / len(rows)

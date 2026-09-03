@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from bigan.execution.polymarket_oms import (
+    REJECT_LIQUIDITY_UNAVAILABLE,
     REJECT_SIZE_BELOW_MINIMUM,
     REJECT_SPREAD_TOO_WIDE,
     PolymarketOMS,
@@ -19,9 +20,10 @@ def _signal(
     market_price: float = 0.50,
     window_id: str = "btc-updown-test",
     edge: float = 0.10,
+    ts_ms: int = 1_000,
 ) -> PricingSignal:
     return PricingSignal(
-        ts_ms=1_000,
+        ts_ms=ts_ms,
         window_id=window_id,
         spot_price=100_000.0,
         effective_strike=100_000.0,
@@ -40,6 +42,7 @@ def test_hold_signal_returns_none() -> None:
         _signal(direction=SignalDirection.BUY_YES, recommended_size_pct=0.05),
         current_bankroll=1_000.0,
         current_bid=0.49,
+        current_ask_size=10_000.0,
     )
     assert filled is not None
     assert filled.status == "FILLED"
@@ -69,6 +72,7 @@ def test_max_trade_cap_enforcement() -> None:
         ),
         current_bankroll=bankroll,
         current_bid=0.49,
+        current_ask_size=10_000.0,
     )
     assert result is not None
     assert result.status == "FILLED"
@@ -89,6 +93,7 @@ def test_min_order_threshold_rejection() -> None:
         _signal(direction=SignalDirection.BUY_YES, recommended_size_pct=0.05),
         current_bankroll=10.0,
         current_bid=0.49,
+        current_ask_size=10_000.0,
     )
     assert result is not None
     assert result.status == "REJECTED"
@@ -103,6 +108,7 @@ def test_spread_guard_rejection() -> None:
         _signal(direction=SignalDirection.BUY_YES, market_price=0.60),
         current_bankroll=1_000.0,
         current_bid=0.50,
+        current_ask_size=10_000.0,
     )
     assert result is not None
     assert result.status == "REJECTED"
@@ -113,6 +119,7 @@ def test_spread_guard_rejection() -> None:
         _signal(direction=SignalDirection.BUY_YES, market_price=0.58),
         current_bankroll=1_000.0,
         current_bid=0.50,
+        current_ask_size=10_000.0,
     )
     assert tight is not None
     assert tight.status == "FILLED"
@@ -131,6 +138,7 @@ def test_position_state_update() -> None:
         ),
         current_bankroll=bankroll,
         current_bid=0.39,
+        current_ask_size=10_000.0,
     )
     assert first is not None and first.status == "FILLED"
     first_fill = min(1.0, first_ask * (1.0 + oms.slippage_tolerance))
@@ -146,12 +154,14 @@ def test_position_state_update() -> None:
     second = oms.process_signal(
         _signal(
             direction=SignalDirection.BUY_YES,
-            recommended_size_pct=0.05,
+            recommended_size_pct=0.10,
             market_price=second_ask,
             window_id="window-a",
+            ts_ms=2_000,
         ),
-        current_bankroll=bankroll,
+        current_bankroll=oms.bankroll,
         current_bid=0.59,
+        current_ask_size=10_000.0,
     )
     assert second is not None and second.status == "FILLED"
     second_fill = min(1.0, second_ask * (1.0 + oms.slippage_tolerance))
@@ -174,9 +184,11 @@ def test_position_state_update() -> None:
             recommended_size_pct=0.05,
             market_price=no_ask,
             window_id="window-a",
+            ts_ms=3_000,
         ),
-        current_bankroll=bankroll,
+        current_bankroll=oms.bankroll,
         current_bid=0.29,
+        current_ask_size=10_000.0,
     )
     assert buy_no is not None and buy_no.status == "FILLED"
     assert buy_no.side == "NO"
@@ -187,3 +199,59 @@ def test_position_state_update() -> None:
     assert no_pos.avg_entry_price == pytest.approx(buy_no.price)
     assert oms.get_position("window-a", "YES") is not None
     assert len(oms.positions()) == 2
+
+
+def test_repeated_signal_targets_total_position_instead_of_rebuying_target() -> None:
+    oms = PolymarketOMS(max_single_trade_pct=0.05)
+    cash = 1_000.0
+    for ts_ms in (1_000, 2_000):
+        result = oms.process_signal(
+            _signal(
+                direction=SignalDirection.BUY_YES,
+                recommended_size_pct=0.05,
+                ts_ms=ts_ms,
+            ),
+            current_bankroll=cash,
+            current_bid=0.49,
+            current_ask_size=10_000.0,
+        )
+        if ts_ms == 1_000:
+            assert result is not None and result.status == "FILLED"
+            cash = oms.bankroll
+        else:
+            assert result is None
+    position = oms.get_position("btc-updown-test", "YES")
+    assert position is not None
+    assert position.total_cost_usdc == pytest.approx(50.0)
+
+
+def test_available_ask_liquidity_caps_fill_and_missing_depth_rejects() -> None:
+    oms = PolymarketOMS(min_order_usd=1.0, slippage_tolerance=0.0)
+    missing = oms.process_signal(
+        _signal(direction=SignalDirection.BUY_YES, ts_ms=1_000),
+        current_bankroll=1_000.0,
+        current_bid=0.49,
+    )
+    assert missing is not None
+    assert missing.status == "REJECTED"
+    assert missing.reject_reason == REJECT_LIQUIDITY_UNAVAILABLE
+
+    partial = oms.process_signal(
+        _signal(direction=SignalDirection.BUY_YES, ts_ms=2_000),
+        current_bankroll=1_000.0,
+        current_bid=0.49,
+        current_ask_size=10.0,
+    )
+    assert partial is not None and partial.status == "FILLED"
+    assert partial.shares == pytest.approx(10.0)
+    assert partial.shares * partial.price == pytest.approx(5.0)
+
+
+def test_duplicate_signal_is_idempotent() -> None:
+    oms = PolymarketOMS()
+    signal = _signal(direction=SignalDirection.BUY_YES)
+    first = oms.process_signal(signal, 1_000.0, 0.49, 10_000.0)
+    second = oms.process_signal(signal, oms.bankroll, 0.49, 10_000.0)
+    assert first is not None and first.status == "FILLED"
+    assert second is None
+    assert len(oms.positions()) == 1

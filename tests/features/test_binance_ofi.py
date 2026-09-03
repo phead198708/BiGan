@@ -247,14 +247,16 @@ def test_book_ticker_and_partial_depth_ingest() -> None:
     first = calc.on_book_ticker(
         {
             "s": "BTCUSDT",
-            "E": 1_700_000_000_000,
+            "u": 1,
             "b": "100.00",
             "B": "2.0",
             "a": "100.01",
             "A": "3.0",
-        }
+        },
+        ts_ms=1_700_000_000_000,
     )
     assert first is None
+    assert calc.last_update_id == 1
     second = calc.on_partial_depth(
         {
             "lastUpdateId": 2,
@@ -265,6 +267,67 @@ def test_book_ticker_and_partial_depth_ingest() -> None:
     )
     assert second is not None
     assert second.raw_ofi == pytest.approx(4.5)
+
+
+def test_standard_and_combined_book_ticker_payloads_do_not_require_event_time() -> None:
+    calc = BinanceOFICalculator(symbol="BTCUSDT")
+    assert calc.on_book_ticker(
+        {
+            "u": 4_000_000_000,
+            "s": "BTCUSDT",
+            "b": "100.00",
+            "B": "2.0",
+            "a": "100.01",
+            "A": "3.0",
+        },
+        ts_ms=1_000,
+    ) is None
+    second = calc.on_book_ticker(
+        {
+            "stream": "btcusdt@bookTicker",
+            "data": {
+                "u": 4_000_000_001,
+                "s": "BTCUSDT",
+                "b": "100.01",
+                "B": "1.5",
+                "a": "100.02",
+                "A": "2.5",
+            },
+        },
+        ts_ms=1_001,
+    )
+    assert second is not None
+    assert second.raw_ofi == pytest.approx(4.5)
+    assert calc.last_update_id == 4_000_000_001
+
+
+def test_stale_depth_and_ticker_do_not_poison_next_transition() -> None:
+    calc = BinanceOFICalculator(symbol="BTCUSDT", ema_alpha=1.0)
+    assert calc.on_book_ticker(
+        {"u": 10, "s": "BTCUSDT", "b": "100", "B": "2", "a": "101", "A": "3"},
+        ts_ms=1_000,
+    ) is None
+    assert calc.on_book_ticker(
+        {"u": 11, "s": "BTCUSDT", "b": "99", "B": "99", "a": "100", "A": "99"},
+        ts_ms=999,
+    ) is None
+    assert calc.last_timestamp_ms == 1_000
+    assert calc.last_update_id == 10
+
+    current = calc.on_book_ticker(
+        {"u": 12, "s": "BTCUSDT", "b": "100", "B": "4", "a": "101", "A": "3"},
+        ts_ms=1_001,
+    )
+    assert current is not None
+    assert current.raw_ofi == pytest.approx(2.0)
+    assert calc.last_update_id == 12
+
+    # Replayed update ids are ignored even when their receive timestamp is newer.
+    assert calc.on_book_ticker(
+        {"u": 12, "s": "BTCUSDT", "b": "100", "B": "8", "a": "101", "A": "3"},
+        ts_ms=1_002,
+    ) is None
+    assert calc.last_timestamp_ms == 1_001
 
 
 def test_update_and_get_z_matches_snapshot_and_reset_clears_state() -> None:

@@ -7,16 +7,21 @@ bankroll, then simulates a slipped fill and updates in-memory positions.
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass
 
 from bigan.strategies.polymarket_pricing import PricingSignal, SignalDirection
 
 DEFAULT_MAX_SINGLE_TRADE_PCT = 0.05
+DEFAULT_MAX_POSITION_PCT = 0.25
+DEFAULT_MAX_WINDOW_EXPOSURE_PCT = 0.25
+DEFAULT_SIGNAL_CACHE_SIZE = 100_000
 DEFAULT_MIN_ORDER_USD = 1.0
 DEFAULT_MAX_SPREAD_ALLOWED = 0.08
 DEFAULT_SLIPPAGE_TOLERANCE = 0.01
 REJECT_SPREAD_TOO_WIDE = "Spread too wide"
 REJECT_SIZE_BELOW_MINIMUM = "Order size below minimum threshold"
+REJECT_LIQUIDITY_UNAVAILABLE = "Available ask liquidity unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +54,8 @@ class PolymarketOMS:
 
     __slots__ = (
         "max_single_trade_pct",
+        "max_position_pct",
+        "max_window_exposure_pct",
         "min_order_usd",
         "max_spread_allowed",
         "slippage_tolerance",
@@ -56,23 +63,37 @@ class PolymarketOMS:
         "bankroll",
         "_positions",
         "_order_seq",
+        "_processed_signals",
+        "_processed_signal_order",
+        "_signal_cache_size",
     )
 
     def __init__(
         self,
         *,
         max_single_trade_pct: float = DEFAULT_MAX_SINGLE_TRADE_PCT,
+        max_position_pct: float = DEFAULT_MAX_POSITION_PCT,
+        max_window_exposure_pct: float = DEFAULT_MAX_WINDOW_EXPOSURE_PCT,
         min_order_usd: float = DEFAULT_MIN_ORDER_USD,
         max_spread_allowed: float = DEFAULT_MAX_SPREAD_ALLOWED,
         slippage_tolerance: float = DEFAULT_SLIPPAGE_TOLERANCE,
         symbol: str = "BTC",
+        signal_cache_size: int = DEFAULT_SIGNAL_CACHE_SIZE,
     ) -> None:
         cap = _finite_float("max_single_trade_pct", max_single_trade_pct)
+        position_cap = _finite_float("max_position_pct", max_position_pct)
+        window_cap = _finite_float("max_window_exposure_pct", max_window_exposure_pct)
         minimum = _finite_float("min_order_usd", min_order_usd)
         spread = _finite_float("max_spread_allowed", max_spread_allowed)
         slippage = _finite_float("slippage_tolerance", slippage_tolerance)
         if not 0.0 < cap <= 1.0:
             raise ValueError("max_single_trade_pct must be in (0, 1]")
+        if not 0.0 < position_cap <= 1.0:
+            raise ValueError("max_position_pct must be in (0, 1]")
+        if not 0.0 < window_cap <= 1.0:
+            raise ValueError("max_window_exposure_pct must be in (0, 1]")
+        if position_cap > window_cap:
+            raise ValueError("max_position_pct cannot exceed max_window_exposure_pct")
         if minimum <= 0.0:
             raise ValueError("min_order_usd must be positive")
         if spread < 0.0:
@@ -81,7 +102,11 @@ class PolymarketOMS:
             raise ValueError("slippage_tolerance must be non-negative")
         if not str(symbol).strip():
             raise ValueError("symbol must be non-empty")
+        if int(signal_cache_size) < 1:
+            raise ValueError("signal_cache_size must be positive")
         self.max_single_trade_pct = cap
+        self.max_position_pct = position_cap
+        self.max_window_exposure_pct = window_cap
         self.min_order_usd = minimum
         self.max_spread_allowed = spread
         self.slippage_tolerance = slippage
@@ -89,6 +114,9 @@ class PolymarketOMS:
         self.bankroll = 0.0
         self._positions: dict[tuple[str, str], Position] = {}
         self._order_seq = 0
+        self._processed_signals: set[tuple[object, ...]] = set()
+        self._processed_signal_order: deque[tuple[object, ...]] = deque()
+        self._signal_cache_size = int(signal_cache_size)
 
     def get_position(self, window_id: str, side: str) -> Position | None:
         return self._positions.get((window_id, side))
@@ -101,6 +129,7 @@ class PolymarketOMS:
         signal: PricingSignal,
         current_bankroll: float,
         current_bid: float,
+        current_ask_size: float | None = None,
     ) -> OrderResult | None:
         """Gate, size, and optionally fill one pricing signal.
 
@@ -111,6 +140,17 @@ class PolymarketOMS:
 
         if signal.direction is SignalDirection.HOLD:
             return None
+
+        signal_key = (
+            signal.window_id,
+            signal.ts_ms,
+            signal.direction.value,
+            signal.market_price,
+            signal.recommended_size_pct,
+        )
+        if signal_key in self._processed_signals:
+            return None
+        self._remember_signal(signal_key)
 
         bankroll = _finite_float("current_bankroll", current_bankroll)
         bid = _finite_float("current_bid", current_bid)
@@ -125,17 +165,49 @@ class PolymarketOMS:
                 reason=f"Unsupported signal direction {signal.direction!r}",
             )
 
+        if not 0.0 <= bid <= ask <= 1.0:
+            return self._rejected(side=side, reason="Invalid bid/ask market")
         if (ask - bid) > self.max_spread_allowed:
             return self._rejected(side=side, reason=REJECT_SPREAD_TOO_WIDE)
 
-        target_usd = bankroll * max(0.0, size_pct)
-        execution_usd = min(target_usd, bankroll * self.max_single_trade_pct)
-        if execution_usd < self.min_order_usd:
-            return self._rejected(side=side, reason=REJECT_SIZE_BELOW_MINIMUM)
+        if current_ask_size is None:
+            return self._rejected(side=side, reason=REJECT_LIQUIDITY_UNAVAILABLE)
+        ask_size = _finite_float("current_ask_size", current_ask_size)
+        if ask_size <= 0.0:
+            return self._rejected(side=side, reason=REJECT_LIQUIDITY_UNAVAILABLE)
+
+        capital = bankroll + sum(position.total_cost_usdc for position in self._positions.values())
+        existing = self.get_position(signal.window_id, side)
+        existing_usd = 0.0 if existing is None else existing.total_cost_usdc
+        window_usd = sum(
+            position.total_cost_usdc
+            for position in self._positions.values()
+            if position.window_id == signal.window_id
+        )
+        target_pct = min(max(0.0, size_pct), self.max_position_pct)
+        target_usd = capital * target_pct
+        remaining_target_usd = max(0.0, target_usd - existing_usd)
+        remaining_window_usd = max(
+            0.0,
+            capital * self.max_window_exposure_pct - window_usd,
+        )
+        if remaining_target_usd <= 0.0 or remaining_window_usd <= 0.0:
+            return None
 
         fill_price = min(1.0, ask * (1.0 + self.slippage_tolerance))
         if fill_price <= 0.0 or not math.isfinite(fill_price):
             return self._rejected(side=side, reason="Invalid fill price")
+        liquidity_usd = ask_size * fill_price
+        execution_usd = min(
+            remaining_target_usd,
+            remaining_window_usd,
+            capital * self.max_single_trade_pct,
+            bankroll,
+            liquidity_usd,
+        )
+        if execution_usd < self.min_order_usd:
+            return self._rejected(side=side, reason=REJECT_SIZE_BELOW_MINIMUM)
+
         shares = execution_usd / fill_price
         cost = shares * fill_price
         self._apply_fill(
@@ -155,6 +227,13 @@ class PolymarketOMS:
             fee_usdc=0.0,
             reject_reason=None,
         )
+
+    def _remember_signal(self, key: tuple[object, ...]) -> None:
+        self._processed_signals.add(key)
+        self._processed_signal_order.append(key)
+        while len(self._processed_signal_order) > self._signal_cache_size:
+            expired = self._processed_signal_order.popleft()
+            self._processed_signals.discard(expired)
 
     def _apply_fill(
         self,

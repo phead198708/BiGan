@@ -12,6 +12,12 @@ from .config import (
     generate_run_id,
     load_backtest_config,
 )
+from .data_loader import (
+    LoadedClob,
+    generate_synthetic_clob,
+    load_clob_snapshots,
+    write_clob_snapshots,
+)
 from .diagnostics import (
     GroupedThresholdBacktestReport,
     run_grouped_threshold_backtest,
@@ -19,6 +25,7 @@ from .diagnostics import (
     run_oracle_label_sanity_backtest,
     run_prediction_threshold_backtest,
 )
+from .engine import BacktestEngine, BacktestFill, BacktestResult, StrategyBacktestParams
 from .evaluation import (
     CalibrationBin,
     PredictionEvaluationReport,
@@ -33,6 +40,16 @@ from .execution import (
     TakerExecutionSettings,
     simulate_taker_long_trade,
 )
+from .grid_search import (
+    GridSearchReport,
+    GridSearchTrial,
+    apply_param_updates,
+    expand_param_grid,
+    run_grid_search,
+    split_snapshots_by_time,
+    time_series_folds,
+)
+from .metrics import ClosedTrade, StrategyBacktestMetrics, compute_backtest_metrics
 from .strategy import (
     DEFAULT_EDGE_THRESHOLDS,
     DEFAULT_HOLD_MS,
@@ -42,9 +59,9 @@ from .strategy import (
     ThresholdStrategyResult,
     ThresholdStrategySummary,
     ThresholdTrade,
+    run_per_family_threshold_search,
     run_threshold_strategy,
     run_threshold_sweep,
-    run_per_family_threshold_search,
     save_threshold_strategy_outputs,
 )
 from .walk_forward import (
@@ -104,4 +121,22 @@ __all__ = [
     "save_walk_forward_report",
     "simulate_taker_long_trade",
     "summarize_metric_stability",
+    "BacktestEngine",
+    "BacktestFill",
+    "BacktestResult",
+    "ClosedTrade",
+    "GridSearchReport",
+    "GridSearchTrial",
+    "LoadedClob",
+    "StrategyBacktestMetrics",
+    "StrategyBacktestParams",
+    "apply_param_updates",
+    "compute_backtest_metrics",
+    "expand_param_grid",
+    "generate_synthetic_clob",
+    "load_clob_snapshots",
+    "run_grid_search",
+    "split_snapshots_by_time",
+    "time_series_folds",
+    "write_clob_snapshots",
 ]
