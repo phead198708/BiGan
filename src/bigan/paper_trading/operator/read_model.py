@@ -182,7 +182,10 @@ class OperatorReadRepository:
             raise ValueError("paper account projection is invalid") from exc
         if not isinstance(payload, dict):
             raise ValueError("paper account projection must be an object")
-        return PaperAccountSnapshot.from_dict(payload)
+        snapshot = PaperAccountSnapshot.from_dict(payload)
+        if snapshot.run_id != self.run_store.manifest.run_id:
+            raise ValueError("paper account projection run identity mismatch")
+        return snapshot
 
     def account_summary(self) -> dict[str, object]:
         """Account-lifetime totals; current_account() remains the window ledger."""
@@ -211,12 +214,19 @@ class OperatorReadRepository:
         bounded = self._limit(limit)
         output: list[dict[str, object]] = []
         for store, link in self._stores(before_run_id):
+            snapshot = OperatorReadRepository(status_path=self.status_path, run_store=store).current_account()
+            if snapshot is None:
+                raise ValueError("paper run account unavailable")
             output.append({
                 "run_id": store.manifest.run_id,
                 "window_ids": list(store.manifest.window_ids),
                 "opening_cash": store.manifest.initial_bankroll,
                 "run_index": 0 if link is None else link.run_index,
                 "predecessor_run_id": None if link is None else link.predecessor_run_id,
+                "market_id": None if link is None else link.market.market_id,
+                "market_title": None if link is None else link.market.title,
+                "settled": set(store.manifest.window_ids).issubset(snapshot.settled_window_ids),
+                "cash": snapshot.cash,
             })
             if len(output) == bounded:
                 break
@@ -229,6 +239,8 @@ class OperatorReadRepository:
         newest: list[dict[str, object]] = []
         for store, _link in self._stores(before_run_id):
             rows = getattr(store, method)(limit=bounded - len(newest), max_limit=self.max_limit)
+            if any(row.run_id != store.manifest.run_id for row in rows):
+                raise ValueError("history event run identity mismatch")
             newest.extend(row.to_dict() for row in reversed(rows))
             if len(newest) == bounded:
                 break
@@ -252,8 +264,10 @@ class OperatorReadRepository:
         for _ in range(self.max_limit):
             if link is None:
                 break
-            manifest = PaperRunStore.load_manifest(output_dir=root, run_id=link.run_id)
-            yield PaperRunStore(run_dir=root / link.run_id, manifest=manifest, fsync=False), link
+            store = PaperRunStore.open_read_only(output_dir=root, run_id=link.run_id)
+            if store.manifest.window_ids != (link.market.window_id,) or store.manifest.initial_bankroll != link.opening_cash:
+                raise ValueError("historical manifest disagrees with account run link")
+            yield store, link
             link = self._previous_link(root, link)
 
     @staticmethod
