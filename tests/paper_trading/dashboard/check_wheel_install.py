@@ -16,11 +16,17 @@ def main() -> None:
     from aiohttp.test_utils import TestClient, TestServer
 
     import bigan.paper_trading.dashboard as dashboard
+    import bigan.paper_trading.stack as stack
     from bigan.paper_trading.dashboard.reader import DashboardReader
     from bigan.paper_trading.dashboard.server import create_app
     from bigan.paper_trading.operator.config import OperatorConfig
 
     assert Path(dashboard.__file__).is_relative_to(target)
+    assert Path(stack.__file__).is_relative_to(target)
+    assert any(
+        point.name == "bigan-paper-stack" and point.value == "bigan.paper_trading.stack.__main__:main"
+        for distribution in distributions(path=[str(target)]) for point in distribution.entry_points
+    )
     assert any(
         point.name == "bigan-paper-dashboard" and point.value == "bigan.paper_trading.dashboard.__main__:main"
         for distribution in distributions(path=[str(target)]) for point in distribution.entry_points

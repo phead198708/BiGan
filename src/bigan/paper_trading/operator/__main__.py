@@ -25,8 +25,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--check", action="store_true", help="validate and print safe identity")
     parser.add_argument("--mock-demo", action="store_true", help="run one local no-network demo")
+    parser.add_argument("--expected-config-sha256", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     config = load_operator_config(args.config)
+    if args.expected_config_sha256 and config.config_sha256 != args.expected_config_sha256:
+        parser.error("Operator configuration identity changed before startup")
     logging.basicConfig(
         level=getattr(logging, config.logging_level),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",

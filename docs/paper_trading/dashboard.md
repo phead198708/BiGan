@@ -8,6 +8,9 @@ forward, or tunnel**. Only literal loopback listeners are accepted.
 
 ## Start in two terminals
 
+For one-command process lifecycle and soak reports, see
+[the local paper stack](live_stack.md). The standalone commands below remain supported.
+
 Install with `python -m pip install -e '.[dev]'` (or install the built wheel).
 Run both commands from the same working directory with exactly the same TOML.
 Relative `output_dir` paths retain the operator's existing working-directory
@@ -118,6 +121,12 @@ warnings. Empty valid history is `[]`. Missing/unreadable status is 503, and an
 unavailable standalone account/history endpoint is 503. `STARTING` and
 `DISCOVERING` without a checkpoint remain displayable. Stale-but-valid status
 is ready; readiness is not permission to trade.
+
+PR-D adds safe `operator_identity` metadata (operator/strategy/account IDs,
+source commit and the existing config hash) to the combined view. `/healthz`
+also includes that identity and an optional stack launch `instance_id`; no
+complete config, credential, filesystem path or operator status-schema change
+is involved. Standalone callers may leave the launch ID unset.
 
 POST/PUT/PATCH/DELETE/OPTIONS are rejected with 405. No CORS is enabled. The
 server also validates local peers and Host values against loopback/localhost
