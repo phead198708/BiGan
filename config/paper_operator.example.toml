@@ -14,6 +14,7 @@ max_preopen_ms = 1800000
 
 gamma_markets_endpoint = "https://gamma-api.polymarket.com/markets"
 resolution_endpoint = "https://gamma-api.polymarket.com/markets"
+binance_venue = "global" # Offline mock identity; live example uses Binance.US.
 binance_depth_endpoint = "https://api.binance.com/api/v3/depth"
 binance_ws_url = "wss://stream.binance.com:9443/ws"
 binance_symbol = "BTCUSDT"

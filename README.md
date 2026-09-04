@@ -47,6 +47,45 @@ demo naturally shows STOPPED and becomes stale after five seconds by default.
 
 See [dashboard setup, field meanings, warnings, troubleshooting and screenshots](docs/paper_trading/dashboard.md).
 
+## One-command live paper stack and soak
+
+This stack consumes live public market data but performs simulated paper execution only. It has no wallet, signing capability, private exchange credentials, or real order path.
+
+```bash
+# Offline, two-minute operator + dashboard + report:
+python -m bigan.paper_trading.stack \
+  --config config/paper_operator.example.toml --mock-demo \
+  --duration 2m --report-dir artifacts/paper_soak/mock-smoke
+
+# Live PUBLIC feeds, still PAPER execution only:
+# Install a regular wheel from a committed checkout (not editable/PYTHONPATH=src).
+# Use that installation's Python for the following commands.
+python -m bigan.build_provenance
+cp config/paper_operator.live.example.toml config/paper_operator.live.toml
+# Set source_commit to the VERIFIED installed wheel SHA; the template must fail unchanged.
+python -m bigan.paper_trading.stack --config config/paper_operator.live.toml --preflight
+python -m bigan.paper_trading.stack --config config/paper_operator.live.toml \
+  --duration 30m --report-dir artifacts/paper_soak/live-30m
+```
+
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080). Installed entry point:
+`bigan-paper-stack`. `dry_run=false` runs the actual public-feed **paper loop**,
+not real trading. Required flags: `paper_only=true`, `capital_at_risk=false`,
+`broker_exchange_write_enabled=false`, `live_exchange_write_enabled=false`,
+`polymarket_write_enabled=false`, `wallet_signing_enabled=false`.
+
+Choose a new empty report directory **outside** the paper output tree. Relative
+output paths use the launch working directory. SIGINT/SIGTERM or duration expiry
+stop Operator first, observe final STOPPED, stop Dashboard, then write reports.
+Child failures stop the stack; writers are never automatically restarted.
+PASS means clean sampled stability, WARN records recoverable issues, FAIL denotes
+safety/integrity/lifecycle failures. **No fill, HOLD or negative paper PnL is not
+a failure.** A report is valid only with `soak_complete.json`, matching artifact
+hashes, and no incomplete marker; never accept `soak_report.json` alone. See
+[startup and troubleshooting](docs/paper_trading/live_stack.md)
+(no market, stale feeds, 503, locks, ports, rollover pending) and
+[soak semantics and acceptance evidence](docs/paper_trading/soak_validation.md).
+
 ## Layout
 
 ```

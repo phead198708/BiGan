@@ -12,7 +12,7 @@ from bigan.paper_trading.operator.pricing_inputs import (
 )
 
 
-def _provider(*, max_samples: int = 10, min_returns: int = 2) -> RollingPricingInputsProvider:
+def _provider(*, max_samples: int = 10, min_returns: int = 2, lookback: int | None = None) -> RollingPricingInputsProvider:
     return RollingPricingInputsProvider(
         window_start_ts_ms=0,
         window_end_ts_ms=10_000,
@@ -26,6 +26,7 @@ def _provider(*, max_samples: int = 10, min_returns: int = 2) -> RollingPricingI
         volatility_min_samples=min_returns,
         volatility_max_abs_log_return=0.20,
         annualization_seconds=31_536_000,
+        oracle_twap_lookback_seconds=lookback,
     )
 
 
@@ -36,6 +37,43 @@ def _sample(ts_ms: int, price: float, source: str) -> ReferencePriceSample:
         price=price,
         source=source,
     )
+
+
+@pytest.mark.parametrize("lookback", [30, 60])
+def test_published_twap_is_not_window_average_and_uses_its_own_volatility(lookback):
+    provider = _provider(lookback=lookback)
+    for timestamp, spot, twap in [(1000, 100, 110), (2000, 200, 111), (3000, 50, 109)]:
+        assert provider.ingest_spot(_sample(timestamp, spot, provider.spot_source))
+        assert provider.ingest_oracle(_sample(timestamp, twap, provider.oracle_source))
+    inputs = provider(3000)
+    assert inputs.spot_price == 50  # Binance remains an independent observed input.
+    assert inputs.oracle_twap_so_far == 109  # Latest published TWAP, no second averaging.
+    assert inputs.twap_weight == 0
+    returns = [math.log(111 / 110), math.log(109 / 111)]
+    mean = sum(returns) / 2
+    expected = math.sqrt(sum((r - mean) ** 2 for r in returns) / 2 * 31536000)
+    assert inputs.volatility_annualized == pytest.approx(expected)
+    assert provider.config_identity()["volatility_source"] == "published_twap"
+    assert provider(4001) is None  # Independent source freshness is still mandatory.
+    provider.reset_for_reconnect()
+    assert provider(3000) is None
+
+
+def test_spot_updates_cannot_warm_published_twap_model():
+    provider = _provider(lookback=60)
+    for timestamp in (1000, 2000, 3000):
+        provider.ingest_spot(_sample(timestamp, 100, provider.spot_source))
+    provider.ingest_oracle(_sample(3000, 100, provider.oracle_source))
+    assert provider.return_sample_count == 0
+    assert provider(3000) is None
+
+
+def test_published_twap_outlier_is_atomic_and_does_not_advance_time():
+    provider = _provider(lookback=60)
+    provider.ingest_oracle(_sample(1000, 100, provider.oracle_source))
+    assert not provider.ingest_oracle(_sample(2000, 200, provider.oracle_source))
+    assert provider.last_oracle_timestamp_ms == 1000
+    assert provider.return_sample_count == 0
 
 
 def test_long_outage_return_is_not_assigned_to_short_volatility_window() -> None:

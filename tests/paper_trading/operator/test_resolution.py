@@ -12,7 +12,8 @@ def _row() -> dict[str, object]:
     return {
         "id": "market-1",
         "conditionId": "condition-1",
-        "slug": "btc-updown-15m-1000",
+        # Slug timestamps are seconds, while the explicit fields below are ms.
+        "slug": "btc-updown-15m-1",
         "question": "BTC 15 minute window 1000",
         "underlying": "BTC",
         "marketType": "binary_up_down",

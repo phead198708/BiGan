@@ -8,6 +8,9 @@ forward, or tunnel**. Only literal loopback listeners are accepted.
 
 ## Start in two terminals
 
+For one-command process lifecycle and soak reports, see
+[the local paper stack](live_stack.md). The standalone commands below remain supported.
+
 Install with `python -m pip install -e '.[dev]'` (or install the built wheel).
 Run both commands from the same working directory with exactly the same TOML.
 Relative `output_dir` paths retain the operator's existing working-directory
@@ -34,7 +37,12 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080). If the port is occupied, us
 another local port, such as `--port 8088`. SIGINT/SIGTERM stop only the dashboard.
 The one-shot mock operator normally finishes in `STOPPED`; its status then ages
 and the stale banner is expected. No fill is also a valid outcome, not an error.
-For a live public-feed paper operator, use the existing PR-B instructions; this
+For a live public-feed paper operator, use the
+[verified-wheel setup](live_stack.md). A standalone dashboard given a live
+configuration (`mock=false`, `dry_run=false`) also verifies its installed wheel
+against `source_commit` before constructing the reader or opening the listener,
+even without the Supervisor's hidden arguments. Source/editable installs remain
+available for mock/config-inspection use, not verified live display. This
 dashboard adds no live execution capability. A missing authoritative opening
 reference still leaves that operator safely degraded.
 
@@ -119,6 +127,12 @@ unavailable standalone account/history endpoint is 503. `STARTING` and
 `DISCOVERING` without a checkpoint remain displayable. Stale-but-valid status
 is ready; readiness is not permission to trade.
 
+PR-D adds safe `operator_identity` metadata (operator/strategy/account IDs,
+source commit and the existing config hash) to the combined view. `/healthz`
+also includes that identity and an optional stack launch `instance_id`; no
+complete config, credential, filesystem path or operator status-schema change
+is involved. Standalone callers may leave the launch ID unset.
+
 POST/PUT/PATCH/DELETE/OPTIONS are rejected with 405. No CORS is enabled. The
 server also validates local peers and Host values against loopback/localhost
 to resist accidental exposure and DNS rebinding. All responses, including
@@ -131,6 +145,21 @@ paths, SQL, tracebacks, or configuration. The service has no outbound requests.
 
 - **Operator:** state/reason, operator/strategy/run IDs, source commit, explicit
   paper-only/write-disabled safety, update time, age, and stale status.
+- **Market data (top of page):** fixed opening / price-to-beat reference and its
+  metadata or public-endpoint proof; latest accepted Chainlink reference (explicit
+  30s/60s published TWAP where applicable); Binance spot bid/ask midpoint; separate
+  UP/YES and DOWN/NO best ask (buy) and bid (sell), each with available shares,
+  token identity and event time. These observations come from the operator's
+  bounded feed state, **not** from `last_decision` or position marks. No decision,
+  Binance outage or insufficient volatility samples do not hide other sources.
+  Each source has independent connection/age/freshness; unreconciled CLOB depth
+  remains unavailable. Rollover clears the old observations. The additive
+  `status.market_data` projection is optional when reading older status files;
+  no fallback prices are fabricated. Opening proof is public JSON identity/hash
+  binding, **not a signed oracle report**.
+  The spot/alpha venue is explicitly labelled **Binance.US** or **Binance Global**;
+  they are separate order books, not interchangeable sources. See the
+  [Binance.US configuration and migration contract](binance_us.md).
 - **Account:** canonical lifetime initial bankroll, cash, equity, total/realized/
   unrealized PnL and fees. **Drawdown is the current run's canonical ledger
   drawdown**, not a newly computed lifetime statistic.
@@ -142,14 +171,15 @@ paths, SQL, tracebacks, or configuration. The service has no outbound requests.
   timestamps, ages, counters, OFI Z and available sample counts. Missing fields
   remain unavailable, never silently zero.
 - **Latest decision inputs:** recorded Spot, oracle TWAP, TWAP weight and
-  annualized volatility from `last_decision` only. No current raw Oracle price
-  or unrecorded per-component freshness is fabricated; the provider exposes
-  aggregate pricing health, and Oracle connection/freshness is in Chainlink.
+  annualized volatility from `last_decision` only; historical decision inputs
+  are deliberately separate from the current source observations above.
 - **History:** decision signal/probability/edge/EV/size and execution/cash;
   fills with fee/order/signal-event identity; settlement payouts/proceeds/PnL;
   runs with opening cash, settled state and predecessor.
 
-All times explicitly use UTC. Numbers use USDC. All external content is inserted
+All times explicitly use UTC. Account and contract quotes use USDC (contract prices
+are per share, before fees); Binance spot uses USDT and Chainlink/opening references
+use USD. Missing prices render as an em dash, not zero. All external content is inserted
 as text nodes, never executable HTML. The top banner always says
 **PAPER / SIMULATED — NO REAL FUNDS**. States use text/symbols as well as color.
 Tables scroll horizontally within responsive panels and support keyboard focus.
@@ -158,6 +188,8 @@ Polling occurs every two seconds after the preceding request completes (no
 overlap). Failures retain the last successful render and show a warning. Status
 is stale after `max(3 * status_interval_ms, 5000)` milliseconds; an ahead-of-reader
 timestamp is also warned. Browser age/countdown continues between polls.
+Individual quote ages also advance between polls. A failed refresh, stale status,
+stopped operator or expired window prevents any quote from being labelled fresh.
 
 ## Troubleshooting
 

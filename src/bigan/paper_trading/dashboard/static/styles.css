@@ -17,6 +17,20 @@ p { margin: .3rem 0; }
 .badge.bad { color: var(--bad); border-color: #954b56; }
 main { padding: 0 2rem; }
 .account-section { margin: .5rem 0 1.4rem; }
+.market-data-section { margin: .5rem 0 1.6rem; }
+.reference-grid, .contract-grid { display: grid; gap: .8rem; margin: .8rem 0; }
+.reference-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.contract-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.price-card { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: .6rem; padding: 1rem 1.2rem; overflow-wrap: anywhere; }
+.price-card h3 { color: var(--muted); font-size: .875rem; margin: 0 0 .4rem; }
+.price-card .price-value { display: block; font-size: 1.8rem; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.025em; }
+.price-card .price-unit { color: var(--muted); font-size: .8rem; }
+.price-card .badge { margin-top: .6rem; padding: .2rem .5rem; font-size: .75rem; }
+.price-card .fields { font-size: .8rem; gap: .3rem .7rem; }
+.price-card.up { border-top: 2px solid var(--accent); }
+.price-card.down { border-top: 2px solid var(--amber); }
+.price-card.up .price-value { color: var(--accent); }
+.price-card.down .price-value { color: var(--amber); }
 .section-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; margin-bottom: .8rem; }
 .section-heading h2 { margin: 0; }
 .section-heading > span, .hint { color: var(--muted); font-size: .875rem; }
@@ -55,5 +69,7 @@ footer { padding: 1rem 2rem 2rem; color: var(--muted); font-size: .875rem; }
 .skip-link { position: absolute; left: -999px; }
 .skip-link:focus { left: 1rem; top: 4rem; z-index: 5; padding: .8rem; background: var(--panel); color: var(--ink); }
 [hidden] { display: none !important; }
+@media (max-width: 900px) { .reference-grid { grid-template-columns: 1fr; } }
+@media (max-width: 600px) { .contract-grid { grid-template-columns: 1fr; } .price-card { padding: 1rem; } }
 @media (max-width: 900px) { .two-column { grid-template-columns: 1fr; gap: 0; } .feed-grid { grid-template-columns: 1fr; gap: 1rem; } .feed-card + .feed-card { border-left: 0; border-top: 1px solid var(--line); padding: 1rem 0 0; } }
 @media (max-width: 600px) { .paper-banner { padding: .6rem 1rem; font-size: .875rem; } .paper-banner span { float: none; display: block; font-size: .75rem; } .page-header { padding: 1.2rem 1rem; align-items: start; flex-direction: column; } .connection { text-align: left; } main, .notices { padding: 0 1rem; } .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .kpi { padding: .9rem; } .kpi .value { font-size: 1.35rem; } .section-heading { flex-wrap: wrap; gap: .3rem; } .fields { grid-template-columns: minmax(6rem, 1fr) minmax(0, 1.3fr); } .panel { padding: 1rem; } #error-banner { width: calc(100% - 2rem); } footer { padding: 1rem; } }

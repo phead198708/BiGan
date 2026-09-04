@@ -98,6 +98,9 @@ class BinanceOFICalculator:
         independent of this cap and uses only ``ts_ms - window_ms``.
     symbol:
         Expected Binance instrument id for payload ingest.
+    venue:
+        Transport-bound source identity (global or us). Payloads themselves do
+        not identify the venue; callers must bind both transports to this venue.
     """
 
     __slots__ = (
@@ -107,6 +110,7 @@ class BinanceOFICalculator:
         "zscore_clip",
         "max_events_cap",
         "symbol",
+        "venue",
         "_prev",
         "_ema",
         "_last_raw",
@@ -128,6 +132,7 @@ class BinanceOFICalculator:
         zscore_clip: float = ZSCORE_CLIP,
         max_events_cap: int = DEFAULT_MAX_EVENTS_CAP,
         symbol: str = "BTCUSDT",
+        venue: str = "global",
     ) -> None:
         if not 0.0 < float(ema_alpha) <= 1.0:
             raise ValueError("ema_alpha must be in (0, 1]")
@@ -141,12 +146,15 @@ class BinanceOFICalculator:
             raise ValueError("max_events_cap must be positive")
         if not str(symbol).strip():
             raise ValueError("symbol must be non-empty")
+        if venue not in ("global", "us"):
+            raise ValueError("venue must be global or us")
         self.ema_alpha = float(ema_alpha)
         self.window_ms = int(window_ms)
         self.zscore_min_samples = int(zscore_min_samples)
         self.zscore_clip = float(zscore_clip)
         self.max_events_cap = int(max_events_cap)
         self.symbol = str(symbol).upper()
+        self.venue = venue
         self._prev: TopOfBook | None = None
         self._ema: float | None = None
         self._last_raw = 0.0
@@ -195,6 +203,7 @@ class BinanceOFICalculator:
             "zscore_clip": self.zscore_clip,
             "max_events_cap": self.max_events_cap,
             "symbol": self.symbol,
+            "venue": self.venue,
         }
 
     def on_depth_update(

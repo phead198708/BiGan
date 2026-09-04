@@ -91,7 +91,14 @@ def effective_strike(
 
 
 class PolymarketPricingEngine:
-    """5m/15m binary win-probability, two-sided edge, and 1/4-Kelly sizer."""
+    """5m/15m binary probability, two-sided edge, and fractional Kelly.
+
+    published_twap models the published rolling TWAP as a lognormal reference
+    process with empirically measured TWAP volatility. This is a forecasting
+    approximation, NOT Chainlink's proprietary TWAP calculation or settlement.
+    Its strike is fixed at the opening TWAP; cumulative-window magnification
+    is only valid in the legacy window_average model.
+    """
 
     __slots__ = (
         "ofi_gamma",
@@ -99,6 +106,7 @@ class PolymarketPricingEngine:
         "min_edge_15m",
         "kelly_fraction",
         "tail_cutoff_ms",
+        "reference_model",
     )
 
     def __init__(
@@ -109,6 +117,7 @@ class PolymarketPricingEngine:
         min_edge_15m: float = DEFAULT_MIN_EDGE_15M,
         kelly_fraction: float = DEFAULT_KELLY_FRACTION,
         tail_cutoff_ms: int = DEFAULT_TAIL_CUTOFF_MS,
+        reference_model: str = "window_average",
     ) -> None:
         gamma = _finite_float("ofi_gamma", ofi_gamma)
         edge_5m = _finite_float("min_edge_5m", min_edge_5m)
@@ -130,6 +139,9 @@ class PolymarketPricingEngine:
         self.min_edge_15m = edge_15m
         self.kelly_fraction = fraction
         self.tail_cutoff_ms = cutoff
+        if reference_model not in {"window_average", "published_twap"}:
+            raise ValueError("unsupported pricing reference model")
+        self.reference_model = reference_model
 
     def config_identity(self) -> dict[str, object]:
         """Return every pricing parameter that can change a decision."""
@@ -140,6 +152,7 @@ class PolymarketPricingEngine:
             "min_edge_15m": self.min_edge_15m,
             "kelly_fraction": self.kelly_fraction,
             "tail_cutoff_ms": self.tail_cutoff_ms,
+            "reference_model": self.reference_model,
         }
 
     def effective_strike(
@@ -252,11 +265,18 @@ class PolymarketPricingEngine:
             raise ValueError("volatility_annualized must be non-negative")
         ts_ms = int(current_ts_ms)
         weight = _twap_weight(twap_weight)
-        k_eff = self.effective_strike(
-            strike_price=window.strike_price,
-            oracle_twap_so_far=oracle_twap_so_far,
-            twap_weight=weight,
-        )
+        probability_reference = spot
+        if self.reference_model == "published_twap":
+            if weight != 0:
+                raise ValueError("published TWAP must not use cumulative-window weights")
+            k_eff = _positive_float("strike_price", window.strike_price)
+            probability_reference = _positive_float("published_twap", oracle_twap_so_far)
+        else:
+            k_eff = self.effective_strike(
+                strike_price=window.strike_price,
+                oracle_twap_so_far=oracle_twap_so_far,
+                twap_weight=weight,
+            )
         remaining_ms = int(window.end_ts_ms) - ts_ms
         if weight == 1.0:
             p_yes = (
@@ -266,7 +286,7 @@ class PolymarketPricingEngine:
             )
         else:
             p_yes = self.calculate_probability(
-                spot_price=spot,
+                spot_price=probability_reference,
                 effective_strike=k_eff,
                 time_to_expiry_sec=remaining_ms / 1000.0,
                 volatility_annualized=vol,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
 
@@ -173,3 +174,44 @@ def test_real_gamma_shape_uses_exact_slug_family_not_fuzzy_title() -> None:
     assert parsed.start_ts_ms == 1_000_000
     assert parsed.resolution_identity.startswith("condition:condition-real")
     assert parsed.reference_price_at_start is None
+
+
+@pytest.mark.parametrize("duration,label", [(300_000, "5m"), (900_000, "15m")])
+@pytest.mark.parametrize("with_event_start", [False, True])
+def test_gamma_listing_time_is_not_window_start(duration, label, with_event_start):
+    # Recorded public Gamma shape: listing time is a day before eventStartTime.
+    start = 1_788_500_700_000
+    row = _row("4182957", start=start)
+    for key in ("start_ts_ms", "end_ts_ms", "windowDurationMs"):
+        row.pop(key)
+    row.update(slug=f"btc-updown-{label}-{start // 1000}",
+               startDate="2026-09-03T05:53:30.078891Z", startDateIso="2026-09-03",
+               endDate=datetime.fromtimestamp((start + duration) / 1000, UTC).isoformat())
+    if with_event_start:
+        row["eventStartTime"] = "2026-09-04T05:45:00Z"
+    market = parse_gamma_markets([row], source_endpoint=ENDPOINT, discovered_at_ms=start)[0]
+    assert market.start_ts_ms == start
+    assert market.end_ts_ms == start + duration
+    assert market.window_duration_ms == duration
+    assert market.reference_price_at_start is None  # No invented strike fallback.
+
+
+@pytest.mark.parametrize("mutation", [
+    {"eventStartTime": "1970-01-01T00:33:21Z"},
+    {"eventStartTime": "invalid"},
+    {"start_ts_ms": NOW + 1},
+    {"slug": "btc-updown-5m-2000"},
+])
+def test_conflicting_or_invalid_window_identity_fails_closed(mutation):
+    row = _row("conflict", start=NOW)
+    row.update(mutation)
+    with pytest.raises(MarketDiscoveryError, match="invalid market payload"):
+        parse_gamma_markets([row], source_endpoint=ENDPOINT, discovered_at_ms=NOW)
+
+
+def test_listing_date_alone_is_not_a_window_identity():
+    row = _row("unknown", start=NOW)
+    row.pop("start_ts_ms")
+    row.update(slug="noncanonical", startDate="1970-01-01T00:33:20Z")
+    with pytest.raises(MarketDiscoveryError, match="invalid market payload"):
+        parse_gamma_markets([row], source_endpoint=ENDPOINT, discovered_at_ms=NOW)

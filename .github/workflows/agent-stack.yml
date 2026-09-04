@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - "src/bigan/backtest/**"
+      - "src/bigan/build_provenance.py"
+      - "setup.py"
       - "src/bigan/data/polymarket_clob.py"
       - "src/bigan/execution/polymarket_oms.py"
       - "src/bigan/features/binance_ofi.py"
@@ -20,6 +22,7 @@ on:
       - "examples/__init__.py"
       - "docs/paper_trading/**"
       - "config/paper_operator.example.toml"
+      - "config/paper_operator.live.example.toml"
       - "README.md"
       - ".github/workflows/agent-stack.yml"
       - "pyproject.toml"
@@ -47,6 +50,7 @@ jobs:
       - name: Lint and type-check agent stack
         run: |
           python -m ruff check \
+            setup.py src/bigan/build_provenance.py \
             examples/__init__.py \
             src/bigan/backtest \
             src/bigan/data/polymarket_clob.py \
@@ -63,6 +67,7 @@ jobs:
             tests/paper_trading \
             tests/strategies/test_polymarket_pricing.py
           python -m mypy --follow-imports=skip \
+            src/bigan/build_provenance.py \
             src/bigan/backtest \
             src/bigan/data/polymarket_clob.py \
             src/bigan/execution/polymarket_oms.py \
@@ -89,4 +94,4 @@ jobs:
         run: |
           python -m pip wheel . --no-deps --wheel-dir "$RUNNER_TEMP/dashboard-wheel"
           python -m pip install --no-deps --target "$RUNNER_TEMP/dashboard-installed" "$RUNNER_TEMP/dashboard-wheel/"*.whl
-          python tests/paper_trading/dashboard/check_wheel_install.py "$RUNNER_TEMP/dashboard-installed"
+          python tests/paper_trading/dashboard/check_wheel_install.py "$RUNNER_TEMP/dashboard-installed" "$(git rev-parse HEAD)"

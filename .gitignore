@@ -23,6 +23,8 @@ ENV/
 
 # Data — never committed (repo-root dumps only; keep src/bigan/data and tests/data)
 /data/
+/artifacts/paper_soak/
+/config/paper_operator.live.toml
 *.parquet
 *.ndjson
 *.ndjson.gz

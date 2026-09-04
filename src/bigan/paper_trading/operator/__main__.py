@@ -11,6 +11,8 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
+from bigan.build_provenance import BuildProvenanceError, require_source_commit
+
 from .config import OperatorConfig, load_operator_config
 from .discovery import DiscoveredMarket, DiscoverySelection
 from .live import LiveFeedSupervisor
@@ -25,13 +27,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--check", action="store_true", help="validate and print safe identity")
     parser.add_argument("--mock-demo", action="store_true", help="run one local no-network demo")
+    parser.add_argument("--expected-config-sha256", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-source-commit", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     config = load_operator_config(args.config)
+    if args.expected_config_sha256 and config.config_sha256 != args.expected_config_sha256:
+        parser.error("Operator configuration identity changed before startup")
+    check_only = args.check or config.config_check_only or (config.dry_run and not args.mock_demo)
+    run_live = not check_only and not (args.mock_demo or config.mock)
+    if run_live or args.expected_source_commit:
+        try:
+            if args.expected_source_commit and config.source_commit != args.expected_source_commit:
+                raise BuildProvenanceError("source identity changed")
+            # Standalone and supervised live execution share the same gate.
+            require_source_commit(config.source_commit)
+        except BuildProvenanceError:
+            parser.error("Operator build provenance does not match expected source")
     logging.basicConfig(
         level=getattr(logging, config.logging_level),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    if args.check or config.config_check_only or (config.dry_run and not args.mock_demo):
+    if check_only:
         print(
             json.dumps(
                 {
@@ -58,7 +74,8 @@ async def _run_live(config: OperatorConfig) -> None:
     http = AiohttpPublicJSONClient()
     operator = PaperTradingOperator(
         config=config,
-        discovery=GammaDiscoveryClient(endpoint=config.gamma_markets_endpoint, http=http),
+        discovery=GammaDiscoveryClient(endpoint=config.gamma_markets_endpoint, http=http,
+                                       opening_reference_endpoint=config.opening_reference_endpoint),
         resolution=GammaResolutionClient(endpoint=config.resolution_endpoint, http=http),
         clock_ms=_now_ms,
     )

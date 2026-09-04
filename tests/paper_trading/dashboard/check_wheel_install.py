@@ -3,11 +3,33 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import socket
 import sys
 import tempfile
 from importlib.metadata import distributions
 from importlib.resources import files
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+
+def check_standalone_entrypoints(config_path: Path, *, accepted: bool) -> None:
+    from bigan.paper_trading.dashboard import __main__ as dashboard_cli
+    from bigan.paper_trading.operator import __main__ as operator_cli
+
+    # Keep the installed wheel's real provenance checks, but never contact an
+    # exchange, start a listener, or acquire an account writer in this smoke test.
+    with (patch.object(operator_cli, "_run_live", new_callable=AsyncMock) as live,
+          patch.object(dashboard_cli.web, "run_app") as serve):
+        for entrypoint, start in ((operator_cli.main, live), (dashboard_cli.main, serve)):
+            try:
+                result = entrypoint(["--config", str(config_path)])
+            except SystemExit as exc:
+                assert not accepted and exc.code == 2
+                start.assert_not_called()
+            else:
+                assert accepted and result == 0
+                start.assert_called_once()
 
 
 def main() -> None:
@@ -16,17 +38,59 @@ def main() -> None:
     from aiohttp.test_utils import TestClient, TestServer
 
     import bigan.paper_trading.dashboard as dashboard
+    import bigan.paper_trading.stack as stack
+    from bigan.build_provenance import (
+        BuildProvenanceError,
+        require_source_commit,
+        runtime_provenance,
+    )
     from bigan.paper_trading.dashboard.reader import DashboardReader
     from bigan.paper_trading.dashboard.server import create_app
     from bigan.paper_trading.operator.config import OperatorConfig
+    from bigan.paper_trading.stack.preflight import PreflightError, preflight
 
     assert Path(dashboard.__file__).is_relative_to(target)
+    assert Path(stack.__file__).is_relative_to(target)
+    assert any(
+        point.name == "bigan-paper-stack" and point.value == "bigan.paper_trading.stack.__main__:main"
+        for distribution in distributions(path=[str(target)]) for point in distribution.entry_points
+    )
     assert any(
         point.name == "bigan-paper-dashboard" and point.value == "bigan.paper_trading.dashboard.__main__:main"
         for distribution in distributions(path=[str(target)]) for point in distribution.entry_points
     )
     for name in ("index.html", "app.js", "styles.css"):
         assert files(dashboard).joinpath("static", name).read_bytes()
+    provenance = runtime_provenance()
+    assert provenance["source_commit"] == sys.argv[2], "wheel must seal the Git revision supplied by the build job"
+    try:
+        require_source_commit("0" * 40)
+    except BuildProvenanceError:
+        pass
+    else:
+        raise AssertionError("mismatched source was accepted")
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        config_path = root / "live.toml"
+        values = {"operator_id": "wheel-test", "strategy_id": "test", "paper_account_id": "test",
+                  "source_commit": provenance["source_commit"], "output_dir": str(root / "never-created"),
+                  "mock": False, "dry_run": False}
+        config_path.write_text("\n".join(f"{key} = {json.dumps(value)}" for key, value in values.items()))
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        assert preflight(config_path=config_path, port=port).build_provenance == provenance
+        check_standalone_entrypoints(config_path, accepted=True)
+        values["source_commit"] = "0" * 40
+        config_path.write_text("\n".join(f"{key} = {json.dumps(value)}" for key, value in values.items()))
+        try:
+            preflight(config_path=config_path, port=port)
+        except PreflightError:
+            pass
+        else:
+            raise AssertionError("incorrect declared wheel source was accepted")
+        check_standalone_entrypoints(config_path, accepted=False)
+        assert not (root / "never-created").exists()
 
     async def check() -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -40,7 +104,7 @@ def main() -> None:
                 assert (await client.get("/readyz")).status == 503
             assert not await asyncio.to_thread(Path(config.output_dir).exists)
     asyncio.run(check())
-    print("Installed wheel serves all packaged assets independently of source cwd; no paper output created.")
+    print("Installed wheel verifies its sealed source, rejects mismatches, and serves assets; no paper output created.")
 
 
 if __name__ == "__main__":

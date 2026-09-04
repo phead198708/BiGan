@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import Mapping
 from contextlib import AbstractAsyncContextManager
+from datetime import UTC, datetime
 
 import pytest
 
@@ -171,7 +172,18 @@ async def test_public_websocket_subscribes_and_buffers_before_bootstrap() -> Non
 
 async def test_public_websocket_supports_application_ping_and_protocol_pong() -> None:
     stop = asyncio.Event()
-    socket = FakeSocket([TimeoutError(), json.dumps({"value": 1})])
+
+    class HeartbeatSocket(FakeSocket):
+        async def recv(self):
+            await self.message_delivered.wait()
+            self.message_delivered.clear()
+            return json.dumps({"value": 1})
+
+        async def ping(self):
+            self.pings += 1
+            self.message_delivered.set()
+
+    socket = HeartbeatSocket([])
 
     async def on_payload(*_args: object) -> None:
         stop.set()
@@ -182,7 +194,7 @@ async def test_public_websocket_supports_application_ping_and_protocol_pong() ->
         queue_size=2,
         reconnect_min_seconds=1,
         reconnect_max_seconds=2,
-        heartbeat_interval_seconds=1,
+        heartbeat_interval_seconds=0.02,
         application_heartbeat="PING",
         clock_ms=lambda: 1_000,
         on_payload=on_payload,
@@ -194,6 +206,27 @@ async def test_public_websocket_supports_application_ping_and_protocol_pong() ->
 
     assert socket.sent[1] == "PING"
     assert socket.pings == 1
+
+
+async def test_empty_rtds_subscription_frame_does_not_reconnect_or_publish():
+    stop = asyncio.Event()
+    socket = FakeSocket(["", b"", "  ", json.dumps({"value": 1})])
+    seen = []
+
+    async def on_payload(payload, generation, received):
+        seen.append(payload)
+        stop.set()
+
+    transport = PublicWebSocketTransport(
+        endpoint="wss://ws-live-data.polymarket.com", subscription=chainlink_subscription("btc/usd", 60),
+        queue_size=4, on_payload=on_payload, on_generation=lambda generation: None, on_disconnect=lambda: None,
+        reconnect_min_seconds=1, reconnect_max_seconds=2, heartbeat_interval_seconds=5,
+        clock_ms=lambda: 1000, connect_factory=FakeConnector([socket]),
+    )
+    await transport.run(stop)
+    assert seen == [{"value": 1}]
+    assert transport.message_count == 1
+    assert transport.parse_error_count == transport.connection_error_count == transport.reconnect_count == 0
 
 
 @pytest.mark.parametrize(
@@ -323,11 +356,12 @@ async def test_chainlink_transport_reuses_strict_parser() -> None:
 def test_subscription_contracts_are_public_and_identity_bound() -> None:
     assert binance_subscription("BTCUSDT")["params"] == ["btcusdt@depth@100ms"]
     assert chainlink_subscription("BTC/USD")["subscriptions"] == [
-        {"topic": "crypto_prices_chainlink", "type": "update", "filters": "btc/usd"}
+        {"topic": "crypto_prices_chainlink", "type": "update", "filters": '{"symbol":"btc/usd"}'}
     ]
 
 
-async def test_gamma_client_queries_deterministic_exact_current_and_next_slugs() -> None:
+@pytest.mark.parametrize("public_shape", [False, True])
+async def test_gamma_client_queries_deterministic_exact_current_and_next_slugs(public_shape) -> None:
     class SlugHTTP:
         def __init__(self) -> None:
             self.slugs: list[str] = []
@@ -338,7 +372,7 @@ async def test_gamma_client_queries_deterministic_exact_current_and_next_slugs()
             start = int(slug.rsplit("-", 1)[1]) * 1_000
             if start > 2_700_000:
                 return []
-            return [
+            rows = [
                 {
                     "id": f"market-{start}",
                     "conditionId": f"condition-{start}",
@@ -355,6 +389,14 @@ async def test_gamma_client_queries_deterministic_exact_current_and_next_slugs()
                     "referencePriceAtStart": 100_000,
                 }
             ]
+            if public_shape:
+                row = rows[0]
+                row.pop("start_ts_ms")
+                row.pop("end_ts_ms")
+                row["startDate"] = "1970-01-01T00:00:00Z"
+                row["eventStartTime"] = datetime.fromtimestamp(start / 1000, UTC).isoformat()
+                row["endDate"] = datetime.fromtimestamp((start + 900_000) / 1000, UTC).isoformat()
+            return rows
 
     http = SlugHTTP()
     client = GammaDiscoveryClient(

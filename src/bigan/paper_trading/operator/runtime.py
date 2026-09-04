@@ -25,6 +25,7 @@ from bigan.strategies.polymarket_pricing import (
     PolymarketPricingEngine,
 )
 
+from .chainlink_twap import oracle_source
 from .checkpoint import (
     AccountCheckpoint,
     AccountCheckpointStore,
@@ -33,8 +34,10 @@ from .checkpoint import (
     run_link_store,
 )
 from .config import OperatorConfig
+from .diagnostics import DiagnosticBuffer, DiagnosticCode
 from .discovery import DiscoveredMarket, DiscoveryFilters, DiscoverySelection
 from .feeds import BinanceDepthSynchronizer, FeedHealth, PolymarketBookSynchronizer
+from .market_data import reference_observation
 from .ownership import AccountProcessLock
 from .pricing_inputs import ReferencePriceSample, RollingPricingInputsProvider
 from .read_model import (
@@ -118,6 +121,7 @@ class PaperTradingOperator:
         self._oracle_connected = False
         self._oracle_connection_generation = 0
         self._oracle_reconnect_count = 0
+        self._oracle_diagnostics = DiagnosticBuffer()
         self.counters: dict[str, int] = {
             "decisions": 0,
             "fills": 0,
@@ -237,6 +241,7 @@ class PaperTradingOperator:
                 payload,
                 generation=generation,
                 received_at_ms=received,
+                now_ms=self.clock_ms(),
             )
             if accepted and self.binance_sync.last_top_changed:
                 event_ts = self.binance_sync.last_event_ts_ms
@@ -333,6 +338,7 @@ class PaperTradingOperator:
                 payload,
                 generation=generation,
                 received_at_ms=received_at_ms,
+                now_ms=self.clock_ms(),
             )
             if accepted and self.binance_sync.last_top_changed:
                 accepted = self._ingest_spot_from_binance(
@@ -399,6 +405,27 @@ class PaperTradingOperator:
             if self.pricing_provider is not None:
                 self.pricing_provider.reset_for_reconnect()
             self._update_gate_state()
+            self._publish_status()
+
+    async def record_transport_diagnostic(
+        self, source: str, code: DiagnosticCode, *, window_generation: int,
+        connection_generation: int, timestamp_ms: int,
+    ) -> None:
+        async with self._lock:
+            if not self._can_accept_generation(window_generation):
+                return
+            if source == "chainlink":
+                if connection_generation < self._oracle_connection_generation:
+                    return
+                target = self._oracle_diagnostics
+            elif source in {"binance", "polymarket"}:
+                sync = self.binance_sync if source == "binance" else self.market_sync
+                if sync is None or _connection_generation(window_generation, connection_generation) < sync.generation:
+                    return
+                target = sync.diagnostics
+            else:
+                raise ValueError("unknown diagnostic source")
+            target.record(code, timestamp_ms=timestamp_ms, generation=connection_generation)
             self._publish_status()
 
     async def disconnect_feed(self, source: str, *, window_generation: int) -> None:
@@ -518,6 +545,7 @@ class PaperTradingOperator:
         binance_health = None if self.binance_sync is None else self.binance_sync.health(now_ms=now_ms)
         market_health = None if self.market_sync is None else self.market_sync.health(now_ms=now_ms)
         binance_health_payload = _health_dict(binance_health)
+        binance_health_payload.update(self.config.binance_source_identity())
         if self.binance_sync is not None:
             binance_health_payload.update(
                 {
@@ -525,11 +553,13 @@ class PaperTradingOperator:
                     "ask_level_count": self.binance_sync.ask_level_count,
                     "book_level_limit": self.binance_sync.book_level_limit,
                     "book_overflow_count": self.binance_sync.book_overflow_count,
+                    "diagnostics": self.binance_sync.diagnostics.to_dict(),
                 }
             )
         market_health_payload = _health_dict(market_health)
         if self.market_sync is not None:
             market_health_payload["tokens"] = self.market_sync.token_health(now_ms=now_ms)
+            market_health_payload["diagnostics"] = self.market_sync.diagnostics.to_dict()
         pricing_health = (
             None if self.pricing_provider is None else self.pricing_provider.health(now_ms=now_ms)
         )
@@ -614,14 +644,18 @@ class PaperTradingOperator:
                     "gap_count": 0,
                     "reconnect_count": self._oracle_reconnect_count,
                     "error_count": 0,
+                    "diagnostics": self._oracle_diagnostics.to_dict(),
                 },
             },
             pricing_inputs=(
                 _unavailable_pricing_health()
-                if pricing_health is None
-                else pricing_health.to_dict()
+                if pricing_health is None or self.pricing_provider is None
+                else {**pricing_health.to_dict(), "diagnostics": self.pricing_provider.diagnostics.to_dict()}
             ),
             alpha={
+                "venue": self.config.binance_venue,
+                "source": self._spot_source,
+                "symbol": self.config.binance_symbol,
                 "timestamp_ms": alpha_ts,
                 "age_ms": alpha_age,
                 "fresh": alpha_fresh,
@@ -646,7 +680,54 @@ class PaperTradingOperator:
                 "status": settlement_status,
                 "source_reference": settlement_reference,
             },
+            market_data=self._market_data(now_ms=now_ms),
         )
+
+    def _market_data(self, *, now_ms: int) -> dict[str, object]:
+        """Project accepted feed data even when another feed blocks decisions."""
+        market, provider = self.active_market, self.pricing_provider
+        if market is None:
+            return {}
+        active = self.state not in {
+            OperatorState.STOPPING, OperatorState.STOPPED, OperatorState.FAILED,
+            OperatorState.EXHAUSTED,
+        }
+        quotes = {} if self.market_sync is None else self.market_sync.quote_observations(now_ms=now_ms)
+        if not active:
+            for quote in quotes.values():
+                quote.update(connected=False, fresh=False)
+        lookback = market.oracle_twap_lookback_seconds
+        spot = reference_observation(
+            None if provider is None else provider.last_spot_sample,
+            source=self._spot_source, symbol=self.config.binance_symbol,
+            kind="midpoint", currency="USDT", now_ms=now_ms,
+            max_age_ms=self.config.max_pricing_age_ms,
+            connected=bool(active and self.binance_sync is not None and self.binance_sync.connected),
+        )
+        spot["fresh"] = bool(
+            spot["fresh"] and self.binance_sync is not None
+            and self.binance_sync.health(now_ms=now_ms).fresh
+        )
+        spot["venue"] = self.config.binance_venue
+        return {
+            "window_id": market.window_id,
+            "market_id": market.market_id,
+            "underlying": self.config.underlying,
+            "spot": spot,
+            "oracle": {
+                **reference_observation(
+                    None if provider is None else provider.last_oracle_sample,
+                    source=self._oracle_source, symbol=self.config.chainlink_symbol,
+                    kind="published_twap" if lookback is not None else "oracle_price",
+                    currency="USD", now_ms=now_ms,
+                    max_age_ms=self.config.max_pricing_age_ms,
+                    connected=active and self._oracle_connected,
+                ),
+                "lookback_seconds": lookback,
+            },
+            "up": quotes.get("yes", {}),
+            "down": quotes.get("no", {}),
+        }
 
     async def _process_snapshot_locked(
         self,
@@ -731,7 +812,9 @@ class PaperTradingOperator:
         self._publish_status(force=True)
 
     def _activate_market(self, market: DiscoveredMarket, *, bankroll: float | None) -> None:
-        if market.reference_price_at_start is None:
+        if market.reference_price_at_start is None or (
+            market.oracle_twap_lookback_seconds is not None and market.opening_reference is None
+        ):
             raise AuthoritativeReferenceUnavailable(
                 "market discovery lacks authoritative reference price at start"
             )
@@ -851,6 +934,7 @@ class PaperTradingOperator:
         self.session = session
         self.active_market = market
         self.pricing_provider = pricing
+        self._oracle_diagnostics = DiagnosticBuffer()
         self.binance_sync = binance
         self.market_sync = market_sync
         self._oracle_connected = False
@@ -894,12 +978,13 @@ class PaperTradingOperator:
             zscore_clip=self.config.ofi_clip,
             max_events_cap=self.config.ofi_max_events,
             symbol=self.config.binance_symbol,
+            venue=self.config.binance_venue,
         )
         pricing_provider = RollingPricingInputsProvider(
             window_start_ts_ms=market.start_ts_ms,
             window_end_ts_ms=market.end_ts_ms,
             spot_source=self._spot_source,
-            oracle_source=self._oracle_source,
+            oracle_source=oracle_source(self.config.chainlink_symbol, market.oracle_twap_lookback_seconds),
             max_age_ms=self.config.max_pricing_age_ms,
             max_samples=self.config.pricing_sample_buffer_size,
             twap_window_ms=self.config.twap_window_ms,
@@ -908,6 +993,7 @@ class PaperTradingOperator:
             volatility_min_samples=self.config.volatility_min_samples,
             volatility_max_abs_log_return=self.config.volatility_max_abs_log_return,
             annualization_seconds=self.config.annualization_seconds,
+            oracle_twap_lookback_seconds=market.oracle_twap_lookback_seconds,
         )
         provider_identity = hashlib.sha256(
             json.dumps(
@@ -960,6 +1046,7 @@ class PaperTradingOperator:
                 min_edge_15m=self.config.pricing_min_edge_15m,
                 kelly_fraction=self.config.pricing_kelly_fraction,
                 tail_cutoff_ms=self.config.pricing_tail_cutoff_ms,
+                reference_model="window_average" if market.oracle_twap_lookback_seconds is None else "published_twap",
             ),
             oms=oms,
             feed_handler=feed_handler,
@@ -980,6 +1067,7 @@ class PaperTradingOperator:
             max_age_ms=self.config.max_alpha_age_ms,
             delta_buffer_size=self.config.binance_delta_buffer_size,
             book_level_limit=self.config.binance_book_level_limit,
+            clock_ahead_tolerance_ms=self.config.binance_clock_ahead_tolerance_ms,
         )
         market_sync = PolymarketBookSynchronizer(
             window_id=market.window_id,
@@ -992,11 +1080,12 @@ class PaperTradingOperator:
 
     @property
     def _spot_source(self) -> str:
-        return f"binance_depth:{self.config.binance_symbol}"
+        return self.config.binance_spot_source
 
     @property
     def _oracle_source(self) -> str:
-        return f"polymarket_rtds_chainlink:{self.config.chainlink_symbol.lower()}"
+        return oracle_source(self.config.chainlink_symbol, None if self.active_market is None
+                             else self.active_market.oracle_twap_lookback_seconds)
 
     def _load_account_checkpoint(self) -> AccountCheckpoint | None:
         checkpoint = self.checkpoint_store.load(config_sha256=self.config.config_sha256)
@@ -1154,6 +1243,8 @@ class PaperTradingOperator:
                 "resolution_source": market.resolution_source,
                 "resolution_identity": market.resolution_identity,
                 "reference_price_at_start": market.reference_price_at_start,
+                "oracle_twap_lookback_seconds": market.oracle_twap_lookback_seconds,
+                "opening_reference": market.provenance()["opening_reference"],
             },
         }
 

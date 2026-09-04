@@ -12,6 +12,18 @@ ROUTES = ["/", "/healthz", "/readyz", "/api/v1/dashboard", "/api/v1/status", "/a
           "/static/app.js", "/static/styles.css"]
 
 
+async def test_dashboard_exposes_actual_source_observations(client, bundle):
+    response = await client.get("/api/v1/dashboard")
+    view = await response.json()
+    prices = view["status"]["market_data"]
+    assert prices == bundle.operator.status().market_data
+    assert view["active_market"]["reference_price_at_start"] == 100
+    assert prices["spot"]["value"] == 102
+    assert prices["oracle"]["value"] == 100
+    assert prices["up"]["ask"] == 0.10
+    assert prices["down"]["ask"] == 0.90
+
+
 @pytest.mark.parametrize("route", ROUTES)
 @pytest.mark.parametrize("method", ["GET", "HEAD"])
 async def test_routes_headers_and_head(client, route, method):

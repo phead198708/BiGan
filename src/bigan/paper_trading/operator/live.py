@@ -7,6 +7,8 @@ import json
 from collections.abc import Mapping
 from contextlib import suppress
 
+from .chainlink_twap import oracle_source
+from .diagnostics import DiagnosticCode, FeedResyncRequired
 from .pricing_inputs import ReferencePriceSample
 from .read_model import OperatorState
 from .runtime import PaperTradingOperator
@@ -90,13 +92,24 @@ class LiveFeedSupervisor:
                 received_at_ms=self.operator.clock_ms(),
             )
             if not accepted:
-                raise ConnectionError("Binance depth bootstrap did not synchronize")
+                raise FeedResyncRequired("Binance depth bootstrap did not synchronize")
 
         async def binance_payload(
             payload: Mapping[str, object],
             connection_generation: int,
             received_at_ms: int,
         ) -> None:
+            # Some exchange clocks lead local receipt by a few milliseconds.
+            # Wait boundedly, keep both original timestamps, and let the
+            # synchronizer re-check local time. Large leads still fail closed.
+            event = payload.get("data", payload)
+            event_ts = event.get("E") if isinstance(event, Mapping) else None
+            if type(event_ts) is int:
+                delay_ms = event_ts - self.operator.clock_ms()
+                tolerance = config.binance_clock_ahead_tolerance_ms
+                if (0 < delay_ms <= tolerance
+                        and event_ts <= received_at_ms + tolerance):
+                    await asyncio.sleep(delay_ms / 1_000)
             accepted = await self.operator.ingest_binance_connection_delta(
                 dict(payload),
                 window_generation=window_generation,
@@ -105,7 +118,7 @@ class LiveFeedSupervisor:
             )
             synchronizer = self.operator.binance_sync
             if not accepted and synchronizer is not None and synchronizer.needs_bootstrap:
-                raise ConnectionError("Binance depth gap requires immediate re-bootstrap")
+                raise FeedResyncRequired("Binance depth gap requires immediate re-bootstrap")
 
         async def market_payload(
             payload: Mapping[str, object],
@@ -118,6 +131,9 @@ class LiveFeedSupervisor:
                 connection_generation=connection_generation,
                 received_at_ms=received_at_ms,
             )
+            synchronizer = self.operator.market_sync
+            if synchronizer is not None and synchronizer.needs_bootstrap:
+                raise FeedResyncRequired("Polymarket depth requires a fresh full-book subscription")
 
         async def oracle_sample(
             sample: ReferencePriceSample,
@@ -130,8 +146,9 @@ class LiveFeedSupervisor:
 
         chainlink = ChainlinkReadonlyFeed(
             expected_symbol=config.chainlink_symbol,
-            source=f"polymarket_rtds_chainlink:{config.chainlink_symbol.lower()}",
+            source=oracle_source(config.chainlink_symbol, market.oracle_twap_lookback_seconds),
             on_sample=oracle_sample,
+            lookback_seconds=market.oracle_twap_lookback_seconds,
         )
 
         async def chainlink_payload(
@@ -145,8 +162,17 @@ class LiveFeedSupervisor:
                 received_at_ms=received_at_ms,
             )
 
+        def diagnostics(source: str):
+            async def record(code: DiagnosticCode, generation: int, timestamp_ms: int) -> None:
+                await self.operator.record_transport_diagnostic(
+                    source, code, window_generation=window_generation,
+                    connection_generation=generation, timestamp_ms=timestamp_ms,
+                )
+            return record
+
         binance = PublicWebSocketTransport(
             endpoint=config.binance_ws_url,
+            on_diagnostic=diagnostics("binance"),
             subscription=binance_subscription(config.binance_symbol),
             queue_size=config.binance_queue_size,
             on_payload=binance_payload,
@@ -161,6 +187,7 @@ class LiveFeedSupervisor:
         )
         polymarket = PublicWebSocketTransport(
             endpoint=config.polymarket_ws_url,
+            on_diagnostic=diagnostics("polymarket"),
             subscription={
                 "assets_ids": [market.yes_token_id, market.no_token_id],
                 "type": "market",
@@ -183,7 +210,8 @@ class LiveFeedSupervisor:
         )
         chainlink_transport = PublicWebSocketTransport(
             endpoint=config.chainlink_ws_url,
-            subscription=chainlink_subscription(config.chainlink_symbol),
+            on_diagnostic=diagnostics("chainlink"),
+            subscription=chainlink_subscription(config.chainlink_symbol, market.oracle_twap_lookback_seconds),
             queue_size=config.binance_queue_size,
             on_payload=chainlink_payload,
             on_generation=lambda connection_generation: self.operator.begin_oracle_connection(
@@ -195,7 +223,7 @@ class LiveFeedSupervisor:
             ),
             reconnect_min_seconds=config.reconnect_min_seconds,
             reconnect_max_seconds=config.reconnect_max_seconds,
-            heartbeat_interval_seconds=config.heartbeat_interval_seconds,
+            heartbeat_interval_seconds=min(5.0, config.heartbeat_interval_seconds),
             clock_ms=self.operator.clock_ms,
             application_heartbeat="PING",
         )

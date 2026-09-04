@@ -341,17 +341,38 @@ python -m bigan.paper_trading.operator \
   --config config/paper_operator.example.toml --mock-demo
 ```
 
-For public live data, copy the file, set `mock=false` and `dry_run=false`, and
-set `source_commit` to the deployed revision. This changes only data sources;
-all executions remain simulated and paper-only.
+For public live data, install a verified regular wheel (see
+[live stack build instructions](live_stack.md)), copy the live example, set
+`mock=false` and `dry_run=false`, and set `source_commit` to the verified SHA
+from `python -m bigan.build_provenance`. The standalone command is:
+
+```bash
+python -m bigan.paper_trading.operator --config config/paper_operator.live.toml
+```
+
+Before any live network connection or account/session creation, the CLI always
+verifies its installed package against that SHA. It does not need a Supervisor
+or hidden expected-source argument to enforce this gate. Missing/modified build
+provenance and mismatched SHAs exit with status 2. Config-only checks and offline
+mock execution remain available from source/editable installs; a successful
+`--check` validates configuration, not live build readiness. All executions
+remain simulated and paper-only.
 
 ## Known limitations
 
-- Gamma does not consistently publish the authoritative price-to-beat for an
-  already-running up/down window. The operator accepts an explicit
-  `referencePriceAtStart`/`priceToBeat`; when it is absent it stays degraded
-  rather than substituting current spot or CLOB mid. A later integration can
-  add a separately proven historical Chainlink start-price lookup.
+Gamma window start is resolved from `start_ts_ms`, `eventStartTime`, and the
+timestamp of the exact supported up/down slug family. When multiple are present
+they must agree; the declared duration must also match the slug and end time.
+`startDate`/`startDateIso` are not window-start fallbacks: live responses can
+contain a listing date from the preceding day. Missing/conflicting authoritative
+window identity fails closed. Gamma lists `eventStartTime` separately in its
+[market response schema](https://docs.polymarket.com/api-reference/markets/list-markets).
+
+- For declared Chainlink TWAP markets, opening price comes from Polymarket's
+  window-bound public website price service, with immutable provenance and no
+  current-price fallback. This endpoint is not a versioned Gamma API; missing or
+  changed responses stop activation. See [opening reference and TWAP model](opening_twap_reference.md)
+  for source identity, RTDS topics, resume behavior and approximation limitations.
 - The process is single strategy, single paper account, and one active window.
 - Metrics are bounded in-memory counters projected to JSON; no new monitoring
   service or large database is introduced.

@@ -84,13 +84,14 @@ def _query(request: web.Request, reader: DashboardReader, *, history: bool) -> t
     return limit, cursor
 
 
-def create_app(reader: DashboardReader) -> web.Application:
+def create_app(reader: DashboardReader, *, instance_id: str | None = None) -> web.Application:
     app = web.Application(middlewares=[security], client_max_size=1024)
     slots = asyncio.Semaphore(4)
 
     async def live(request: web.Request) -> web.Response:
         _query(request, reader, history=False)
-        return _json({"alive": True, "paper_only": True, "read_only": True})
+        return _json({"alive": True, "paper_only": True, "read_only": True,
+                      "instance_id": instance_id, "operator_identity": reader.operator_identity})
 
     async def status(request: web.Request) -> web.Response:
         _query(request, reader, history=False)

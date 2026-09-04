@@ -134,11 +134,23 @@ class DashboardReader:
             warnings.append(_warning("STATUS_STALE", "Operator status is stale or its clock is ahead", "status"))
         return {
             "schema_version": 1, "generated_at_ms": now, "stale": stale,
+            "operator_identity": self.operator_identity,
             "status_age_ms": age, "stale_after_ms": self.stale_after_ms,
             "status": status.to_dict(), "active_market": status.active_market,
             "account": None, "positions": None,
             "recent": dict.fromkeys(SECTIONS), "warnings": warnings,
             "query_defaults": {"limit": self.config.recent_query_default, "max_limit": self.config.recent_query_max},
+        }
+
+    @property
+    def operator_identity(self) -> dict[str, str]:
+        """Safe deployment identity; never expose the complete configuration."""
+        return {
+            "operator_id": self.config.operator_id,
+            "strategy_id": self.config.strategy_id,
+            "paper_account_id": self.config.paper_account_id,
+            "source_commit": self.config.source_commit,
+            "config_sha256": self.config.config_sha256,
         }
 
     def _repository(self, status: OperatorStatus, checkpoint: AccountCheckpoint) -> OperatorReadRepository:
