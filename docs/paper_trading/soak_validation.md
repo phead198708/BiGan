@@ -85,14 +85,43 @@ bounded serial polling. CI makes no Binance/Polymarket/Chainlink requests.
 
 ## Manual acceptance evidence
 
-Evidence is recorded after the final implementation checks in this PR. A live
-report must come from an actual run, not a mock renamed as live. On this host,
+Implementation commit: `6227e20a753f3adb3d2901bc0e7f202127585044`.
+
+On 2026-09-04 the **two-minute mock stack passed** (124.211 s including process
+startup/shutdown): 61/61 polls successful, all sampled feeds fresh, 1 observed
+settlement/rollover, final STOPPED, no warnings/hard failures. Activity lower
+bounds: 453 decisions, 23 fills, 299 HOLDs. The deployment used default strategy
+parameters, a temporary independent output/report tree and the exact commit
+above as source identity. Its config SHA is recorded in the unmodified report;
+the deployment-specific config/output paths are not published.
+
+- [Machine report](evidence/mock-2m/soak_report.json)
+- [Attachable Markdown summary](evidence/mock-2m/soak_summary.md)
+- [Running desktop](images/stack/stack-running.png), [mobile](images/stack/stack-mobile.png),
+  [after rollover](images/stack/stack-rollover.png), [STOPPED](images/stack/stack-stopped.png),
+  [last view retained after disconnect](images/stack/stack-disconnected.png)
+
+External Playwright/Chrome acceptance verified the permanent paper banner,
+account cards, mobile overflow, two-run history, STOPPED before dashboard exit,
+last-view retention after disconnect, and no page errors. The reusable optional
+script is `tests/paper_trading/stack/browser_acceptance.cjs`; no Node/browser
+runtime dependency is added to the package. All owned children were reaped.
+
+Automated results: 90 stack tests; 491 paper-trading tests (included in the
+651-test full agent-stack suite). Ruff, MyPy (47 source files), compileall,
+diff whitespace checks and wheel build/isolated installation checks passed.
+The installed wheel includes both console entry points and serves all assets
+independently of source cwd. Real subprocess tests cover SIGINT/SIGTERM,
+crashes, deadlines, locked accounts and no automatic writer restart. A rare
+concurrent rollback-journal read can truthfully produce WARN in offline E2E;
+tests permit only that expected availability warning, never hide it to force PASS.
+
+A live report must come from an actual run, not a mock renamed as live. On this host,
 the public Binance depth probe returned **HTTP 451** on 2026-09-04. That blocks
 the required REST bootstrap. Consequently the required **30-minute live soak
 has not been executed** and remains a deployment acceptance prerequisite from
 an environment with legitimate access to all required public endpoints. No
 endpoint allowlist bypass, alternate private source or fabricated fill is used.
 
-The mock report and dashboard screenshots are attached separately after the
-two-minute local acceptance run. They demonstrate process/ledger/UI integration,
-not public feed availability or production profitability.
+These mock artifacts demonstrate process/ledger/UI integration, not public
+feed availability, a complete 15-minute live market or production profitability.
