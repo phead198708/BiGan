@@ -11,6 +11,12 @@ import pytest
 from bigan.paper_trading.operator.ownership import AccountProcessLock
 from bigan.paper_trading.operator.runtime import PaperTradingOperator
 from bigan.paper_trading.stack.preflight import preflight
+from bigan.paper_trading.stack.report import (
+    COMPLETE_FILE,
+    INCOMPLETE_FILE,
+    ReportWriter,
+    load_completed_report,
+)
 from bigan.paper_trading.stack.supervisor import PaperStackSupervisor
 from tests.paper_trading.stack.conftest import free_port, write_config
 
@@ -151,3 +157,29 @@ async def test_parent_never_constructs_writer_or_takes_account_lock(tmp_path, mo
     monkeypatch.setattr(PaperTradingOperator, "__init__", forbidden)
     assert await stack.run() == 0  # Children import their own unpatched modules.
     assert_reaped(stack)
+
+
+@pytest.mark.parametrize("failure_at", [1, 2])
+async def test_artifact_failure_exits_nonzero_and_leaves_no_disk_pass(tmp_path, monkeypatch, failure_at):
+    stack = supervisor(tmp_path)
+    stack.duration = 0.2
+    original = ReportWriter._replace
+    calls = 0
+
+    def fail_publication(self, source, destination):
+        nonlocal calls
+        calls += 1
+        if calls == failure_at:
+            raise OSError("disk failure")
+        return original(self, source, destination)
+
+    monkeypatch.setattr(ReportWriter, "_replace", fail_publication)
+    assert await stack.run() == 1
+    assert_reaped(stack)
+    directory = tmp_path / "report"
+    assert stack.report.failed
+    assert (directory / INCOMPLETE_FILE).exists()
+    assert not (directory / COMPLETE_FILE).exists()
+    assert not (directory / "soak_report.json").exists()
+    with pytest.raises(ValueError, match="REPORT_NOT_COMPLETE"):
+        load_completed_report(directory)

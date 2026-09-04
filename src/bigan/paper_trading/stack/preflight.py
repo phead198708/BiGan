@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bigan.build_provenance import BuildProvenanceError, require_source_commit
 from bigan.paper_trading.dashboard.server import loopback_host
 from bigan.paper_trading.operator.config import OperatorConfig, load_operator_config
 
@@ -53,6 +54,7 @@ class Preflight:
     port: int
     report_dir: Path | None
     mock: bool
+    build_provenance: dict[str, str] | None = None
 
     @property
     def url(self) -> str:
@@ -71,7 +73,7 @@ class Preflight:
 
     def summary(self) -> dict[str, Any]:
         return {"valid": True, "paper_only": True, **self.identity,
-                "dashboard_url": self.url, "mode": self.mode}
+                "dashboard_url": self.url, "mode": self.mode, "build_provenance": self.build_provenance}
 
 
 def preflight(*, config_path: Path, host: str = "127.0.0.1", port: int = 8080,
@@ -85,13 +87,14 @@ def preflight(*, config_path: Path, host: str = "127.0.0.1", port: int = 8080,
                 raise PreflightError("INVALID_PUBLIC_IDENTITY")
         if config.config_check_only:
             raise PreflightError("CONFIG_CHECK_ONLY_CANNOT_RUN")
+        provenance = None
         if not mock:
             if config.mock is not False or config.dry_run is not False:
                 raise PreflightError("LIVE_MODE_REQUIRES_MOCK_FALSE_DRY_RUN_FALSE")
             commit = config.source_commit
-            if (not re.fullmatch(r"[0-9a-f]{40}", commit) or len(set(commit)) < 4
-                    or commit.startswith(("deadbeef", "0123456789", "abcdef"))):
+            if not re.fullmatch(r"[0-9a-f]{40}", commit):
                 raise PreflightError("LIVE_REQUIRES_FULL_DEPLOYED_SOURCE_COMMIT")
+            provenance = require_source_commit(commit)
         elif config.mock is not True:
             raise PreflightError("MOCK_MODE_REQUIRES_MOCK_TRUE")
         host = loopback_host(host)
@@ -105,7 +108,9 @@ def preflight(*, config_path: Path, host: str = "127.0.0.1", port: int = 8080,
             except OSError:
                 raise PreflightError("DASHBOARD_PORT_UNAVAILABLE") from None
         return Preflight(config, config_path.resolve(), Path.cwd().resolve(), host, port,
-                         None if report_dir is None else report_dir.expanduser().resolve(), mock)
+                         None if report_dir is None else report_dir.expanduser().resolve(), mock, provenance)
+    except BuildProvenanceError as exc:
+        raise PreflightError(str(exc)) from None
     except PreflightError:
         raise
     except (OSError, ValueError, TypeError):

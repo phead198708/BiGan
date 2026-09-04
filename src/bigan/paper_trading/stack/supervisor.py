@@ -48,6 +48,8 @@ class PaperStackSupervisor:
 
     def commands(self) -> dict[str, list[str]]:
         shared = ["--config", str(self.check.config_path), "--expected-config-sha256", self.check.config.config_sha256]
+        if not self.check.mock:
+            shared += ["--expected-source-commit", self.check.config.source_commit]
         operator_module = "bigan.paper_trading.stack.mock_operator" if self.check.mock else "bigan.paper_trading.operator"
         return {
             "dashboard": [sys.executable, "-m", "bigan.paper_trading.dashboard", *shared,

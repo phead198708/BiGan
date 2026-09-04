@@ -30,9 +30,23 @@ unchanged. Mock and live must use separate configuration identities/output trees
 
 ## Live public-feed paper execution
 
+Live execution requires a **regular wheel**, not `PYTHONPATH=src` or an editable
+install. Build from a committed checkout, then install into a clean environment:
+
+```bash
+python -m pip wheel . --no-deps --wheel-dir dist
+python -m venv /path/to/paper-venv
+/path/to/paper-venv/bin/python -m pip install dist/bigan-0.1.0-py3-none-any.whl
+/path/to/paper-venv/bin/python -m bigan.build_provenance
+```
+
+Use that environment's Python for the commands below. Do not overlay it with
+an editable install or source-tree `PYTHONPATH`. Copy the **verified installed
+source_commit** printed by the command into the deployment config.
+
 ```bash
 cp config/paper_operator.live.example.toml config/paper_operator.live.toml
-# Edit source_commit to the full deployed git SHA and select an independent output_dir.
+# Set source_commit to the verified installed wheel SHA; select an independent output_dir.
 # Do not commit this deployment-specific file or add credentials.
 python -m bigan.paper_trading.stack --config config/paper_operator.live.toml --preflight
 python -m bigan.paper_trading.stack \
@@ -57,9 +71,23 @@ wallet_signing_enabled = false
 The existing strict configuration loader rejects dangerous/unknown fields and
 non-allowlisted public endpoints. Live startup additionally requires `mock=false`,
 `dry_run=false`, `config_check_only=false`, a full 40-character lowercase source
-SHA (not placeholders, repeated-character/example hashes), safe display IDs and
-an explicit output directory. The example's base SHA must be replaced with the
-actual installed revision; format validation cannot prove what code was installed.
+SHA matching the verified executing wheel, safe display IDs and an explicit
+output directory. The bundled template intentionally contains a placeholder and
+**must fail** until replaced. No Git command is run during preflight: it verifies
+the `_build_provenance.json` generated inside the wheel, including SHA-256 hashes
+of its packaged code/assets. Cwd, environment SHA declarations, and configuration
+values cannot supply build provenance. Both children reverify their own package
+before startup. Missing metadata, dirty/unverifiable builds, mismatched source
+claims and altered/extra/missing packaged files fail closed.
+
+The setuptools build hook attests the Git HEAD only when packaged bytes and
+build inputs match that revision. Source archives without Git and dirty builds
+remain installable for development/mock but carry no verified source SHA and
+cannot run live. Editable builds never stamp the mutable source tree. Unrelated
+notes/tests/docs do not invalidate identical package/build inputs. Build metadata
+is not a cryptographic signature: the builder and distribution channel must be
+trusted. This does not defend against an actor replacing both verifier and seal.
+See the [setuptools customization contract](https://setuptools.pypa.io/en/stable/userguide/extension.html).
 There is no environment-based trading configuration override.
 
 Preflight binds and releases a loopback socket to test availability, but makes

@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
 import time
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from .preflight import SAFETY, Preflight, validate_report_directory
+
+INCOMPLETE_FILE = ".soak-report.lock"
+COMPLETE_FILE = "soak_complete.json"
+ARTIFACTS = ("soak_report.json", "soak_summary.md")
 
 
 def now_ms() -> int:
@@ -45,6 +51,7 @@ class SoakReport:
             "ended_at_ms": None, "duration_ms": 0, "result": "PASS", "mode": check.mode,
             "paper_safety": dict(SAFETY), "operator_identity": check.identity,
             "source_commit": check.config.source_commit, "config_sha256": check.config.config_sha256,
+            "build_provenance": check.build_provenance, "publication_schema_version": 1,
             "dashboard_url": check.url,
             "polls": {"attempted": 0, "successful": 0, "failed": 0, "longest_failure_streak_ms": 0},
             "states": {}, "feeds": {}, "rollovers": 0, "runs_observed": [],
@@ -115,21 +122,28 @@ class SoakReport:
 
 
 class ReportWriter:
-    """Reserve an empty, disjoint artifact directory; atomically publish each file.
+    """Stage all artifacts; atomically rename the incomplete marker to completion.
 
-    An exclusive marker prevents two supervisors overwriting the same report.
-    A crash can leave that marker for explicit operator inspection, never repair.
-    No handles into the paper output tree are opened here.
+    ONLY a completion manifest with matching hashes is a published report. An
+    exception invalidates this writer's public artifacts and keeps an incomplete
+    marker; closing a descriptor never turns a failed publication into success.
     """
 
     def __init__(self, directory: Path, *, output: Path) -> None:
         validate_report_directory(directory, output)
         directory.mkdir(parents=True, exist_ok=True)
         self.fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self._temporary: set[str] = set()
+        self._published: set[str] = set()
+        self._attempted = False
         try:
-            claim = os.open(".soak-report.lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=self.fd)
-            os.close(claim)
-            if set(os.listdir(self.fd)) != {".soak-report.lock"}:
+            claim = os.open(INCOMPLETE_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=self.fd)
+            try:
+                os.fsync(claim)
+            finally:
+                os.close(claim)
+            os.fsync(self.fd)
+            if set(os.listdir(self.fd)) != {INCOMPLETE_FILE}:
                 raise ValueError("REPORT_DIRECTORY_NOT_EMPTY")
         except BaseException:
             os.close(self.fd)
@@ -137,28 +151,97 @@ class ReportWriter:
             raise
 
     def write(self, report: SoakReport) -> None:
-        self._atomic("soak_report.json", json.dumps(report.data, allow_nan=False, indent=2) + "\n")
-        self._atomic("soak_summary.md", report.markdown())
-        os.fsync(self.fd)
+        if self._attempted:
+            raise ValueError("REPORT_PUBLICATION_ALREADY_ATTEMPTED")
+        self._attempted = True
+        try:
+            contents = {
+                "soak_report.json": (json.dumps(report.data, allow_nan=False, indent=2) + "\n").encode(),
+                "soak_summary.md": report.markdown().encode(),
+            }
+            manifest = {"schema_version": 1, "result": report.data["result"],
+                        "files": {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()}}
+            # Every byte is staged and fsync'd BEFORE any artifact is published.
+            staged = {name: self._stage(data) for name, data in contents.items()}
+            marker = self._stage((json.dumps(manifest, sort_keys=True) + "\n").encode())
+            for name, temporary in staged.items():
+                if name in os.listdir(self.fd):
+                    raise ValueError("REPORT_ALREADY_EXISTS")
+                self._published.add(name)
+                self._replace(temporary, name)
+            # The owned marker is still INCOMPLETE even when it contains the
+            # future manifest. One final rename removes it and commits the pair.
+            self._replace(marker, INCOMPLETE_FILE)
+            os.fsync(self.fd)
+            self._published.add(COMPLETE_FILE)
+            self._replace(INCOMPLETE_FILE, COMPLETE_FILE)
+            os.fsync(self.fd)
+        except BaseException:
+            report.issue("REPORT_WRITE_FAILED", hard=True)
+            self._abort()
+            raise
 
-    def _atomic(self, name: str, text: str) -> None:
+    def _stage(self, contents: bytes) -> str:
         temporary = "." + uuid.uuid4().hex + ".tmp"
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=self.fd)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                stream.write(text)
-                stream.flush()
-                os.fsync(stream.fileno())
-            # Never replace somebody else's previous artifact.
-            if name in os.listdir(self.fd):
-                raise ValueError("REPORT_ALREADY_EXISTS")
-            os.replace(temporary, name, src_dir_fd=self.fd, dst_dir_fd=self.fd)
-        finally:
-            if temporary in os.listdir(self.fd):
-                os.unlink(temporary, dir_fd=self.fd)
+        self._temporary.add(temporary)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return temporary
+
+    def _replace(self, source: str, destination: str) -> None:
+        os.replace(source, destination, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        self._temporary.discard(source)
+
+    def _abort(self) -> None:
+        # Only files this instance created/attempted to publish are invalidated.
+        # Even a persistent I/O outage cannot make a remaining candidate valid:
+        # consumers MUST validate the completion marker and reject INCOMPLETE.
+        with suppress(OSError):
+            claim = os.open(INCOMPLETE_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=self.fd)
+            try:
+                os.fsync(claim)
+            finally:
+                os.close(claim)
+        for name in self._published | self._temporary:
+            with suppress(OSError):
+                os.unlink(name, dir_fd=self.fd)
+        with suppress(OSError):
+            os.fsync(self.fd)
 
     def close(self) -> None:
         if self.fd >= 0:
-            os.unlink(".soak-report.lock", dir_fd=self.fd)
             os.close(self.fd)
             self.fd = -1
+
+
+def load_completed_report(directory: Path) -> dict[str, Any]:
+    """Machine-consumer boundary: neither JSON alone nor marker alone is enough."""
+    try:
+        if (directory / INCOMPLETE_FILE).exists():
+            raise ValueError("incomplete")
+        for name in (*ARTIFACTS, COMPLETE_FILE):
+            path = directory / name
+            if path.is_symlink() or path.stat().st_size > 2_000_000:
+                raise ValueError("invalid artifact")
+        encoded = (directory / COMPLETE_FILE).read_bytes()
+        manifest = json.loads(encoded)
+        if (set(manifest) != {"schema_version", "result", "files"}
+                or type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1
+                or manifest["result"] not in {"PASS", "WARN", "FAIL"}
+                or set(manifest["files"]) != set(ARTIFACTS)):
+            raise ValueError("invalid completion manifest")
+        contents = {name: (directory / name).read_bytes() for name in ARTIFACTS}
+        if any(hashlib.sha256(data).hexdigest() != manifest["files"][name] for name, data in contents.items()):
+            raise ValueError("artifact hash mismatch")
+        report = json.loads(contents["soak_report.json"])
+        require_finite(report)
+        if (report["publication_schema_version"] != 1 or report["result"] != manifest["result"]
+                or (directory / INCOMPLETE_FILE).exists()
+                or (directory / COMPLETE_FILE).read_bytes() != encoded):
+            raise ValueError("publication changed")
+        return report
+    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+        raise ValueError("REPORT_NOT_COMPLETE") from None

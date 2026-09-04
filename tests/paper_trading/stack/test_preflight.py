@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import socket
+import subprocess
+from pathlib import Path
 
 import pytest
 
+from bigan import build_provenance
 from bigan.paper_trading.stack.__main__ import main
 from bigan.paper_trading.stack.preflight import SAFETY, PreflightError, duration_seconds, preflight
-from tests.paper_trading.stack.conftest import free_port, write_config
+from tests.paper_trading.stack.conftest import COMMIT, free_port, write_config
+
+
+@pytest.fixture(autouse=True)
+def verified_wheel(monkeypatch):
+    monkeypatch.setattr(build_provenance, "runtime_provenance", lambda: {
+        "kind": "wheel", "source_commit": COMMIT, "manifest_sha256": "0" * 64,
+    })
 
 
 def test_valid_live_is_pure(tmp_path, monkeypatch):
@@ -14,10 +24,12 @@ def test_valid_live_is_pure(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     before = list(tmp_path.rglob("*"))
     monkeypatch.setattr(socket.socket, "connect", lambda *args: pytest.fail("preflight connected"))
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: pytest.fail("preflight spawned a process"))
     result = preflight(config_path=path, port=free_port(), report_dir=tmp_path / "reports")
     assert result.config.config_sha256 == result.identity["config_sha256"]
     assert str(result.config.output_dir) == "relative-paper"
     assert result.cwd == tmp_path
+    assert result.build_provenance["source_commit"] == COMMIT
     assert result.summary()["mode"] == "live_public_feeds_paper_execution"
     assert list(tmp_path.rglob("*")) == before
 
@@ -96,3 +108,23 @@ def test_cli_preflight_safe_summary(tmp_path, capsys):
 def test_cli_no_implicit_report_location(tmp_path):
     with pytest.raises(SystemExit):
         main(["--config", str(write_config(tmp_path))])
+
+
+def test_bundled_live_example_is_never_valid_by_default():
+    example = Path(__file__).resolve().parents[3] / "config" / "paper_operator.live.example.toml"
+    with pytest.raises(PreflightError, match="LIVE_REQUIRES_FULL_DEPLOYED_SOURCE_COMMIT"):
+        preflight(config_path=example, port=free_port())
+
+
+def test_live_source_must_match_executing_package(tmp_path):
+    with pytest.raises(PreflightError, match="SOURCE_COMMIT_BUILD_MISMATCH"):
+        preflight(config_path=write_config(tmp_path, source_commit="c522b5f23f615500e2a11cc90107d4ac543a1777"), port=free_port())
+
+
+def test_unsealed_source_checkout_cannot_claim_live_provenance(tmp_path, monkeypatch):
+    def missing():
+        raise build_provenance.BuildProvenanceError("BUILD_PROVENANCE_UNAVAILABLE")
+    monkeypatch.setattr(build_provenance, "runtime_provenance", missing)
+    with pytest.raises(PreflightError, match="BUILD_PROVENANCE_UNAVAILABLE"):
+        preflight(config_path=write_config(tmp_path), port=free_port())
+    assert not (tmp_path / "paper-output").exists()

@@ -8,14 +8,31 @@ read-model consistency; this is **sampled observation, not deterministic audit**
 ## Report contract
 
 An explicit disjoint empty report directory receives `soak_report.json` (schema
-1) and `soak_summary.md`. An exclusive report marker prevents concurrent reuse;
-each file is fsync'd and atomically renamed. Files are never overwritten. The
-two artifacts are not a multi-file transaction: on disk errors the command
-returns nonzero, and incomplete artifacts must not be accepted as a completed
-soak. A crash may leave a marker requiring manual inspection. Paper output is
-never used for report storage or altered by report failure handling.
+1, `publication_schema_version=1`), `soak_summary.md`, and `soak_complete.json`.
+**The JSON alone is never acceptance evidence.** Consumers must verify the
+completion manifest and both artifact hashes, and reject `.soak-report.lock`.
+The supported read-only consumer is:
 
-The JSON includes deployed/config identities, exact paper safety invariants,
+```python
+from pathlib import Path
+from bigan.paper_trading.stack.report import load_completed_report
+report = load_completed_report(Path("artifacts/paper_soak/run-001"))
+```
+
+The writer exclusively claims `.soak-report.lock`, stages and fsyncs every file,
+publishes both artifacts, then atomically renames the incomplete marker into the
+completion manifest. This final rename is the publication commit point. The
+manifest contains both SHA-256 hashes and the result; consumers reject missing,
+changed or mixed artifacts. Closing the writer does **not** remove an incomplete
+marker. On exceptions the run becomes FAIL and this writer's candidate artifacts
+(including a previously published PASS JSON) are withdrawn, while the incomplete
+marker remains. No existing user report is overwritten or repaired. Persistent
+I/O failures/power loss can leave candidates: they are invalid without a matching
+completion manifest and absent incomplete marker, even if a candidate says PASS.
+Paper output is never used for report storage or changed by publication failures.
+
+The JSON includes deployed/config identities, verified build provenance for live
+runs (null for unsealed mock runs), exact paper safety invariants,
 timestamps, poll attempts/success/failures/longest continuous outage, state sample
 counts and observed durations, feed fresh sample ratios, run indices/rollovers,
 first/final canonical account observations, activity deltas and bounded diagnostic
@@ -84,6 +101,11 @@ operator escalation, config changes, malformed/stale/nonfinite HTTP views and
 bounded serial polling. CI makes no Binance/Polymarket/Chainlink requests.
 
 ## Manual acceptance evidence
+
+The artifacts below are historical **pre-completion-protocol** evidence from
+`6227e20`, not newly published reports under the current contract. They are kept
+unchanged for provenance and will be rejected by `load_completed_report` because
+they have no completion manifest. Never retrofit a marker to old evidence.
 
 Implementation commit: `6227e20a753f3adb3d2901bc0e7f202127585044`.
 

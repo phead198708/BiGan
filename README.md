@@ -58,8 +58,11 @@ python -m bigan.paper_trading.stack \
   --duration 2m --report-dir artifacts/paper_soak/mock-smoke
 
 # Live PUBLIC feeds, still PAPER execution only:
+# Install a regular wheel from a committed checkout (not editable/PYTHONPATH=src).
+# Use that installation's Python for the following commands.
+python -m bigan.build_provenance
 cp config/paper_operator.live.example.toml config/paper_operator.live.toml
-# Set source_commit to the actual full deployed SHA and choose an independent output_dir.
+# Set source_commit to the VERIFIED installed wheel SHA; the template must fail unchanged.
 python -m bigan.paper_trading.stack --config config/paper_operator.live.toml --preflight
 python -m bigan.paper_trading.stack --config config/paper_operator.live.toml \
   --duration 30m --report-dir artifacts/paper_soak/live-30m
@@ -77,7 +80,9 @@ stop Operator first, observe final STOPPED, stop Dashboard, then write reports.
 Child failures stop the stack; writers are never automatically restarted.
 PASS means clean sampled stability, WARN records recoverable issues, FAIL denotes
 safety/integrity/lifecycle failures. **No fill, HOLD or negative paper PnL is not
-a failure.** See [startup and troubleshooting](docs/paper_trading/live_stack.md)
+a failure.** A report is valid only with `soak_complete.json`, matching artifact
+hashes, and no incomplete marker; never accept `soak_report.json` alone. See
+[startup and troubleshooting](docs/paper_trading/live_stack.md)
 (no market, stale feeds, 503, locks, ports, rollover pending) and
 [soak semantics and acceptance evidence](docs/paper_trading/soak_validation.md).
 

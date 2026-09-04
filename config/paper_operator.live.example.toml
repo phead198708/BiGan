@@ -1,10 +1,11 @@
 # Live PUBLIC feeds with simulated paper execution only. No real funds.
-# Replace the base source SHA below with the actual deployed commit before use.
+# This template MUST fail preflight until its source matches a verified wheel.
+# Read the installed identity with: python -m bigan.build_provenance
 # Do not commit your deployment-specific copy.
 operator_id = "btc-paper-operator"
 strategy_id = "alpha-pricing-v1"
 paper_account_id = "paper-usdc-demo"
-source_commit = "83efdef055ef3211d395296a3a72fde6ede05019"
+source_commit = "replace-with-verified-build-source-commit"
 output_dir = "data/paper_operator_live"
 
 underlying = "BTC"
