@@ -190,7 +190,8 @@ See [soak validation](soak_validation.md) for report semantics and evidence.
 ### Bounded readiness diagnostics
 
 `soak_report.json.readiness_diagnostics` records the last **180** startup/runtime
-observations, per-gate sample counts and an immutable `failure_snapshot` captured
+observations (also capped at a conservative 750 KB serialized sample budget),
+per-gate sample counts and an immutable `failure_snapshot` captured
 before shutdown. Startup probes are coalesced to one sample per second when the
 blocking gates are unchanged; runtime probes retain every sampled observation.
 The failure snapshot includes the blocking codes, each feed/YES/NO/alpha/pricing

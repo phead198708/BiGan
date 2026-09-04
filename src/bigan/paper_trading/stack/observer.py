@@ -16,7 +16,7 @@ import aiohttp
 from bigan.paper_trading.contracts import PaperDecisionEvent, PaperSettlementEvent
 from bigan.paper_trading.operator.read_model import OperatorStatus
 
-from .diagnostics import TRACE_LIMIT, readiness_snapshot
+from .diagnostics import TRACE_BYTE_LIMIT, TRACE_LIMIT, readiness_snapshot, snapshot_byte_bound
 from .preflight import SAFETY
 from .report import SoakReport, require_finite
 
@@ -144,8 +144,9 @@ class PaperSoakObserver:
                     and 0 <= sample["observed_at_ms"] - previous["observed_at_ms"] < 1000):
                 return
         samples.append(sample)
-        if len(samples) > TRACE_LIMIT:
-            del samples[0]
+        trace["retained_byte_bound"] += snapshot_byte_bound(sample)
+        while len(samples) > TRACE_LIMIT or trace["retained_byte_bound"] > TRACE_BYTE_LIMIT:
+            trace["retained_byte_bound"] -= snapshot_byte_bound(samples.pop(0))
             trace["evicted_samples"] += 1
         for code in sample["reasons"]:
             counts = trace["reason_counts"]

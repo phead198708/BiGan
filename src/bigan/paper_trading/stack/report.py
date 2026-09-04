@@ -13,7 +13,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from .diagnostics import TRACE_LIMIT
+from .diagnostics import TRACE_BYTE_LIMIT, TRACE_LIMIT
 from .preflight import SAFETY, Preflight, validate_report_directory
 
 INCOMPLETE_FILE = ".soak-report.lock"
@@ -59,6 +59,7 @@ class SoakReport:
             "states": {}, "feeds": {}, "rollovers": 0, "runs_observed": [],
             "live_readiness": {"ready_samples": 0, "unready_samples": 0},
             "readiness_diagnostics": {"sample_limit": TRACE_LIMIT, "samples": [], "reason_counts": {},
+                                      "byte_limit": TRACE_BYTE_LIMIT, "retained_byte_bound": 0,
                                       "evicted_samples": 0, "failure_snapshot": None},
             "requested_duration_ms": None, "measurement_duration_ms": 0,
             "account": dict.fromkeys((

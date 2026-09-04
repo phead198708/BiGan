@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -9,7 +10,15 @@ from bigan.paper_trading.operator.diagnostics import MAX_COUNTER, NUMERIC_FIELDS
 from bigan.paper_trading.operator.read_model import OperatorState
 
 TRACE_LIMIT = 180
+TRACE_BYTE_LIMIT = 750_000
 SOURCES = ("binance", "polymarket", "chainlink")
+
+
+def snapshot_byte_bound(sample: dict[str, Any]) -> int:
+    # Account for the report writer's pretty-print indentation around the
+    # nested sample. This deliberately overestimates the on-disk contribution.
+    encoded = json.dumps(sample, allow_nan=False, indent=2).encode()
+    return len(encoded) + 8 * (encoded.count(b"\n") + 1)
 
 
 def _obj(value: Any) -> dict[str, Any]:

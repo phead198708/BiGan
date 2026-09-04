@@ -6,8 +6,13 @@ from dataclasses import replace
 
 import pytest
 
-from bigan.paper_trading.operator.diagnostics import DiagnosticCode
-from bigan.paper_trading.stack.diagnostics import TRACE_LIMIT, readiness_reasons, readiness_snapshot
+from bigan.paper_trading.operator.diagnostics import MAX_COUNTER, NUMERIC_FIELDS, DiagnosticCode
+from bigan.paper_trading.stack.diagnostics import (
+    TRACE_BYTE_LIMIT,
+    TRACE_LIMIT,
+    readiness_reasons,
+    readiness_snapshot,
+)
 from bigan.paper_trading.stack.observer import (
     ObservationError,
     ObservationPolicy,
@@ -110,3 +115,28 @@ async def test_live_transport_error_reaches_projection_and_stale_generation_is_f
     assert operator.market_sync.diagnostics.counts["WS_HEARTBEAT_TIMEOUT"] == 1
     await operator.shutdown()
     assert operator.status().feeds["polymarket"]["diagnostics"]["counts"]["WS_HEARTBEAT_TIMEOUT"] == 1
+
+
+async def test_maximal_diagnostics_stay_below_report_reader_byte_limit(observation, tmp_path):
+    observer = PaperSoakObserver(report=observation.report)
+    payload = copy.deepcopy(observation.payload)
+    diagnostics = {"counts": {code.value: MAX_COUNTER for code in DiagnosticCode}, "recent": [
+        {"code": DiagnosticCode.PRICING_MISSING_SAMPLES.value, **dict.fromkeys(NUMERIC_FIELDS, MAX_COUNTER)}
+        for _ in range(32)
+    ]}
+    for component in (*payload["status"]["feeds"].values(), payload["status"]["pricing_inputs"]):
+        component["diagnostics"] = diagnostics
+    for _ in range(500):
+        observer.record_readiness(payload, phase="runtime")
+    observer.freeze_readiness_failure()
+    trace = observation.report.data["readiness_diagnostics"]
+    assert 1 <= len(trace["samples"]) <= TRACE_LIMIT
+    assert trace["retained_byte_bound"] <= TRACE_BYTE_LIMIT
+    observation.report.finish()
+    writer = ReportWriter(tmp_path / "maximal-report", output=tmp_path / "paper-output")
+    try:
+        writer.write(observation.report)
+    finally:
+        writer.close()
+    assert (tmp_path / "maximal-report" / "soak_report.json").stat().st_size < 2_000_000
+    assert load_completed_report(tmp_path / "maximal-report")["readiness_diagnostics"] == trace
