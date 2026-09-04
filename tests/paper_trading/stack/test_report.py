@@ -137,6 +137,29 @@ async def test_no_report_writer_inside_output(observation):
         ReportWriter(observation.check.config.output_dir / "report", output=observation.check.config.output_dir)
 
 
+async def test_close_error_retires_fd_without_changing_committed_report(observation, monkeypatch):
+    directory = observation.check.report_dir
+    writer = ReportWriter(directory, output=observation.check.config.output_dir)
+    writer.write(observation.report)
+    original = os.close
+    calls = []
+
+    def close_then_fail(fd):
+        calls.append(fd)
+        original(fd)
+        raise OSError("uncertain close")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "close", close_then_fail)
+        with pytest.raises(OSError):
+            writer.close()
+        assert writer.fd == -1
+        writer.close()  # Never retry a potentially reused descriptor.
+        assert len(calls) == 1
+    assert load_completed_report(directory) == observation.report.data
+    assert not (directory / INCOMPLETE_FILE).exists()
+
+
 async def test_bounded_diagnostics_and_no_raw_text(observation):
     for n in range(1000):
         observation.report.issue(f"ISSUE_{n}")

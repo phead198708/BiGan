@@ -183,3 +183,40 @@ async def test_artifact_failure_exits_nonzero_and_leaves_no_disk_pass(tmp_path, 
     assert not (directory / "soak_report.json").exists()
     with pytest.raises(ValueError, match="REPORT_NOT_COMPLETE"):
         load_completed_report(directory)
+
+
+@pytest.mark.parametrize("outcome", ["PASS", "WARN", "FAIL", "write_failure"])
+async def test_close_failure_preserves_published_outcome_and_exit_status(tmp_path, monkeypatch, outcome):
+    logs = []
+    stack = supervisor(tmp_path, log=logs.append)
+    stack.duration = 0.2
+    original_close, original_write = ReportWriter.close, ReportWriter.write
+    published = []
+
+    def write_outcome(self, report):
+        if outcome == "write_failure":
+            raise OSError("private write error")
+        # Isolate publication from incidental scheduler-dependent soak warnings.
+        report.data["result"] = outcome
+        original_write(self, report)
+        published.append(load_completed_report(tmp_path / "report"))
+
+    def close_then_fail(self):
+        original_close(self)
+        raise OSError("private close error")
+
+    monkeypatch.setattr(ReportWriter, "write", write_outcome)
+    monkeypatch.setattr(ReportWriter, "close", close_then_fail)
+    code = await stack.run()
+    assert_reaped(stack)
+    assert code == (1 if outcome in {"FAIL", "write_failure"} else 0)
+    assert any("REPORT_DESCRIPTOR_CLOSE_FAILED" in line for line in logs)
+    assert not any("private" in line for line in logs)
+    if outcome == "write_failure":
+        assert stack.report.failed
+        assert (tmp_path / "report" / INCOMPLETE_FILE).exists()
+        with pytest.raises(ValueError, match="REPORT_NOT_COMPLETE"):
+            load_completed_report(tmp_path / "report")
+    else:
+        assert load_completed_report(tmp_path / "report") == published[0] == stack.report.data
+        assert stack.report.data["result"] == outcome

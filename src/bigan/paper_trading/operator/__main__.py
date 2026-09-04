@@ -33,18 +33,21 @@ def main(argv: list[str] | None = None) -> int:
     config = load_operator_config(args.config)
     if args.expected_config_sha256 and config.config_sha256 != args.expected_config_sha256:
         parser.error("Operator configuration identity changed before startup")
-    if args.expected_source_commit:
+    check_only = args.check or config.config_check_only or (config.dry_run and not args.mock_demo)
+    run_live = not check_only and not (args.mock_demo or config.mock)
+    if run_live or args.expected_source_commit:
         try:
-            if config.source_commit != args.expected_source_commit:
+            if args.expected_source_commit and config.source_commit != args.expected_source_commit:
                 raise BuildProvenanceError("source identity changed")
-            require_source_commit(args.expected_source_commit)
+            # Standalone and supervised live execution share the same gate.
+            require_source_commit(config.source_commit)
         except BuildProvenanceError:
             parser.error("Operator build provenance does not match expected source")
     logging.basicConfig(
         level=getattr(logging, config.logging_level),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    if args.check or config.config_check_only or (config.dry_run and not args.mock_demo):
+    if check_only:
         print(
             json.dumps(
                 {

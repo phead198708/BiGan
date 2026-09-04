@@ -37,7 +37,12 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080). If the port is occupied, us
 another local port, such as `--port 8088`. SIGINT/SIGTERM stop only the dashboard.
 The one-shot mock operator normally finishes in `STOPPED`; its status then ages
 and the stale banner is expected. No fill is also a valid outcome, not an error.
-For a live public-feed paper operator, use the existing PR-B instructions; this
+For a live public-feed paper operator, use the
+[verified-wheel setup](live_stack.md). A standalone dashboard given a live
+configuration (`mock=false`, `dry_run=false`) also verifies its installed wheel
+against `source_commit` before constructing the reader or opening the listener,
+even without the Supervisor's hidden arguments. Source/editable installs remain
+available for mock/config-inspection use, not verified live display. This
 dashboard adds no live execution capability. A missing authoritative opening
 reference still leaves that operator safely degraded.
 

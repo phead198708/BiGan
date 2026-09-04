@@ -212,9 +212,15 @@ class ReportWriter:
             os.fsync(self.fd)
 
     def close(self) -> None:
+        """Release only the read-only directory FD; never change publication.
+
+        Retire the descriptor before closing: after a close error its state is
+        uncertain, and retrying could close an unrelated, reused descriptor.
+        """
         if self.fd >= 0:
-            os.close(self.fd)
+            fd = self.fd
             self.fd = -1
+            os.close(fd)
 
 
 def load_completed_report(directory: Path) -> dict[str, Any]:

@@ -77,7 +77,9 @@ output directory. The bundled template intentionally contains a placeholder and
 the `_build_provenance.json` generated inside the wheel, including SHA-256 hashes
 of its packaged code/assets. Cwd, environment SHA declarations, and configuration
 values cannot supply build provenance. Both children reverify their own package
-before startup. Missing metadata, dirty/unverifiable builds, mismatched source
+before startup. Standalone Operator live execution and Dashboard live display
+enforce the same check based on their actual mode, without requiring the hidden
+Supervisor arguments. Missing metadata, dirty/unverifiable builds, mismatched source
 claims and altered/extra/missing packaged files fail closed.
 
 The setuptools build hook attests the Git HEAD only when packaged bytes and

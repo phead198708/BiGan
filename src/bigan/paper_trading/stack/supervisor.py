@@ -138,7 +138,10 @@ class PaperStackSupervisor:
                     try:
                         writer.close()
                     except OSError:
-                        self.report.issue("REPORT_CLOSE_FAILED", hard=True)
+                        # write() has already decided/published the outcome.
+                        # Closing a read-only directory FD cannot revoke that
+                        # decision or introduce a different exit/disk result.
+                        self.log("[soak] REPORT_DESCRIPTOR_CLOSE_FAILED (result unchanged)")
         self.log("[soak] " + self.report.data["result"])
         return 1 if self.report.failed else 0
 

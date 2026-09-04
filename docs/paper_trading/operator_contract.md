@@ -341,9 +341,22 @@ python -m bigan.paper_trading.operator \
   --config config/paper_operator.example.toml --mock-demo
 ```
 
-For public live data, copy the file, set `mock=false` and `dry_run=false`, and
-set `source_commit` to the deployed revision. This changes only data sources;
-all executions remain simulated and paper-only.
+For public live data, install a verified regular wheel (see
+[live stack build instructions](live_stack.md)), copy the live example, set
+`mock=false` and `dry_run=false`, and set `source_commit` to the verified SHA
+from `python -m bigan.build_provenance`. The standalone command is:
+
+```bash
+python -m bigan.paper_trading.operator --config config/paper_operator.live.toml
+```
+
+Before any live network connection or account/session creation, the CLI always
+verifies its installed package against that SHA. It does not need a Supervisor
+or hidden expected-source argument to enforce this gate. Missing/modified build
+provenance and mismatched SHAs exit with status 2. Config-only checks and offline
+mock execution remain available from source/editable installs; a successful
+`--check` validates configuration, not live build readiness. All executions
+remain simulated and paper-only.
 
 ## Known limitations
 

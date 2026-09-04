@@ -31,6 +31,15 @@ I/O failures/power loss can leave candidates: they are invalid without a matchin
 completion manifest and absent incomplete marker, even if a candidate says PASS.
 Paper output is never used for report storage or changed by publication failures.
 
+After `write()` successfully publishes and syncs the completion manifest, the
+outcome is final. `close()` only releases a read-only directory descriptor; a
+failure there emits the fixed console diagnostic
+`REPORT_DESCRIPTOR_CLOSE_FAILED` without changing the report or exit status.
+It cannot turn a published PASS/WARN into an in-memory FAIL (or vice versa).
+The descriptor is retired before close and never retried after an uncertain
+close result. A failed publication still exits FAIL and remains incomplete,
+even if descriptor cleanup also fails.
+
 The JSON includes deployed/config identities, verified build provenance for live
 runs (null for unsealed mock runs), exact paper safety invariants,
 timestamps, poll attempts/success/failures/longest continuous outage, state sample

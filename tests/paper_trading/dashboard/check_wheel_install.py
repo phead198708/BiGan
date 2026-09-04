@@ -10,6 +10,26 @@ import tempfile
 from importlib.metadata import distributions
 from importlib.resources import files
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+
+def check_standalone_entrypoints(config_path: Path, *, accepted: bool) -> None:
+    from bigan.paper_trading.dashboard import __main__ as dashboard_cli
+    from bigan.paper_trading.operator import __main__ as operator_cli
+
+    # Keep the installed wheel's real provenance checks, but never contact an
+    # exchange, start a listener, or acquire an account writer in this smoke test.
+    with (patch.object(operator_cli, "_run_live", new_callable=AsyncMock) as live,
+          patch.object(dashboard_cli.web, "run_app") as serve):
+        for entrypoint, start in ((operator_cli.main, live), (dashboard_cli.main, serve)):
+            try:
+                result = entrypoint(["--config", str(config_path)])
+            except SystemExit as exc:
+                assert not accepted and exc.code == 2
+                start.assert_not_called()
+            else:
+                assert accepted and result == 0
+                start.assert_called_once()
 
 
 def main() -> None:
@@ -60,6 +80,7 @@ def main() -> None:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         assert preflight(config_path=config_path, port=port).build_provenance == provenance
+        check_standalone_entrypoints(config_path, accepted=True)
         values["source_commit"] = "0" * 40
         config_path.write_text("\n".join(f"{key} = {json.dumps(value)}" for key, value in values.items()))
         try:
@@ -68,6 +89,7 @@ def main() -> None:
             pass
         else:
             raise AssertionError("incorrect declared wheel source was accepted")
+        check_standalone_entrypoints(config_path, accepted=False)
         assert not (root / "never-created").exists()
 
     async def check() -> None:

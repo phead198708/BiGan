@@ -29,10 +29,11 @@ def main(argv: list[str] | None = None) -> int:
         config = load_operator_config(args.config)
         if args.expected_config_sha256 and config.config_sha256 != args.expected_config_sha256:
             raise ValueError("configuration changed")
-        if args.expected_source_commit:
-            if config.source_commit != args.expected_source_commit:
-                raise ValueError("source identity changed")
-            require_source_commit(args.expected_source_commit)
+        if args.expected_source_commit and config.source_commit != args.expected_source_commit:
+            raise ValueError("source identity changed")
+        if args.expected_source_commit or (not config.mock and not config.dry_run):
+            # A standalone live view must not advertise an unverified revision.
+            require_source_commit(config.source_commit)
     except (OSError, ValueError, TypeError):
         parser.error("Invalid operator configuration, loopback host, or port")
     try:
