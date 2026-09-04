@@ -84,3 +84,9 @@ jobs:
             tests/paper_trading \
             tests/strategies/test_polymarket_pricing.py \
             -q
+
+      - name: Verify dashboard wheel assets
+        run: |
+          python -m pip wheel . --no-deps --wheel-dir "$RUNNER_TEMP/dashboard-wheel"
+          python -m pip install --no-deps --target "$RUNNER_TEMP/dashboard-installed" "$RUNNER_TEMP/dashboard-wheel/"*.whl
+          python tests/paper_trading/dashboard/check_wheel_install.py "$RUNNER_TEMP/dashboard-installed"

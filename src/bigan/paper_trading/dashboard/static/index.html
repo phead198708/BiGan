@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Local, read-only paper trading account and operator monitor. No real funds.">
+  <title>BiGan · Paper Monitor</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="paper-banner">PAPER / SIMULATED — NO REAL FUNDS <span>LOCAL · READ ONLY</span></div>
+  <a class="skip-link" href="#main">Skip to account</a>
+  <header class="page-header">
+    <div><p class="eyebrow">BiGan / Operator observatory</p><h1>Paper Monitor</h1></div>
+    <div class="connection"><span id="state-badge" class="badge">— unavailable</span><p id="poll-status">Connecting to local reader…</p></div>
+  </header>
+  <div id="error-banner" class="notice" role="status" aria-live="polite" hidden></div>
+  <div id="warnings" class="notices" role="status" aria-live="polite"></div>
+  <main id="main">
+    <section aria-labelledby="account-title" class="account-section">
+      <div class="section-heading"><h2 id="account-title">Account</h2><span>USDC · lifetime totals / run-local drawdown</span></div>
+      <div id="account-kpis" class="kpi-grid"><p>Account unavailable until a valid run is readable.</p></div>
+    </section>
+    <div class="two-column">
+      <section class="panel" aria-labelledby="market-title"><div class="section-heading"><h2 id="market-title">Active market</h2><span id="countdown">—</span></div><h3 id="market-name">—</h3><dl id="market-fields" class="fields"></dl></section>
+      <section class="panel" aria-labelledby="operator-title"><h2 id="operator-title">Operator</h2><dl id="operator-fields" class="fields"></dl></section>
+    </div>
+    <section class="panel" aria-labelledby="positions-title"><div class="section-heading"><h2 id="positions-title">Open positions</h2><span>Canonical ledger marks</span></div><div id="positions-table" class="table-wrap" tabindex="0" role="region" aria-label="Open positions table">unavailable</div></section>
+    <section class="panel" aria-labelledby="feeds-title"><div class="section-heading"><h2 id="feeds-title">Feed health</h2><span>Last reported by operator</span></div><div id="feed-cards" class="feed-grid"></div></section>
+    <div class="two-column">
+      <section class="panel" aria-labelledby="alpha-title"><h2 id="alpha-title">Alpha &amp; pricing health</h2><dl id="alpha-fields" class="fields"></dl></section>
+      <section class="panel" aria-labelledby="inputs-title"><h2 id="inputs-title">Latest decision inputs</h2><p class="hint">Recorded at decision time. Not a live price feed.</p><dl id="inputs-fields" class="fields"></dl></section>
+    </div>
+    <section class="history-section" aria-labelledby="history-title">
+      <div class="section-heading history-heading"><div><h2 id="history-title">Run history</h2><p id="history-page" class="hint">Newest bounded page</p></div><div class="pager"><button id="latest" type="button">Latest</button><button id="older" type="button" disabled>Load older runs ↓</button></div></div>
+      <section class="panel" aria-labelledby="decisions-title"><h3 id="decisions-title">Recent decisions</h3><div id="decisions-table" class="table-wrap" tabindex="0" role="region" aria-label="Recent decisions table">unavailable</div></section>
+      <section class="panel" aria-labelledby="fills-title"><h3 id="fills-title">Recent fills</h3><div id="fills-table" class="table-wrap" tabindex="0" role="region" aria-label="Recent fills table">unavailable</div></section>
+      <section class="panel" aria-labelledby="settlements-title"><h3 id="settlements-title">Settlements</h3><div id="settlements-table" class="table-wrap" tabindex="0" role="region" aria-label="Settlements table">unavailable</div></section>
+      <section class="panel" aria-labelledby="runs-title"><h3 id="runs-title">Recent runs</h3><div id="runs-table" class="table-wrap" tabindex="0" role="region" aria-label="Recent runs table">unavailable</div></section>
+    </section>
+  </main>
+  <footer>All timestamps UTC · Read-only observations; status and ledger may have different update times. No controls, wallet or live orders.</footer>
+</body>
+</html>

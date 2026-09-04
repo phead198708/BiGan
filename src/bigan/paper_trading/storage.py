@@ -44,10 +44,27 @@ JSONL_FILES = (
 class PaperRunStore:
     """Explicit new/resume lifecycle for a single durable paper run."""
 
+    read_only = False
+
     def __init__(self, *, run_dir: Path, manifest: PaperRunManifest, fsync: bool) -> None:
         self.run_dir = run_dir
         self.manifest = manifest
         self.fsync = fsync
+
+    @classmethod
+    def open_read_only(cls, *, output_dir: str | Path, run_id: str) -> PaperRunStore:
+        """Read an existing manifest only; never recover or rebuild any artifact."""
+        manifest = cls.load_manifest(output_dir=output_dir, run_id=run_id)
+        if manifest.run_id != run_id:
+            raise ValueError("run directory and manifest identity disagree")
+        return ReadOnlyPaperRunStore(
+            run_dir=Path(output_dir).expanduser().resolve() / run_id,
+            manifest=manifest, fsync=False,
+        )
+
+    def _require_writable(self) -> None:
+        if self.read_only:
+            raise PermissionError("paper run store is read-only")
 
     @classmethod
     def create_new(
@@ -126,6 +143,7 @@ class PaperRunStore:
     ) -> None:
         """Append one strategy decision and its derived account observations."""
 
+        self._require_writable()
         self._validate_artifact_identity(
             decision.run_id,
             ledger_event.run_id,
@@ -247,6 +265,7 @@ class PaperRunStore:
     ) -> None:
         """Append settlement truth and its derived account observations."""
 
+        self._require_writable()
         self._validate_artifact_identity(
             settlement.run_id,
             ledger_event.run_id,
@@ -264,6 +283,7 @@ class PaperRunStore:
     def recover_ledger(self) -> PaperAccountLedger:
         """Validate all artifacts, replay authoritative events, and verify snapshot."""
 
+        self._require_writable()
         decision_payloads = self._read_jsonl(SIGNAL_EVENTS_FILE)
         settlement_payloads = self._read_jsonl(SETTLEMENT_EVENTS_FILE)
         decisions = [PaperDecisionEvent.from_dict(row) for row in decision_payloads]
@@ -347,12 +367,14 @@ class PaperRunStore:
         ledger_event: PaperLedgerEvent,
         snapshot: PaperAccountSnapshot,
     ) -> None:
+        self._require_writable()
         self._append_jsonl(LEDGER_EVENTS_FILE, ledger_event.to_dict())
         self._append_jsonl(POSITION_SNAPSHOTS_FILE, snapshot.to_dict())
         self._append_jsonl(PNL_SNAPSHOTS_FILE, snapshot.to_dict())
         self._write_atomic_json(SNAPSHOT_FILE, snapshot.to_dict())
 
     def _index_decision(self, decision: PaperDecisionEvent) -> None:
+        self._require_writable()
         with self._open_idempotency_index() as database:
             _insert_decision_index(database, decision)
 
@@ -360,6 +382,7 @@ class PaperRunStore:
         self,
         decisions: tuple[PaperDecisionEvent, ...],
     ) -> None:
+        self._require_writable()
         path = self.run_dir / IDEMPOTENCY_INDEX_FILE
         temporary = self.run_dir / f".{IDEMPOTENCY_INDEX_FILE}.{os.getpid()}.tmp"
         temporary.unlink(missing_ok=True)
@@ -383,8 +406,21 @@ class PaperRunStore:
         path = self.run_dir / IDEMPOTENCY_INDEX_FILE
         if not path.is_file():
             raise ValueError("paper idempotency index is missing")
-        database = sqlite3.connect(path)
+        if self.read_only:
+            # WAL readers can create/update -shm even with mode=ro. The canonical
+            # writer uses rollback journals; refuse other formats without repair.
+            with path.open("rb") as handle:
+                header = handle.read(100)
+            if header[:16] != b"SQLite format 3\x00" or header[18:20] != b"\x01\x01":
+                raise ValueError("unsupported read-only index format")
+            if any(Path(str(path) + suffix).exists() for suffix in ("-journal", "-wal", "-shm")):
+                raise ValueError("read-only index is temporarily unavailable")
+            database = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.02)
+        else:
+            database = sqlite3.connect(path)
         try:
+            if self.read_only:
+                database.execute("PRAGMA query_only=ON")
             with database:
                 yield database
         finally:
@@ -395,6 +431,7 @@ class PaperRunStore:
             raise ValueError("artifact run_id does not match paper run manifest")
 
     def _append_jsonl(self, name: str, payload: dict[str, object]) -> None:
+        self._require_writable()
         encoded = _encode_json(payload) + b"\n"
         path = self.run_dir / name
         with path.open("ab") as handle:
@@ -457,6 +494,7 @@ class PaperRunStore:
                 yield _decode_jsonl_line(buffer, name=name, line_number=1)
 
     def _write_atomic_json(self, name: str, payload: dict[str, object]) -> None:
+        self._require_writable()
         path = self.run_dir / name
         temporary = self.run_dir / f".{name}.{os.getpid()}.tmp"
         encoded = _encode_json(payload) + b"\n"
@@ -475,6 +513,20 @@ class PaperRunStore:
                     os.close(directory_fd)
         finally:
             temporary.unlink(missing_ok=True)
+
+
+class ReadOnlyPaperRunStore(PaperRunStore):
+    """Capability with no create, resume, recovery, or mutation entry points."""
+
+    read_only = True
+
+    @classmethod
+    def create_new(cls, **kwargs: Any) -> PaperRunStore:
+        raise PermissionError("paper run store is read-only")
+
+    @classmethod
+    def resume_existing(cls, **kwargs: Any) -> PaperRunStore:
+        raise PermissionError("paper run store is read-only")
 
 
 def _validate_run_component(run_id: str) -> None:

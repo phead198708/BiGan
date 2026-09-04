@@ -54,6 +54,10 @@ kafka = [
 
 [project.scripts]
 bigan-ingest = "bigan.ingestion.__main__:app"
+bigan-paper-dashboard = "bigan.paper_trading.dashboard.__main__:main"
+
+[tool.setuptools.package-data]
+"bigan.paper_trading.dashboard" = ["static/*.html", "static/*.js", "static/*.css"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

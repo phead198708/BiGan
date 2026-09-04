@@ -26,6 +26,27 @@ The operator contract, recovery rules, status schema, and live-data limitations
 are documented in
 [`docs/paper_trading/operator_contract.md`](docs/paper_trading/operator_contract.md).
 
+## Local read-only paper dashboard
+
+After starting the operator (or running the mock demo above), open a second
+terminal with the same working directory and configuration:
+
+```bash
+python -m bigan.paper_trading.dashboard \
+  --config config/paper_operator.example.toml --host 127.0.0.1 --port 8080
+# Installed console command: bigan-paper-dashboard --config config/paper_operator.example.toml
+```
+
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080) for operator/account/position
+health and bounded decision, fill, settlement and run history. This is a
+separate **read-only, loopback-only service with no authentication**: do not
+expose it publicly or via a proxy/tunnel. It never starts the operator, repairs
+its storage, signs, trades, or writes paper run files. Failed refreshes retain
+the last view; missing sections show unavailable, not zero. A completed mock
+demo naturally shows STOPPED and becomes stale after five seconds by default.
+
+See [dashboard setup, field meanings, warnings, troubleshooting and screenshots](docs/paper_trading/dashboard.md).
+
 ## Layout
 
 ```
