@@ -15,7 +15,7 @@ from .contracts import (
     PaperWindowRegistration,
 )
 from .ledger import PaperAccountLedger, replay_paper_events
-from .session import PaperSessionFailedError, PaperTradingSession
+from .session import PaperSessionFailedError, PaperSessionOwnershipError, PaperTradingSession
 from .storage import PaperRunStore
 
 __all__ = [
@@ -30,6 +30,7 @@ __all__ = [
     "PaperRunManifest",
     "PaperRunStore",
     "PaperSessionFailedError",
+    "PaperSessionOwnershipError",
     "PaperSafetyBoundary",
     "PaperSettlementEvent",
     "PaperSettlementInput",

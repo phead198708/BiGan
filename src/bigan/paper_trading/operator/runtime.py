@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -16,7 +17,7 @@ from bigan.execution.polymarket_oms import PolymarketOMS
 from bigan.features.binance_ofi import BinanceOFICalculator
 from bigan.paper_trading.contracts import PaperSettlementInput
 from bigan.paper_trading.session import PaperSessionFailedError, PaperTradingSession
-from bigan.paper_trading.storage import PaperRunStore
+from bigan.paper_trading.storage import MANIFEST_FILE, PaperRunStore
 from bigan.pipeline.events import DecisionDisposition
 from bigan.pipeline.strategy_runner import StrategyRunner
 from bigan.strategies.polymarket_pricing import (
@@ -95,6 +96,7 @@ class PaperTradingOperator:
         self.active_market: DiscoveredMarket | None = None
         self.next_market: DiscoveredMarket | None = None
         self.session: PaperTradingSession | None = None
+        self._session_owner_token: object | None = None
         self.pricing_provider: RollingPricingInputsProvider | None = None
         self.binance_sync: BinanceDepthSynchronizer | None = None
         self.market_sync: PolymarketBookSynchronizer | None = None
@@ -460,7 +462,7 @@ class PaperTradingOperator:
                     self._publish_status()
                     return
                 self._validate_final_resolution(final, market)
-                session.settle(
+                session._settle_operator(
                     PaperSettlementInput(
                         window_id=final.window_id,
                         yes_payout=final.yes_payout,
@@ -469,7 +471,8 @@ class PaperTradingOperator:
                         source_ts_ms=final.source_ts_ms,
                         received_ts_ms=final.received_ts_ms,
                         source_reference=final.source_reference,
-                    )
+                    ),
+                    owner_token=self._require_session_token(),
                 )
                 self._last_settlement = final
                 self.counters["settlement_completed"] += 1
@@ -487,6 +490,7 @@ class PaperTradingOperator:
         self._accepting_snapshots = False
         async with self._lock:
             if not self._account_lock.held:
+                self._revoke_session()
                 return
             try:
                 exhausted = self.state is OperatorState.EXHAUSTED
@@ -501,7 +505,10 @@ class PaperTradingOperator:
                 else:
                     self._publish_status(force=True)
             finally:
-                self._account_lock.release()
+                try:
+                    self._revoke_session()
+                finally:
+                    self._account_lock.release()
 
     def status(self) -> OperatorStatus:
         now_ms = self.clock_ms()
@@ -678,7 +685,9 @@ class PaperTradingOperator:
             return None
         before = session.runner.decision_count
         try:
-            result = await session.process_snapshot(snapshot)
+            result = await session._process_operator_snapshot(
+                snapshot, owner_token=self._require_session_token()
+            )
             if session.runner.decision_count == before:
                 self.counters["snapshot_deduplicated"] += 1
             else:
@@ -816,6 +825,11 @@ class PaperTradingOperator:
                 snapshot_dedupe_cache_size=self.config.snapshot_lru_size,
             )
             lifecycle_reason = "session_created"
+        owner_token = object()
+        session._bind_operator(
+            owner_token=owner_token,
+            ownership_checker=lambda: self._owns_session_writes(owner_token),
+        )
         if checkpoint.activation_state == "ACTIVATING":
             if session.current_snapshot.last_event_sequence != 0:
                 raise ValueError("ACTIVATING run cannot contain trading or settlement events")
@@ -832,6 +846,8 @@ class PaperTradingOperator:
             self.checkpoint_store.write(active)
             checkpoint = active
         self._checkpoint = checkpoint
+        self._revoke_session()
+        self._session_owner_token = owner_token
         self.session = session
         self.active_market = market
         self.pricing_provider = pricing
@@ -985,7 +1001,7 @@ class PaperTradingOperator:
     def _load_account_checkpoint(self) -> AccountCheckpoint | None:
         checkpoint = self.checkpoint_store.load(config_sha256=self.config.config_sha256)
         if checkpoint is None:
-            if any(path.is_dir() for path in Path(self.config.output_dir).glob("paper-*")):
+            if self._has_existing_run_data():
                 raise ValueError(
                     "existing paper runs without account checkpoint; explicit migration required"
                 )
@@ -1011,6 +1027,38 @@ class PaperTradingOperator:
             ):
                 raise ValueError("checkpoint predecessor ledger is not settled at carried cash")
         return checkpoint
+
+    def _has_existing_run_data(self) -> bool:
+        root = Path(self.config.output_dir)
+        for path in root.iterdir():
+            if path.is_dir() and (path / MANIFEST_FILE).exists():
+                manifest = PaperRunStore.load_manifest(output_dir=root, run_id=path.name)
+                if manifest.run_id != path.name:
+                    raise ValueError("existing run directory and manifest identity disagree")
+                return True
+            # A canonical run without a manifest is incomplete, not an empty account.
+            if re.fullmatch(r"paper-[0-9a-f]{24}", path.name):
+                raise ValueError("incomplete paper run without an account checkpoint")
+        return False
+
+    def _owns_session_writes(self, owner_token: object) -> bool:
+        return bool(
+            self._account_lock.held
+            and self._session_owner_token is owner_token
+            and not self._permanently_failed
+        )
+
+    def _require_session_token(self) -> object:
+        token = self._session_owner_token
+        if token is None or not self._owns_session_writes(token):
+            raise RuntimeError("operator has no current session write ownership")
+        return token
+
+    def _revoke_session(self) -> None:
+        token = self._session_owner_token
+        self._session_owner_token = None
+        if self.session is not None and token is not None:
+            self.session._close_operator(owner_token=token)
 
     def _ingest_spot_from_binance(self, timestamp_ms: int) -> bool:
         if self.binance_sync is None or self.pricing_provider is None:
@@ -1172,6 +1220,7 @@ class PaperTradingOperator:
         self.counters["operator_errors"] += 1
         self._permanently_failed = True
         self._accepting_snapshots = False
+        self._revoke_session()
         self.state = OperatorState.FAILED
         self.state_reason = f"{reason}:{type(exc).__name__}"
         logger.exception("paper_operator.failed", extra={"reason": reason})

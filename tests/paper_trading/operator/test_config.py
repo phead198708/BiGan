@@ -40,6 +40,19 @@ def test_defaults_are_strictly_paper_only_and_identity_is_stable(tmp_path: Path)
     assert len(first.config_sha256) == 64
 
 
+@pytest.mark.parametrize("operator_id", [
+    ".", "..", "paper-main", "PAPER-main", "paper-" + "a" * 24,
+    "/outside", "../outside", "nested/operator", r"nested\operator", ".account-locks",
+    " leading-space", "nul\x00name",
+])
+def test_operator_paths_and_reserved_run_namespace_fail_before_creating_files(tmp_path, operator_id):
+    output = tmp_path / "runs"
+    with pytest.raises(ValueError, match="operator_id"):
+        OperatorConfig(**_minimal(output, operator_id=operator_id))
+    assert not output.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

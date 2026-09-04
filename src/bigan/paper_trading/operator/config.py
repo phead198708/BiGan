@@ -159,8 +159,12 @@ class OperatorConfig:
             object.__setattr__(self, "output_dir", Path(self.output_dir))
         for name in ("operator_id", "strategy_id", "paper_account_id", "source_commit"):
             _require_text(name, getattr(self, name))
-        if Path(self.operator_id).name != self.operator_id:
-            raise ValueError("operator_id must be a safe path component")
+        if (
+            self.operator_id in {".", ".."}
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", self.operator_id)
+            or self.operator_id.lower().startswith("paper-")
+        ):
+            raise ValueError("operator_id must be a safe path component outside the reserved paper- namespace")
         if self.underlying != self.underlying.upper() or not self.underlying:
             raise ValueError("underlying must be a non-empty uppercase symbol")
         if not re.fullmatch(r"[A-Z0-9]{5,20}", self.binance_symbol):
@@ -198,7 +202,7 @@ class OperatorConfig:
             raise ValueError("recent query default cannot exceed its hard maximum")
         if self.logging_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError("logging_level is invalid")
-        if Path(self.status_filename).name != self.status_filename:
+        if self.status_filename in {".", ".."} or Path(self.status_filename).name != self.status_filename:
             raise ValueError("status_filename must be a plain filename")
         if self.status_filename in {"account_checkpoint.json", ".operator.lock"}:
             raise ValueError("status_filename cannot overwrite account checkpoint or ownership lock")

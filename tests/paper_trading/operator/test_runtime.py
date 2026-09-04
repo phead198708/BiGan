@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from bigan.data.polymarket_clob import MarketSnapshot
+from bigan.paper_trading.contracts import PaperSettlementInput
 from bigan.paper_trading.operator.config import OperatorConfig
 from bigan.paper_trading.operator.discovery import DiscoveredMarket, DiscoverySelection
 from bigan.paper_trading.operator.ownership import AccountOwnershipError
@@ -17,8 +19,14 @@ from bigan.paper_trading.operator.read_model import (
 )
 from bigan.paper_trading.operator.resolution import FinalResolution
 from bigan.paper_trading.operator.runtime import PaperTradingOperator, stable_run_id
-from bigan.paper_trading.session import PaperSessionFailedError, PaperTradingSession
+from bigan.paper_trading.session import (
+    PaperSessionFailedError,
+    PaperSessionOwnershipError,
+    PaperTradingSession,
+)
+from bigan.paper_trading.storage import JSONL_FILES, SETTLEMENT_EVENTS_FILE, PaperRunStore
 from bigan.strategies.polymarket_pricing import PolymarketPricingEngine, SignalDirection
+from tests.paper_trading.helpers import manifest
 
 
 class FakeClock:
@@ -731,14 +739,14 @@ async def test_shutdown_waits_for_inflight_decision(tmp_path: Path, monkeypatch)
     await _ready_operator(operator, clock, produce_decision=False)
     entered = asyncio.Event()
     release = asyncio.Event()
-    original = PaperTradingSession.process_snapshot
+    original = PaperTradingSession._process_operator_snapshot
 
-    async def blocked(self: PaperTradingSession, snapshot):
+    async def blocked(self: PaperTradingSession, snapshot, *, owner_token):
         entered.set()
         await release.wait()
-        return await original(self, snapshot)
+        return await original(self, snapshot, owner_token=owner_token)
 
-    monkeypatch.setattr(PaperTradingSession, "process_snapshot", blocked)
+    monkeypatch.setattr(PaperTradingSession, "_process_operator_snapshot", blocked)
     market_sync = operator.market_sync
     assert market_sync is not None
     snapshot = market_sync.ingest(
@@ -1041,3 +1049,119 @@ async def test_zero_cash_settlement_is_exhausted_not_storage_failure(tmp_path, m
     assert resumed.session.current_snapshot.cash == 0
     assert resumed.read_repository.settlements(1)
     await resumed.shutdown()
+
+
+@pytest.mark.parametrize("use_saved_token", [False, True])
+async def test_retired_session_cannot_write_during_new_operator_takeover(tmp_path, use_saved_token):
+    market, clock = _market(1), FakeClock(10_000)
+    final = _final(market)
+    settlement = PaperSettlementInput(
+        window_id=final.window_id, yes_payout=final.yes_payout, settlement_ts_ms=final.settlement_ts_ms,
+        source=final.source, source_ts_ms=final.source_ts_ms, received_ts_ms=final.received_ts_ms,
+        source_reference=final.source_reference,
+    )
+    first = PaperTradingOperator(
+        config=_config(tmp_path), discovery=FakeDiscovery([_selection(market)]),
+        resolution=FakeResolution([final]), clock_ms=clock,
+    )
+    await first.start()
+    await _ready_operator(first, clock)
+    stale_session, stale_token = first.session, first._session_owner_token
+    stale_snapshot = stale_session.current_snapshot
+    oms_calls = stale_session.runner.oms_calls
+    await first.shutdown()
+    second = PaperTradingOperator(
+        config=_config(tmp_path), discovery=FakeDiscovery([_selection(market)]),
+        resolution=FakeResolution([final]), clock_ms=clock,
+    )
+    await second.start()
+    assert second._account_lock.held
+    tape_before = {name: (stale_session.store.run_dir / name).read_bytes() for name in JSONL_FILES}
+    snapshot = MarketSnapshot(
+        timestamp_ms=clock.now_ms + 1, window_id=market.window_id,
+        yes_bid=.09, yes_ask=.10, no_bid=.89, no_ask=.90, last_traded_price=.10,
+        yes_bid_size=100, yes_ask_size=100, no_bid_size=100, no_ask_size=100,
+    )
+    with pytest.raises(PaperSessionOwnershipError):
+        if use_saved_token:
+            stale_session._process_operator_snapshot_sync(snapshot, owner_token=stale_token)
+        else:
+            stale_session.process_snapshot_sync(snapshot)
+    with pytest.raises(PaperSessionOwnershipError):
+        if use_saved_token:
+            await stale_session._process_operator_snapshot(snapshot, owner_token=stale_token)
+        else:
+            await stale_session.process_snapshot(snapshot)
+    assert {name: (stale_session.store.run_dir / name).read_bytes() for name in JSONL_FILES} == tape_before
+
+    def stale_writer():
+        with pytest.raises(PaperSessionOwnershipError):
+            if use_saved_token:
+                stale_session._settle_operator(settlement, owner_token=stale_token)
+            else:
+                stale_session.settle(settlement)
+
+    clock.now_ms = market.end_ts_ms + 1
+    await asyncio.gather(asyncio.to_thread(stale_writer), second.poll())
+    assert stale_session.current_snapshot == stale_snapshot
+    assert stale_session.runner.oms_calls == oms_calls
+    assert len((second.session.store.run_dir / SETTLEMENT_EVENTS_FILE).read_text().splitlines()) == 1
+    assert second.session.store.recover_ledger().snapshot() == second.session.current_snapshot
+    assert second.session.failed is False
+    await second.shutdown()
+
+
+async def test_rollover_revokes_old_session_even_while_operator_keeps_account_lock(tmp_path):
+    old, new, clock = _market(1), _market(2, start=900_000), FakeClock(10_000)
+    operator = PaperTradingOperator(
+        config=_config(tmp_path), discovery=FakeDiscovery([_selection(old), _selection(new)]),
+        resolution=FakeResolution([_final(old)]), clock_ms=clock,
+    )
+    await operator.start()
+    await _ready_operator(operator, clock)
+    stale, token = operator.session, operator._session_owner_token
+    clock.now_ms = old.end_ts_ms + 1
+    await operator.poll()
+    assert operator._account_lock.held
+    assert operator._session_owner_token is not token
+    before = stale.store.recover_ledger().snapshot()
+    with pytest.raises(PaperSessionOwnershipError, match="permanently closed"):
+        stale._settle_operator(stale.store.recent_settlements(limit=1)[0].settlement, owner_token=token)
+    clock.now_ms = new.start_ts_ms + 10_000
+    await _ready_operator(operator, clock)
+    assert operator.session.runner.oms_calls > 0
+    assert stale.store.recover_ledger().snapshot() == before
+    await operator.shutdown()
+
+
+async def test_unrelated_paper_prefixed_directory_is_not_an_existing_run(tmp_path):
+    (tmp_path / "paper-notes").mkdir()
+    (tmp_path / "paper-notes" / "notes.txt").write_text("not a ledger")
+    operator = PaperTradingOperator(
+        config=_config(tmp_path), discovery=FakeDiscovery([_selection(_market(1))]),
+        resolution=FakeResolution([None]), clock_ms=FakeClock(10_000),
+    )
+    await operator.start()
+    assert operator.state is OperatorState.SYNCING
+    await operator.shutdown()
+
+
+@pytest.mark.parametrize("kind", ["manifest_without_prefix", "invalid_manifest", "incomplete_canonical"])
+async def test_existing_or_damaged_run_artifacts_still_require_explicit_recovery(tmp_path, kind):
+    if kind == "manifest_without_prefix":
+        PaperRunStore.create_new(output_dir=tmp_path, manifest=replace(manifest(), run_id="legacy-run"))
+    elif kind == "invalid_manifest":
+        run = tmp_path / "legacy-run"
+        run.mkdir()
+        (run / "paper_run_manifest.json").write_text("{broken")
+    else:
+        (tmp_path / ("paper-" + "a" * 24)).mkdir()
+    operator = PaperTradingOperator(
+        config=_config(tmp_path), discovery=FakeDiscovery([_selection(_market(1))]),
+        resolution=FakeResolution([None]), clock_ms=FakeClock(10_000),
+    )
+    await operator.start()
+    assert operator.state is OperatorState.FAILED
+    assert operator.session is None
+    assert not operator.checkpoint_store.path.exists()
+    await operator.shutdown()

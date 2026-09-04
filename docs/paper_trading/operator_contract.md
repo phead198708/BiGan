@@ -27,6 +27,14 @@ allowlists. No environment-variable overlay exists, so an environment variable
 cannot turn a paper process into a live process. The code contains no order
 creation, cancellation, allowance, wallet, or signing adapter.
 
+`operator_id` is a portable ASCII path component: 1–128 characters, starting
+with a letter or digit, followed only by letters, digits, `_`, `-`, or `.`.
+`.` and `..`, separators, and the case-insensitive reserved `paper-` run
+namespace are rejected during configuration validation, before directory
+creation. Existing deployments with a reserved ID require explicit account
+identity migration; renaming only the configuration or directory does not
+bypass checkpoint and manifest identity validation.
+
 ## Components and data flow
 
 1. `OperatorConfig` performs strict TOML schema, range, safety, and endpoint
@@ -193,6 +201,17 @@ in shutdown's `finally` block or by OS process exit. Lock files are never
 unlinked. Run on a POSIX filesystem supporting `flock`; these are local-storage
 locks, not distributed cross-host/account locks for independent output roots.
 
+Each operator-owned session is bound once to a per-activation identity token.
+Its public snapshot, settlement, and feed-lifecycle methods reject calls with
+`PaperSessionOwnershipError`; only the operator's tokenized internal entry
+points may mutate it, and every entry also checks current account-lock ownership.
+Decision persistence rechecks the authorized processing context. Shutdown
+irrevocably closes the session before releasing the process locks; rollover
+and permanent operator failure also revoke the old session. Retained session
+references (including a previously valid token) cannot write after revocation
+or takeover. Read-only snapshots/history remain available. Standalone PR-A
+sessions retain their public API.
+
 `<output_dir>/<operator_id>/account_checkpoint.json` is the durable account
 frontier, not a dashboard projection. It records the active market metadata,
 stable run ID, opening cash, original account bankroll, cumulative prior-run
@@ -217,8 +236,11 @@ ledger. A crash before the checkpoint resumes the old run; a crash after the
 checkpoint but before creation creates the intended successor with the same
 cash. No funds are reinitialized from `initial_bankroll` at rollover.
 
-Missing checkpoints alongside existing `paper-*` run directories, corrupt or
+Missing checkpoints alongside manifest-backed run directories (regardless of
+prefix), incomplete canonical `paper-<24 hex digits>` run paths, corrupt or
 configuration-mismatched checkpoints, and ledger/cash mismatches fail closed.
+Existing manifests are parsed and their run identity checked, not inferred from
+a directory prefix; unrelated folders such as `paper-notes` are not run data.
 Pre-checkpoint and schema-version-1 deployments require explicit account-frontier migration; the
 operator never guesses a balance from today's discovered market. Use a
 dedicated output directory per operator/account, and retain its checkpoint
