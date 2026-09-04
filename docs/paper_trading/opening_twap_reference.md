@@ -67,6 +67,10 @@ unready until depth reconciles it; a gap, overflow or unconfirmed notice past
 the freshness deadline requires a new full-book subscription. No missing size
 is synthesized, and a malformed later batch item cannot publish an earlier fill
 candidate from that same batch.
+Valid price-change/trade-book interleaving waits behind the same gate instead of
+reconnecting on each notification. The merged snapshot uses the latest known
+event time, but source freshness and ordering remain independent for YES and NO;
+an older YES message is not rejected merely because a newer NO message arrived.
 
 ## Pricing model and limitations
 

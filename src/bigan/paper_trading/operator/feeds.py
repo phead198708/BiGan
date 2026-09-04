@@ -583,9 +583,7 @@ class PolymarketBookSynchronizer:
                 if pending is not None and timestamp < pending[0]:
                     self.out_of_order_count += 1
                     return None
-                if book.matches(payload):
-                    self._pending_tops.pop(token_id, None)
-                else:
+                if not book.matches(payload):
                     self._pending_tops[token_id] = (timestamp, {
                         "best_bid": payload.get("best_bid"), "best_ask": payload.get("best_ask"),
                     })
@@ -611,12 +609,23 @@ class PolymarketBookSynchronizer:
                     self._invalidate()
                     return None
                 depth = self._depth[token_id].updated(payload)
+                if "best_bid" in payload and "best_ask" in payload and not depth.matches(payload):
+                    # Trade-driven full books and price-change notifications can
+                    # interleave. Wait for authoritative depth, not a new socket
+                    # on every such boundary; pending tokens cannot execute.
+                    self._pending_tops[token_id] = (timestamp, {
+                        "best_bid": payload.get("best_bid"), "best_ask": payload.get("best_ask"),
+                    })
             else:
                 self.unknown_message_count += 1
                 return None
+            # The parser consumes a merged as-of quote, while token freshness
+            # below retains each exchange timestamp. Different token books may
+            # arrive interleaved; do not compare YES event time to NO event time.
+            decision_ts = max(timestamp, max(self._timestamp_by_token.values(), default=timestamp))
             normalized = {
                 "event_type": "book", "asset_id": token_id,
-                "window_id": self.window_id, "timestamp": timestamp,
+                "window_id": self.window_id, "timestamp": decision_ts,
                 **depth.top_payload(),
             }
             previous_errors = self._handler.parse_errors + self._handler.dropped_stale
@@ -653,7 +662,7 @@ class PolymarketBookSynchronizer:
             if self._pending_tops:
                 self.state = FeedConnectionState.SYNCING
                 return None
-            if not self._tokens_fresh(now_ms=timestamp):
+            if not self._tokens_fresh(now_ms=decision_ts):
                 self.state = FeedConnectionState.STALE
                 return None
             self.state = FeedConnectionState.READY

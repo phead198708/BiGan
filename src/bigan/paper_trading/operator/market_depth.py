@@ -48,14 +48,12 @@ class MarketDepth:
             levels.pop(price, None)
         if len(levels) > MAX_MARKET_LEVELS:
             raise ValueError("CLOB depth exceeds memory bound")
-        book = MarketDepth(bids, asks)
-        if "best_bid" in payload and "best_ask" in payload and not book.matches(payload):
-            raise ValueError("CLOB delta top disagrees with reconstructed depth")
-        return book
+        return MarketDepth(bids, asks)
 
     def matches(self, payload: Mapping[str, object]) -> bool:
         bid, ask = self.top()
-        return bid == _price(payload.get("best_bid")) and ask == _price(payload.get("best_ask"))
+        expected_bid, expected_ask = _price(payload.get("best_bid")), _price(payload.get("best_ask"))
+        return bid == expected_bid and ask == expected_ask
 
     def top(self) -> tuple[float, float]:
         if not self.bids or not self.asks:

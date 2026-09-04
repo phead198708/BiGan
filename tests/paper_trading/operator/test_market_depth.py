@@ -68,7 +68,8 @@ def test_unreconciled_advisory_resubscribes_after_freshness_deadline():
 
 
 @pytest.mark.parametrize("mutation", [
-    {"best_bid": "0.38"}, {"size": "NaN"}, {"size": "-1"}, {"side": "BAD"},
+    {"best_bid": "NaN"}, {"size": "NaN"}, {"size": "-1"}, {"side": "BAD"},
+    {"best_bid": "0.38", "best_ask": "NaN"},
     {"price": True}, {"size": True}, {"price": "1.2"},
 ])
 def test_ambiguous_or_malformed_depth_requests_resubscription(mutation):
@@ -108,3 +109,31 @@ def test_reconnect_cannot_reuse_old_depth_or_pending_advisories():
     feed.begin_generation(2)
     assert feed.ingest(change(), generation=2) is None
     assert feed.needs_bootstrap
+
+
+def test_interleaved_token_timestamps_are_not_a_global_sequence_gap():
+    feed = ready()
+    assert feed.ingest(_book("no-token", 2, 1200, bid="0.40", ask="0.50"), generation=1)
+    snapshot = feed.ingest(_book("yes-token", 2, 1100, bid="0.39", ask="0.50"), generation=1)
+    assert snapshot is not None and snapshot.timestamp_ms == 1200
+    assert feed.token_health(now_ms=1200)["yes"]["timestamp_ms"] == 1100
+    assert feed.token_health(now_ms=1200)["no"]["timestamp_ms"] == 1200
+    assert feed.health(now_ms=1200).fresh
+    assert not feed.token_health(now_ms=1601)["yes"]["fresh"]
+    # An actual older event for the same token still cannot change its depth.
+    assert feed.ingest(_book("yes-token", 3, 1099, bid="0.10", ask="0.20"), generation=1) is None
+    assert feed._depth["yes-token"].top() == (0.39, 0.50)
+
+
+def test_unconfirmed_delta_waits_for_trade_full_book_without_reconnect_loop():
+    feed = ready()
+    assert feed.ingest(change(best_bid="0.38"), generation=1) is None
+    assert not feed.needs_bootstrap and not feed.health(now_ms=1100).fresh
+    # Price-only confirmation is still insufficient evidence of quantity.
+    assert feed.ingest({"event_type": "best_bid_ask", "asset_id": "yes-token", "timestamp": 1100,
+                        "best_bid": "0.39", "best_ask": "0.50"}, generation=1) is None
+    assert not feed.health(now_ms=1100).fresh
+    snapshot = feed.ingest(_book("yes-token", 2, 1101, bid="0.38", ask="0.50"), generation=1)
+    assert snapshot is not None and snapshot.yes_bid_size == 10
+    assert feed.health(now_ms=1101).fresh
+    assert not feed.needs_bootstrap
