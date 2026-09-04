@@ -38,6 +38,30 @@ def _sample(ts_ms: int, price: float, source: str) -> ReferencePriceSample:
     )
 
 
+def test_long_outage_return_is_not_assigned_to_short_volatility_window() -> None:
+    provider = _provider(min_returns=1)
+    assert provider.ingest_spot(_sample(1_000, 100, provider.spot_source))
+    assert provider.ingest_spot(_sample(2_000, 101, provider.spot_source))
+    assert provider.return_sample_count == 1
+    assert provider.ingest_spot(_sample(3_600_000, 200, provider.spot_source))
+    assert provider.return_sample_count == 0
+    provider.ingest_oracle(_sample(3_600_000, 200, provider.oracle_source))
+    assert provider.health(now_ms=3_600_000).ready is False
+    assert provider(3_600_000) is None
+    assert provider.ingest_spot(_sample(3_601_000, 201, provider.spot_source))
+    assert provider.return_sample_count == 1
+
+
+def test_return_eviction_uses_start_time_and_health_expires_warmup() -> None:
+    provider = _provider(min_returns=1)
+    provider.ingest_spot(_sample(0, 100, provider.spot_source))
+    provider.ingest_spot(_sample(10_000, 101, provider.spot_source))
+    provider.ingest_oracle(_sample(10_000, 100, provider.oracle_source))
+    assert provider.health(now_ms=10_000).ready is True
+    assert provider.health(now_ms=10_001).ready is False
+    assert provider.return_sample_count == 0
+
+
 def test_provider_requires_both_sources_and_minimum_volatility_samples() -> None:
     provider = _provider()
     provider.ingest_spot(_sample(1_000, 100.0, "binance:BTCUSDT"))

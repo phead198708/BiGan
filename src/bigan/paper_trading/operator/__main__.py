@@ -104,9 +104,8 @@ async def _run_mock_demo(config: OperatorConfig) -> None:
     await operator.start()
     generation = operator.generation
     received = _now_ms()
-    sample_base = received - (
-        (config.volatility_min_samples + 1) * config.volatility_return_interval_ms
-    )
+    warmup_samples = max(config.volatility_min_samples, config.ofi_min_samples)
+    sample_base = received - warmup_samples * config.volatility_return_interval_ms
     await operator.ingest_binance_snapshot(
         {
             "lastUpdateId": 1,
@@ -116,20 +115,23 @@ async def _run_mock_demo(config: OperatorConfig) -> None:
         generation=generation,
         received_at_ms=sample_base,
     )
-    for index in range(config.volatility_min_samples):
+    previous_bid, previous_ask = 99_999, 100_001
+    for index in range(warmup_samples):
         timestamp = sample_base + (index + 1) * config.volatility_return_interval_ms
+        next_bid, next_ask = 100_000 + index, 100_002 + index
         await operator.ingest_binance_delta(
             {
                 "s": config.binance_symbol,
                 "E": timestamp,
                 "U": index + 2,
                 "u": index + 2,
-                "b": [[str(100_000 + index), "2"]],
-                "a": [[str(100_002 + index), "2"]],
+                "b": [[str(previous_bid), "0"], [str(next_bid), "2"]],
+                "a": [[str(previous_ask), "0"], [str(next_ask), "2"]],
             },
             generation=generation,
             received_at_ms=timestamp,
         )
+        previous_bid, previous_ask = next_bid, next_ask
     await operator.ingest_oracle(
         _mock_oracle(config, received),
         generation=generation,

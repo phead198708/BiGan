@@ -269,6 +269,202 @@ async def test_freshness_gate_blocks_until_all_three_sources_ready(tmp_path: Pat
     assert operator.counters["snapshot_freshness_dropped"] == 1
 
 
+@pytest.mark.parametrize("settle_before_restart", [True, False])
+async def test_restart_recovers_account_frontier_before_discovering_new_market(
+    tmp_path, settle_before_restart,
+) -> None:
+    old, new = _market(1), _market(2, start=900_000)
+    clock = FakeClock(10_000)
+    first = PaperTradingOperator(
+        config=_config(tmp_path),
+        discovery=FakeDiscovery([_selection(old), DiscoverySelection(None, None, 0)]),
+        resolution=FakeResolution([_final(old)]), clock_ms=clock,
+    )
+    await first.start()
+    await _ready_operator(first, clock)
+    assert first.session is not None
+    assert first.session.current_snapshot.open_lots
+    clock.now_ms = old.end_ts_ms + 1
+    if settle_before_restart:
+        await first.poll()
+        assert first.active_market == old
+    await first.shutdown()
+
+    discovery = FakeDiscovery([_selection(new)])
+    resolution = FakeResolution([_final(old)])
+    second = PaperTradingOperator(
+        config=_config(tmp_path), discovery=discovery, resolution=resolution, clock_ms=clock,
+    )
+    await second.start()
+    assert second.active_market == old
+    assert discovery.calls == 0
+    assert second.session is not None
+    old_session = second.session
+    await second.poll()
+    carried_cash = old_session.current_snapshot.cash
+    assert carried_cash > second.config.initial_bankroll
+    assert second.active_market == new
+    assert second.session.store.manifest.initial_bankroll == carried_cash
+    assert second.session.current_snapshot.cash == carried_cash
+    assert resolution.calls == (0 if settle_before_restart else 1)
+    checkpoint = second.checkpoint_store.load(config_sha256=second.config.config_sha256)
+    assert checkpoint.predecessor_run_id == old_session.store.manifest.run_id
+    assert checkpoint.predecessor_settled_cash == carried_cash
+    await second.shutdown()
+    third = PaperTradingOperator(
+        config=_config(tmp_path), discovery=discovery, resolution=resolution, clock_ms=clock,
+    )
+    await third.start()
+    assert third.active_market == new
+    assert third.session.current_snapshot.cash == carried_cash
+
+
+@pytest.mark.parametrize("failure_boundary", ["checkpoint", "create_session"])
+async def test_rollover_crash_recovers_old_ledger_or_successor_activation_intent(
+    tmp_path, monkeypatch, failure_boundary,
+) -> None:
+    old, new = _market(1), _market(2, start=900_000)
+    clock = FakeClock(10_000)
+    first = PaperTradingOperator(
+        config=_config(tmp_path), discovery=FakeDiscovery([_selection(old), _selection(new)]),
+        resolution=FakeResolution([_final(old)]), clock_ms=clock,
+    )
+    await first.start()
+    await _ready_operator(first, clock)
+    old_session = first.session
+    assert old_session is not None
+
+    def fail(*_args, **_kwargs):
+        raise OSError("injected crash boundary")
+
+    with monkeypatch.context() as patch:
+        if failure_boundary == "checkpoint":
+            patch.setattr(first.checkpoint_store, "write", fail)
+        else:
+            patch.setattr(PaperTradingSession, "create_new", fail)
+        clock.now_ms = old.end_ts_ms + 1
+        await first.poll()
+    assert first.state is OperatorState.FAILED
+    carried_cash = old_session.current_snapshot.cash
+    assert carried_cash > first.config.initial_bankroll
+
+    second = PaperTradingOperator(
+        config=_config(tmp_path), discovery=FakeDiscovery([_selection(new)]),
+        resolution=FakeResolution([None]), clock_ms=clock,
+    )
+    await second.start()
+    if failure_boundary == "checkpoint":
+        assert second.active_market == old
+        await second.poll()
+    assert second.active_market == new
+    assert second.session is not None
+    assert second.session.store.manifest.initial_bankroll == carried_cash
+    assert second.session.current_snapshot.cash == carried_cash
+
+
+@pytest.mark.parametrize("checkpoint_damage", ["missing", "corrupt"])
+async def test_missing_or_corrupt_checkpoint_never_resets_existing_account(
+    tmp_path, checkpoint_damage,
+) -> None:
+    clock = FakeClock(10_000)
+    first = PaperTradingOperator(
+        config=_config(tmp_path), discovery=FakeDiscovery([_selection(_market(1))]),
+        resolution=FakeResolution([None]), clock_ms=clock,
+    )
+    await first.start()
+    await first.shutdown()
+    if checkpoint_damage == "missing":
+        first.checkpoint_store.path.unlink()
+    else:
+        first.checkpoint_store.path.write_text("{broken")
+    second = PaperTradingOperator(
+        config=_config(tmp_path), discovery=FakeDiscovery([_selection(_market(2, start=900_000))]),
+        resolution=FakeResolution([None]), clock_ms=clock,
+    )
+    await second.start()
+    assert second.state is OperatorState.FAILED
+    assert second.session is None
+    assert len(list(tmp_path.glob("paper-*"))) == 1
+
+
+async def test_rejected_spot_invalidates_alpha_and_blocks_oms(tmp_path) -> None:
+    market, clock = _market(1), FakeClock(10_000)
+    operator = PaperTradingOperator(
+        config=_config(tmp_path), discovery=FakeDiscovery([_selection(market)]),
+        resolution=FakeResolution([None]), clock_ms=clock,
+    )
+    await operator.start()
+    await _ready_operator(operator, clock)
+    assert operator.session is not None
+    oms_calls = operator.session.runner.oms_calls
+    clock.now_ms += 1
+    accepted = await operator.ingest_binance_delta(
+        {"s": "BTCUSDT", "E": clock.now_ms, "U": 12, "u": 12,
+         "b": [["201", "2"]], "a": [["103", "0"], ["203", "2"]]},
+        generation=operator.generation, received_at_ms=clock.now_ms,
+    )
+    assert accepted is False
+    assert operator.pricing_provider.outlier_count == 1
+    assert operator.pricing_provider.last_spot_timestamp_ms is None
+    assert operator.session.runner.ofi_engine.last_timestamp_ms is None
+    await _emit_market_pair(operator, market, timestamp_ms=clock.now_ms, sequence=2)
+    assert operator.state is not OperatorState.RUNNING
+    assert operator.session.runner.oms_calls == oms_calls
+
+
+async def test_live_connection_rejects_spot_and_requests_new_bootstrap(tmp_path) -> None:
+    market, clock = _market(1), FakeClock(10_000)
+    operator = PaperTradingOperator(
+        config=_config(tmp_path), discovery=FakeDiscovery([_selection(market)]),
+        resolution=FakeResolution([None]), clock_ms=clock,
+    )
+    await operator.start()
+    assert await operator.begin_binance_connection(
+        window_generation=operator.generation, connection_generation=1,
+        snapshot={"lastUpdateId": 10, "bids": [["99", "2"]], "asks": [["101", "2"]]},
+        received_at_ms=clock.now_ms,
+    )
+    clock.now_ms += 1
+    assert not await operator.ingest_binance_connection_delta(
+        {"s": "BTCUSDT", "E": clock.now_ms, "U": 11, "u": 11,
+         "b": [["201", "2"]], "a": [["101", "0"], ["203", "2"]]},
+        window_generation=operator.generation, connection_generation=1,
+        received_at_ms=clock.now_ms,
+    )
+    assert operator.binance_sync.needs_bootstrap
+    assert operator.pricing_provider.last_spot_timestamp_ms is None
+    assert operator.session.runner.ofi_engine.last_timestamp_ms is None
+    assert operator.session.runner.oms_calls == 0
+
+
+async def test_projection_failure_closes_execution_gate_and_recovers(tmp_path) -> None:
+    market, clock = _market(1), FakeClock(10_000)
+    operator = PaperTradingOperator(
+        config=_config(tmp_path), discovery=FakeDiscovery([_selection(market)]),
+        resolution=FakeResolution([None]), clock_ms=clock,
+    )
+    await operator.start()
+    await _ready_operator(operator, clock)
+    session = operator.session
+    assert session is not None
+    calls = session.runner.oms_calls
+    account = session.current_snapshot
+    working_writer = operator.status_writer
+    operator.status_writer = FailingStatusWriter(working_writer.path)
+    clock.now_ms += operator.config.status_interval_ms
+    await operator.poll()
+    assert operator.state is OperatorState.DEGRADED
+    await _emit_market_pair(operator, market, timestamp_ms=clock.now_ms, sequence=2)
+    assert operator.state is OperatorState.DEGRADED
+    assert session.runner.oms_calls == calls
+    assert session.current_snapshot == account
+    operator.status_writer = working_writer
+    clock.now_ms += 1
+    await _emit_market_pair(operator, market, timestamp_ms=clock.now_ms, sequence=3)
+    assert operator.state is OperatorState.RUNNING
+    assert session.runner.oms_calls > calls
+
+
 async def test_deep_binance_updates_do_not_refresh_stale_ofi_for_oms(
     tmp_path: Path,
 ) -> None:

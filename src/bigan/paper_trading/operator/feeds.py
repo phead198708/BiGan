@@ -576,7 +576,7 @@ class PolymarketBookSynchronizer:
                 return None
             event_type = str(payload.get("event_type") or payload.get("type") or "")
             if event_type == "book":
-                self._full_books.add(token_id)
+                _validate_full_market_book(payload)
             elif event_type in {"price_change", "best_bid_ask"}:
                 previous_sequence = self._sequence_by_token.get(token_id)
                 if token_id not in self._full_books:
@@ -597,16 +597,30 @@ class PolymarketBookSynchronizer:
             else:
                 self.unknown_message_count += 1
                 return None
-            if sequence is not None:
-                self._sequence_by_token[token_id] = sequence
-            self._timestamp_by_token[token_id] = timestamp
             normalized = dict(payload)
             normalized.pop("sequence", None)
             normalized.pop("seq", None)
             normalized["window_id"] = self.window_id
+            if event_type == "book":
+                # Only the validated full depth defines this token's top; do not
+                # let optional best_bid/ask or nested books override it.
+                normalized = {
+                    "event_type": "book", "asset_id": token_id,
+                    "window_id": self.window_id, "timestamp": timestamp,
+                    "bids": payload["bids"], "asks": payload["asks"],
+                }
+            previous_errors = self._handler.parse_errors + self._handler.dropped_stale
             snapshot = self._handler.parse_orderbook_delta(normalized)
+            if self._handler.parse_errors + self._handler.dropped_stale > previous_errors:
+                self.parse_error_count += 1
+                self._invalidate()
+                return None
+            if event_type == "book":
+                self._full_books.add(token_id)
+            if sequence is not None:
+                self._sequence_by_token[token_id] = sequence
+            self._timestamp_by_token[token_id] = timestamp
             if snapshot is None:
-                self.parse_error_count = self._handler.parse_errors
                 return None
             if min(
                 snapshot.yes_bid_size,
@@ -626,6 +640,7 @@ class PolymarketBookSynchronizer:
             return snapshot
         except (TypeError, ValueError):
             self.error_count += 1
+            self._invalidate()
             return None
 
     def health(self, *, now_ms: int) -> FeedHealth:
@@ -690,6 +705,33 @@ class PolymarketBookSynchronizer:
             max_quote_age_ms=self.max_age_ms,
             mock=True,
         )
+
+
+def _validate_full_market_book(payload: Mapping[str, object]) -> None:
+    tops: list[float] = []
+    for name in ("bids", "asks"):
+        levels = payload.get(name)
+        if not isinstance(levels, Sequence) or isinstance(levels, (str, bytes)) or not levels:
+            raise ValueError(f"full book requires non-empty {name}")
+        prices: list[float] = []
+        for level in levels:
+            if not isinstance(level, Mapping):
+                raise ValueError("market level must contain price and size")
+            raw_price, raw_size = level.get("price"), level.get("size")
+            if not isinstance(raw_price, (str, int, float)) or not isinstance(raw_size, (str, int, float)):
+                raise ValueError("market level requires numeric price and size")
+            price, size = float(raw_price), float(raw_size)
+            if not math.isfinite(price) or not 0 < price <= 1:
+                raise ValueError("market price must be in (0, 1]")
+            if not math.isfinite(size) or size < 0:
+                raise ValueError("market size must be finite and non-negative")
+            if size > 0:
+                prices.append(price)
+        if not prices:
+            raise ValueError("full book requires positive liquidity on both sides")
+        tops.append(max(prices) if name == "bids" else min(prices))
+    if tops[0] > tops[1]:
+        raise ValueError("crossed full market book")
 
 
 def _unwrap_binance(payload: Mapping[str, object]) -> Mapping[str, object]:

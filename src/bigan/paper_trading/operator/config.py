@@ -89,7 +89,7 @@ class OperatorConfig:
     underlying: str = "BTC"
     market_type: str = "binary_up_down"
     window_duration_ms: int = 900_000
-    slug_pattern: str | None = r"btc-updown-15m-\d+"
+    slug_pattern: str | None = None
     title_pattern: str | None = None
     max_preopen_ms: int = 1_800_000
     gamma_markets_endpoint: str = DEFAULT_GAMMA_MARKETS_ENDPOINT
@@ -182,12 +182,26 @@ class OperatorConfig:
             raise ValueError("risk position cap cannot exceed window exposure cap")
         if self.window_duration_ms not in {300_000, 900_000}:
             raise ValueError("paper operator supports only 5m and 15m windows")
+        sources = {"BTC": ("BTCUSDT", "btc/usd"), "ETH": ("ETHUSDT", "eth/usd")}
+        if sources.get(self.underlying) != (self.binance_symbol, self.chainlink_symbol):
+            raise ValueError("underlying, binance_symbol and chainlink_symbol must match a supported asset")
+        canonical_slug = (
+            rf"{self.underlying.lower()}-updown-{self.window_duration_ms // 60_000}m-\d+"
+        )
+        if self.slug_pattern is None:
+            object.__setattr__(self, "slug_pattern", canonical_slug)
+        elif self.slug_pattern != canonical_slug:
+            raise ValueError("slug_pattern must match the configured asset and window duration")
+        if self.binance_book_level_limit < 1_000:
+            raise ValueError("binance_book_level_limit must accommodate the 1000-level REST bootstrap")
         if self.recent_query_default > self.recent_query_max:
             raise ValueError("recent query default cannot exceed its hard maximum")
         if self.logging_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError("logging_level is invalid")
         if Path(self.status_filename).name != self.status_filename:
             raise ValueError("status_filename must be a plain filename")
+        if self.status_filename == "account_checkpoint.json":
+            raise ValueError("status_filename cannot overwrite the authoritative account checkpoint")
         _validate_safety(self)
         for field_name in _ALLOWED_ENDPOINTS:
             _validate_readonly_endpoint(field_name, str(getattr(self, field_name)))

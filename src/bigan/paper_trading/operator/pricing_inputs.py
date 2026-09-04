@@ -54,9 +54,9 @@ class RollingPricingInputsProvider:
 
     Spot and oracle samples are independent. Oracle TWAP is a left-continuous,
     event-time integral, bounded by both ``twap_window_ms`` and the market
-    window start. Volatility uses non-overlapping-at-least-interval log returns
-    and population variance, annualized by
-    ``sqrt(annualization_seconds / return_interval_seconds)``. Buffers are
+    window start. Volatility uses non-overlapping log returns wholly inside
+    the rolling window, with drift and variance normalized by actual elapsed
+    time before annualization. Buffers are
     bounded and reconnect explicitly clears warm state.
     """
 
@@ -153,6 +153,7 @@ class RollingPricingInputsProvider:
             "twap_sampling": "event_time_left_continuous",
             "volatility_returns": "irregular_log_returns_with_elapsed_time",
             "volatility_variance": "elapsed_time_demeaned_realized_variance",
+            "volatility_window_policy": "complete_intervals_only_reset_after_long_gap",
         }
 
     def ingest_spot(self, sample: ReferencePriceSample) -> bool:
@@ -169,6 +170,12 @@ class RollingPricingInputsProvider:
             and sample.timestamp_ms - volatility_base.timestamp_ms >= self.return_interval_ms
         ):
             elapsed_ms = sample.timestamp_ms - volatility_base.timestamp_ms
+            if elapsed_ms > self.volatility_window_ms:
+                # A return spanning a long outage cannot describe this rolling window.
+                self._returns.clear()
+                self._last_volatility_sample = sample
+                self._spot_samples.append(sample)
+                return True
             log_return = math.log(sample.price / volatility_base.price)
             if abs(log_return) > self.volatility_max_abs_log_return:
                 self.outlier_count += 1
@@ -285,6 +292,7 @@ class RollingPricingInputsProvider:
         return result
 
     def health(self, *, now_ms: int) -> PricingProviderHealth:
+        self._evict_returns(now_ms)
         latest = (
             None
             if not self._spot_samples or not self._oracle_samples
@@ -310,7 +318,7 @@ class RollingPricingInputsProvider:
 
     def _evict_returns(self, now_ms: int) -> None:
         cutoff = now_ms - self.volatility_window_ms
-        while self._returns and self._returns[0][0] < cutoff:
+        while self._returns and self._returns[0][0] - self._returns[0][2] < cutoff:
             self._returns.popleft()
 
     def _annualized_volatility(self) -> float:

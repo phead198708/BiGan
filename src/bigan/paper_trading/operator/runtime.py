@@ -23,6 +23,7 @@ from bigan.strategies.polymarket_pricing import (
     PolymarketPricingEngine,
 )
 
+from .checkpoint import AccountCheckpoint, AccountCheckpointStore
 from .config import OperatorConfig
 from .discovery import DiscoveredMarket, DiscoveryFilters, DiscoverySelection
 from .feeds import BinanceDepthSynchronizer, FeedHealth, PolymarketBookSynchronizer
@@ -95,6 +96,10 @@ class PaperTradingOperator:
         self._projection_error: str | None = None
         self._last_status_write_ms: int | None = None
         self._last_settlement: FinalResolution | None = None
+        self._checkpoint: AccountCheckpoint | None = None
+        self.checkpoint_store = AccountCheckpointStore(
+            Path(config.output_dir) / config.operator_id / "account_checkpoint.json"
+        )
         self._oracle_connected = False
         self._oracle_connection_generation = 0
         self._oracle_reconnect_count = 0
@@ -137,6 +142,20 @@ class PaperTradingOperator:
 
         async with self._lock:
             self._require_not_failed()
+            if self.session is not None:
+                return
+            try:
+                self._checkpoint = self._load_account_checkpoint()
+                if self._checkpoint is not None:
+                    # Recover the durable frontier, not today's discovered market.
+                    # poll() will settle/roll this run forward exactly once.
+                    self._activate_market(
+                        self._checkpoint.market, bankroll=self._checkpoint.opening_cash
+                    )
+                    return
+            except Exception as exc:
+                self._fail_permanently("account_checkpoint_recovery_failure", exc)
+                return
             self._transition(OperatorState.DISCOVERING, "startup_discovery")
             try:
                 selection = await self.discovery.discover(
@@ -178,7 +197,7 @@ class PaperTradingOperator:
                 received_at_ms=received,
             )
             if accepted and self.binance_sync.last_top_changed:
-                self._ingest_spot_from_binance(received)
+                accepted = self._ingest_spot_from_binance(received)
             self._update_gate_state()
             self._publish_status()
             return accepted
@@ -201,7 +220,7 @@ class PaperTradingOperator:
             )
             if accepted and self.binance_sync.last_top_changed:
                 event_ts = self.binance_sync.last_event_ts_ms
-                self._ingest_spot_from_binance(received if event_ts is None else event_ts)
+                accepted = self._ingest_spot_from_binance(received if event_ts is None else event_ts)
             self._update_gate_state()
             self._publish_status()
             return accepted
@@ -271,7 +290,7 @@ class PaperTradingOperator:
                 received_at_ms=received_at_ms,
             )
             if accepted and self.binance_sync.last_top_changed:
-                self._ingest_spot_from_binance(received_at_ms)
+                accepted = self._ingest_spot_from_binance(received_at_ms)
             self._update_gate_state()
             self._publish_status()
             return accepted
@@ -294,7 +313,7 @@ class PaperTradingOperator:
                 received_at_ms=received_at_ms,
             )
             if accepted and self.binance_sync.last_top_changed:
-                self._ingest_spot_from_binance(
+                accepted = self._ingest_spot_from_binance(
                     self.binance_sync.last_event_ts_ms or received_at_ms
                 )
             self._update_gate_state()
@@ -632,6 +651,11 @@ class PaperTradingOperator:
             self.counters["snapshot_freshness_dropped"] += 1
             self._transition(OperatorState.SYNCING, "freshness_gate_closed")
             return None
+        # Publishing the transition can itself fail and leave us DEGRADED.
+        # Feed ingestion remains enabled for warmup/recovery, execution does not.
+        self._update_gate_state()
+        if self.state is not OperatorState.RUNNING or self._projection_error is not None:
+            return None
         before = session.runner.decision_count
         try:
             result = await session.process_snapshot(snapshot)
@@ -678,6 +702,13 @@ class PaperTradingOperator:
             raise AuthoritativeReferenceUnavailable(
                 "market discovery lacks authoritative reference price at start"
             )
+        if (
+            market.underlying != self.config.underlying
+            or market.market_type != self.config.market_type
+            or market.window_duration_ms != self.config.window_duration_ms
+            or market.end_ts_ms - market.start_ts_ms != self.config.window_duration_ms
+        ):
+            raise ValueError("active market does not match configured asset/window identity")
         self.generation += 1
         generation = self.generation
         run_id = stable_run_id(
@@ -688,11 +719,38 @@ class PaperTradingOperator:
         )
         run_path = Path(self.config.output_dir) / run_id
         starting_bankroll = self.config.initial_bankroll if bankroll is None else bankroll
+        checkpoint = self._checkpoint
+        if checkpoint is not None and checkpoint.market.window_id == market.window_id:
+            if checkpoint.run_id != run_id or checkpoint.opening_cash != starting_bankroll:
+                raise ValueError("account checkpoint run identity or opening cash mismatch")
+        else:
+            previous = self.session
+            if checkpoint is not None and previous is None:
+                raise ValueError("cannot advance account without recovering its prior run")
+            if previous is not None and (
+                self.active_market is None
+                or self.active_market.window_id not in previous.current_snapshot.settled_window_ids
+                or previous.current_snapshot.cash != starting_bankroll
+                or market.start_ts_ms < self.active_market.end_ts_ms
+            ):
+                raise ValueError("successor requires a settled predecessor with matching cash")
+            checkpoint = AccountCheckpoint(
+                config_sha256=self.config.config_sha256, run_id=run_id,
+                market=market, opening_cash=starting_bankroll,
+                predecessor_run_id=None if previous is None else self.run_id,
+                predecessor_window_id=None if previous is None else previous.runner.window.window_id,
+                predecessor_settled_cash=None if previous is None else previous.current_snapshot.cash,
+            )
+            # Durable activation intent precedes every create/resume side effect.
+            self.checkpoint_store.write(checkpoint)
+            self._checkpoint = checkpoint
         if run_path.is_dir():
-            starting_bankroll = PaperRunStore.load_manifest(
+            manifest_bankroll = PaperRunStore.load_manifest(
                 output_dir=self.config.output_dir,
                 run_id=run_id,
             ).initial_bankroll
+            if manifest_bankroll != starting_bankroll:
+                raise ValueError("run opening cash disagrees with account checkpoint")
         runner, pricing, binance, market_sync = self._build_runner(
             market,
             bankroll=starting_bankroll,
@@ -705,7 +763,7 @@ class PaperTradingOperator:
                 run_id=run_id,
                 source_commit=self.config.source_commit,
                 config=session_config,
-                fsync=self.config.fsync,
+                fsync=True,
                 snapshot_dedupe_cache_size=self.config.snapshot_lru_size,
             )
             lifecycle_reason = "session_resumed"
@@ -716,7 +774,7 @@ class PaperTradingOperator:
                 run_id=run_id,
                 source_commit=self.config.source_commit,
                 config=session_config,
-                fsync=self.config.fsync,
+                fsync=True,
                 snapshot_dedupe_cache_size=self.config.snapshot_lru_size,
             )
             lifecycle_reason = "session_created"
@@ -868,13 +926,36 @@ class PaperTradingOperator:
     def _oracle_source(self) -> str:
         return f"polymarket_rtds_chainlink:{self.config.chainlink_symbol.lower()}"
 
-    def _ingest_spot_from_binance(self, timestamp_ms: int) -> None:
+    def _load_account_checkpoint(self) -> AccountCheckpoint | None:
+        checkpoint = self.checkpoint_store.load(config_sha256=self.config.config_sha256)
+        if checkpoint is None:
+            if any(path.is_dir() for path in Path(self.config.output_dir).glob("paper-*")):
+                raise ValueError(
+                    "existing paper runs without account checkpoint; explicit migration required"
+                )
+            return None
+        if checkpoint.predecessor_run_id is not None:
+            manifest = PaperRunStore.load_manifest(
+                output_dir=self.config.output_dir, run_id=checkpoint.predecessor_run_id
+            )
+            store = PaperRunStore.resume_existing(
+                output_dir=self.config.output_dir, expected_manifest=manifest, fsync=True
+            )
+            settled = store.recover_ledger().snapshot()
+            if (
+                checkpoint.predecessor_window_id not in settled.settled_window_ids
+                or settled.cash != checkpoint.opening_cash
+            ):
+                raise ValueError("checkpoint predecessor ledger is not settled at carried cash")
+        return checkpoint
+
+    def _ingest_spot_from_binance(self, timestamp_ms: int) -> bool:
         if self.binance_sync is None or self.pricing_provider is None:
-            return
+            return False
         mid = self.binance_sync.mid_price
         if mid is None:
-            return
-        self.pricing_provider.ingest_spot(
+            return False
+        accepted = self.pricing_provider.ingest_spot(
             ReferencePriceSample(
                 timestamp_ms=timestamp_ms,
                 received_at_ms=max(timestamp_ms, self.clock_ms()),
@@ -882,6 +963,12 @@ class PaperTradingOperator:
                 source=self._spot_source,
             )
         )
+        if not accepted:
+            # Never combine a newly accepted alpha with a rejected reference.
+            # False also asks the live transport to reconnect/bootstrap.
+            self.binance_sync.disconnect()
+            self.pricing_provider.reset_for_reconnect()
+        return accepted
 
     def _all_inputs_fresh(self, now_ms: int) -> bool:
         if (

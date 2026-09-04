@@ -103,6 +103,30 @@ def test_ranges_and_queue_bounds_are_validated(tmp_path: Path) -> None:
         OperatorConfig(**_minimal(tmp_path, binance_book_level_limit=0))
 
 
+@pytest.mark.parametrize("overrides", [
+    {"underlying": "ETH"},
+    {"binance_symbol": "ETHUSDT"},
+    {"chainlink_symbol": "eth/usd"},
+    {"underlying": "DOGE", "binance_symbol": "DOGEUSDT", "chainlink_symbol": "doge/usd"},
+    {"slug_pattern": ""},
+    {"window_duration_ms": 300_000, "slug_pattern": r"btc-updown-15m-\d+"},
+    {"binance_book_level_limit": 100},
+    {"binance_book_level_limit": 999},
+    {"status_filename": "account_checkpoint.json"},
+])
+def test_cross_source_and_bootstrap_contracts_fail_early(tmp_path, overrides) -> None:
+    with pytest.raises(ValueError):
+        OperatorConfig(**_minimal(tmp_path, **overrides))
+
+
+def test_slug_default_tracks_the_validated_asset_and_duration(tmp_path) -> None:
+    config = OperatorConfig(**_minimal(
+        tmp_path, underlying="ETH", binance_symbol="ETHUSDT", chainlink_symbol="eth/usd",
+        window_duration_ms=300_000, binance_book_level_limit=1_000,
+    ))
+    assert config.slug_pattern == r"eth-updown-5m-\d+"
+
+
 def test_toml_loader_rejects_unknown_fields_and_loads_safe_file(tmp_path: Path) -> None:
     path = tmp_path / "operator.toml"
     path.write_text(

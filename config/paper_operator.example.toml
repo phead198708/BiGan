@@ -8,7 +8,8 @@ output_dir = "data/paper_operator"
 underlying = "BTC"
 market_type = "binary_up_down"
 window_duration_ms = 900000
-slug_pattern = "btc-updown-15m-\\d+"
+# Omit slug_pattern to derive the canonical family from underlying + duration.
+# BTC sources must be BTCUSDT + btc/usd (ETH: ETHUSDT + eth/usd).
 max_preopen_ms = 1800000
 
 gamma_markets_endpoint = "https://gamma-api.polymarket.com/markets"
@@ -26,7 +27,7 @@ max_pricing_age_ms = 5000
 binance_queue_size = 10000
 market_queue_size = 10000
 binance_delta_buffer_size = 5000
-binance_book_level_limit = 5000
+binance_book_level_limit = 5000 # Must be >= 1000 REST snapshot levels per side.
 
 twap_window_ms = 900000
 volatility_return_interval_ms = 1000

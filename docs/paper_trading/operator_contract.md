@@ -84,6 +84,13 @@ fuzzy title substring. Explicit classification fields, when supplied, are
 validated against configured filters. This operator currently rejects all
 durations except 5m and 15m; 1h is not silently mapped onto 15m pricing.
 
+Source identities are coupled: BTC requires `BTCUSDT` and `btc/usd`; ETH
+requires `ETHUSDT` and `eth/usd`. Other mappings are rejected. The operator's
+slug pattern is the canonical asset/duration family; omission derives it from
+those settings, while an empty or mismatched pattern is rejected. The title
+regex can add a narrower filter. The Binance per-side level cap must be at
+least 1,000, matching the public REST bootstrap request.
+
 Eligible rows must match underlying, market type, exact duration, optional
 full-match slug/title regex, and the active/pre-open interval. Current windows
 sort by earliest end, then latest start, then stable IDs. Future windows sort by
@@ -105,7 +112,9 @@ the SHA-256 of the parsed source row.
   establish the price at the start boundary, but pre-open duration is excluded.
 - Returns: log returns using samples at least
   `volatility_return_interval_ms` apart, with each actual elapsed interval
-  retained.
+  retained. Both endpoints must lie inside `volatility_window_ms`; a return
+  crossing the cutoff is discarded in both pricing and health checks. A gap
+  longer than the window resets the return baseline and requires new warm-up.
 - Volatility: elapsed-time-demeaned realized variance over
   `volatility_window_ms`, normalized by total observed milliseconds and then
   annualized. Irregular source cadence therefore does not inherit the configured
@@ -114,6 +123,11 @@ the SHA-256 of the parsed source row.
   state, so TWAP or volatility is never fabricated.
 - Invalid/outlier handling: non-positive/non-finite, wrong source, out-of-order,
   future, stale, and over-bound log-return samples fail closed.
+  A rejected synchronized Binance spot sample invalidates alpha and pricing
+  warm state and requests re-bootstrap; cached spot is not paired with new OFI.
+  Full CLOB `book` events must validate both sides, every price/quantity and the
+  uncrossed top before advancing token sequence/freshness. Malformed full books
+  invalidate the synchronized pair instead of borrowing a previous bid/ask.
 
 Every provider parameter and source identity is included in the PR-A manifest
 hash through the runner and operator configuration identity.
@@ -155,6 +169,27 @@ does not exist, the operator creates a session. If it exists, it calls the
 strict PR-A resume path, which verifies the manifest, validates authoritative
 JSONL, rebuilds the derived SQLite idempotency index, restores cash/positions/
 sequence, and does not restore an unprovable WebSocket cursor or resting order.
+
+`<output_dir>/<operator_id>/account_checkpoint.json` is the durable account
+frontier, not a dashboard projection. It records the active market metadata,
+stable run ID, opening cash, configuration hash, and predecessor settlement
+run/window/cash. Every successor activation intent is atomically replaced and
+fsynced **before** creating its session. Operator-owned PR-A ledgers always
+fsync authoritative writes (the `fsync` setting controls optional projection
+fsync). Startup recovers this frontier before calling discovery, including an
+expired or already-settled old window. The recovered ledger determines carried
+cash; a successor checkpoint is checked against its predecessor's settled
+ledger. A crash before the checkpoint resumes the old run; a crash after the
+checkpoint but before creation creates the intended successor with the same
+cash. No funds are reinitialized from `initial_bankroll` at rollover.
+
+Missing checkpoints alongside existing `paper-*` run directories, corrupt or
+configuration-mismatched checkpoints, and ledger/cash mismatches fail closed.
+Pre-checkpoint deployments require explicit account-frontier migration; the
+operator never guesses a balance from today's discovered market. Use a
+dedicated output directory per operator/account, and retain its checkpoint
+together with all predecessor ledgers. A partially created/corrupt run requires
+repair from authoritative artifacts rather than silently replacing it.
 
 A settled window is never settled or traded again. Rollover occurs only after
 the settlement event and account snapshot are durably persisted. The old
@@ -209,6 +244,11 @@ It increments `projection_errors` and moves a non-failed operator to observable
 hard maximum and reverse-reads JSONL without loading full history. It exposes
 current status, current account snapshot, recent decisions, recent fills, and
 settlements.
+
+Projection failure also closes execution immediately: even fresh snapshots
+cannot reach Session/OMS unless the gate transition successfully publishes
+`RUNNING`. Feed ingestion continues for recovery, and a successful status
+publication can reopen execution without changing authoritative ledger state.
 
 ## Operation
 

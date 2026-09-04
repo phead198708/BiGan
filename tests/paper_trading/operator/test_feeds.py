@@ -270,6 +270,46 @@ def test_polymarket_requires_fresh_full_books_for_both_tokens() -> None:
     assert feed.health(now_ms=1_100).fresh is True
 
 
+@pytest.mark.parametrize("mutation", [
+    "missing_bids", "missing_asks", "empty_bids", "malformed_deep_level",
+    "invalid_size", "crossed", "out_of_range", "null_asks",
+])
+def test_malformed_full_book_invalidates_without_reusing_old_top(mutation) -> None:
+    feed = _polymarket()
+    feed.begin_generation(1)
+    feed.ingest(_book("yes-token", 1, 1_000, bid="0.39", ask="0.40"), generation=1)
+    assert feed.ingest(
+        _book("no-token", 1, 1_000, bid="0.59", ask="0.60"), generation=1
+    ) is not None
+    payload = _book("yes-token", 2, 1_100, bid="0.39", ask="0.40")
+    if mutation == "missing_bids":
+        payload.pop("bids")
+    elif mutation == "missing_asks":
+        payload.pop("asks")
+    elif mutation == "empty_bids":
+        payload["bids"] = []
+    elif mutation == "malformed_deep_level":
+        payload["bids"].append({"price": "NaN", "size": "1"})
+    elif mutation == "invalid_size":
+        payload["asks"][0]["size"] = "-1"
+    elif mutation == "crossed":
+        payload["bids"][0]["price"] = "0.5"
+    elif mutation == "out_of_range":
+        payload["asks"][0]["price"] = "1.2"
+    else:
+        payload["asks"] = None
+    assert feed.ingest(payload, generation=1) is None
+    assert feed.state is FeedConnectionState.SYNCING
+    assert feed.health(now_ms=1_100).fresh is False
+    assert feed.token_health(now_ms=1_100)["yes"]["timestamp_ms"] is None
+    assert feed.ingest(
+        _book("no-token", 2, 1_100, bid="0.59", ask="0.60"), generation=1
+    ) is None
+    assert feed.ingest(
+        _book("yes-token", 2, 1_100, bid="0.39", ask="0.40"), generation=1
+    ) is not None
+
+
 def test_polymarket_one_stale_token_or_sequence_gap_blocks_snapshot() -> None:
     feed = _polymarket()
     feed.begin_generation(1)
