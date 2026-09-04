@@ -92,6 +92,19 @@ trusted. This does not defend against an actor replacing both verifier and seal.
 See the [setuptools customization contract](https://setuptools.pypa.io/en/stable/userguide/extension.html).
 There is no environment-based trading configuration override.
 
+Before live measurement, verify host clock synchronization separately (on macOS,
+`sntp -t 3 time.apple.com` is read-only). A connected feed can still be unusable if
+the host clock is behind its event timestamps. Re-check after any manual clock
+correction: an automatic time service may reapply an old estimate. The application
+does not change host time or compensate by rewriting market timestamps. Its
+receive pump continues draining bounded queues while a separate heartbeat task
+waits for PONG; heartbeat timeout still invalidates the connection and queued data.
+
+See [每个 round 的归档范围](round_retention.md) for the distinction between retained
+decision/account records and a complete raw market-data archive. Keep deployment
+configuration and the sealed wheel separately; a config hash alone cannot recreate
+the parameters.
+
 Preflight binds and releases a loopback socket to test availability, but makes
 no outbound connections, creates no directories/locks and launches no processes.
 Its output contains only safe identity/URL/mode fields. A report directory must

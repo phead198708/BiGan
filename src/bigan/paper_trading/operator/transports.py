@@ -212,6 +212,13 @@ class PublicWebSocketTransport:
                         # are boundedly buffered while the REST snapshot is in flight.
                         await _maybe_await(self.on_generation(generation))
                         while not stop_event.is_set():
+                            # A failed heartbeat/reader fences queued data too;
+                            # a busy queue must not hide a dead connection.
+                            if receiver.done():
+                                await receiver
+                                if stop_event.is_set():
+                                    break
+                                raise ConnectionError("public websocket receive pump stopped")
                             if self.queue.size:
                                 item = await self.queue.get()
                             else:
@@ -258,31 +265,64 @@ class PublicWebSocketTransport:
         generation: int,
         stop_event: asyncio.Event,
     ) -> None:
-        heartbeat_due = time.monotonic() + self.heartbeat_interval_seconds
+        # Never stop draining recv() while waiting for PONG. A bounded WS
+        # library queue can fill with market messages and prevent its protocol
+        # reader from reaching the PONG, causing a self-inflicted timeout.
+        reader = asyncio.create_task(
+            self._receive_messages(socket, generation, stop_event),
+            name=f"public-feed-messages-{generation}",
+        )
+        heartbeat = asyncio.create_task(
+            self._heartbeat(socket, stop_event),
+            name=f"public-feed-heartbeat-{generation}",
+        )
+        stopped = asyncio.create_task(stop_event.wait())
+        tasks = (reader, heartbeat, stopped)
+        try:
+            done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if stopped in done and stop_event.is_set():
+                return
+            for task in (reader, heartbeat):
+                if task in done:
+                    await task
+            raise ConnectionError("public websocket connection task stopped")
+        finally:
+            for pending_task in tasks:
+                pending_task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _receive_messages(
+        self,
+        socket: PublicSocket,
+        generation: int,
+        stop_event: asyncio.Event,
+    ) -> None:
         while not stop_event.is_set():
-            try:
-                raw = await asyncio.wait_for(
-                    socket.recv(), timeout=max(0.001, heartbeat_due - time.monotonic())
-                )
-            except TimeoutError:
-                if self.application_heartbeat is not None:
-                    await socket.send(self.application_heartbeat)
-                pong = await socket.ping()
-                if inspect.isawaitable(pong):
-                    await asyncio.wait_for(
-                        pong,
-                        timeout=self.heartbeat_interval_seconds,
-                    )
-                heartbeat_due = time.monotonic() + self.heartbeat_interval_seconds
-                continue
-            if time.monotonic() >= heartbeat_due:
-                if self.application_heartbeat is not None:
-                    await socket.send(self.application_heartbeat)
-                heartbeat_due = time.monotonic() + self.heartbeat_interval_seconds
+            raw = await socket.recv()
             received = self.clock_ms()
             self.last_message_received_ms = received
             for payload in _decode_payloads(raw):
                 self.queue.put_nowait((payload, generation, received))
+
+    async def _heartbeat(self, socket: PublicSocket, stop_event: asyncio.Event) -> None:
+        heartbeat_due = time.monotonic() + self.heartbeat_interval_seconds
+        while not stop_event.is_set():
+            await asyncio.sleep(max(0, heartbeat_due - time.monotonic()))
+            if stop_event.is_set():
+                return
+            heartbeat_due = time.monotonic() + self.heartbeat_interval_seconds
+            # One outstanding PING, with a deadline covering send and PONG.
+            # Busy streams still send application heartbeats on schedule.
+            await asyncio.wait_for(
+                self._send_heartbeat(socket), timeout=self.heartbeat_interval_seconds,
+            )
+
+    async def _send_heartbeat(self, socket: PublicSocket) -> None:
+        if self.application_heartbeat is not None:
+            await socket.send(self.application_heartbeat)
+        pong = await socket.ping()
+        if inspect.isawaitable(pong):
+            await pong
 
     async def _next_queue_item(
         self,
@@ -298,11 +338,11 @@ class PublicWebSocketTransport:
             )
             if stopped in done and stop_event.is_set():
                 return None
-            if queued in done:
-                return queued.result()
             if receiver in done:
                 await receiver
                 raise ConnectionError("public websocket receive pump stopped")
+            if queued in done:
+                return queued.result()
             return None
         finally:
             for task in (queued, stopped):

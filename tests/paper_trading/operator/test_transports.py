@@ -172,7 +172,18 @@ async def test_public_websocket_subscribes_and_buffers_before_bootstrap() -> Non
 
 async def test_public_websocket_supports_application_ping_and_protocol_pong() -> None:
     stop = asyncio.Event()
-    socket = FakeSocket([TimeoutError(), json.dumps({"value": 1})])
+
+    class HeartbeatSocket(FakeSocket):
+        async def recv(self):
+            await self.message_delivered.wait()
+            self.message_delivered.clear()
+            return json.dumps({"value": 1})
+
+        async def ping(self):
+            self.pings += 1
+            self.message_delivered.set()
+
+    socket = HeartbeatSocket([])
 
     async def on_payload(*_args: object) -> None:
         stop.set()
@@ -183,7 +194,7 @@ async def test_public_websocket_supports_application_ping_and_protocol_pong() ->
         queue_size=2,
         reconnect_min_seconds=1,
         reconnect_max_seconds=2,
-        heartbeat_interval_seconds=1,
+        heartbeat_interval_seconds=0.02,
         application_heartbeat="PING",
         clock_ms=lambda: 1_000,
         on_payload=on_payload,

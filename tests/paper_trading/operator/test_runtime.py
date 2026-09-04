@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -966,6 +967,7 @@ async def test_account_totals_and_bounded_history_survive_three_windows_and_rest
     )
     await operator.start()
     settled_runs, pnl, fees = [], 0.0, 0.0
+    archived_files = {}
     for market in markets[:2]:
         clock.now_ms = market.start_ts_ms + 10_000
         await _ready_operator(operator, clock)
@@ -973,6 +975,19 @@ async def test_account_totals_and_bounded_history_survive_three_windows_and_rest
         settled_runs.append(operator.run_id)
         clock.now_ms = market.end_ts_ms + 1
         await operator.poll()
+        old_dir = old_session.store.run_dir
+        archived_files[old_dir] = {path.name: path.read_bytes() for path in old_dir.iterdir() if path.is_file()}
+        link = json.loads((old_dir / "operator_account_link.json").read_text())
+        assert link["market"]["reference_price_at_start"] == market.reference_price_at_start
+        assert link["market"]["yes_token_id"] == market.yes_token_id
+        assert link["market"]["no_token_id"] == market.no_token_id
+        decision = old_session.store.recent_decisions(limit=1)[0].decision
+        assert (decision.yes_bid, decision.yes_ask, decision.no_bid, decision.no_ask) == (0.09, 0.10, 0.89, 0.90)
+        assert decision.spot_price == 102 and decision.oracle_twap_so_far == 100
+        assert decision.alpha_timestamp_ms is not None
+        final = old_session.store.recent_settlements(limit=1)[0].settlement
+        assert final.source_reference == f"resolution:{market.market_id}"
+        assert final.yes_payout == 1
         pnl += old_session.current_snapshot.realized_pnl
         fees += old_session.current_snapshot.commission_paid
     status = operator.status()
@@ -1005,6 +1020,9 @@ async def test_account_totals_and_bounded_history_survive_three_windows_and_rest
     assert resumed.status().account["total_fees"] == pytest.approx(fees)
     assert [row["run_id"] for row in resumed.read_repository.recent_fills(2)] == settled_runs
     await resumed.shutdown()
+    # Later windows and restart do not overwrite any predecessor audit artifact.
+    for directory, files in archived_files.items():
+        assert {path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()} == files
 
 
 async def test_zero_cash_settlement_is_exhausted_not_storage_failure(tmp_path, monkeypatch):
