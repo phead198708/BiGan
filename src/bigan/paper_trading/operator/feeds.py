@@ -504,6 +504,13 @@ class PolymarketBookSynchronizer:
             self.dropped_generation_count += 1
             return None
         try:
+            event_type = str(payload.get("event_type") or payload.get("type") or "")
+            if event_type and event_type not in {"book", "price_change", "best_bid_ask"}:
+                # custom_feature_enabled broadcasts lifecycle events, including
+                # other markets without asset_id. They are not broken depth and
+                # cannot refresh/invalidate this token pair or trigger recovery.
+                self.unknown_message_count += 1
+                return None
             changes = payload.get("price_changes")
             if (
                 not (payload.get("asset_id") or payload.get("asset"))

@@ -71,6 +71,9 @@ Valid price-change/trade-book interleaving waits behind the same gate instead of
 reconnecting on each notification. The merged snapshot uses the latest known
 event time, but source freshness and ordering remain independent for YES and NO;
 an older YES message is not rejected merely because a newer NO message arrived.
+Lifecycle broadcasts (including other assets' `new_market`) and non-quote events
+are filtered before token/depth parsing. They neither reset this market's book
+nor refresh its execution freshness. Settlement still uses the Gamma resolver.
 
 ## Pricing model and limitations
 

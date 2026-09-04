@@ -137,3 +137,15 @@ def test_unconfirmed_delta_waits_for_trade_full_book_without_reconnect_loop():
     assert snapshot is not None and snapshot.yes_bid_size == 10
     assert feed.health(now_ms=1101).fresh
     assert not feed.needs_bootstrap
+
+
+@pytest.mark.parametrize("kind", ["new_market", "market_resolved", "tick_size_change", "last_trade_price"])
+def test_non_quote_broadcasts_cannot_reset_or_refresh_current_book(kind):
+    feed = ready()
+    before = feed.health(now_ms=1000)
+    assert feed.ingest({"event_type": kind, "market": "another-condition", "assets_ids": ["doge-yes", "doge-no"],
+                        "timestamp": "1200"}, generation=1) is None
+    assert feed.health(now_ms=1000) == before
+    assert feed.unknown_message_count == 1
+    assert not feed.needs_bootstrap
+    assert feed.token_health(now_ms=1200)["yes"]["timestamp_ms"] == 1000
