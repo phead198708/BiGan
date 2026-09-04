@@ -73,7 +73,8 @@ class Preflight:
 
     def summary(self) -> dict[str, Any]:
         return {"valid": True, "paper_only": True, **self.identity,
-                "dashboard_url": self.url, "mode": self.mode, "build_provenance": self.build_provenance}
+                "dashboard_url": self.url, "mode": self.mode, "build_provenance": self.build_provenance,
+                "market_data_source": self.config.binance_source_identity()}
 
 
 def preflight(*, config_path: Path, host: str = "127.0.0.1", port: int = 8080,

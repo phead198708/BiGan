@@ -157,6 +157,9 @@ paths, SQL, tracebacks, or configuration. The service has no outbound requests.
   `status.market_data` projection is optional when reading older status files;
   no fallback prices are fabricated. Opening proof is public JSON identity/hash
   binding, **not a signed oracle report**.
+  The spot/alpha venue is explicitly labelled **Binance.US** or **Binance Global**;
+  they are separate order books, not interchangeable sources. See the
+  [Binance.US configuration and migration contract](binance_us.md).
 - **Account:** canonical lifetime initial bankroll, cash, equity, total/realized/
   unrealized PnL and fees. **Drawdown is the current run's canonical ledger
   drawdown**, not a newly computed lifetime statistic.

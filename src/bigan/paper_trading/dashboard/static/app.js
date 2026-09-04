@@ -11,6 +11,8 @@ const when = (v) => typeof v === "number" && Number.isFinite(v) && !Number.isNaN
 const text = (v) => v === null || v === undefined || v === "" ? "—" : String(v);
 const flag = (v) => v === true ? "✓ Yes" : v === false ? "× No" : "— unavailable";
 const age = (v) => typeof v === "number" && Number.isFinite(v) ? number(v / 1000, 1) + " s" : "—";
+const binanceName = (status) => status.feeds?.binance?.venue === "us" ? "Binance.US"
+  : status.feeds?.binance?.venue === "global" ? "Binance Global" : "Binance · venue unavailable";
 function el(tag, value, className) {
   const node = document.createElement(tag);
   if (value !== undefined) node.textContent = text(value);
@@ -74,7 +76,7 @@ function renderPrices(view) {
       ["来源时间 (UTC)", when(proof?.source_ts_ms ?? market?.discovered_at_ms)],
       ["来源校验", proof ? "Public endpoint · identity / payload hash (not a signed oracle report)" : "Market metadata · no separate opening proof"],
     ]);
-  for (const [key, label] of [["oracle", "当前参考价 · Chainlink"], ["spot", "当前现货价 · Binance"]]) {
+  for (const [key, label] of [["oracle", "当前参考价 · Chainlink"], ["spot", "当前现货价 · " + binanceName(view.status)]]) {
     const o = current[key] || {};
     const model = key === "spot" ? "bid/ask midpoint" : o.kind === "published_twap" ? text(o.lookback_seconds) + "s published TWAP" : "Oracle price";
     priceCard("reference-prices", key, label, price(o.value), text(o.symbol) + " · " + text(o.quote_currency) + " · " + model, [
@@ -158,7 +160,7 @@ function render(view) {
     ["Cost basis", r => money(r.cost_usdc)], ["Unrealized PnL", r => money(r.unrealized_pnl)], ["Opened (UTC)", r => when(r.opened_at_ms)],
   ], "No open positions.");
   const feeds = $("feed-cards"); feeds.replaceChildren();
-  for (const [name, label] of [["binance", "Binance"], ["polymarket", "Polymarket"], ["chainlink", "Chainlink"]]) {
+  for (const [name, label] of [["binance", binanceName(status)], ["polymarket", "Polymarket"], ["chainlink", "Chainlink"]]) {
     const feed = status.feeds?.[name];
     const card = el("div", undefined, "feed-card"), dl = el("dl", undefined, "fields");
     card.append(el("h3", label), dl);
@@ -171,6 +173,7 @@ function render(view) {
   }
   const alpha = status.alpha, pricing = status.pricing_inputs;
   fields("alpha-fields", [
+    ["Alpha venue / source", text(alpha?.venue) + " / " + text(alpha?.source)],
     ["OFI Z-score", number(alpha?.z_score, 4)], ["Alpha timestamp (UTC)", when(alpha?.timestamp_ms)], ["Alpha age", age(alpha?.age_ms)], ["Alpha fresh", flag(alpha?.fresh)],
     ["Pricing ready / fresh", flag(pricing?.ready) + " / " + flag(pricing?.fresh)], ["Pricing time (UTC)", when(pricing?.timestamp_ms)], ["Pricing age", age(pricing?.age_ms)],
     ["Spot samples", pricing?.spot_sample_count], ["Oracle / TWAP samples", pricing?.oracle_sample_count], ["Volatility return samples", pricing?.return_sample_count],

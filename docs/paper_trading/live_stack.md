@@ -173,3 +173,12 @@ its separate handoff deadline); brief recovered gaps remain visible as warnings.
 | Report directory nonempty | Choose a new directory; no overwrite or automatic deletion. |
 
 See [soak validation](soak_validation.md) for report semantics and evidence.
+
+## Binance.US source selection
+
+The live example now explicitly selects Binance.US for both public REST depth
+and WebSocket deltas. The offline mock and omitted-venue legacy defaults remain
+Global; no automatic fallback is used. Follow the
+[source identity and migration contract](binance_us.md) when creating a new
+deployment config, account/output directory and report. Do not mix US/Global
+endpoints or treat a US soak as validation of Global alpha.

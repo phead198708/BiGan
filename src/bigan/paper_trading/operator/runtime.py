@@ -520,6 +520,7 @@ class PaperTradingOperator:
         binance_health = None if self.binance_sync is None else self.binance_sync.health(now_ms=now_ms)
         market_health = None if self.market_sync is None else self.market_sync.health(now_ms=now_ms)
         binance_health_payload = _health_dict(binance_health)
+        binance_health_payload.update(self.config.binance_source_identity())
         if self.binance_sync is not None:
             binance_health_payload.update(
                 {
@@ -624,6 +625,9 @@ class PaperTradingOperator:
                 else pricing_health.to_dict()
             ),
             alpha={
+                "venue": self.config.binance_venue,
+                "source": self._spot_source,
+                "symbol": self.config.binance_symbol,
                 "timestamp_ms": alpha_ts,
                 "age_ms": alpha_age,
                 "fresh": alpha_fresh,
@@ -676,6 +680,7 @@ class PaperTradingOperator:
             spot["fresh"] and self.binance_sync is not None
             and self.binance_sync.health(now_ms=now_ms).fresh
         )
+        spot["venue"] = self.config.binance_venue
         return {
             "window_id": market.window_id,
             "market_id": market.market_id,
@@ -944,6 +949,7 @@ class PaperTradingOperator:
             zscore_clip=self.config.ofi_clip,
             max_events_cap=self.config.ofi_max_events,
             symbol=self.config.binance_symbol,
+            venue=self.config.binance_venue,
         )
         pricing_provider = RollingPricingInputsProvider(
             window_start_ts_ms=market.start_ts_ms,
@@ -1044,7 +1050,7 @@ class PaperTradingOperator:
 
     @property
     def _spot_source(self) -> str:
-        return f"binance_depth:{self.config.binance_symbol}"
+        return self.config.binance_spot_source
 
     @property
     def _oracle_source(self) -> str:

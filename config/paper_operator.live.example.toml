@@ -19,8 +19,10 @@ gamma_markets_endpoint = "https://gamma-api.polymarket.com/markets"
 resolution_endpoint = "https://gamma-api.polymarket.com/markets"
 # Read-only website API; window/asset/TWAP identity and response hash are persisted.
 opening_reference_endpoint = "https://polymarket.com/api/crypto/crypto-price"
-binance_depth_endpoint = "https://api.binance.com/api/v3/depth"
-binance_ws_url = "wss://stream.binance.com:9443/ws"
+# Separate venue, not a fallback/mirror of Binance Global. Use only where applicable.
+binance_venue = "us"
+binance_depth_endpoint = "https://api.binance.us/api/v3/depth"
+binance_ws_url = "wss://stream.binance.us:9443/ws"
 binance_symbol = "BTCUSDT"
 polymarket_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 chainlink_ws_url = "wss://ws-live-data.polymarket.com"

@@ -17,8 +17,15 @@ from .opening_reference import OPENING_REFERENCE_ENDPOINT
 DEFAULT_GAMMA_MARKETS_ENDPOINT = "https://gamma-api.polymarket.com/markets"
 DEFAULT_BINANCE_DEPTH_ENDPOINT = "https://api.binance.com/api/v3/depth"
 DEFAULT_BINANCE_WS_URL = "wss://stream.binance.com:9443/ws"
+BINANCE_US_DEPTH_ENDPOINT = "https://api.binance.us/api/v3/depth"
+BINANCE_US_WS_URL = "wss://stream.binance.us:9443/ws"
 DEFAULT_POLYMARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 DEFAULT_CHAINLINK_WS_URL = "wss://ws-live-data.polymarket.com"
+
+_BINANCE_VENUE_HOSTS = {
+    "global": ({"api.binance.com", "api1.binance.com", "api2.binance.com", "api3.binance.com"}, "stream.binance.com"),
+    "us": ({"api.binance.us"}, "stream.binance.us"),
+}
 
 _DANGEROUS_KEYS = {
     "api_key",
@@ -59,12 +66,12 @@ _ALLOWED_ENDPOINTS = {
     ),
     "binance_depth_endpoint": (
         {"https"},
-        {"api.binance.com", "api1.binance.com", "api2.binance.com", "api3.binance.com"},
+        {"api.binance.com", "api1.binance.com", "api2.binance.com", "api3.binance.com", "api.binance.us"},
         {"/api/v3/depth"},
     ),
     "binance_ws_url": (
         {"wss"},
-        {"stream.binance.com"},
+        {"stream.binance.com", "stream.binance.us"},
         {"/ws", "/stream"},
     ),
     "polymarket_ws_url": (
@@ -98,6 +105,7 @@ class OperatorConfig:
     gamma_markets_endpoint: str = DEFAULT_GAMMA_MARKETS_ENDPOINT
     resolution_endpoint: str = DEFAULT_GAMMA_MARKETS_ENDPOINT
     opening_reference_endpoint: str = OPENING_REFERENCE_ENDPOINT
+    binance_venue: str = "global"
     binance_depth_endpoint: str = DEFAULT_BINANCE_DEPTH_ENDPOINT
     binance_ws_url: str = DEFAULT_BINANCE_WS_URL
     binance_symbol: str = "BTCUSDT"
@@ -213,6 +221,32 @@ class OperatorConfig:
         _validate_safety(self)
         for field_name in _ALLOWED_ENDPOINTS:
             _validate_readonly_endpoint(field_name, str(getattr(self, field_name)))
+        if not isinstance(self.binance_venue, str) or self.binance_venue not in _BINANCE_VENUE_HOSTS:
+            raise ValueError("binance_venue must be global or us")
+        rest_hosts, ws_host = _BINANCE_VENUE_HOSTS[self.binance_venue]
+        rest, ws = urlsplit(self.binance_depth_endpoint), urlsplit(self.binance_ws_url)
+        if (
+            rest.hostname not in rest_hosts or ws.hostname != ws_host
+            or rest.port not in {None, 443} or ws.port not in {None, 443, 9443}
+        ):
+            raise ValueError("Binance REST and WebSocket endpoints must match binance_venue and approved ports")
+
+    @property
+    def binance_display_name(self) -> str:
+        return "Binance.US" if self.binance_venue == "us" else "Binance Global"
+
+    @property
+    def binance_spot_source(self) -> str:
+        prefix = "binance_us_depth" if self.binance_venue == "us" else "binance_depth"
+        return f"{prefix}:{self.binance_symbol}"
+
+    def binance_source_identity(self) -> dict[str, str]:
+        """Public, validated source identity; never an implicit venue fallback."""
+        return {
+            "venue": self.binance_venue, "display_name": self.binance_display_name,
+            "symbol": self.binance_symbol, "source": self.binance_spot_source,
+            "rest_endpoint": self.binance_depth_endpoint, "ws_endpoint": self.binance_ws_url,
+        }
 
     @property
     def config_sha256(self) -> str:

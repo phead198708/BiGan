@@ -52,6 +52,7 @@ class SoakReport:
             "paper_safety": dict(SAFETY), "operator_identity": check.identity,
             "source_commit": check.config.source_commit, "config_sha256": check.config.config_sha256,
             "build_provenance": check.build_provenance, "publication_schema_version": 1,
+            "market_data_source": check.config.binance_source_identity(),
             "dashboard_url": check.url,
             "polls": {"attempted": 0, "successful": 0, "failed": 0, "longest_failure_streak_ms": 0},
             "states": {}, "feeds": {}, "rollovers": 0, "runs_observed": [],
@@ -118,6 +119,8 @@ class SoakReport:
                  f"(requested ms: {d['requested_duration_ms']}).",
                  f"Live input samples: {d['live_readiness']}.",
                  f"Source: `{d['source_commit']}`. Config: `{d['config_sha256']}`.",
+                 f"Market data: {d['market_data_source']['display_name']} / "
+                 f"`{d['market_data_source']['symbol']}` / `{d['market_data_source']['source']}`.",
                  f"Final state: `{d['final_state']}`. Observed rollovers: {d['rollovers']}.", "",
                  f"Polls: {d['polls']['successful']} successful / {d['polls']['attempted']} attempted.",
                  "", "Canonical account observations:", ""]
