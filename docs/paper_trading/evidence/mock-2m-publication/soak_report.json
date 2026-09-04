@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "started_at_ms": 1788496175955,
+  "ended_at_ms": 1788496300087,
+  "duration_ms": 124132,
+  "result": "PASS",
+  "mode": "mock_public_feeds_paper_execution",
+  "paper_safety": {
+    "paper_only": true,
+    "capital_at_risk": false,
+    "broker_exchange_write_enabled": false,
+    "live_exchange_write_enabled": false,
+    "polymarket_write_enabled": false,
+    "wallet_signing_enabled": false
+  },
+  "operator_identity": {
+    "operator_id": "provenance-mock",
+    "strategy_id": "alpha-pricing-v1",
+    "paper_account_id": "paper-mock-evidence",
+    "source_commit": "84e71d0cdb7e907415d96873805a0eac8841e593",
+    "config_sha256": "3bf784861a2a7ee1ee68e80d4d3f3118db308b225bb159b37a382ab1596844b7"
+  },
+  "source_commit": "84e71d0cdb7e907415d96873805a0eac8841e593",
+  "config_sha256": "3bf784861a2a7ee1ee68e80d4d3f3118db308b225bb159b37a382ab1596844b7",
+  "build_provenance": null,
+  "publication_schema_version": 1,
+  "dashboard_url": "http://127.0.0.1:8098",
+  "polls": {
+    "attempted": 61,
+    "successful": 61,
+    "failed": 0,
+    "longest_failure_streak_ms": 0
+  },
+  "states": {
+    "RUNNING": {
+      "samples": 60,
+      "observed_ms": 120086
+    },
+    "STOPPED": {
+      "samples": 1,
+      "observed_ms": 0
+    }
+  },
+  "feeds": {
+    "binance": {
+      "samples": 60,
+      "fresh_samples": 60,
+      "fresh_ratio": 1.0
+    },
+    "chainlink": {
+      "samples": 60,
+      "fresh_samples": 60,
+      "fresh_ratio": 1.0
+    },
+    "polymarket": {
+      "samples": 60,
+      "fresh_samples": 60,
+      "fresh_ratio": 1.0
+    }
+  },
+  "rollovers": 1,
+  "runs_observed": [
+    {
+      "run_id": "paper-e458626962919f69fcd60fcf",
+      "run_index": 0
+    },
+    {
+      "run_id": "paper-a9e827bbdfeccdf04398f600",
+      "run_index": 1
+    }
+  ],
+  "account": {
+    "initial_equity": 997.5635798874005,
+    "final_equity": 1152.7630050641103,
+    "final_cash": 1104.4017155492886,
+    "realized_pnl": 155.24028744537912,
+    "unrealized_pnl": -2.4772823812694327,
+    "fees": 0.0,
+    "max_observed_drawdown": 0.008035741833117982
+  },
+  "activity": {
+    "decisions": 453,
+    "fills": 23,
+    "rejects": 0,
+    "holds": 300,
+    "settlements": 1
+  },
+  "warnings": [],
+  "hard_failures": [],
+  "final_state": "STOPPED",
+  "scope": "Sampled HTTP observations, not ledger audit or authoritative PnL; activity is a lower bound."
+}

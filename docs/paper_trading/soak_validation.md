@@ -100,7 +100,43 @@ crashed children, existing account locks, port races, startup deadlines, frozen
 operator escalation, config changes, malformed/stale/nonfinite HTTP views and
 bounded serial polling. CI makes no Binance/Polymarket/Chainlink requests.
 
-## Manual acceptance evidence
+## Current publication/provenance acceptance
+
+On 2026-09-04, the ordinary wheel built from committed runtime
+`84e71d0cdb7e907415d96873805a0eac8841e593` was installed into an isolated
+target and verified independently of repository cwd. The build seal SHA-256 is
+`8405d36a97058a2ce37114fc485c6cc6342c72ce6427c3227468d40eaf4b144c`.
+The installed package passed live preflight with its exact source SHA, rejected
+a different SHA, and rejected the unchanged bundled live template. A wheel
+built before committing the runtime changes correctly returned
+`UNVERIFIED_BUILD_SOURCE`. Preflight created no paper output in these checks.
+
+That installed wheel then completed a fresh **two-minute offline mock soak**:
+**PASS**, 124.132 seconds including startup/shutdown, 61/61 successful polls,
+one settlement/rollover, final STOPPED, no warnings or hard failures. Activity
+lower bounds were 453 decisions, 23 fills, and 300 HOLDs. Strategy parameters
+were defaults; only the independent account/output/source identity was supplied.
+The raw report intentionally has null build_provenance because mock mode does
+not require or assert the live provenance gate, even when using a sealed wheel.
+
+- [JSON artifact](evidence/mock-2m-publication/soak_report.json)
+- [Markdown artifact](evidence/mock-2m-publication/soak_summary.md)
+- [Completion manifest](evidence/mock-2m-publication/soak_complete.json)
+
+All three artifacts are copied byte-for-byte from the new run and verified with
+`load_completed_report()`. The incomplete marker is absent. This is a new
+publication, not a completion marker added to historical reports. The external
+browser script also passed running/mobile/rollover/STOPPED/retained-view checks
+without page errors, and the stack reaped both owned children (port released).
+
+Automated results: **673 passed** in the agent-stack suite, including 513
+paper-trading tests and 112 stack tests. Ruff, MyPy (48 source files), compileall,
+and diff checks passed. Failure injection covers each of the four publication
+renames, including the first and second artifact failures in real Supervisor
+runs; candidates are withdrawn, incomplete markers retained, and consumers
+reject the result. Live 30-minute acceptance remains outstanding below.
+
+## Historical manual acceptance evidence
 
 The artifacts below are historical **pre-completion-protocol** evidence from
 `6227e20`, not newly published reports under the current contract. They are kept
