@@ -119,6 +119,9 @@ class LiveFeedSupervisor:
                 connection_generation=connection_generation,
                 received_at_ms=received_at_ms,
             )
+            synchronizer = self.operator.market_sync
+            if synchronizer is not None and synchronizer.needs_bootstrap:
+                raise ConnectionError("Polymarket depth requires a fresh full-book subscription")
 
         async def oracle_sample(
             sample: ReferencePriceSample,

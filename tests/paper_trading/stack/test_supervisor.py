@@ -193,7 +193,9 @@ async def test_parent_never_constructs_writer_or_takes_account_lock(tmp_path, mo
 
     monkeypatch.setattr(AccountProcessLock, "acquire", forbidden)
     monkeypatch.setattr(PaperTradingOperator, "__init__", forbidden)
-    assert await stack.run() == 0  # Children import their own unpatched modules.
+    # Children import their own unpatched modules. Keep lifecycle diagnostics in
+    # the assertion so a slow CI host's shutdown/observation failure is visible.
+    assert await stack.run() == 0, stack.report.data
     assert_reaped(stack)
 
 

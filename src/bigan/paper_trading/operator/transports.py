@@ -439,6 +439,8 @@ class PolymarketReadonlyFeed:
             generation=generation,
             received_at_ms=received,
         )
+        if self.synchronizer.needs_bootstrap:
+            raise ConnectionError("Polymarket depth requires a fresh full-book subscription")
         if snapshot is not None:
             await _maybe_await(self.on_snapshot(snapshot, generation))
 
@@ -514,7 +516,9 @@ def chainlink_subscription(symbol: str, lookback_seconds: int | None = None) -> 
 def _decode_payloads(raw: str | bytes) -> tuple[Mapping[str, object], ...]:
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8")
-    if raw.strip().upper() in {"PING", "PONG"}:
+    # RTDS may send an empty frame immediately after subscription. It is a
+    # transport control message, never an observation or freshness heartbeat.
+    if raw.strip().upper() in {"", "PING", "PONG"}:
         return ()
     value = json.loads(raw)
     if isinstance(value, Mapping):

@@ -197,6 +197,27 @@ async def test_public_websocket_supports_application_ping_and_protocol_pong() ->
     assert socket.pings == 1
 
 
+async def test_empty_rtds_subscription_frame_does_not_reconnect_or_publish():
+    stop = asyncio.Event()
+    socket = FakeSocket(["", b"", "  ", json.dumps({"value": 1})])
+    seen = []
+
+    async def on_payload(payload, generation, received):
+        seen.append(payload)
+        stop.set()
+
+    transport = PublicWebSocketTransport(
+        endpoint="wss://ws-live-data.polymarket.com", subscription=chainlink_subscription("btc/usd", 60),
+        queue_size=4, on_payload=on_payload, on_generation=lambda generation: None, on_disconnect=lambda: None,
+        reconnect_min_seconds=1, reconnect_max_seconds=2, heartbeat_interval_seconds=5,
+        clock_ms=lambda: 1000, connect_factory=FakeConnector([socket]),
+    )
+    await transport.run(stop)
+    assert seen == [{"value": 1}]
+    assert transport.message_count == 1
+    assert transport.parse_error_count == transport.connection_error_count == transport.reconnect_count == 0
+
+
 @pytest.mark.parametrize(
     "endpoint,subscription",
     [

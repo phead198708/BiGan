@@ -13,6 +13,8 @@ from typing import Generic, TypeVar
 from bigan.data.polymarket_clob import MarketSnapshot, PolymarketFeedHandler
 from bigan.features.binance_ofi import BinanceOFICalculator
 
+from .market_depth import MarketDepth
+
 T = TypeVar("T")
 
 
@@ -464,6 +466,9 @@ class PolymarketBookSynchronizer:
         self._sequence_by_token: dict[str, int] = {}
         self._timestamp_by_token: dict[str, int] = {}
         self._full_books: set[str] = set()
+        self._depth: dict[str, MarketDepth] = {}
+        self._pending_tops: dict[str, tuple[int, Mapping[str, object]]] = {}
+        self.needs_bootstrap = False
         self._handler = self._new_handler()
 
     def subscription_message(self) -> dict[str, object]:
@@ -481,11 +486,12 @@ class PolymarketBookSynchronizer:
         self.generation = generation
         self.connected = True
         self._invalidate()
+        self.needs_bootstrap = False
 
     def disconnect(self) -> None:
         self.connected = False
+        self._invalidate()
         self.state = FeedConnectionState.DISCONNECTED
-        self._full_books.clear()
 
     def ingest(
         self,
@@ -508,7 +514,8 @@ class PolymarketBookSynchronizer:
                 for change in changes:
                     if not isinstance(change, Mapping):
                         self.parse_error_count += 1
-                        continue
+                        self._invalidate()
+                        return None
                     normalized = {
                         key: value
                         for key, value in payload.items()
@@ -521,9 +528,11 @@ class PolymarketBookSynchronizer:
                         generation=generation,
                         received_at_ms=received_at_ms,
                     )
+                    if self.needs_bootstrap:
+                        return None
                     if snapshot is not None:
                         last = snapshot
-                return last
+                return None if self._pending_tops else last
             token_id = _text(payload.get("asset_id") or payload.get("asset"), "asset_id")
             if token_id not in {self.yes_token_id, self.no_token_id}:
                 self.token_mismatch_count += 1
@@ -555,14 +564,36 @@ class PolymarketBookSynchronizer:
             if timestamp > received:
                 self.out_of_order_count += 1
                 return None
+            if any(received - pending[0] > self.max_age_ms for pending in self._pending_tops.values()):
+                self.gap_count += 1
+                self._invalidate()
+                return None
             previous_ts = self._timestamp_by_token.get(token_id)
             if previous_ts is not None and timestamp < previous_ts:
                 self.out_of_order_count += 1
                 return None
             event_type = str(payload.get("event_type") or payload.get("type") or "")
+            if event_type == "best_bid_ask":
+                # Advisory top prices carry no size. Never replace depth or
+                # refresh executable timestamps with these notifications.
+                book = self._depth.get(token_id)
+                if book is None:
+                    return None
+                pending = self._pending_tops.get(token_id)
+                if pending is not None and timestamp < pending[0]:
+                    self.out_of_order_count += 1
+                    return None
+                if book.matches(payload):
+                    self._pending_tops.pop(token_id, None)
+                else:
+                    self._pending_tops[token_id] = (timestamp, {
+                        "best_bid": payload.get("best_bid"), "best_ask": payload.get("best_ask"),
+                    })
+                    self.state = FeedConnectionState.SYNCING
+                return None
             if event_type == "book":
-                _validate_full_market_book(payload)
-            elif event_type in {"price_change", "best_bid_ask"}:
+                depth = MarketDepth.from_payload(payload)
+            elif event_type == "price_change":
                 previous_sequence = self._sequence_by_token.get(token_id)
                 if token_id not in self._full_books:
                     self._invalidate()
@@ -579,21 +610,15 @@ class PolymarketBookSynchronizer:
                     self.gap_count += 1
                     self._invalidate()
                     return None
+                depth = self._depth[token_id].updated(payload)
             else:
                 self.unknown_message_count += 1
                 return None
-            normalized = dict(payload)
-            normalized.pop("sequence", None)
-            normalized.pop("seq", None)
-            normalized["window_id"] = self.window_id
-            if event_type == "book":
-                # Only the validated full depth defines this token's top; do not
-                # let optional best_bid/ask or nested books override it.
-                normalized = {
-                    "event_type": "book", "asset_id": token_id,
-                    "window_id": self.window_id, "timestamp": timestamp,
-                    "bids": payload["bids"], "asks": payload["asks"],
-                }
+            normalized = {
+                "event_type": "book", "asset_id": token_id,
+                "window_id": self.window_id, "timestamp": timestamp,
+                **depth.top_payload(),
+            }
             previous_errors = self._handler.parse_errors + self._handler.dropped_stale
             snapshot = self._handler.parse_orderbook_delta(normalized)
             if self._handler.parse_errors + self._handler.dropped_stale > previous_errors:
@@ -602,6 +627,12 @@ class PolymarketBookSynchronizer:
                 return None
             if event_type == "book":
                 self._full_books.add(token_id)
+            self._depth[token_id] = depth
+            pending = self._pending_tops.get(token_id)
+            if pending is not None and (
+                timestamp > pending[0] or timestamp == pending[0] and depth.matches(pending[1])
+            ):
+                self._pending_tops.pop(token_id, None)
             if sequence is not None:
                 self._sequence_by_token[token_id] = sequence
             self._timestamp_by_token[token_id] = timestamp
@@ -618,6 +649,10 @@ class PolymarketBookSynchronizer:
                 return None
             if self._full_books != {self.yes_token_id, self.no_token_id}:
                 return None
+            self.needs_bootstrap = False
+            if self._pending_tops:
+                self.state = FeedConnectionState.SYNCING
+                return None
             if not self._tokens_fresh(now_ms=timestamp):
                 self.state = FeedConnectionState.STALE
                 return None
@@ -631,7 +666,7 @@ class PolymarketBookSynchronizer:
     def health(self, *, now_ms: int) -> FeedHealth:
         latest = max(self._timestamp_by_token.values(), default=None)
         age = None if latest is None else int(now_ms) - latest
-        synchronized = self._full_books == {self.yes_token_id, self.no_token_id}
+        synchronized = self._full_books == {self.yes_token_id, self.no_token_id} and not self._pending_tops
         fresh = bool(self.connected and synchronized and self._tokens_fresh(now_ms=now_ms))
         state = self.state
         if self.connected and synchronized and not fresh:
@@ -663,7 +698,7 @@ class PolymarketBookSynchronizer:
                 "token_id": token_id,
                 "timestamp_ms": timestamp,
                 "age_ms": age,
-                "fresh": bool(age is not None and 0 <= age <= self.max_age_ms),
+                "fresh": bool(token_id not in self._pending_tops and age is not None and 0 <= age <= self.max_age_ms),
             }
         return output
 
@@ -671,15 +706,19 @@ class PolymarketBookSynchronizer:
         expected = (self.yes_token_id, self.no_token_id)
         return all(
             token in self._timestamp_by_token
+            and token not in self._pending_tops
             and 0 <= now_ms - self._timestamp_by_token[token] <= self.max_age_ms
             for token in expected
         )
 
     def _invalidate(self) -> None:
         self.state = FeedConnectionState.SYNCING
+        self.needs_bootstrap = True
         self._sequence_by_token.clear()
         self._timestamp_by_token.clear()
         self._full_books.clear()
+        self._depth.clear()
+        self._pending_tops.clear()
         self._handler = self._new_handler()
 
     def _new_handler(self) -> PolymarketFeedHandler:
@@ -690,33 +729,6 @@ class PolymarketBookSynchronizer:
             max_quote_age_ms=self.max_age_ms,
             mock=True,
         )
-
-
-def _validate_full_market_book(payload: Mapping[str, object]) -> None:
-    tops: list[float] = []
-    for name in ("bids", "asks"):
-        levels = payload.get(name)
-        if not isinstance(levels, Sequence) or isinstance(levels, (str, bytes)) or not levels:
-            raise ValueError(f"full book requires non-empty {name}")
-        prices: list[float] = []
-        for level in levels:
-            if not isinstance(level, Mapping):
-                raise ValueError("market level must contain price and size")
-            raw_price, raw_size = level.get("price"), level.get("size")
-            if not isinstance(raw_price, (str, int, float)) or not isinstance(raw_size, (str, int, float)):
-                raise ValueError("market level requires numeric price and size")
-            price, size = float(raw_price), float(raw_size)
-            if not math.isfinite(price) or not 0 < price <= 1:
-                raise ValueError("market price must be in (0, 1]")
-            if not math.isfinite(size) or size < 0:
-                raise ValueError("market size must be finite and non-negative")
-            if size > 0:
-                prices.append(price)
-        if not prices:
-            raise ValueError("full book requires positive liquidity on both sides")
-        tops.append(max(prices) if name == "bids" else min(prices))
-    if tops[0] > tops[1]:
-        raise ValueError("crossed full market book")
 
 
 def _unwrap_binance(payload: Mapping[str, object]) -> Mapping[str, object]:

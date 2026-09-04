@@ -50,11 +50,23 @@ The E18 `full_accuracy_value` is decoded using decimal arithmetic before enterin
 the existing floating-point strategy interface; display-only `value` is not a
 fallback. Observation time drives freshness, not local receipt time.
 
-RTDS provides no TWAP history/snapshot/replay. Reconnect therefore invalidates
-rolling inputs and requires warm-up again. Ordinary `crypto_prices_chainlink`
+RTDS does not guarantee TWAP history/snapshot/replay. Observed subscription
+batches are not used for warm-up; only individually validated live updates are
+ingested. Empty subscription frames are ignored without reconnecting or advancing
+freshness. Reconnect invalidates rolling inputs and requires warm-up again.
+Ordinary `crypto_prices_chainlink`
 updates and the other lookback/asset cannot enter a TWAP-configured Session.
 Binance remains the independent spot/OFI source, and Polymarket CLOB remains the
 execution source. All three inputs must pass the existing freshness gates.
+
+CLOB depth is reconstructed per token from full books and absolute-size changes,
+bounded to 10,000 levels per side. Deleting a best level reveals the next known
+price **and its own size**. A `best_bid_ask` notice has no quantity: it never
+refreshes executable timestamps. If it arrives ahead of depth, that token is
+unready until depth reconciles it; a gap, overflow or unconfirmed notice past
+the freshness deadline requires a new full-book subscription. No missing size
+is synthesized, and a malformed later batch item cannot publish an earlier fill
+candidate from that same batch.
 
 ## Pricing model and limitations
 
