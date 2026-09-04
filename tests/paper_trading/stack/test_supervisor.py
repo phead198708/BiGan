@@ -49,12 +49,13 @@ async def test_real_children_e2e_rollover_and_stop(tmp_path, hold):
     assert logs.index("[soak] dashboard healthy") < logs.index("[operator] started")
     assert "[soak] operator ready" in logs
     report = json.loads((tmp_path / "report" / "soak_report.json").read_text())
-    # A concurrent SQLite rollback journal can legitimately make one bounded
-    # read unavailable. Never hide that warning just to manufacture a PASS.
+    # Independent processes can observe SETTLEMENT_PENDING/DEGRADED during
+    # rollover, or a bounded read while SQLite holds a rollback journal.
+    # These are explicitly permitted warnings, not reasons to manufacture PASS.
     assert report["result"] in {"PASS", "WARN"}, report["warnings"]
     assert all(w["severity"] == "info" or w["code"] in {
-        "DASHBOARD_SECTION_WARNING", "ACCOUNT_UNAVAILABLE",
-    } for w in report["warnings"])
+        "DASHBOARD_SECTION_WARNING", "ACCOUNT_UNAVAILABLE", "TRANSIENT_NON_RUNNING_STATE",
+    } for w in report["warnings"]), report["warnings"]
     assert report["rollovers"] == 1
     assert report["final_state"] == "STOPPED"
     assert report["activity"]["decisions"] > 0

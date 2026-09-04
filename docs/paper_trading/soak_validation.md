@@ -113,8 +113,9 @@ diff whitespace checks and wheel build/isolated installation checks passed.
 The installed wheel includes both console entry points and serves all assets
 independently of source cwd. Real subprocess tests cover SIGINT/SIGTERM,
 crashes, deadlines, locked accounts and no automatic writer restart. A rare
-concurrent rollback-journal read can truthfully produce WARN in offline E2E;
-tests permit only that expected availability warning, never hide it to force PASS.
+concurrent rollback-journal read or briefly observed settlement/rollover transition
+can truthfully produce WARN in offline E2E; tests permit these expected
+availability/state warnings, never hide them to force PASS.
 
 A live report must come from an actual run, not a mock renamed as live. On this host,
 the public Binance depth probe returned **HTTP 451** on 2026-09-04. That blocks
