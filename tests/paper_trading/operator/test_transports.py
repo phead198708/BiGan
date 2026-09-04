@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import Mapping
 from contextlib import AbstractAsyncContextManager
+from datetime import UTC, datetime
 
 import pytest
 
@@ -327,7 +328,8 @@ def test_subscription_contracts_are_public_and_identity_bound() -> None:
     ]
 
 
-async def test_gamma_client_queries_deterministic_exact_current_and_next_slugs() -> None:
+@pytest.mark.parametrize("public_shape", [False, True])
+async def test_gamma_client_queries_deterministic_exact_current_and_next_slugs(public_shape) -> None:
     class SlugHTTP:
         def __init__(self) -> None:
             self.slugs: list[str] = []
@@ -338,7 +340,7 @@ async def test_gamma_client_queries_deterministic_exact_current_and_next_slugs()
             start = int(slug.rsplit("-", 1)[1]) * 1_000
             if start > 2_700_000:
                 return []
-            return [
+            rows = [
                 {
                     "id": f"market-{start}",
                     "conditionId": f"condition-{start}",
@@ -355,6 +357,14 @@ async def test_gamma_client_queries_deterministic_exact_current_and_next_slugs()
                     "referencePriceAtStart": 100_000,
                 }
             ]
+            if public_shape:
+                row = rows[0]
+                row.pop("start_ts_ms")
+                row.pop("end_ts_ms")
+                row["startDate"] = "1970-01-01T00:00:00Z"
+                row["eventStartTime"] = datetime.fromtimestamp(start / 1000, UTC).isoformat()
+                row["endDate"] = datetime.fromtimestamp((start + 900_000) / 1000, UTC).isoformat()
+            return rows
 
     http = SlugHTTP()
     client = GammaDiscoveryClient(

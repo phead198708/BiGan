@@ -13,7 +13,13 @@ from typing import Any
 
 import aiohttp
 
-from .observer import HTTPUnavailable, ObservationError, ObservationPolicy, PaperSoakObserver
+from .observer import (
+    HTTPUnavailable,
+    ObservationError,
+    ObservationPolicy,
+    PaperSoakObserver,
+    live_inputs_ready,
+)
 from .preflight import Preflight
 from .report import ReportWriter, SoakReport, now_ms
 
@@ -42,6 +48,7 @@ class PaperStackSupervisor:
         self._drainers: list[asyncio.Task[None]] = []
         self.instance_id = uuid.uuid4().hex
         self.report = SoakReport(check)
+        self.report.data["requested_duration_ms"] = None if duration is None else round(duration * 1000)
         self.observer = PaperSoakObserver(report=self.report, policy=policy, instance_id=self.instance_id,
                                           history_limit=min(check.config.recent_query_max, 50))
         self.operator_started_ms: int | None = None
@@ -59,6 +66,7 @@ class PaperStackSupervisor:
 
     async def run(self) -> int:
         writer: ReportWriter | None = None
+        started: float | None = None
         loop = asyncio.get_running_loop()
         installed: list[signal.Signals] = []
         for signum in (signal.SIGINT, signal.SIGTERM):
@@ -101,6 +109,8 @@ class PaperStackSupervisor:
                 except Exception:
                     self.report.issue("STACK_STARTUP_OR_RUNTIME_FAILURE", hard=True)
                 finally:
+                    if started is not None:
+                        self.report.data["measurement_duration_ms"] = int(max(0, time.monotonic() - started) * 1000)
                     # No new polls. Keep the reader alive for final STOPPED observation.
                     if "operator" in self.children:
                         await self._terminate("operator")
@@ -169,6 +179,7 @@ class PaperStackSupervisor:
 
     async def _wait_ready(self, *, operator: bool) -> None:
         deadline = time.monotonic() + self.startup_timeout
+        waiting_announced = False
         while time.monotonic() < deadline:
             self._check_children()
             if self.stop.is_set():
@@ -188,6 +199,11 @@ class PaperStackSupervisor:
                         raise HTTPUnavailable("OLD_OPERATOR_STATUS")
                     if status.get("state") == "FAILED":
                         raise StackFailure("OPERATOR_FAILED")
+                    if not self.check.mock and not live_inputs_ready(payload):
+                        if not waiting_announced:
+                            self.log("[soak] waiting for live RUNNING state and fresh trading inputs")
+                            waiting_announced = True
+                        raise HTTPUnavailable("LIVE_INPUTS_NOT_READY")
                 self._check_children()
                 self.log("[soak] " + ("operator ready" if operator else "dashboard healthy"))
                 return

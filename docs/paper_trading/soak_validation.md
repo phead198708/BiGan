@@ -88,6 +88,14 @@ replace the operator's persistent replay/idempotency checks.
   unreadability/staleness or delayed rollover beyond the configured deadline,
   forced termination, missing final STOPPED, or no valid observations.
 
+Live mode additionally requires observed `RUNNING` samples with the active
+market, healthy Session, connected/synchronized/fresh feeds, fresh alpha and
+ready/fresh pricing. `live_readiness` contains bounded ready/unready sample
+counters. `LIVE_INPUTS_NEVER_READY`, `LIVE_INPUTS_UNAVAILABLE_DEADLINE`, and
+`LIVE_DURATION_NOT_COMPLETED` are hard failures, independent of fills or PnL.
+The measured duration excludes startup/shutdown and uses a monotonic clock;
+the existing `duration_ms` remains wall time for the entire invocation.
+
 PASS and WARN return 0 after clean shutdown; FAIL returns 1. Preflight/config
 errors return 2 without children. Reports never turn a losing strategy or zero
 fills into a stability failure. A PASS also does not prove an entire live market

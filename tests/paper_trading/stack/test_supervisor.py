@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import signal
 import socket
 import sys
+from dataclasses import replace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -17,7 +20,7 @@ from bigan.paper_trading.stack.report import (
     ReportWriter,
     load_completed_report,
 )
-from bigan.paper_trading.stack.supervisor import PaperStackSupervisor
+from bigan.paper_trading.stack.supervisor import PaperStackSupervisor, StackFailure
 from tests.paper_trading.stack.conftest import free_port, write_config
 
 
@@ -34,6 +37,41 @@ async def wait_ready(stack):
             if stack.report.failed:
                 pytest.fail(str(stack.report.data["hard_failures"]))
             await asyncio.sleep(0.02)
+
+
+@pytest.mark.parametrize("eventually_ready", [False, True])
+async def test_live_startup_waits_for_running_inputs(observation, eventually_ready):
+    stack = PaperStackSupervisor(replace(observation.check, mock=False), startup_timeout=0.5, log=lambda _: None)
+    calls = 0
+
+    async def get(path):
+        nonlocal calls
+        if path == "/healthz":
+            return {"alive": True, "paper_only": True, "read_only": True,
+                    "operator_identity": stack.check.identity, "instance_id": stack.instance_id}
+        if path == "/readyz":
+            return {"ready": True, "stale": False}
+        calls += 1
+        payload = copy.deepcopy(observation.payload)
+        if not eventually_ready or calls < 3:
+            payload["status"]["state"] = "DISCOVERING"
+        return payload
+
+    stack.observer.get = AsyncMock(side_effect=get)
+    if eventually_ready:
+        await stack._wait_ready(operator=True)
+        assert calls == 3
+    else:
+        with pytest.raises(StackFailure, match="STARTUP_TIMEOUT"):
+            await stack._wait_ready(operator=True)
+        assert calls > 1
+        # Full lifecycle must also persist failure, without starting the clock.
+        stack._spawn = AsyncMock()
+        assert await stack.run() == 1
+        report = load_completed_report(stack.check.report_dir)
+        assert report["measurement_duration_ms"] == 0
+        assert report["result"] == "FAIL"
+        assert "LIVE_INPUTS_NEVER_READY" in {item["code"] for item in report["hard_failures"]}
 
 
 def assert_reaped(stack):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from dataclasses import replace
 
 import pytest
 from aiohttp import web
@@ -12,12 +13,73 @@ from bigan.paper_trading.stack.observer import (
     ObservationError,
     ObservationPolicy,
     PaperSoakObserver,
+    live_inputs_ready,
 )
+from bigan.paper_trading.stack.report import SoakReport
 from tests.paper_trading.operator.test_runtime import _ready_operator
 
 
 def make_observer(observation, **kwargs):
     return PaperSoakObserver(report=observation.report, **kwargs)
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda p: p.update(stale=True),
+    lambda p: p["status"].update(state="DISCOVERING"),
+    lambda p: p["status"].update(state="DEGRADED"),
+    lambda p: p["status"].update(run_id=None),
+    lambda p: p["status"].update(active_market=None),
+    lambda p: p["status"]["active_market"].update(window_start_ts_ms=p["generated_at_ms"] + 1),
+    lambda p: p["status"]["active_market"].update(window_end_ts_ms=p["generated_at_ms"]),
+    lambda p: p["status"]["feeds"]["binance"].update(fresh=False),
+    lambda p: p["status"]["feeds"]["polymarket"].update(synchronized=False),
+    lambda p: p["status"]["feeds"]["chainlink"].update(connected=False),
+    lambda p: p["status"]["alpha"].update(fresh=False),
+    lambda p: p["status"]["pricing_inputs"].update(ready=False),
+    lambda p: p["status"]["pricing_inputs"].update(fresh=False),
+    lambda p: p["status"]["session"].update(healthy=False),
+    lambda p: p["status"]["session"].update(failure_reason="projection_error"),
+])
+async def test_live_readiness_requires_trading_inputs_not_readable_status(observation, mutation):
+    payload = copy.deepcopy(observation.payload)
+    assert live_inputs_ready(payload)
+    mutation(payload)
+    assert not live_inputs_ready(payload)
+
+
+async def test_live_feed_outage_deadline_and_recovery(observation):
+    report = SoakReport(replace(observation.check, mock=False))
+    observer = PaperSoakObserver(report=report, policy=ObservationPolicy(stale_seconds=1))
+    ready = observation.payload
+    unready = copy.deepcopy(ready)
+    unready["status"]["feeds"]["binance"]["fresh"] = False
+    observer.observe(ready, at=0)
+    observer.observe(unready, at=1)
+    observer.observe(ready, at=1.5)
+    observer.observe(unready, at=2)
+    with pytest.raises(ObservationError, match="LIVE_INPUTS_UNAVAILABLE_DEADLINE"):
+        observer.observe(unready, at=3.1)
+    assert report.data["live_readiness"] == {"ready_samples": 2, "unready_samples": 3}
+    final = copy.deepcopy(unready)
+    final["status"]["state"] = "STOPPED"
+    observer.observe(final, at=10, final=True)
+    assert report.data["live_readiness"]["unready_samples"] == 3
+
+
+async def test_live_report_rejects_no_readiness_and_incomplete_measurement(observation):
+    report = SoakReport(replace(observation.check, mock=False))
+    report.data["polls"]["successful"] = 1  # A readable API is not live coverage.
+    report.data["requested_duration_ms"] = 1_800_000
+    report.finish(ended_at_ms=report.data["started_at_ms"] + 1_800_000)
+    assert {item["code"] for item in report.data["hard_failures"]} == {
+        "LIVE_INPUTS_NEVER_READY", "LIVE_DURATION_NOT_COMPLETED",
+    }
+    report = SoakReport(replace(observation.check, mock=False))
+    report.data.update(requested_duration_ms=1000, measurement_duration_ms=1000)
+    report.data["polls"]["successful"] = 1
+    PaperSoakObserver(report=report).observe(observation.payload, at=0)
+    report.finish()
+    assert not report.failed  # Zero fills is still a valid live strategy outcome.
 
 
 @pytest.mark.parametrize("mutation,code", [

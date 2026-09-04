@@ -116,6 +116,14 @@ Only then is Operator launched. Readiness must refer to a process started after
 that launch, not a previous `STOPPED` status. The single startup deadline covers
 both phases. No shell commands or automatic writer restarts are used.
 
+For **live** mode, readable `/readyz` alone is not sufficient. Before the timed
+measurement begins, the current process must be `RUNNING` with an active run
+inside its trading window, a healthy Session, all three public feeds connected,
+synchronized and fresh, fresh OFI alpha, and ready/fresh pricing inputs. The
+Dashboard's `/readyz` still means that its read model is readable; it is not a
+trading-readiness promise. Discovery-only or disconnected runs time out with
+`STARTUP_TIMEOUT` and cannot pass live acceptance.
+
 Remove `--duration` to run until SIGINT/SIGTERM. On normal stop the supervisor
 cancels further polls, sends SIGTERM to its operator child, waits for its exit and
 final `STOPPED` status, reads one final dashboard view, stops the dashboard, then
@@ -139,6 +147,13 @@ Times use positive integer `s`, `m`, `h` units, maximum seven days. Defaults:
 `--shutdown-grace 15s`, `--unreadable-timeout 30s`, `--stale-timeout 30s`,
 `--rollover-timeout 15m`. Duration starts after readiness; report duration also
 includes startup/shutdown. `--no-soak-report` skips artifacts, **not safety gates**.
+`measurement_duration_ms` separately records monotonic elapsed time after live
+readiness and before shutdown; `requested_duration_ms` records the requested
+measurement. Interrupting a duration-limited live run early produces
+`LIVE_DURATION_NOT_COMPLETED`, even if total wall time including startup is long.
+Zero live-ready samples produce `LIVE_INPUTS_NEVER_READY`. A continuous loss of
+live readiness after startup fails at `--stale-timeout` (settlement/rollover uses
+its separate handoff deadline); brief recovered gaps remain visible as warnings.
 
 | Symptom | Response |
 | --- | --- |

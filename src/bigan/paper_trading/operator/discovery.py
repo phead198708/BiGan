@@ -200,11 +200,7 @@ def _parse_market_row(
     no_token = tokens[no_index].strip()
     if not yes_token or not no_token or yes_token == no_token:
         raise ValueError("YES/NO token IDs must be non-empty and distinct")
-    start = _timestamp_ms_optional(row, "start_ts_ms", "startDate", "startDateIso")
-    if start is None and slug_identity is not None:
-        start = slug_identity[3]
-    if start is None:
-        raise ValueError("market start timestamp is missing")
+    start = _window_start_ms(row, slug_identity)
     end = _timestamp_ms(row, "end_ts_ms", "endDate", "endDateIso")
     if end <= start:
         raise ValueError("market end must be after start")
@@ -214,7 +210,8 @@ def _parse_market_row(
         if raw_duration is None and slug_identity is not None
         else _strict_int(raw_duration, "windowDurationMs")
     )
-    if duration <= 0 or end - start != duration:
+    if (duration <= 0 or end - start != duration
+            or slug_identity is not None and duration != slug_identity[2]):
         raise ValueError("window duration does not match start/end")
     market_id = _text(row.get("id") or row.get("market_id"), "market_id")
     condition_id = _text(row.get("conditionId") or row.get("condition_id"), "condition_id")
@@ -298,6 +295,24 @@ def _outcome_index(outcomes: list[str], accepted: set[str]) -> int:
     if len(indexes) != 1:
         raise ValueError("outcomes must identify one YES/UP and one NO/DOWN token")
     return indexes[0]
+
+
+def _window_start_ms(
+    row: dict[str, Any], slug_identity: tuple[str, str, int, int] | None,
+) -> int:
+    # Gamma startDate/startDateIso can describe listing time, not the period
+    # whose opening price resolves the market. Never use them as a strike time.
+    candidates = [
+        value for name in ("start_ts_ms", "eventStartTime")
+        if (value := _timestamp_ms_optional(row, name)) is not None
+    ]
+    if slug_identity is not None:
+        candidates.append(slug_identity[3])
+    if not candidates:
+        raise ValueError("market window start timestamp is missing")
+    if len(set(candidates)) != 1:
+        raise ValueError("conflicting market window start timestamps")
+    return candidates[0]
 
 
 def _timestamp_ms(row: dict[str, Any], *names: str) -> int:

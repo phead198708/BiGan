@@ -76,6 +76,31 @@ def _text(value: Any) -> str:
     return value
 
 
+def live_inputs_ready(payload: dict[str, Any]) -> bool:
+    """Trading readiness is stricter than the dashboard's read-model /readyz."""
+    status = _object(payload.get("status"))
+    market = status.get("active_market")
+    if (payload.get("stale") is not False or status.get("state") != "RUNNING"
+            or not status.get("run_id") or not isinstance(market, dict)):
+        return False
+    timestamp = _integer(payload.get("generated_at_ms"))
+    if not (_integer(market.get("window_start_ts_ms")) <= timestamp
+            < _integer(market.get("window_end_ts_ms"))):
+        return False
+    feeds = _object(status.get("feeds"))
+    for name in ("binance", "polymarket", "chainlink"):
+        health = _object(feeds.get(name))
+        if any(health.get(key) is not True for key in ("connected", "synchronized", "fresh")):
+            return False
+    pricing = _object(status.get("pricing_inputs"))
+    session = _object(status.get("session"))
+    return bool(
+        pricing.get("ready") is True and pricing.get("fresh") is True
+        and _object(status.get("alpha")).get("fresh") is True
+        and session.get("healthy") is True and session.get("failure_reason") is None
+    )
+
+
 class PaperSoakObserver:
     def __init__(self, *, report: SoakReport, policy: ObservationPolicy | None = None,
                  instance_id: str | None = None, history_limit: int = 50) -> None:
@@ -91,6 +116,7 @@ class PaperSoakObserver:
         self._poll_lock = asyncio.Lock()
         self._failure_since: float | None = None
         self._stale_since: float | None = None
+        self._live_unready_since: float | None = None
         self._rollover_since: float | None = None
         self._last_state: str | None = None
         self._last_sample_time: float | None = None
@@ -281,6 +307,19 @@ class PaperSoakObserver:
         if status["last_fill"] is not None and status["last_fill"].get("run_id") != status["run_id"]:
             raise ObservationError("MIXED_FILL_RUN")
         self._aggregate(status, at, final=final)
+        if self.report.data["mode"] == "live_public_feeds_paper_execution" and not final:
+            coverage = self.report.data["live_readiness"]
+            if live_inputs_ready(payload):
+                coverage["ready_samples"] += 1
+                self._live_unready_since = None
+            else:
+                coverage["unready_samples"] += 1
+                self._live_unready_since = at if self._live_unready_since is None else self._live_unready_since
+                self.report.issue("LIVE_INPUTS_NOT_READY")
+                # Settlement has its own, longer bounded handoff deadline.
+                deadline = self.policy.rollover_seconds if pending else self.policy.stale_seconds
+                if at - self._live_unready_since >= deadline:
+                    raise ObservationError("LIVE_INPUTS_UNAVAILABLE_DEADLINE")
         if not isinstance(payload["warnings"], list) or len(payload["warnings"]) > 32:
             raise ObservationError("INVALID_API_SCHEMA")
         for warning in payload["warnings"]:

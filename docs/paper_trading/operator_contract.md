@@ -360,6 +360,14 @@ remain simulated and paper-only.
 
 ## Known limitations
 
+Gamma window start is resolved from `start_ts_ms`, `eventStartTime`, and the
+timestamp of the exact supported up/down slug family. When multiple are present
+they must agree; the declared duration must also match the slug and end time.
+`startDate`/`startDateIso` are not window-start fallbacks: live responses can
+contain a listing date from the preceding day. Missing/conflicting authoritative
+window identity fails closed. Gamma lists `eventStartTime` separately in its
+[market response schema](https://docs.polymarket.com/api-reference/markets/list-markets).
+
 - Gamma does not consistently publish the authoritative price-to-beat for an
   already-running up/down window. The operator accepts an explicit
   `referencePriceAtStart`/`priceToBeat`; when it is absent it stays degraded

@@ -55,6 +55,8 @@ class SoakReport:
             "dashboard_url": check.url,
             "polls": {"attempted": 0, "successful": 0, "failed": 0, "longest_failure_streak_ms": 0},
             "states": {}, "feeds": {}, "rollovers": 0, "runs_observed": [],
+            "live_readiness": {"ready_samples": 0, "unready_samples": 0},
+            "requested_duration_ms": None, "measurement_duration_ms": 0,
             "account": dict.fromkeys((
                 "initial_equity", "final_equity", "final_cash", "realized_pnl", "unrealized_pnl",
                 "fees", "max_observed_drawdown",
@@ -98,6 +100,12 @@ class SoakReport:
                 self.issue(f"NO_{key.upper()}_OBSERVED", informational=True)
         if not self.data["polls"]["successful"]:
             self.issue("NO_VALID_OBSERVATIONS", hard=True)
+        if self.data["mode"] == "live_public_feeds_paper_execution":
+            if not self.data["live_readiness"]["ready_samples"]:
+                self.issue("LIVE_INPUTS_NEVER_READY", hard=True)
+            requested = self.data["requested_duration_ms"]
+            if requested is not None and self.data["measurement_duration_ms"] < requested:
+                self.issue("LIVE_DURATION_NOT_COMPLETED", hard=True)
         require_finite(self.data)
         return self.data
 
@@ -106,6 +114,9 @@ class SoakReport:
         lines = ["# Paper stack soak — " + d["result"], "",
                  "PAPER / SIMULATED — NO REAL FUNDS", "",
                  f"Mode: `{d['mode']}`. Duration: {d['duration_ms'] / 1000:.1f} seconds.",
+                 f"Measurement: {d['measurement_duration_ms'] / 1000:.1f} seconds after readiness "
+                 f"(requested ms: {d['requested_duration_ms']}).",
+                 f"Live input samples: {d['live_readiness']}.",
                  f"Source: `{d['source_commit']}`. Config: `{d['config_sha256']}`.",
                  f"Final state: `{d['final_state']}`. Observed rollovers: {d['rollovers']}.", "",
                  f"Polls: {d['polls']['successful']} successful / {d['polls']['attempted']} attempted.",
