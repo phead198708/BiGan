@@ -109,6 +109,7 @@ class OperatorConfig:
     binance_depth_endpoint: str = DEFAULT_BINANCE_DEPTH_ENDPOINT
     binance_ws_url: str = DEFAULT_BINANCE_WS_URL
     binance_symbol: str = "BTCUSDT"
+    binance_clock_ahead_tolerance_ms: int = 0
     polymarket_ws_url: str = DEFAULT_POLYMARKET_WS_URL
     chainlink_ws_url: str = DEFAULT_CHAINLINK_WS_URL
     chainlink_symbol: str = "btc/usd"
@@ -223,6 +224,9 @@ class OperatorConfig:
             _validate_readonly_endpoint(field_name, str(getattr(self, field_name)))
         if not isinstance(self.binance_venue, str) or self.binance_venue not in _BINANCE_VENUE_HOSTS:
             raise ValueError("binance_venue must be global or us")
+        if (type(self.binance_clock_ahead_tolerance_ms) is not int
+                or not 0 <= self.binance_clock_ahead_tolerance_ms <= 1_000):
+            raise ValueError("binance_clock_ahead_tolerance_ms must be an integer in [0, 1000]")
         rest_hosts, ws_host = _BINANCE_VENUE_HOSTS[self.binance_venue]
         rest, ws = urlsplit(self.binance_depth_endpoint), urlsplit(self.binance_ws_url)
         if (
@@ -240,12 +244,13 @@ class OperatorConfig:
         prefix = "binance_us_depth" if self.binance_venue == "us" else "binance_depth"
         return f"{prefix}:{self.binance_symbol}"
 
-    def binance_source_identity(self) -> dict[str, str]:
+    def binance_source_identity(self) -> dict[str, object]:
         """Public, validated source identity; never an implicit venue fallback."""
         return {
             "venue": self.binance_venue, "display_name": self.binance_display_name,
             "symbol": self.binance_symbol, "source": self.binance_spot_source,
             "rest_endpoint": self.binance_depth_endpoint, "ws_endpoint": self.binance_ws_url,
+            "clock_ahead_tolerance_ms": self.binance_clock_ahead_tolerance_ms,
         }
 
     @property

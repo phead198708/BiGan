@@ -131,6 +131,7 @@ class BinanceDepthSynchronizer:
         max_age_ms: int,
         delta_buffer_size: int,
         book_level_limit: int = 5_000,
+        clock_ahead_tolerance_ms: int = 0,
     ) -> None:
         if not symbol or symbol != symbol.upper():
             raise ValueError("symbol must be uppercase and non-empty")
@@ -138,11 +139,14 @@ class BinanceDepthSynchronizer:
             raise ValueError("freshness and buffer bounds are invalid")
         if calculator.symbol != symbol:
             raise ValueError("calculator and synchronizer symbols differ")
+        if type(clock_ahead_tolerance_ms) is not int or not 0 <= clock_ahead_tolerance_ms <= 1_000:
+            raise ValueError("clock ahead tolerance must be an integer in [0, 1000]")
         self.calculator = calculator
         self.symbol = symbol
         self.max_age_ms = int(max_age_ms)
         self.delta_buffer_size = int(delta_buffer_size)
         self.book_level_limit = int(book_level_limit)
+        self.clock_ahead_tolerance_ms = clock_ahead_tolerance_ms
         self.state = FeedConnectionState.DISCONNECTED
         self.connected = False
         self.generation = 0
@@ -188,6 +192,7 @@ class BinanceDepthSynchronizer:
         *,
         generation: int,
         received_at_ms: int | None = None,
+        now_ms: int | None = None,
     ) -> bool:
         if generation != self.generation:
             self.dropped_generation_count += 1
@@ -201,8 +206,12 @@ class BinanceDepthSynchronizer:
                 return False
             event_ts = _positive_int(delta.get("E"), "Binance event timestamp")
             received = event_ts if received_at_ms is None else int(received_at_ms)
+            decision_time = received if now_ms is None else int(now_ms)
             self.last_message_received_ms = received
-            if event_ts > received:
+            # Preserve the real arrival time. A small exchange-clock lead may
+            # only be consumed AFTER local processing time catches up; bounded
+            # buffering is not permission to trade on a future observation.
+            if event_ts > received + self.clock_ahead_tolerance_ms or event_ts > decision_time:
                 self.out_of_order_count += 1
                 if not self.needs_bootstrap:
                     self._invalidate(clear_buffer=True)

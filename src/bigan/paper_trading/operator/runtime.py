@@ -239,6 +239,7 @@ class PaperTradingOperator:
                 payload,
                 generation=generation,
                 received_at_ms=received,
+                now_ms=self.clock_ms(),
             )
             if accepted and self.binance_sync.last_top_changed:
                 event_ts = self.binance_sync.last_event_ts_ms
@@ -335,6 +336,7 @@ class PaperTradingOperator:
                 payload,
                 generation=generation,
                 received_at_ms=received_at_ms,
+                now_ms=self.clock_ms(),
             )
             if accepted and self.binance_sync.last_top_changed:
                 accepted = self._ingest_spot_from_binance(
@@ -1038,6 +1040,7 @@ class PaperTradingOperator:
             max_age_ms=self.config.max_alpha_age_ms,
             delta_buffer_size=self.config.binance_delta_buffer_size,
             book_level_limit=self.config.binance_book_level_limit,
+            clock_ahead_tolerance_ms=self.config.binance_clock_ahead_tolerance_ms,
         )
         market_sync = PolymarketBookSynchronizer(
             window_id=market.window_id,

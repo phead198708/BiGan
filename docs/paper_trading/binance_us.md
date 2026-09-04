@@ -12,6 +12,7 @@ binance_venue = "us"
 binance_depth_endpoint = "https://api.binance.us/api/v3/depth"
 binance_ws_url = "wss://stream.binance.us:9443/ws"
 binance_symbol = "BTCUSDT"
+binance_clock_ahead_tolerance_ms = 50
 ```
 
 Both hosts must agree with the explicit venue. US/Global mixtures, an unsupported
@@ -27,6 +28,15 @@ the snapshot/update IDs, applies absolute quantities/deletions to its bounded
 local book and re-bootstraps on gaps. No changes to OFI math, trading thresholds,
 freshness cutoffs, risk limits or readiness measurement are made to accommodate
 the new venue. A quiet/stale US market must still close the execution gate.
+
+The live example permits up to 50ms of exchange-clock lead relative to the
+original local receipt. Events are boundedly delayed until local processing time
+reaches the **unchanged** exchange timestamp, and the synchronizer re-checks this
+before updating the book/OFI. Both original event and arrival timestamps are
+retained; no future quote is used early. Leads beyond the configured bound,
+failure of the clock to catch up, ordering errors and gaps still fail closed.
+The default is zero (legacy strict behavior); the absolute configurable ceiling
+is 1,000ms. This is a receive-time buffer, not a widened freshness or trading gate.
 
 API contracts: [Binance.US official documentation](https://docs.binance.us/).
 The 1,000-level bootstrap is a limited snapshot; it does not represent liquidity

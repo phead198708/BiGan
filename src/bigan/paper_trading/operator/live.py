@@ -98,6 +98,17 @@ class LiveFeedSupervisor:
             connection_generation: int,
             received_at_ms: int,
         ) -> None:
+            # Some exchange clocks lead local receipt by a few milliseconds.
+            # Wait boundedly, keep both original timestamps, and let the
+            # synchronizer re-check local time. Large leads still fail closed.
+            event = payload.get("data", payload)
+            event_ts = event.get("E") if isinstance(event, Mapping) else None
+            if type(event_ts) is int:
+                delay_ms = event_ts - self.operator.clock_ms()
+                tolerance = config.binance_clock_ahead_tolerance_ms
+                if (0 < delay_ms <= tolerance
+                        and event_ts <= received_at_ms + tolerance):
+                    await asyncio.sleep(delay_ms / 1_000)
             accepted = await self.operator.ingest_binance_connection_delta(
                 dict(payload),
                 window_generation=window_generation,

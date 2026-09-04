@@ -24,6 +24,8 @@ binance_venue = "us"
 binance_depth_endpoint = "https://api.binance.us/api/v3/depth"
 binance_ws_url = "wss://stream.binance.us:9443/ws"
 binance_symbol = "BTCUSDT"
+# Buffer small exchange-clock leads until local time catches up; never trade ahead.
+binance_clock_ahead_tolerance_ms = 50
 polymarket_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 chainlink_ws_url = "wss://ws-live-data.polymarket.com"
 chainlink_symbol = "btc/usd"
