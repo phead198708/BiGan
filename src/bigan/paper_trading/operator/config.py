@@ -200,8 +200,8 @@ class OperatorConfig:
             raise ValueError("logging_level is invalid")
         if Path(self.status_filename).name != self.status_filename:
             raise ValueError("status_filename must be a plain filename")
-        if self.status_filename == "account_checkpoint.json":
-            raise ValueError("status_filename cannot overwrite the authoritative account checkpoint")
+        if self.status_filename in {"account_checkpoint.json", ".operator.lock"}:
+            raise ValueError("status_filename cannot overwrite account checkpoint or ownership lock")
         _validate_safety(self)
         for field_name in _ALLOWED_ENDPOINTS:
             _validate_readonly_endpoint(field_name, str(getattr(self, field_name)))

@@ -28,6 +28,24 @@ async def test_supervisor_always_shuts_down_after_unexpected_failure() -> None:
     assert operator.shutdown_called is True
 
 
+async def test_exhausted_operator_stops_supervisor_without_starting_feeds() -> None:
+    class ExhaustedOperator:
+        state = OperatorState.EXHAUSTED
+        shutdown_called = False
+
+        async def start(self):
+            return None
+
+        async def shutdown(self):
+            self.shutdown_called = True
+
+    operator = ExhaustedOperator()
+    stop = asyncio.Event()
+    await LiveFeedSupervisor(operator=operator).run(stop)  # type: ignore[arg-type]
+    assert operator.shutdown_called
+    assert stop.is_set()
+
+
 async def test_supervisor_shuts_down_when_poll_raises() -> None:
     class FailingPollOperator:
         def __init__(self) -> None:

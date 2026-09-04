@@ -113,6 +113,7 @@ def test_ranges_and_queue_bounds_are_validated(tmp_path: Path) -> None:
     {"binance_book_level_limit": 100},
     {"binance_book_level_limit": 999},
     {"status_filename": "account_checkpoint.json"},
+    {"status_filename": ".operator.lock"},
 ])
 def test_cross_source_and_bootstrap_contracts_fail_early(tmp_path, overrides) -> None:
     with pytest.raises(ValueError):

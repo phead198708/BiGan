@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
 
@@ -23,10 +24,17 @@ from bigan.strategies.polymarket_pricing import (
     PolymarketPricingEngine,
 )
 
-from .checkpoint import AccountCheckpoint, AccountCheckpointStore
+from .checkpoint import (
+    AccountCheckpoint,
+    AccountCheckpointStore,
+    fsync_directory,
+    load_run_link,
+    run_link_store,
+)
 from .config import OperatorConfig
 from .discovery import DiscoveredMarket, DiscoveryFilters, DiscoverySelection
 from .feeds import BinanceDepthSynchronizer, FeedHealth, PolymarketBookSynchronizer
+from .ownership import AccountProcessLock
 from .pricing_inputs import ReferencePriceSample, RollingPricingInputsProvider
 from .read_model import (
     OPERATOR_STATUS_SCHEMA_VERSION,
@@ -34,6 +42,7 @@ from .read_model import (
     OperatorState,
     OperatorStatus,
     OperatorStatusWriter,
+    account_totals,
 )
 from .resolution import FinalResolution
 
@@ -97,6 +106,10 @@ class PaperTradingOperator:
         self._last_status_write_ms: int | None = None
         self._last_settlement: FinalResolution | None = None
         self._checkpoint: AccountCheckpoint | None = None
+        self._account_lock = AccountProcessLock(
+            output_dir=Path(config.output_dir), operator_id=config.operator_id,
+            account_id=config.paper_account_id,
+        )
         self.checkpoint_store = AccountCheckpointStore(
             Path(config.output_dir) / config.operator_id / "account_checkpoint.json"
         )
@@ -133,6 +146,7 @@ class PaperTradingOperator:
         return OperatorReadRepository(
             status_path=self.status_writer.path,
             run_store=None if self.session is None else self.session.store,
+            checkpoint=self._checkpoint,
             default_limit=self.config.recent_query_default,
             max_limit=self.config.recent_query_max,
         )
@@ -144,6 +158,8 @@ class PaperTradingOperator:
             self._require_not_failed()
             if self.session is not None:
                 return
+            # No checkpoint, ledger, index or shared status access before ownership.
+            self._account_lock.acquire()
             try:
                 self._checkpoint = self._load_account_checkpoint()
                 if self._checkpoint is not None:
@@ -197,7 +213,9 @@ class PaperTradingOperator:
                 received_at_ms=received,
             )
             if accepted and self.binance_sync.last_top_changed:
-                accepted = self._ingest_spot_from_binance(received)
+                event_ts = self.binance_sync.last_event_ts_ms
+                if event_ts is not None:
+                    accepted = self._ingest_spot_from_binance(event_ts)
             self._update_gate_state()
             self._publish_status()
             return accepted
@@ -290,7 +308,9 @@ class PaperTradingOperator:
                 received_at_ms=received_at_ms,
             )
             if accepted and self.binance_sync.last_top_changed:
-                accepted = self._ingest_spot_from_binance(received_at_ms)
+                event_ts = self.binance_sync.last_event_ts_ms
+                if event_ts is not None:
+                    accepted = self._ingest_spot_from_binance(event_ts)
             self._update_gate_state()
             self._publish_status()
             return accepted
@@ -410,6 +430,7 @@ class PaperTradingOperator:
             if self._permanently_failed or self.state in {
                 OperatorState.STOPPING,
                 OperatorState.STOPPED,
+                OperatorState.EXHAUSTED,
             }:
                 return
             market = self.active_market
@@ -465,14 +486,22 @@ class PaperTradingOperator:
 
         self._accepting_snapshots = False
         async with self._lock:
-            if self.state is OperatorState.STOPPED:
+            if not self._account_lock.held:
                 return
-            self._transition(OperatorState.STOPPING, "shutdown_requested")
-            if self.binance_sync is not None:
-                self.binance_sync.disconnect()
-            if self.market_sync is not None:
-                self.market_sync.disconnect()
-            self._transition(OperatorState.STOPPED, "shutdown_complete")
+            try:
+                exhausted = self.state is OperatorState.EXHAUSTED
+                if not exhausted:
+                    self._transition(OperatorState.STOPPING, "shutdown_requested")
+                if self.binance_sync is not None:
+                    self.binance_sync.disconnect()
+                if self.market_sync is not None:
+                    self.market_sync.disconnect()
+                if not exhausted:
+                    self._transition(OperatorState.STOPPED, "shutdown_complete")
+                else:
+                    self._publish_status(force=True)
+            finally:
+                self._account_lock.release()
 
     def status(self) -> OperatorStatus:
         now_ms = self.clock_ms()
@@ -600,16 +629,7 @@ class PaperTradingOperator:
                 ),
             },
             account={
-                "initial_bankroll": (
-                    self.config.initial_bankroll
-                    if session is None
-                    else session.store.manifest.initial_bankroll
-                ),
-                "cash": self.config.initial_bankroll if snapshot is None else snapshot.cash,
-                "equity": self.config.initial_bankroll if snapshot is None else snapshot.equity,
-                "realized_pnl": 0.0 if snapshot is None else snapshot.realized_pnl,
-                "unrealized_pnl": 0.0 if snapshot is None else snapshot.unrealized_pnl,
-                "total_fees": 0.0 if snapshot is None else snapshot.commission_paid,
+                **account_totals(snapshot, self._checkpoint, self.config.initial_bankroll),
                 "open_positions": positions,
             },
             counters=dict(self.counters),
@@ -670,6 +690,10 @@ class PaperTradingOperator:
             raise
 
     async def _rollover_locked(self, bankroll: float) -> None:
+        if bankroll == 0:
+            self._accepting_snapshots = False
+            self._transition(OperatorState.EXHAUSTED, "settled_account_has_no_capital")
+            return
         self._transition(OperatorState.ROLLING_OVER, "discovering_next_window")
         try:
             selection = await self.discovery.discover(
@@ -737,13 +761,27 @@ class PaperTradingOperator:
             checkpoint = AccountCheckpoint(
                 config_sha256=self.config.config_sha256, run_id=run_id,
                 market=market, opening_cash=starting_bankroll,
+                initial_bankroll=self.config.initial_bankroll if checkpoint is None else checkpoint.initial_bankroll,
+                run_index=0 if checkpoint is None else checkpoint.run_index + 1,
+                prior_realized_pnl=(
+                    0.0 if previous is None or checkpoint is None
+                    else checkpoint.prior_realized_pnl + previous.current_snapshot.realized_pnl
+                ),
+                prior_fees=(
+                    0.0 if previous is None or checkpoint is None
+                    else checkpoint.prior_fees + previous.current_snapshot.commission_paid
+                ),
                 predecessor_run_id=None if previous is None else self.run_id,
                 predecessor_window_id=None if previous is None else previous.runner.window.window_id,
                 predecessor_settled_cash=None if previous is None else previous.current_snapshot.cash,
             )
             # Durable activation intent precedes every create/resume side effect.
             self.checkpoint_store.write(checkpoint)
-            self._checkpoint = checkpoint
+        if checkpoint.activation_state == "ACTIVE":
+            if not run_path.is_dir():
+                raise ValueError("ACTIVE account run directory is missing")
+            if load_run_link(Path(self.config.output_dir), run_id, checkpoint.config_sha256) != checkpoint:
+                raise ValueError("active account checkpoint disagrees with its run link")
         if run_path.is_dir():
             manifest_bankroll = PaperRunStore.load_manifest(
                 output_dir=self.config.output_dir,
@@ -778,6 +816,22 @@ class PaperTradingOperator:
                 snapshot_dedupe_cache_size=self.config.snapshot_lru_size,
             )
             lifecycle_reason = "session_created"
+        if checkpoint.activation_state == "ACTIVATING":
+            if session.current_snapshot.last_event_sequence != 0:
+                raise ValueError("ACTIVATING run cannot contain trading or settlement events")
+            active = replace(checkpoint, activation_state="ACTIVE")
+            links = run_link_store(Path(self.config.output_dir), run_id)
+            existing = links.load(config_sha256=checkpoint.config_sha256)
+            if existing is not None and existing != active:
+                raise ValueError("conflicting account run link")
+            if existing is None:
+                links.write(active)
+            # Persist the new directory entry before publishing ACTIVE.
+            fsync_directory(run_path)
+            fsync_directory(Path(self.config.output_dir))
+            self.checkpoint_store.write(active)
+            checkpoint = active
+        self._checkpoint = checkpoint
         self.session = session
         self.active_market = market
         self.pricing_provider = pricing
@@ -790,7 +844,9 @@ class PaperTradingOperator:
         self.market_sync.begin_generation(generation)
         self._accepting_snapshots = market.window_id not in session.current_snapshot.settled_window_ids
         self._initialize_run_counters(session)
-        if self.clock_ms() >= market.end_ts_ms:
+        if not self._accepting_snapshots and session.current_snapshot.cash == 0:
+            self._transition(OperatorState.EXHAUSTED, "settled_account_has_no_capital")
+        elif self.clock_ms() >= market.end_ts_ms:
             self._accepting_snapshots = False
             self._transition(
                 OperatorState.SETTLEMENT_PENDING,
@@ -935,6 +991,9 @@ class PaperTradingOperator:
                 )
             return None
         if checkpoint.predecessor_run_id is not None:
+            previous = load_run_link(
+                Path(self.config.output_dir), checkpoint.predecessor_run_id, checkpoint.config_sha256
+            )
             manifest = PaperRunStore.load_manifest(
                 output_dir=self.config.output_dir, run_id=checkpoint.predecessor_run_id
             )
@@ -945,6 +1004,10 @@ class PaperTradingOperator:
             if (
                 checkpoint.predecessor_window_id not in settled.settled_window_ids
                 or settled.cash != checkpoint.opening_cash
+                or checkpoint.run_index != previous.run_index + 1
+                or checkpoint.initial_bankroll != previous.initial_bankroll
+                or checkpoint.prior_realized_pnl != previous.prior_realized_pnl + settled.realized_pnl
+                or checkpoint.prior_fees != previous.prior_fees + settled.commission_paid
             ):
                 raise ValueError("checkpoint predecessor ledger is not settled at carried cash")
         return checkpoint
@@ -996,6 +1059,7 @@ class PaperTradingOperator:
             OperatorState.SETTLEMENT_PENDING,
             OperatorState.STOPPING,
             OperatorState.STOPPED,
+            OperatorState.EXHAUSTED,
         }:
             return
         if self.active_market is None:
@@ -1010,6 +1074,7 @@ class PaperTradingOperator:
     def _can_accept_generation(self, generation: int) -> bool:
         accepted = bool(
             self._accepting_snapshots
+            and self._account_lock.held
             and not self._permanently_failed
             and self.state not in {OperatorState.STOPPING, OperatorState.STOPPED}
             and generation == self.generation
@@ -1113,6 +1178,8 @@ class PaperTradingOperator:
         self._publish_status(force=True)
 
     def _publish_status(self, *, force: bool = False) -> None:
+        if not self._account_lock.held:
+            return
         now_ms = self.clock_ms()
         if (
             not force
@@ -1127,7 +1194,7 @@ class PaperTradingOperator:
         except Exception as exc:
             self.counters["projection_errors"] += 1
             self._projection_error = f"{type(exc).__name__}: {exc}"
-            if not self._permanently_failed:
+            if not self._permanently_failed and self.state is not OperatorState.EXHAUSTED:
                 self.state = OperatorState.DEGRADED
                 self.state_reason = "status_projection_write_failed"
             logger.error(

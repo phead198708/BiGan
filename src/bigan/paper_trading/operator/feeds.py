@@ -259,28 +259,17 @@ class BinanceDepthSynchronizer:
             )
             bid_price, bid_qty, ask_price, ask_qty = _book_top(bids, asks)
             buffered = tuple(self._buffer)
-            applicable_event_times = [
-                _positive_int(delta.get("E"), "Binance event timestamp")
-                for delta, _received in buffered
-                if _positive_int(delta.get("u"), "final update id") > update_id
-            ]
-            seed_ts = min((int(received_at_ms), *applicable_event_times))
             self.calculator.reset()
-            self.calculator.update_and_get_z(
-                bid_price=bid_price,
-                bid_qty=bid_qty,
-                ask_price=ask_price,
-                ask_qty=ask_qty,
-                ts_ms=seed_ts,
-            )
             self._bids = bids
             self._asks = asks
             self.last_bid_price = bid_price
             self.last_ask_price = ask_price
-            self.last_top_changed = True
+            self.last_top_changed = False
             self._has_applied_delta = False
             self.last_update_id = update_id
-            self.last_event_ts_ms = seed_ts
+            # REST has no exchange event time. Its receipt time must never
+            # seed OFI/spot ahead of the deltas buffered during HTTP latency.
+            self.last_event_ts_ms = None
             self.last_message_received_ms = int(received_at_ms)
             self.needs_bootstrap = False
             self._buffer.clear()
@@ -290,7 +279,7 @@ class BinanceDepthSynchronizer:
                     continue
                 if not self._apply_delta(delta, received_at_ms=received):
                     return False
-            self.state = FeedConnectionState.READY
+            self.state = FeedConnectionState.READY if self._has_applied_delta else FeedConnectionState.SYNCING
             return True
         except (TypeError, ValueError) as exc:
             self.error_count += 1
@@ -308,11 +297,12 @@ class BinanceDepthSynchronizer:
         fresh = bool(
             self.connected
             and not self.needs_bootstrap
+            and self._has_applied_delta
             and age is not None
             and 0 <= age <= self.max_age_ms
         )
         state = self.state
-        if self.connected and not fresh and not self.needs_bootstrap:
+        if self.connected and self._has_applied_delta and not fresh and not self.needs_bootstrap:
             state = FeedConnectionState.STALE
         return FeedHealth(
             state=state,
@@ -355,14 +345,8 @@ class BinanceDepthSynchronizer:
             self._invalidate(clear_buffer=True)
             return False
         event_ts = _positive_int(delta.get("E"), "Binance event timestamp")
-        rebase_snapshot_clock = bool(
-            not self._has_applied_delta
-            and self.last_event_ts_ms is not None
-            and event_ts < self.last_event_ts_ms
-        )
         if (
-            not rebase_snapshot_clock
-            and self.last_event_ts_ms is not None
+            self.last_event_ts_ms is not None
             and event_ts < self.last_event_ts_ms
         ):
             self.out_of_order_count += 1
@@ -386,7 +370,8 @@ class BinanceDepthSynchronizer:
         previous_top = self._current_top()
         current_top = (bid_price, bid_qty, ask_price, ask_qty)
         top_changed = current_top != previous_top
-        if rebase_snapshot_clock and previous_top is not None:
+        first_delta = not self._has_applied_delta
+        if first_delta and previous_top is not None:
             self.calculator.reset()
             self.calculator.update_and_get_z(
                 bid_price=previous_top[0],
@@ -407,7 +392,7 @@ class BinanceDepthSynchronizer:
         self._asks = asks
         self.last_bid_price = bid_price
         self.last_ask_price = ask_price
-        self.last_top_changed = top_changed
+        self.last_top_changed = top_changed or first_delta
         self._has_applied_delta = True
         self.last_update_id = final_update
         self.last_event_ts_ms = event_ts

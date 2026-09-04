@@ -9,12 +9,14 @@ from .discovery import (
     parse_gamma_markets,
     select_market_windows,
 )
+from .ownership import AccountOwnershipError
 from .pricing_inputs import ReferencePriceSample, RollingPricingInputsProvider
 from .read_model import OperatorReadRepository, OperatorState, OperatorStatus
 from .resolution import FinalResolution, GammaResolutionClient, parse_gamma_resolution
 from .runtime import PaperTradingOperator, stable_run_id
 
 __all__ = [
+    "AccountOwnershipError",
     "DiscoveredMarket",
     "DiscoveryFilters",
     "DiscoverySelection",

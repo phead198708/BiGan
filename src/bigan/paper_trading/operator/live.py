@@ -36,7 +36,7 @@ class LiveFeedSupervisor:
         try:
             await self.operator.start()
             while not stop_event.is_set():
-                if self.operator.state is OperatorState.FAILED:
+                if self.operator.state in {OperatorState.FAILED, OperatorState.EXHAUSTED}:
                     stop_event.set()
                     break
                 if self.operator.session is None or self.operator.active_market is None:
@@ -50,12 +50,12 @@ class LiveFeedSupervisor:
                     while (
                         not stop_event.is_set()
                         and window_generation == self.operator.generation
-                        and self.operator.state is not OperatorState.FAILED
+                        and self.operator.state not in {OperatorState.FAILED, OperatorState.EXHAUSTED}
                     ):
                         await self._wait_interval(stop_event)
                         if not stop_event.is_set():
                             await self.operator.poll()
-                    if self.operator.state is OperatorState.FAILED:
+                    if self.operator.state in {OperatorState.FAILED, OperatorState.EXHAUSTED}:
                         stop_event.set()
                 finally:
                     for task in tasks:

@@ -104,7 +104,7 @@ async def _run_mock_demo(config: OperatorConfig) -> None:
     await operator.start()
     generation = operator.generation
     received = _now_ms()
-    warmup_samples = max(config.volatility_min_samples, config.ofi_min_samples)
+    warmup_samples = max(config.volatility_min_samples + 1, config.ofi_min_samples)
     sample_base = received - warmup_samples * config.volatility_return_interval_ms
     await operator.ingest_binance_snapshot(
         {

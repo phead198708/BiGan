@@ -46,6 +46,10 @@ creation, cancellation, allowance, wallet, or signing adapter.
    information required to identify the true top. A gap, reconnect, symbol
    mismatch, future/out-of-order event, or buffer/level overflow invalidates
    alpha and requests an immediate reconnect/bootstrap.
+   REST receipt time is not an exchange event timestamp: a standalone snapshot
+   initializes only the local book. The first valid WS delta seeds OFI and spot
+   using its exchange timestamp, including when it was buffered before the REST
+   response arrived. Volatility warm-up starts from that event-time baseline.
 5. `PolymarketBookSynchronizer` requires full books for both discovered token
    IDs. A missing/stale token, sequence gap, window mismatch, or old generation
    cannot produce a tradable snapshot.
@@ -143,14 +147,21 @@ STARTING -> DISCOVERING -> SYNCING -> RUNNING
                                       v
                                 ROLLING_OVER -> SYNCING
 
+settled cash == 0 -> EXHAUSTED (no new window, no capital reinjection)
 any authoritative ledger/persistence/cash failure -> FAILED
-shutdown: any non-failed state -> STOPPING -> STOPPED
+shutdown: non-terminal state -> STOPPING -> STOPPED
 ```
 
 `DEGRADED` is retryable for discovery, feed freshness, unavailable resolution,
 or projection output. `FAILED` is permanent for an authoritative
 Session/ledger/persistence/cash-consistency failure. No automatic rollover is
 allowed from `FAILED`.
+
+`EXHAUSTED` is a normal terminal economic outcome, not a persistence error.
+The final settled ledger and its positive original opening balance remain the
+account frontier; no zero-opening-cash successor is created. Startup derives
+`EXHAUSTED` again from that ledger, polling/OMS remain fenced, and the live
+supervisor shuts down feeds and releases ownership without changing this state.
 
 Only `RUNNING` with fresh synchronized Binance, a fresh OFI timestamp, an
 actively connected Chainlink stream, fresh dynamic pricing inputs, fresh
@@ -164,17 +175,40 @@ settlement substitute.
 ## Run identity, recovery, and rollover
 
 The stable run ID is SHA-256 over strategy ID, market ID, window ID, and paper
-account ID. Process start time is not part of the identity. If that directory
-does not exist, the operator creates a session. If it exists, it calls the
+account ID. Process start time is not part of the identity. A new run directory
+is created only for an explicit `ACTIVATING` intent. An `ACTIVE` run with a
+missing directory fails closed. An existing directory uses the
 strict PR-A resume path, which verifies the manifest, validates authoritative
 JSONL, rebuilds the derived SQLite idempotency index, restores cash/positions/
 sequence, and does not restore an unprovable WebSocket cursor or resting order.
 
+Before reading checkpoint/ledger data or writing shared status, startup takes
+non-blocking POSIX `flock` locks on both the paper account (under
+`<output_dir>/.account-locks/`) and `<output_dir>/<operator_id>/.operator.lock`.
+The account lock also prevents a differently named operator from writing the
+same account in that output directory. A contender raises
+`AccountOwnershipError` without touching checkpoint, ledger, SQLite or status.
+Ownership is held through discovery retries, decisions and rollover and released
+in shutdown's `finally` block or by OS process exit. Lock files are never
+unlinked. Run on a POSIX filesystem supporting `flock`; these are local-storage
+locks, not distributed cross-host/account locks for independent output roots.
+
 `<output_dir>/<operator_id>/account_checkpoint.json` is the durable account
 frontier, not a dashboard projection. It records the active market metadata,
-stable run ID, opening cash, configuration hash, and predecessor settlement
-run/window/cash. Every successor activation intent is atomically replaced and
-fsynced **before** creating its session. Operator-owned PR-A ledgers always
+stable run ID, opening cash, original account bankroll, cumulative prior-run
+realized PnL/fees, run index, configuration hash, and predecessor settlement
+run/window/cash. Checkpoint schema version 2 uses two-phase activation:
+
+1. Persist and fsync the explicit `ACTIVATING` intent.
+2. Completely create (or validate/recover) the empty run; persist its immutable
+   `operator_account_link.json`, then fsync the run and parent directory.
+3. Atomically persist `ACTIVE` before exposing the session for decisions.
+
+Only `ACTIVATING` may create an absent run. It cannot contain trading or
+settlement events; a partial or conflicting run is not replaced. Crashing after
+complete creation but before `ACTIVE` publication can safely finish activation.
+`ACTIVE` must agree with its existing run link and pass strict ledger recovery.
+Operator-owned PR-A ledgers always
 fsync authoritative writes (the `fsync` setting controls optional projection
 fsync). Startup recovers this frontier before calling discovery, including an
 expired or already-settled old window. The recovered ledger determines carried
@@ -185,7 +219,7 @@ cash. No funds are reinitialized from `initial_bankroll` at rollover.
 
 Missing checkpoints alongside existing `paper-*` run directories, corrupt or
 configuration-mismatched checkpoints, and ledger/cash mismatches fail closed.
-Pre-checkpoint deployments require explicit account-frontier migration; the
+Pre-checkpoint and schema-version-1 deployments require explicit account-frontier migration; the
 operator never guesses a balance from today's discovered market. Use a
 dedicated output directory per operator/account, and retain its checkpoint
 together with all predecessor ledgers. A partially created/corrupt run requires
@@ -244,6 +278,25 @@ It increments `projection_errors` and moves a non-failed operator to observable
 hard maximum and reverse-reads JSONL without loading full history. It exposes
 current status, current account snapshot, recent decisions, recent fills, and
 settlements.
+
+The status `account` object is account-lifetime scoped: `initial_bankroll` never
+resets on rollover, and `realized_pnl` / `total_fees` add current ledger values
+to checkpointed predecessor totals. `total_pnl` is current equity minus the
+original account bankroll. The explicit `current_run_initial_bankroll`,
+`current_run_realized_pnl`, and `current_run_fees` fields expose the window view.
+`account_summary()` returns these cumulative totals; `current_account()` retains
+its existing current-window `PaperAccountSnapshot` contract. Counters are still
+current-run operational counters, not lifetime accounting values.
+
+Immutable per-run links make the predecessor chain traversable without keeping
+an unbounded run list in memory. `recent_decisions`, `recent_fills`, and
+`settlements` now include prior runs and return the newest N events in
+chronological order. Each query caps both returned rows and scanned runs at
+`recent_query_max`. `recent_runs` returns a newest-first bounded run page;
+passing its last `run_id` as `before_run_id` to these methods pages to earlier
+windows (exclusive). A page may contain fewer events when its scanned windows
+have no matching activity; it does not imply that older account history ended.
+Keep every predecessor run and run link with the account checkpoint.
 
 Projection failure also closes execution immediately: even fresh snapshots
 cannot reach Session/OMS unless the gate transition successfully publishes

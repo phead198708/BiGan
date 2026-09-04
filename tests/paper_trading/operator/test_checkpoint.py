@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -24,6 +25,7 @@ def test_failed_atomic_replace_preserves_previous_account_frontier(tmp_path, mon
     store = AccountCheckpointStore(tmp_path / "account_checkpoint.json")
     checkpoint = AccountCheckpoint(
         config_sha256="config", run_id="paper-1", market=_market(1), opening_cash=1_000,
+        initial_bankroll=1_000,
     )
     store.write(checkpoint)
 
@@ -41,6 +43,7 @@ def test_checkpoint_rejects_config_change_and_incomplete_cash_link(tmp_path) -> 
     store = AccountCheckpointStore(tmp_path / "account_checkpoint.json")
     checkpoint = AccountCheckpoint(
         config_sha256="config", run_id="paper-1", market=_market(1), opening_cash=1_000,
+        initial_bankroll=1_000,
     )
     store.write(checkpoint)
     with pytest.raises(ValueError, match="configuration identity"):
@@ -50,3 +53,20 @@ def test_checkpoint_rejects_config_change_and_incomplete_cash_link(tmp_path) -> 
     with pytest.raises(ValueError, match="cash"):
         replace(checkpoint, predecessor_run_id="paper-old",
                 predecessor_window_id="old-window", predecessor_settled_cash=1_100)
+
+
+def test_checkpoint_must_explicitly_prove_activation_state(tmp_path) -> None:
+    store = AccountCheckpointStore(tmp_path / "account_checkpoint.json")
+    store.write(AccountCheckpoint(
+        config_sha256="config", run_id="paper-1", market=_market(1),
+        opening_cash=1_000, initial_bankroll=1_000, activation_state="ACTIVE",
+    ))
+    payload = json.loads(store.path.read_text())
+    payload.pop("activation_state")
+    store.path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="fields"):
+        store.load(config_sha256="config")
+    payload["schema_version"] = 1
+    store.path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="migration"):
+        store.load(config_sha256="config")

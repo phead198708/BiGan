@@ -13,6 +13,7 @@ import os
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Literal
 
 from .discovery import DiscoveredMarket
 
@@ -23,14 +24,27 @@ class AccountCheckpoint:
     run_id: str
     market: DiscoveredMarket
     opening_cash: float
+    initial_bankroll: float
+    activation_state: Literal["ACTIVATING", "ACTIVE"] = "ACTIVATING"
+    run_index: int = 0
+    prior_realized_pnl: float = 0.0
+    prior_fees: float = 0.0
     predecessor_run_id: str | None = None
     predecessor_window_id: str | None = None
     predecessor_settled_cash: float | None = None
-    schema_version: int = 1
+    schema_version: int = 2
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
+        if self.schema_version != 2:
             raise ValueError("unsupported account checkpoint schema")
+        if self.activation_state not in {"ACTIVATING", "ACTIVE"}:
+            raise ValueError("invalid account activation state")
+        if not isinstance(self.run_index, int) or isinstance(self.run_index, bool) or self.run_index < 0:
+            raise ValueError("invalid account run index")
+        if not math.isfinite(self.initial_bankroll) or self.initial_bankroll <= 0:
+            raise ValueError("account original bankroll must be positive")
+        if not math.isfinite(self.prior_realized_pnl) or not math.isfinite(self.prior_fees) or self.prior_fees < 0:
+            raise ValueError("invalid cumulative account totals")
         if not math.isfinite(self.opening_cash) or self.opening_cash <= 0:
             raise ValueError("account checkpoint requires positive opening cash")
         predecessor = (self.predecessor_run_id, self.predecessor_window_id,
@@ -40,6 +54,13 @@ class AccountCheckpoint:
                 raise ValueError("incomplete predecessor settlement identity")
             if self.predecessor_settled_cash != self.opening_cash:
                 raise ValueError("successor cash must equal predecessor settlement cash")
+            if self.run_index == 0:
+                raise ValueError("successor must advance the account run index")
+        elif (
+            self.run_index != 0 or self.prior_fees != 0 or self.prior_realized_pnl != 0
+            or self.opening_cash != self.initial_bankroll
+        ):
+            raise ValueError("first run must start at the original account bankroll")
 
 
 class AccountCheckpointStore:
@@ -50,6 +71,10 @@ class AccountCheckpointStore:
         if not self.path.exists():
             return None
         payload = json.loads(self.path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("schema_version") != 2:
+            raise ValueError("unsupported account checkpoint schema; explicit migration required")
+        if set(payload) != set(AccountCheckpoint.__dataclass_fields__):
+            raise ValueError("account checkpoint fields do not match schema")
         payload["market"] = DiscoveredMarket(**payload["market"])
         checkpoint = AccountCheckpoint(**payload)
         if checkpoint.config_sha256 != config_sha256:
@@ -78,3 +103,27 @@ class AccountCheckpointStore:
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
+
+
+RUN_LINK_FILE = "operator_account_link.json"
+
+
+def run_link_store(output_dir: Path, run_id: str) -> AccountCheckpointStore:
+    if run_id in {".", ".."} or Path(run_id).name != run_id:
+        raise ValueError("invalid account run ID")
+    return AccountCheckpointStore(output_dir / run_id / RUN_LINK_FILE)
+
+
+def load_run_link(output_dir: Path, run_id: str, config_sha256: str) -> AccountCheckpoint:
+    link = run_link_store(output_dir, run_id).load(config_sha256=config_sha256)
+    if link is None or link.run_id != run_id or link.activation_state != "ACTIVE":
+        raise ValueError("missing or invalid active account run link")
+    return link
+
+
+def fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import math
 import os
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
 
 from bigan.paper_trading.contracts import PaperAccountSnapshot
 from bigan.paper_trading.storage import SNAPSHOT_FILE, PaperRunStore
+
+from .checkpoint import AccountCheckpoint, load_run_link
 
 OPERATOR_STATUS_SCHEMA_VERSION = "1.0"
 
@@ -26,6 +29,7 @@ class OperatorState(StrEnum):
     STOPPING = "STOPPING"
     STOPPED = "STOPPED"
     FAILED = "FAILED"
+    EXHAUSTED = "EXHAUSTED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +148,7 @@ class OperatorReadRepository:
         *,
         status_path: str | Path,
         run_store: PaperRunStore | None,
+        checkpoint: AccountCheckpoint | None = None,
         default_limit: int = 50,
         max_limit: int = 500,
     ) -> None:
@@ -151,6 +156,7 @@ class OperatorReadRepository:
             raise ValueError("read query bounds are invalid")
         self.status_path = Path(status_path)
         self.run_store = run_store
+        self.checkpoint = checkpoint
         self.default_limit = int(default_limit)
         self.max_limit = int(max_limit)
 
@@ -178,20 +184,86 @@ class OperatorReadRepository:
             raise ValueError("paper account projection must be an object")
         return PaperAccountSnapshot.from_dict(payload)
 
-    def recent_decisions(self, limit: int | None = None) -> tuple[dict[str, object], ...]:
+    def account_summary(self) -> dict[str, object]:
+        """Account-lifetime totals; current_account() remains the window ledger."""
         store = self._require_store()
-        bounded = self._limit(limit)
-        return tuple(row.to_dict() for row in store.recent_decisions(limit=bounded, max_limit=self.max_limit))
+        return account_totals(self.current_account(), self.checkpoint, store.manifest.initial_bankroll)
 
-    def recent_fills(self, limit: int | None = None) -> tuple[dict[str, object], ...]:
-        store = self._require_store()
-        bounded = self._limit(limit)
-        return tuple(row.to_dict() for row in store.recent_fills(limit=bounded, max_limit=self.max_limit))
+    def recent_decisions(
+        self, limit: int | None = None, *, before_run_id: str | None = None,
+    ) -> tuple[dict[str, object], ...]:
+        return self._history("recent_decisions", limit, before_run_id)
 
-    def settlements(self, limit: int | None = None) -> tuple[dict[str, object], ...]:
-        store = self._require_store()
+    def recent_fills(
+        self, limit: int | None = None, *, before_run_id: str | None = None,
+    ) -> tuple[dict[str, object], ...]:
+        return self._history("recent_fills", limit, before_run_id)
+
+    def settlements(
+        self, limit: int | None = None, *, before_run_id: str | None = None,
+    ) -> tuple[dict[str, object], ...]:
+        return self._history("recent_settlements", limit, before_run_id)
+
+    def recent_runs(
+        self, limit: int | None = None, *, before_run_id: str | None = None,
+    ) -> tuple[dict[str, object], ...]:
+        """Newest-first chain page; pass the last run_id to page backwards."""
         bounded = self._limit(limit)
-        return tuple(row.to_dict() for row in store.recent_settlements(limit=bounded, max_limit=self.max_limit))
+        output: list[dict[str, object]] = []
+        for store, link in self._stores(before_run_id):
+            output.append({
+                "run_id": store.manifest.run_id,
+                "window_ids": list(store.manifest.window_ids),
+                "opening_cash": store.manifest.initial_bankroll,
+                "run_index": 0 if link is None else link.run_index,
+                "predecessor_run_id": None if link is None else link.predecessor_run_id,
+            })
+            if len(output) == bounded:
+                break
+        return tuple(output)
+
+    def _history(
+        self, method: str, limit: int | None, before_run_id: str | None,
+    ) -> tuple[dict[str, object], ...]:
+        bounded = self._limit(limit)
+        newest: list[dict[str, object]] = []
+        for store, _link in self._stores(before_run_id):
+            rows = getattr(store, method)(limit=bounded - len(newest), max_limit=self.max_limit)
+            newest.extend(row.to_dict() for row in reversed(rows))
+            if len(newest) == bounded:
+                break
+        return tuple(reversed(newest))
+
+    def _stores(self, before_run_id: str | None) -> Iterator[tuple[PaperRunStore, AccountCheckpoint | None]]:
+        """Bound memory, rows and disk traversal to max_limit runs per query."""
+        current = self._require_store()
+        link = self.checkpoint
+        if link is None:
+            if before_run_id is not None:
+                raise ValueError("cross-run cursor requires an account checkpoint")
+            yield current, None
+            return
+        root = current.run_dir.parent
+        if before_run_id is not None:
+            cursor = load_run_link(root, before_run_id, link.config_sha256)
+            if cursor.run_index > link.run_index:
+                raise ValueError("run cursor is beyond this account frontier")
+            link = self._previous_link(root, cursor)
+        for _ in range(self.max_limit):
+            if link is None:
+                break
+            manifest = PaperRunStore.load_manifest(output_dir=root, run_id=link.run_id)
+            yield PaperRunStore(run_dir=root / link.run_id, manifest=manifest, fsync=False), link
+            link = self._previous_link(root, link)
+
+    @staticmethod
+    def _previous_link(root: Path, link: AccountCheckpoint) -> AccountCheckpoint | None:
+        if link.predecessor_run_id is None:
+            return None
+        previous = load_run_link(root, link.predecessor_run_id, link.config_sha256)
+        if previous.run_index != link.run_index - 1 or previous.initial_bankroll != link.initial_bankroll:
+            raise ValueError("account run chain is inconsistent")
+        return previous
 
     def _limit(self, value: int | None) -> int:
         limit = self.default_limit if value is None else value
@@ -203,6 +275,32 @@ class OperatorReadRepository:
         if self.run_store is None:
             raise ValueError("there is no active paper run")
         return self.run_store
+
+
+def account_totals(
+    snapshot: PaperAccountSnapshot | None,
+    checkpoint: AccountCheckpoint | None,
+    initial_bankroll: float,
+) -> dict[str, object]:
+    original = initial_bankroll if checkpoint is None else checkpoint.initial_bankroll
+    opening = initial_bankroll if checkpoint is None else checkpoint.opening_cash
+    prior_pnl = 0.0 if checkpoint is None else checkpoint.prior_realized_pnl
+    prior_fees = 0.0 if checkpoint is None else checkpoint.prior_fees
+    equity = opening if snapshot is None else snapshot.equity
+    run_pnl = 0.0 if snapshot is None else snapshot.realized_pnl
+    run_fees = 0.0 if snapshot is None else snapshot.commission_paid
+    return {
+        "initial_bankroll": original,
+        "cash": opening if snapshot is None else snapshot.cash,
+        "equity": equity,
+        "realized_pnl": prior_pnl + run_pnl,
+        "unrealized_pnl": 0.0 if snapshot is None else snapshot.unrealized_pnl,
+        "total_pnl": equity - original,
+        "total_fees": prior_fees + run_fees,
+        "current_run_initial_bankroll": opening,
+        "current_run_realized_pnl": run_pnl,
+        "current_run_fees": run_fees,
+    }
 
 
 def _encode_json(payload: dict[str, object]) -> bytes:

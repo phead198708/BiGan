@@ -86,7 +86,8 @@ def test_binance_gap_invalidates_alpha_until_new_bootstrap() -> None:
 
     feed.begin_generation(2)
     assert feed.ingest_snapshot(_snapshot(20), generation=2, received_at_ms=1_200)
-    assert feed.state is FeedConnectionState.READY
+    assert feed.state is FeedConnectionState.SYNCING
+    assert feed.calculator.last_timestamp_ms is None
 
 
 def test_binance_diff_depth_updates_a_local_book_one_side_at_a_time() -> None:
@@ -107,8 +108,8 @@ def test_binance_diff_depth_updates_a_local_book_one_side_at_a_time() -> None:
     )
     assert feed.last_update_id == 11
     assert feed.mid_price == pytest.approx(100.5)
-    assert feed.last_top_changed is False
-    assert feed.calculator.last_timestamp_ms == 1_000
+    assert feed.last_top_changed is True  # first exchange event establishes the baseline
+    assert feed.calculator.last_timestamp_ms == 1_100
 
     assert feed.ingest_delta(
         {
