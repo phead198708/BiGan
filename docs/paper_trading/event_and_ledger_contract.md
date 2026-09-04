@@ -134,6 +134,14 @@ shared processing implementation with its identity-checked token, so callers
 cannot bypass pre-deduplication, post-persistence health checks, cash consistency,
 or fail-closed session semantics.
 
+PR-B adds an outer ownership boundary: an operator-bound session rejects public
+`process_snapshot_sync()`, `process_snapshot()`, `settle()`, `start()`, and
+`stop()` calls. Only a matching per-activation token with a live account lock
+can enter its internal processing/settlement path. Shutdown, rollover, and
+permanent operator failure irreversibly revoke that capability before releasing
+ownership, so stale session references cannot write into a successor's ledger.
+Standalone sessions retain the public methods above.
+
 ## Artifacts and recovery
 
 An explicit `<output_dir>/<run_id>/` contains:
@@ -169,9 +177,10 @@ the replayed result exactly.
 `paper_snapshot.json` is written to a same-directory exclusive temporary file,
 flushed, and atomically installed with `os.replace()`. A ledger or storage
 failure permanently marks its `PaperTradingSession` failed; later processing
-is refused instead of continuing with unaudited state. Feed-driven integrations
-must use `PaperTradingSession.start()` (not `StrategyRunner.start()`) so every
-snapshot enters through that fail-closed session boundary.
+is refused instead of continuing with unaudited state. Standalone feed-driven
+integrations must use `PaperTradingSession.start()` (not `StrategyRunner.start()`)
+so every snapshot enters through that fail-closed session boundary. PR-B owns
+its feed lifecycle and uses the tokenized session boundary instead.
 
 ## Follow-on integration
 

@@ -19,6 +19,8 @@ on:
       - "tests/strategies/test_polymarket_pricing.py"
       - "examples/__init__.py"
       - "docs/paper_trading/**"
+      - "config/paper_operator.example.toml"
+      - "README.md"
       - ".github/workflows/agent-stack.yml"
       - "pyproject.toml"
   workflow_dispatch:

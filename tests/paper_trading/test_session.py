@@ -12,7 +12,11 @@ from bigan.data.polymarket_clob import MarketSnapshot, PolymarketFeedHandler
 from bigan.execution.polymarket_oms import PolymarketOMS
 from bigan.features.binance_ofi import BinanceOFICalculator, TopOfBook
 from bigan.paper_trading.contracts import PaperSettlementInput
-from bigan.paper_trading.session import PaperSessionFailedError, PaperTradingSession
+from bigan.paper_trading.session import (
+    PaperSessionFailedError,
+    PaperSessionOwnershipError,
+    PaperTradingSession,
+)
 from bigan.paper_trading.storage import (
     LEDGER_EVENTS_FILE,
     SETTLEMENT_EVENTS_FILE,
@@ -295,6 +299,88 @@ def test_runner_can_be_owned_by_only_one_paper_session(tmp_path: Path) -> None:
             source_commit="commit-a",
         )
     assert not (tmp_path / "exclusive-run-b").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["sync", "async", "settle", "start", "stop"])
+async def test_operator_owned_session_rejects_public_entry_before_any_io(tmp_path, monkeypatch, operation):
+    session = PaperTradingSession.create_new(
+        runner=_runner(), output_dir=tmp_path, run_id="owned-session", source_commit="commit-a",
+    )
+    token = object()
+    session._bind_operator(owner_token=token, ownership_checker=lambda: True)
+    before = session.current_snapshot
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("unauthorized session call reached deduplication, runner or ledger")
+
+    monkeypatch.setattr(session, "_source_snapshot_processed", forbidden)
+    snapshot = _snapshot(100_000, yes_bid=.39, yes_ask=.40, no_bid=.09, no_ask=.90)
+    with pytest.raises(PaperSessionOwnershipError, match="owner token"):
+        if operation == "sync":
+            session.process_snapshot_sync(snapshot)
+        elif operation == "async":
+            await session.process_snapshot(snapshot)
+        elif operation == "settle":
+            session.settle(_settlement())
+        elif operation == "start":
+            await session.start()
+        else:
+            await session.stop()
+    assert session.current_snapshot == before
+    assert session.runner.decision_count == 0
+    assert session.runner.oms.positions() == ()
+    assert session.failed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["sync", "async", "settle"])
+async def test_operator_session_rechecks_token_lock_and_permanent_revocation(tmp_path, operation):
+    session = PaperTradingSession.create_new(
+        runner=_runner(), output_dir=tmp_path, run_id="revocable-session", source_commit="commit-a",
+    )
+    token, lock_held = object(), [True]
+    session._bind_operator(owner_token=token, ownership_checker=lambda: lock_held[0])
+    snapshot = _snapshot(100_000, yes_bid=.39, yes_ask=.40, no_bid=.09, no_ask=.90)
+
+    async def call(owner_token):
+        if operation == "sync":
+            return session._process_operator_snapshot_sync(snapshot, owner_token=owner_token)
+        if operation == "async":
+            return await session._process_operator_snapshot(snapshot, owner_token=owner_token)
+        return session._settle_operator(_settlement(), owner_token=owner_token)
+
+    with pytest.raises(PaperSessionOwnershipError, match="owner token"):
+        await call(object())
+    lock_held[0] = False
+    with pytest.raises(PaperSessionOwnershipError, match="no longer owns"):
+        await call(token)
+    lock_held[0] = True
+    session._close_operator(owner_token=token)
+    with pytest.raises(PaperSessionOwnershipError, match="permanently closed"):
+        await call(token)
+    with pytest.raises(PaperSessionOwnershipError, match="already bound"):
+        session._bind_operator(owner_token=object(), ownership_checker=lambda: True)
+    assert session.current_snapshot.last_event_sequence == 0
+    assert session.store.recover_ledger().snapshot() == session.current_snapshot
+
+
+def test_operator_sync_capability_persists_and_callback_cannot_bypass_it(tmp_path):
+    session = PaperTradingSession.create_new(
+        runner=_runner(spot_price=200_000), output_dir=tmp_path,
+        run_id="authorized-sync", source_commit="commit-a",
+    )
+    token = object()
+    session._bind_operator(owner_token=token, ownership_checker=lambda: True)
+    result = session._process_operator_snapshot_sync(
+        _snapshot(100_000, yes_bid=.39, yes_ask=.40, no_bid=.09, no_ask=.90), owner_token=token,
+    )
+    assert result.status == "FILLED"
+    before = session.current_snapshot
+    with pytest.raises(PaperSessionOwnershipError, match="owner token"):
+        session._on_decision(session.runner.last_decision)
+    assert session.current_snapshot == before
+    assert session.store.recover_ledger().snapshot() == before
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -35,6 +35,10 @@ class PaperSessionFailedError(RuntimeError):
     """Raised after a ledger or durability failure permanently closes a session."""
 
 
+class PaperSessionOwnershipError(RuntimeError):
+    """A caller lacks the operator's current, live session write capability."""
+
+
 DEFAULT_SNAPSHOT_DEDUPE_CACHE_SIZE = 10_000
 
 
@@ -59,6 +63,10 @@ class PaperTradingSession:
         self._snapshot_dedupe_cache_size = cache_size
         self._snapshot_id_cache: OrderedDict[str, None] = OrderedDict()
         self._runner_owner_token = object()
+        self._operator_owner_token: object | None = None
+        self._operator_ownership_checker: Callable[[], bool] | None = None
+        self._operator_closed = False
+        self._active_write_token: object | None = None
         self._assert_cash_consistency()
         self.runner.bind_paper_session(
             owner_token=self._runner_owner_token,
@@ -177,6 +185,7 @@ class PaperTradingSession:
     async def start(self) -> None:
         """Connect the configured feed through the session's fail-closed path."""
 
+        self._require_write_access(None)
         self._require_healthy()
         if not self._feed_callback_registered:
             self.runner.feed_handler.on_snapshot(self._on_snapshot)
@@ -186,14 +195,27 @@ class PaperTradingSession:
     async def stop(self) -> None:
         """Close the configured feed."""
 
+        self._require_write_access(None)
         await self.runner.feed_handler.close()
 
     def process_snapshot_sync(self, snapshot: MarketSnapshot) -> OrderResult | None:
         """Process one snapshot and fail closed if persistence did not complete."""
 
+        return self._process_snapshot_sync(snapshot, owner_token=None)
+
+    def _process_operator_snapshot_sync(
+        self, snapshot: MarketSnapshot, *, owner_token: object,
+    ) -> OrderResult | None:
+        return self._process_snapshot_sync(snapshot, owner_token=owner_token)
+
+    def _process_snapshot_sync(
+        self, snapshot: MarketSnapshot, *, owner_token: object | None,
+    ) -> OrderResult | None:
+        self._require_write_access(owner_token)
         self._require_healthy()
         if self._source_snapshot_processed(_snapshot_id(snapshot)):
             return None
+        self._active_write_token = owner_token
         try:
             result = self.runner._process_paper_snapshot_sync(
                 snapshot,
@@ -202,6 +224,9 @@ class PaperTradingSession:
         except Exception as exc:
             self._fail_after_runner_exception(exc)
             raise
+        finally:
+            self._active_write_token = None
+        self._require_write_access(owner_token)
         self._require_healthy()
         self._assert_cash_consistency()
         return result
@@ -209,9 +234,21 @@ class PaperTradingSession:
     async def process_snapshot(self, snapshot: MarketSnapshot) -> OrderResult | None:
         """Async wrapper retaining StrategyRunner's return contract."""
 
+        return await self._process_snapshot(snapshot, owner_token=None)
+
+    async def _process_operator_snapshot(
+        self, snapshot: MarketSnapshot, *, owner_token: object,
+    ) -> OrderResult | None:
+        return await self._process_snapshot(snapshot, owner_token=owner_token)
+
+    async def _process_snapshot(
+        self, snapshot: MarketSnapshot, *, owner_token: object | None,
+    ) -> OrderResult | None:
+        self._require_write_access(owner_token)
         self._require_healthy()
         if self._source_snapshot_processed(_snapshot_id(snapshot)):
             return None
+        self._active_write_token = owner_token
         try:
             result = await self.runner._process_paper_snapshot(
                 snapshot,
@@ -220,6 +257,9 @@ class PaperTradingSession:
         except Exception as exc:
             self._fail_after_runner_exception(exc)
             raise
+        finally:
+            self._active_write_token = None
+        self._require_write_access(owner_token)
         self._require_healthy()
         self._assert_cash_consistency()
         return result
@@ -230,6 +270,17 @@ class PaperTradingSession:
     def settle(self, settlement: PaperSettlementInput) -> PaperSettlementEvent:
         """Settle the fixed window and durably persist the resulting account."""
 
+        return self._settle(settlement, owner_token=None)
+
+    def _settle_operator(
+        self, settlement: PaperSettlementInput, *, owner_token: object,
+    ) -> PaperSettlementEvent:
+        return self._settle(settlement, owner_token=owner_token)
+
+    def _settle(
+        self, settlement: PaperSettlementInput, *, owner_token: object | None,
+    ) -> PaperSettlementEvent:
+        self._require_write_access(owner_token)
         self._require_healthy()
         sequence = self.ledger.last_event_sequence + 1
         event_id = _event_id(self.store.manifest.run_id, "settlement", sequence)
@@ -259,6 +310,7 @@ class PaperTradingSession:
             raise
 
     def _on_decision(self, decision: StrategyDecisionEvent) -> None:
+        self._require_write_access(self._active_write_token)
         if self.failed:
             raise PaperSessionFailedError(self.failure_reason or "paper session failed")
         sequence = self.ledger.last_event_sequence + 1
@@ -288,6 +340,33 @@ class PaperTradingSession:
         except Exception as exc:
             self._fail(exc)
             raise
+
+    def _bind_operator(self, *, owner_token: object, ownership_checker: Callable[[], bool]) -> None:
+        """Bind once, before exposure; never turn a retired session standalone."""
+        if owner_token is None or not callable(ownership_checker):
+            raise ValueError("operator binding requires a token and ownership checker")
+        if self._operator_owner_token is not None or self._feed_callback_registered:
+            raise PaperSessionOwnershipError("session is already bound or independently started")
+        self._require_healthy()
+        self._operator_owner_token = owner_token
+        self._operator_ownership_checker = ownership_checker
+
+    def _close_operator(self, *, owner_token: object) -> None:
+        if self._operator_owner_token is None or owner_token is not self._operator_owner_token:
+            raise PaperSessionOwnershipError("invalid operator owner token")
+        self._operator_closed = True
+
+    def _require_write_access(self, owner_token: object | None) -> None:
+        if self._operator_owner_token is None:
+            if owner_token is not None:
+                raise PaperSessionOwnershipError("standalone session rejects operator owner token")
+            return
+        if self._operator_closed:
+            raise PaperSessionOwnershipError("operator-owned session is permanently closed")
+        if owner_token is None or owner_token is not self._operator_owner_token:
+            raise PaperSessionOwnershipError("operator-owned session requires its owner token")
+        if self._operator_ownership_checker is None or not self._operator_ownership_checker():
+            raise PaperSessionOwnershipError("operator no longer owns this session/account lock")
 
     def _assert_decision_cash(self, decision: StrategyDecisionEvent) -> None:
         if not math.isclose(self.ledger.cash, decision.cash_after, abs_tol=1e-8):
