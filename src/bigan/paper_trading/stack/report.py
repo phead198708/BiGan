@@ -13,6 +13,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from .diagnostics import TRACE_LIMIT
 from .preflight import SAFETY, Preflight, validate_report_directory
 
 INCOMPLETE_FILE = ".soak-report.lock"
@@ -57,6 +58,8 @@ class SoakReport:
             "polls": {"attempted": 0, "successful": 0, "failed": 0, "longest_failure_streak_ms": 0},
             "states": {}, "feeds": {}, "rollovers": 0, "runs_observed": [],
             "live_readiness": {"ready_samples": 0, "unready_samples": 0},
+            "readiness_diagnostics": {"sample_limit": TRACE_LIMIT, "samples": [], "reason_counts": {},
+                                      "evicted_samples": 0, "failure_snapshot": None},
             "requested_duration_ms": None, "measurement_duration_ms": 0,
             "account": dict.fromkeys((
                 "initial_equity", "final_equity", "final_cash", "realized_pnl", "unrealized_pnl",
@@ -130,6 +133,14 @@ class SoakReport:
         lines += ["", "Diagnostics:", ""]
         lines += [f"- {x['severity']}: `{x['code']}` ({x['count']})"
                   for x in d["hard_failures"] + d["warnings"]] or ["- None."]
+        trace = d["readiness_diagnostics"]
+        lines += ["", "Readiness diagnostics (bounded observations, not raw feed replay):", ""]
+        failure = trace["failure_snapshot"]
+        if failure is not None:
+            lines += [f"- Failure observation: {failure['observed_at_ms']} ms; phase: {failure['phase']}.",
+                      "- Blocking gates: " + ", ".join(f"`{code}`" for code in failure["reasons"]) + "."]
+        lines += [f"- `{code}`: {count} sampled observations." for code, count in trace["reason_counts"].items()]
+        lines += [f"- Recent snapshots: {len(trace['samples'])}; evicted: {trace['evicted_samples']}."]
         lines += ["", d["scope"], "",
                   "No wallet, signing, private exchange credentials, real order path or real funds.", ""]
         return "\n".join(lines)

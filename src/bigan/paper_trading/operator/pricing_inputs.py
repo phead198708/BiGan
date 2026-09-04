@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 from bigan.pipeline.strategy_runner import PricingInputs
 
+from .diagnostics import DiagnosticBuffer, DiagnosticCode
+
 
 @dataclass(frozen=True, slots=True)
 class ReferencePriceSample:
@@ -119,6 +121,7 @@ class RollingPricingInputsProvider:
         self.future_input_count = 0
         self.stale_input_count = 0
         self.missing_input_count = 0
+        self.diagnostics = DiagnosticBuffer()
 
     @property
     def spot_sample_count(self) -> int:
@@ -232,12 +235,17 @@ class RollingPricingInputsProvider:
     def __call__(self, decision_ts_ms: int) -> PricingInputs | None:
         if not self._spot_samples or not self._oracle_samples:
             self.missing_input_count += 1
+            self._diagnose(DiagnosticCode.PRICING_MISSING_SAMPLES, decision_ts_ms)
             return None
         spot = self._spot_samples[-1]
         oracle = self._oracle_samples[-1]
         source_ts = min(spot.timestamp_ms, oracle.timestamp_ms)
         if spot.timestamp_ms > decision_ts_ms or oracle.timestamp_ms > decision_ts_ms:
             self.future_input_count += 1
+            if spot.timestamp_ms > decision_ts_ms:
+                self._diagnose(DiagnosticCode.PRICING_FUTURE_SPOT, decision_ts_ms)
+            if oracle.timestamp_ms > decision_ts_ms:
+                self._diagnose(DiagnosticCode.PRICING_FUTURE_ORACLE, decision_ts_ms)
             return None
         age_ms = max(
             decision_ts_ms - spot.timestamp_ms,
@@ -245,10 +253,15 @@ class RollingPricingInputsProvider:
         )
         if age_ms > self.max_age_ms:
             self.stale_input_count += 1
+            if decision_ts_ms - spot.timestamp_ms > self.max_age_ms:
+                self._diagnose(DiagnosticCode.PRICING_STALE_SPOT, decision_ts_ms)
+            if decision_ts_ms - oracle.timestamp_ms > self.max_age_ms:
+                self._diagnose(DiagnosticCode.PRICING_STALE_ORACLE, decision_ts_ms)
             return None
         self._evict_returns(decision_ts_ms)
         if len(self._returns) < self.volatility_min_samples:
             self.missing_input_count += 1
+            self._diagnose(DiagnosticCode.PRICING_VOLATILITY_WARMUP, decision_ts_ms)
             return None
         # A published rolling TWAP is the terminal reference process itself,
         # not an already-realized fraction of the entire 5m/15m market.
@@ -261,6 +274,7 @@ class RollingPricingInputsProvider:
         twap = self._oracle_twap(decision_ts_ms)
         if twap is None:
             self.missing_input_count += 1
+            self._diagnose(DiagnosticCode.PRICING_TWAP_UNAVAILABLE, decision_ts_ms)
             return None
         volatility = self._annualized_volatility()
         progress = (decision_ts_ms - self.window_start_ts_ms) / (
@@ -273,6 +287,12 @@ class RollingPricingInputsProvider:
             twap_weight=min(1.0, max(0.0, progress)),
             volatility_annualized=volatility,
         )
+
+    def _diagnose(self, code: DiagnosticCode, timestamp_ms: int) -> None:
+        self.diagnostics.record(code, timestamp_ms=timestamp_ms,
+                                spot_timestamp_ms=self.last_spot_timestamp_ms,
+                                oracle_timestamp_ms=self.last_oracle_timestamp_ms,
+                                return_sample_count=len(self._returns))
 
     def _oracle_twap(self, decision_ts_ms: int) -> float | None:
         if decision_ts_ms < self.window_start_ts_ms:

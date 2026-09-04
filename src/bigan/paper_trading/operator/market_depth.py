@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 
+from .diagnostics import DepthValidationError, DiagnosticCode
+
 MAX_MARKET_LEVELS = 10_000
 
 
@@ -19,14 +21,14 @@ class MarketDepth:
         for name in ("bids", "asks"):
             raw = payload.get(name)
             if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)) or len(raw) > MAX_MARKET_LEVELS:
-                raise ValueError("invalid or oversized CLOB depth")
+                raise DepthValidationError(DiagnosticCode.DEPTH_INVALID, "invalid or oversized CLOB depth")
             levels = {}
             for level in raw:
                 if not isinstance(level, Mapping):
-                    raise ValueError("invalid CLOB level")
+                    raise DepthValidationError(DiagnosticCode.DEPTH_INVALID, "invalid CLOB level")
                 price, size = _level(level)
                 if price in levels:
-                    raise ValueError("duplicate CLOB price level")
+                    raise DepthValidationError(DiagnosticCode.DEPTH_DUPLICATE_PRICE, "duplicate CLOB price level")
                 if size:
                     levels[price] = size
             sides.append(levels)
@@ -39,7 +41,7 @@ class MarketDepth:
         bids, asks = self.bids.copy(), self.asks.copy()
         side = payload.get("side")
         if side not in {"BUY", "SELL"}:
-            raise ValueError("CLOB depth change requires BUY/SELL")
+            raise DepthValidationError(DiagnosticCode.DEPTH_INVALID, "CLOB depth change requires BUY/SELL")
         levels = bids if side == "BUY" else asks
         price, size = _level(payload)
         if size:
@@ -47,7 +49,7 @@ class MarketDepth:
         else:
             levels.pop(price, None)
         if len(levels) > MAX_MARKET_LEVELS:
-            raise ValueError("CLOB depth exceeds memory bound")
+            raise DepthValidationError(DiagnosticCode.DEPTH_LEVEL_LIMIT, "CLOB depth exceeds memory bound")
         return MarketDepth(bids, asks)
 
     def matches(self, payload: Mapping[str, object]) -> bool:
@@ -57,10 +59,10 @@ class MarketDepth:
 
     def top(self) -> tuple[float, float]:
         if not self.bids or not self.asks:
-            raise ValueError("CLOB requires positive liquidity on both sides")
+            raise DepthValidationError(DiagnosticCode.DEPTH_EMPTY_SIDE, "CLOB requires positive liquidity on both sides")
         bid, ask = max(self.bids), min(self.asks)
         if bid > ask:
-            raise ValueError("crossed CLOB depth")
+            raise DepthValidationError(DiagnosticCode.DEPTH_CROSSED, "crossed CLOB depth")
         return bid, ask
 
     def top_payload(self) -> dict[str, object]:
@@ -71,10 +73,10 @@ class MarketDepth:
 
 def _price(raw: object) -> float:
     if not isinstance(raw, (str, int, float)) or isinstance(raw, bool):
-        raise ValueError("CLOB price must be numeric")
+        raise DepthValidationError(DiagnosticCode.DEPTH_INVALID_PRICE, "CLOB price must be numeric")
     value = float(raw)
     if not math.isfinite(value) or not 0 < value <= 1:
-        raise ValueError("CLOB price must be in (0, 1]")
+        raise DepthValidationError(DiagnosticCode.DEPTH_INVALID_PRICE, "CLOB price must be in (0, 1]")
     return value
 
 
@@ -82,8 +84,8 @@ def _level(payload: Mapping[str, object]) -> tuple[float, float]:
     price = _price(payload.get("price"))
     raw = payload.get("size")
     if not isinstance(raw, (str, int, float)) or isinstance(raw, bool):
-        raise ValueError("CLOB size must be numeric")
+        raise DepthValidationError(DiagnosticCode.DEPTH_INVALID_SIZE, "CLOB size must be numeric")
     size = float(raw)
     if not math.isfinite(size) or size < 0:
-        raise ValueError("CLOB size must be finite and non-negative")
+        raise DepthValidationError(DiagnosticCode.DEPTH_INVALID_SIZE, "CLOB size must be finite and non-negative")
     return price, size

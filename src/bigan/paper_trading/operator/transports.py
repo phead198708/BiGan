@@ -24,6 +24,7 @@ from bigan.v8.polymarket.recorder.chainlink_rtds import (
 )
 
 from .chainlink_twap import TWAP_TOPICS, parse_twap_sample
+from .diagnostics import DiagnosticCode, FeedResyncRequired, HeartbeatTimeout
 from .discovery import (
     DiscoveryFilters,
     DiscoverySelection,
@@ -41,6 +42,7 @@ Sleep = Callable[[float], Awaitable[None]]
 PayloadHandler = Callable[[Mapping[str, object], int, int], object]
 GenerationHandler = Callable[[int], object]
 DisconnectHandler = Callable[[], object]
+DiagnosticHandler = Callable[[DiagnosticCode, int, int], object]
 
 
 class PublicSocket(Protocol):
@@ -145,6 +147,7 @@ class PublicWebSocketTransport:
         on_payload: PayloadHandler,
         on_generation: GenerationHandler,
         on_disconnect: DisconnectHandler,
+        on_diagnostic: DiagnosticHandler | None = None,
         application_heartbeat: str | None = None,
         connect_factory: SocketContextFactory | None = None,
         sleep: Sleep = asyncio.sleep,
@@ -168,6 +171,7 @@ class PublicWebSocketTransport:
         self.on_payload = on_payload
         self.on_generation = on_generation
         self.on_disconnect = on_disconnect
+        self.on_diagnostic = on_diagnostic
         self.application_heartbeat = application_heartbeat
         self.connect_factory = connect_factory or _websocket_context
         self.sleep = sleep
@@ -248,6 +252,8 @@ class PublicWebSocketTransport:
                 self.connection_error_count += 1
                 if isinstance(exc, (ValueError, json.JSONDecodeError)):
                     self.parse_error_count += 1
+                if self.on_diagnostic is not None:
+                    await _maybe_await(self.on_diagnostic(_transport_reason(exc), generation, self.clock_ms()))
                 logger.warning(
                     "paper_operator.feed.disconnected",
                     extra={"error_type": type(exc).__name__, "generation": generation},
@@ -313,9 +319,12 @@ class PublicWebSocketTransport:
             heartbeat_due = time.monotonic() + self.heartbeat_interval_seconds
             # One outstanding PING, with a deadline covering send and PONG.
             # Busy streams still send application heartbeats on schedule.
-            await asyncio.wait_for(
-                self._send_heartbeat(socket), timeout=self.heartbeat_interval_seconds,
-            )
+            try:
+                await asyncio.wait_for(
+                    self._send_heartbeat(socket), timeout=self.heartbeat_interval_seconds,
+                )
+            except TimeoutError:
+                raise HeartbeatTimeout("public feed heartbeat deadline exceeded") from None
 
     async def _send_heartbeat(self, socket: PublicSocket) -> None:
         if self.application_heartbeat is not None:
@@ -603,6 +612,24 @@ def _require_public_websocket_url(endpoint: str) -> None:
         raise ValueError("websocket transport requires a public WSS URL")
     if any(word in parsed.path.lower() for word in ("order", "trade", "private", "wallet")):
         raise ValueError("websocket transport rejects write/trading endpoints")
+
+
+def _transport_reason(exc: Exception) -> DiagnosticCode:
+    if isinstance(exc, HeartbeatTimeout):
+        return DiagnosticCode.WS_HEARTBEAT_TIMEOUT
+    if isinstance(exc, TimeoutError):
+        return DiagnosticCode.WS_TIMEOUT
+    if isinstance(exc, FeedResyncRequired):
+        return DiagnosticCode.WS_REBOOTSTRAP_REQUIRED
+    if isinstance(exc, ConnectionClosed):
+        return DiagnosticCode.WS_CLOSED
+    if isinstance(exc, aiohttp.ClientError):
+        return DiagnosticCode.WS_HTTP_FAILURE
+    if isinstance(exc, ValueError):
+        return DiagnosticCode.WS_INVALID_PAYLOAD
+    if isinstance(exc, WebSocketException):
+        return DiagnosticCode.WS_PROTOCOL_ERROR
+    return DiagnosticCode.WS_IO_FAILURE
 
 
 async def _maybe_await(value: object) -> None:

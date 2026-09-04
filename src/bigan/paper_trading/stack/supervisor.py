@@ -103,6 +103,7 @@ class PaperStackSupervisor:
                 except StackStopped:
                     pass
                 except (StackFailure, ObservationError) as exc:
+                    self.observer.freeze_readiness_failure()
                     self.report.issue(str(exc), hard=True)
                 except asyncio.CancelledError:
                     self.report.issue("SUPERVISOR_CANCELLED", hard=True)
@@ -199,6 +200,8 @@ class PaperStackSupervisor:
                         raise HTTPUnavailable("OLD_OPERATOR_STATUS")
                     if status.get("state") == "FAILED":
                         raise StackFailure("OPERATOR_FAILED")
+                    if not self.check.mock:
+                        self.observer.record_readiness(payload, phase="startup")
                     if not self.check.mock and not live_inputs_ready(payload):
                         if not waiting_announced:
                             self.log("[soak] waiting for live RUNNING state and fresh trading inputs")

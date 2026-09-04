@@ -7,6 +7,7 @@ import json
 import math
 import re
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,6 +16,7 @@ import aiohttp
 from bigan.paper_trading.contracts import PaperDecisionEvent, PaperSettlementEvent
 from bigan.paper_trading.operator.read_model import OperatorStatus
 
+from .diagnostics import TRACE_LIMIT, readiness_snapshot
 from .preflight import SAFETY
 from .report import SoakReport, require_finite
 
@@ -128,6 +130,31 @@ class PaperSoakObserver:
         self.last_process_started_ms: int | None = None
         self.last_updated_ms: int | None = None
         self.last_state: str | None = None
+
+    def record_readiness(self, payload: dict[str, Any], *, phase: str) -> None:
+        trace = self.report.data["readiness_diagnostics"]
+        sample = readiness_snapshot(payload, phase=phase)
+        samples = trace["samples"]
+        # Startup probes run at 10 Hz; retain at most one per second. Runtime
+        # probes retain every observation, including the one that trips a gate.
+        if phase == "startup" and samples:
+            previous = samples[-1]
+            if (previous["phase"] == phase and sample["reasons"] == previous["reasons"]
+                    and sample["observed_at_ms"] is not None and previous["observed_at_ms"] is not None
+                    and 0 <= sample["observed_at_ms"] - previous["observed_at_ms"] < 1000):
+                return
+        samples.append(sample)
+        if len(samples) > TRACE_LIMIT:
+            del samples[0]
+            trace["evicted_samples"] += 1
+        for code in sample["reasons"]:
+            counts = trace["reason_counts"]
+            counts[code] = counts.get(code, 0) + 1
+
+    def freeze_readiness_failure(self) -> None:
+        trace = self.report.data["readiness_diagnostics"]
+        if trace["failure_snapshot"] is None and trace["samples"]:
+            trace["failure_snapshot"] = deepcopy(trace["samples"][-1])
 
     async def __aenter__(self) -> PaperSoakObserver:
         self.http = aiohttp.ClientSession(
@@ -308,6 +335,7 @@ class PaperSoakObserver:
             raise ObservationError("MIXED_FILL_RUN")
         self._aggregate(status, at, final=final)
         if self.report.data["mode"] == "live_public_feeds_paper_execution" and not final:
+            self.record_readiness(payload, phase="runtime")
             coverage = self.report.data["live_readiness"]
             if live_inputs_ready(payload):
                 coverage["ready_samples"] += 1
@@ -319,6 +347,11 @@ class PaperSoakObserver:
                 # Settlement has its own, longer bounded handoff deadline.
                 deadline = self.policy.rollover_seconds if pending else self.policy.stale_seconds
                 if at - self._live_unready_since >= deadline:
+                    self.freeze_readiness_failure()
+                    failure = self.report.data["readiness_diagnostics"]["failure_snapshot"]
+                    if failure is not None:
+                        failure["unready_duration_ms"] = int((at - self._live_unready_since) * 1000)
+                        failure["deadline_ms"] = int(deadline * 1000)
                     raise ObservationError("LIVE_INPUTS_UNAVAILABLE_DEADLINE")
         if not isinstance(payload["warnings"], list) or len(payload["warnings"]) > 32:
             raise ObservationError("INVALID_API_SCHEMA")

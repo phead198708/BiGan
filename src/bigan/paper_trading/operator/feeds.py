@@ -13,6 +13,7 @@ from typing import Generic, TypeVar
 from bigan.data.polymarket_clob import MarketSnapshot, PolymarketFeedHandler
 from bigan.features.binance_ofi import BinanceOFICalculator
 
+from .diagnostics import DepthValidationError, DiagnosticBuffer, DiagnosticCode
 from .market_depth import MarketDepth
 
 T = TypeVar("T")
@@ -170,6 +171,7 @@ class BinanceDepthSynchronizer:
         self._asks: dict[float, float] = {}
         self._buffer: deque[tuple[dict[str, object], int]] = deque()
         self._buffer_compromised = False
+        self.diagnostics = DiagnosticBuffer()
 
     def begin_generation(self, generation: int) -> None:
         if generation <= self.generation:
@@ -203,6 +205,7 @@ class BinanceDepthSynchronizer:
             delta = _unwrap_binance(payload)
             if _binance_symbol(payload, delta) != self.symbol:
                 self.symbol_mismatch_count += 1
+                self.diagnostics.record(DiagnosticCode.SYMBOL_MISMATCH, received_at_ms=received_at_ms)
                 return False
             event_ts = _positive_int(delta.get("E"), "Binance event timestamp")
             received = event_ts if received_at_ms is None else int(received_at_ms)
@@ -213,6 +216,8 @@ class BinanceDepthSynchronizer:
             # buffering is not permission to trade on a future observation.
             if event_ts > received + self.clock_ahead_tolerance_ms or event_ts > decision_time:
                 self.out_of_order_count += 1
+                self.diagnostics.record(DiagnosticCode.EVENT_FROM_FUTURE, event_timestamp_ms=event_ts,
+                                        received_at_ms=received, timestamp_ms=decision_time, generation=generation)
                 if not self.needs_bootstrap:
                     self._invalidate(clear_buffer=True)
                 return False
@@ -222,6 +227,8 @@ class BinanceDepthSynchronizer:
                 and (self.needs_bootstrap or self._has_applied_delta)
             ):
                 self.out_of_order_count += 1
+                self.diagnostics.record(DiagnosticCode.EVENT_OUT_OF_ORDER, event_timestamp_ms=event_ts,
+                                        received_at_ms=received, generation=generation)
                 if not self.needs_bootstrap:
                     self._invalidate(clear_buffer=True)
                 return False
@@ -229,12 +236,18 @@ class BinanceDepthSynchronizer:
                 if len(self._buffer) >= self.delta_buffer_size:
                     self._buffer.popleft()
                     self.buffer_overflow_count += 1
+                    self.diagnostics.record(DiagnosticCode.DEPTH_BUFFER_OVERFLOW, received_at_ms=received,
+                                            generation=generation)
                     self._buffer_compromised = True
                 self._buffer.append((dict(delta), received))
                 return False
             return self._apply_delta(delta, received_at_ms=received)
         except (TypeError, ValueError) as exc:
             self.error_count += 1
+            self.diagnostics.record(
+                DiagnosticCode.DEPTH_LEVEL_LIMIT if isinstance(exc, _DepthBookOverflow) else DiagnosticCode.DEPTH_INVALID,
+                received_at_ms=received_at_ms, generation=generation,
+            )
             if isinstance(exc, _DepthBookOverflow):
                 self.book_overflow_count += 1
             if not self.needs_bootstrap:
@@ -294,6 +307,10 @@ class BinanceDepthSynchronizer:
             return True
         except (TypeError, ValueError) as exc:
             self.error_count += 1
+            self.diagnostics.record(
+                DiagnosticCode.DEPTH_LEVEL_LIMIT if isinstance(exc, _DepthBookOverflow) else DiagnosticCode.DEPTH_INVALID,
+                received_at_ms=received_at_ms, generation=generation,
+            )
             if isinstance(exc, _DepthBookOverflow):
                 self.book_overflow_count += 1
             self._invalidate(clear_buffer=True)
@@ -353,6 +370,9 @@ class BinanceDepthSynchronizer:
         expected = self.last_update_id + 1
         if not first_update <= expected <= final_update:
             self.gap_count += 1
+            self.diagnostics.record(DiagnosticCode.DEPTH_SEQUENCE_GAP, received_at_ms=received_at_ms,
+                                    generation=self.generation, expected_update_id=expected,
+                                    first_update_id=first_update, last_update_id=final_update)
             self._invalidate(clear_buffer=True)
             return False
         event_ts = _positive_int(delta.get("E"), "Binance event timestamp")
@@ -361,6 +381,8 @@ class BinanceDepthSynchronizer:
             and event_ts < self.last_event_ts_ms
         ):
             self.out_of_order_count += 1
+            self.diagnostics.record(DiagnosticCode.EVENT_OUT_OF_ORDER, event_timestamp_ms=event_ts,
+                                    received_at_ms=received_at_ms, generation=self.generation)
             self._invalidate(clear_buffer=True)
             return False
         bids = dict(self._bids)
@@ -479,6 +501,7 @@ class PolymarketBookSynchronizer:
         self._pending_tops: dict[str, tuple[int, Mapping[str, object]]] = {}
         self.needs_bootstrap = False
         self._handler = self._new_handler()
+        self.diagnostics = DiagnosticBuffer()
 
     def subscription_message(self) -> dict[str, object]:
         return {
@@ -512,6 +535,7 @@ class PolymarketBookSynchronizer:
         if generation != self.generation:
             self.dropped_generation_count += 1
             return None
+        timestamp: int | None = None
         try:
             event_type = str(payload.get("event_type") or payload.get("type") or "")
             if event_type and event_type not in {"book", "price_change", "best_bid_ask"}:
@@ -530,6 +554,7 @@ class PolymarketBookSynchronizer:
                 for change in changes:
                     if not isinstance(change, Mapping):
                         self.parse_error_count += 1
+                        self._diagnose(DiagnosticCode.DEPTH_INVALID, received_at_ms)
                         self._invalidate()
                         return None
                     normalized = {
@@ -579,14 +604,17 @@ class PolymarketBookSynchronizer:
             self.last_message_received_ms = received
             if timestamp > received:
                 self.out_of_order_count += 1
+                self._diagnose(DiagnosticCode.EVENT_FROM_FUTURE, received, timestamp)
                 return None
             if any(received - pending[0] > self.max_age_ms for pending in self._pending_tops.values()):
                 self.gap_count += 1
+                self._diagnose(DiagnosticCode.DEPTH_TOP_TIMEOUT, received, timestamp)
                 self._invalidate()
                 return None
             previous_ts = self._timestamp_by_token.get(token_id)
             if previous_ts is not None and timestamp < previous_ts:
                 self.out_of_order_count += 1
+                self._diagnose(DiagnosticCode.EVENT_OUT_OF_ORDER, received, timestamp)
                 return None
             event_type = str(payload.get("event_type") or payload.get("type") or "")
             if event_type == "best_bid_ask":
@@ -600,6 +628,7 @@ class PolymarketBookSynchronizer:
                     self.out_of_order_count += 1
                     return None
                 if not book.matches(payload):
+                    self._diagnose(DiagnosticCode.DEPTH_TOP_MISMATCH, received, timestamp)
                     self._pending_tops[token_id] = (timestamp, {
                         "best_bid": payload.get("best_bid"), "best_ask": payload.get("best_ask"),
                     })
@@ -610,6 +639,7 @@ class PolymarketBookSynchronizer:
             elif event_type == "price_change":
                 previous_sequence = self._sequence_by_token.get(token_id)
                 if token_id not in self._full_books:
+                    self._diagnose(DiagnosticCode.DEPTH_MISSING_FULL_BOOK, received, timestamp)
                     self._invalidate()
                     return None
                 if (
@@ -618,14 +648,17 @@ class PolymarketBookSynchronizer:
                     and sequence != previous_sequence + 1
                 ):
                     self.gap_count += 1
+                    self._diagnose(DiagnosticCode.DEPTH_SEQUENCE_GAP, received, timestamp)
                     self._invalidate()
                     return None
                 if sequence is None and not _has_complete_top(payload):
                     self.gap_count += 1
+                    self._diagnose(DiagnosticCode.DEPTH_MISSING_TOP, received, timestamp)
                     self._invalidate()
                     return None
                 depth = self._depth[token_id].updated(payload)
                 if "best_bid" in payload and "best_ask" in payload and not depth.matches(payload):
+                    self._diagnose(DiagnosticCode.DEPTH_TOP_MISMATCH, received, timestamp)
                     # Trade-driven full books and price-change notifications can
                     # interleave. Wait for authoritative depth, not a new socket
                     # on every such boundary; pending tokens cannot execute.
@@ -648,6 +681,7 @@ class PolymarketBookSynchronizer:
             snapshot = self._handler.parse_orderbook_delta(normalized)
             if self._handler.parse_errors + self._handler.dropped_stale > previous_errors:
                 self.parse_error_count += 1
+                self._diagnose(DiagnosticCode.DEPTH_PARSER_REJECTED, received, timestamp)
                 self._invalidate()
                 return None
             if event_type == "book":
@@ -670,6 +704,7 @@ class PolymarketBookSynchronizer:
                 snapshot.no_ask_size,
             ) <= 0.0:
                 self.parse_error_count += 1
+                self._diagnose(DiagnosticCode.DEPTH_EMPTY_SIDE, received, timestamp)
                 self._invalidate()
                 return None
             if self._full_books != {self.yes_token_id, self.no_token_id}:
@@ -683,10 +718,16 @@ class PolymarketBookSynchronizer:
                 return None
             self.state = FeedConnectionState.READY
             return snapshot
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
             self.error_count += 1
+            self._diagnose(exc.code if isinstance(exc, DepthValidationError) else DiagnosticCode.DEPTH_INVALID,
+                           received_at_ms, timestamp)
             self._invalidate()
             return None
+
+    def _diagnose(self, code: DiagnosticCode, received: int | None, timestamp: int | None = None) -> None:
+        self.diagnostics.record(code, received_at_ms=received, event_timestamp_ms=timestamp,
+                                generation=self.generation)
 
     def health(self, *, now_ms: int) -> FeedHealth:
         latest = max(self._timestamp_by_token.values(), default=None)

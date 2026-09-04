@@ -187,6 +187,39 @@ its separate handoff deadline); brief recovered gaps remain visible as warnings.
 
 See [soak validation](soak_validation.md) for report semantics and evidence.
 
+### Bounded readiness diagnostics
+
+`soak_report.json.readiness_diagnostics` records the last **180** startup/runtime
+observations, per-gate sample counts and an immutable `failure_snapshot` captured
+before shutdown. Startup probes are coalesced to one sample per second when the
+blocking gates are unchanged; runtime probes retain every sampled observation.
+The failure snapshot includes the blocking codes, each feed/YES/NO/alpha/pricing
+age and timestamp, warm-up sample counts, and (for the runtime readiness deadline)
+the consecutive unready duration and deadline. `STOPPED` cleanup cannot replace
+this evidence. These are sampled states, not proof of continuous readiness.
+
+Feed and pricing status sections additionally expose `diagnostics`: fixed-code
+counters and the latest **32** component events. They survive reconnect/stop,
+but restart with a new process/window. The soak snapshots copy at most eight
+events per component, retaining all known counters. Example distinctions:
+
+- `DEPTH_EMPTY_SIDE`, `DEPTH_CROSSED`, `DEPTH_MISSING_FULL_BOOK`,
+  `DEPTH_TOP_TIMEOUT`: different CLOB invalidation/re-bootstrap paths.
+- `EVENT_FROM_FUTURE` versus `EVENT_OUT_OF_ORDER`: clock lead versus sequence
+  timing; event/receipt timestamps remain unchanged.
+- `WS_HEARTBEAT_TIMEOUT`, `WS_CLOSED`, `WS_REBOOTSTRAP_REQUIRED`: different
+  transport recovery triggers, without logging exception messages.
+- `PRICING_FUTURE_SPOT`/`PRICING_FUTURE_ORACLE`, stale inputs, missing samples
+  and volatility warm-up: distinguish the provider's existing `None` returns.
+  A sample later than a decision can be an ordinary cross-feed arrival ordering
+  issue; it does not by itself prove an incorrect host clock.
+
+Only allowlisted codes and bounded scalar fields are retained. Raw payloads,
+exception text, source URLs and configuration dumps are excluded. No trading
+predicate, causal timestamp rule, timeout or safety gate is relaxed. These
+diagnostics do **not** provide complete raw-feed archival or deterministic tick
+replay; preserve the deployment TOML and sealed wheel alongside the report.
+
 ## Binance.US source selection
 
 The live example now explicitly selects Binance.US for both public REST depth

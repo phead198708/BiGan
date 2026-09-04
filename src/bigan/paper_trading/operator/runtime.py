@@ -34,6 +34,7 @@ from .checkpoint import (
     run_link_store,
 )
 from .config import OperatorConfig
+from .diagnostics import DiagnosticBuffer, DiagnosticCode
 from .discovery import DiscoveredMarket, DiscoveryFilters, DiscoverySelection
 from .feeds import BinanceDepthSynchronizer, FeedHealth, PolymarketBookSynchronizer
 from .market_data import reference_observation
@@ -120,6 +121,7 @@ class PaperTradingOperator:
         self._oracle_connected = False
         self._oracle_connection_generation = 0
         self._oracle_reconnect_count = 0
+        self._oracle_diagnostics = DiagnosticBuffer()
         self.counters: dict[str, int] = {
             "decisions": 0,
             "fills": 0,
@@ -405,6 +407,27 @@ class PaperTradingOperator:
             self._update_gate_state()
             self._publish_status()
 
+    async def record_transport_diagnostic(
+        self, source: str, code: DiagnosticCode, *, window_generation: int,
+        connection_generation: int, timestamp_ms: int,
+    ) -> None:
+        async with self._lock:
+            if not self._can_accept_generation(window_generation):
+                return
+            if source == "chainlink":
+                if connection_generation < self._oracle_connection_generation:
+                    return
+                target = self._oracle_diagnostics
+            elif source in {"binance", "polymarket"}:
+                sync = self.binance_sync if source == "binance" else self.market_sync
+                if sync is None or _connection_generation(window_generation, connection_generation) < sync.generation:
+                    return
+                target = sync.diagnostics
+            else:
+                raise ValueError("unknown diagnostic source")
+            target.record(code, timestamp_ms=timestamp_ms, generation=connection_generation)
+            self._publish_status()
+
     async def disconnect_feed(self, source: str, *, window_generation: int) -> None:
         async with self._lock:
             if window_generation != self.generation:
@@ -530,11 +553,13 @@ class PaperTradingOperator:
                     "ask_level_count": self.binance_sync.ask_level_count,
                     "book_level_limit": self.binance_sync.book_level_limit,
                     "book_overflow_count": self.binance_sync.book_overflow_count,
+                    "diagnostics": self.binance_sync.diagnostics.to_dict(),
                 }
             )
         market_health_payload = _health_dict(market_health)
         if self.market_sync is not None:
             market_health_payload["tokens"] = self.market_sync.token_health(now_ms=now_ms)
+            market_health_payload["diagnostics"] = self.market_sync.diagnostics.to_dict()
         pricing_health = (
             None if self.pricing_provider is None else self.pricing_provider.health(now_ms=now_ms)
         )
@@ -619,12 +644,13 @@ class PaperTradingOperator:
                     "gap_count": 0,
                     "reconnect_count": self._oracle_reconnect_count,
                     "error_count": 0,
+                    "diagnostics": self._oracle_diagnostics.to_dict(),
                 },
             },
             pricing_inputs=(
                 _unavailable_pricing_health()
-                if pricing_health is None
-                else pricing_health.to_dict()
+                if pricing_health is None or self.pricing_provider is None
+                else {**pricing_health.to_dict(), "diagnostics": self.pricing_provider.diagnostics.to_dict()}
             ),
             alpha={
                 "venue": self.config.binance_venue,
@@ -908,6 +934,7 @@ class PaperTradingOperator:
         self.session = session
         self.active_market = market
         self.pricing_provider = pricing
+        self._oracle_diagnostics = DiagnosticBuffer()
         self.binance_sync = binance
         self.market_sync = market_sync
         self._oracle_connected = False
