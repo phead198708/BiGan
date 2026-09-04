@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -9,6 +10,17 @@ from bigan import build_provenance
 from bigan.paper_trading.dashboard import __main__ as dashboard_cli
 from bigan.paper_trading.operator import __main__ as operator_cli
 from tests.paper_trading.stack.conftest import COMMIT, write_config
+
+
+@pytest.fixture(autouse=True)
+def isolated_cli_loop(monkeypatch):
+    # A CLI normally owns the process-wide loop policy. In-process tests must
+    # not let asyncio.run() detach pytest-asyncio's existing cleanup loop.
+    # An explicit factory runs/fully closes the real coroutine without setting
+    # or clearing the policy's current loop.
+    with asyncio.Runner(loop_factory=asyncio.new_event_loop) as runner:
+        monkeypatch.setattr(operator_cli.asyncio, "run", runner.run)
+        yield
 
 
 @pytest.fixture(params=["operator", "dashboard"])
