@@ -74,7 +74,8 @@ async def _run_live(config: OperatorConfig) -> None:
     http = AiohttpPublicJSONClient()
     operator = PaperTradingOperator(
         config=config,
-        discovery=GammaDiscoveryClient(endpoint=config.gamma_markets_endpoint, http=http),
+        discovery=GammaDiscoveryClient(endpoint=config.gamma_markets_endpoint, http=http,
+                                       opening_reference_endpoint=config.opening_reference_endpoint),
         resolution=GammaResolutionClient(endpoint=config.resolution_endpoint, http=http),
         clock_ms=_now_ms,
     )

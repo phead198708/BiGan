@@ -6,9 +6,11 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from .opening_reference import OpeningReferenceProof
 
 
 class MarketDiscoveryError(RuntimeError):
@@ -64,6 +66,28 @@ class DiscoveredMarket:
     resolution_identity: str
     reference_price_at_start: float | None
     raw_payload_sha256: str
+    oracle_twap_lookback_seconds: int | None = None
+    opening_reference: OpeningReferenceProof | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.opening_reference, dict):
+            object.__setattr__(self, "opening_reference", OpeningReferenceProof(**self.opening_reference))
+        if "twap" in self.resolution_source.lower() and self.oracle_twap_lookback_seconds is None:
+            raise ValueError("TWAP resolution requires an explicit oracle lookback")
+        if self.oracle_twap_lookback_seconds is not None:
+            if type(self.oracle_twap_lookback_seconds) is not int or self.oracle_twap_lookback_seconds not in {30, 60}:
+                raise ValueError("unsupported oracle TWAP lookback")
+            expected = f"https://data.chain.link/streams/{self.underlying.lower()}-usd-twap-{self.oracle_twap_lookback_seconds}s-streams"
+            if self.resolution_source != expected:
+                raise ValueError("oracle TWAP source disagrees with market identity")
+        proof = self.opening_reference
+        if proof is not None and (
+            proof.market_id != self.market_id or proof.condition_id != self.condition_id
+            or proof.symbol != self.underlying or proof.window_start_ts_ms != self.start_ts_ms
+            or proof.window_end_ts_ms != self.end_ts_ms or proof.price != self.reference_price_at_start
+            or proof.lookback_seconds != self.oracle_twap_lookback_seconds
+        ):
+            raise ValueError("opening reference proof disagrees with market identity")
 
     @property
     def window_id(self) -> str:
@@ -85,6 +109,8 @@ class DiscoveredMarket:
             "resolution_identity": self.resolution_identity,
             "reference_price_at_start": self.reference_price_at_start,
             "raw_payload_sha256": self.raw_payload_sha256,
+            "oracle_twap_lookback_seconds": self.oracle_twap_lookback_seconds,
+            "opening_reference": None if self.opening_reference is None else asdict(self.opening_reference),
         }
 
 
@@ -216,6 +242,7 @@ def _parse_market_row(
     market_id = _text(row.get("id") or row.get("market_id"), "market_id")
     condition_id = _text(row.get("conditionId") or row.get("condition_id"), "condition_id")
     resolution_source = _text(row.get("resolutionSource"), "resolutionSource")
+    lookback = _oracle_lookback(row, slug_identity, resolution_source)
     resolution_identity = _text(
         row.get("resolutionIdentity")
         or f"condition:{condition_id}:source:{resolution_source}",
@@ -263,7 +290,30 @@ def _parse_market_row(
         resolution_identity=resolution_identity,
         reference_price_at_start=reference_price_at_start,
         raw_payload_sha256=hashlib.sha256(encoded).hexdigest(),
+        oracle_twap_lookback_seconds=lookback,
     )
+
+
+def _oracle_lookback(row: dict[str, Any], identity: tuple[str, str, int, int] | None, source: str) -> int | None:
+    config = row.get("cryptoMarketConfig")
+    if config is None:
+        if "twap" in source.lower():
+            raise ValueError("TWAP resolution requires explicit cryptoMarketConfig")
+        return None
+    if not isinstance(config, dict) or type(config.get("twapEnabled")) is not bool:
+        raise ValueError("invalid cryptoMarketConfig")
+    if not config["twapEnabled"]:
+        if "twap" in source.lower():
+            raise ValueError("TWAP source conflicts with disabled cryptoMarketConfig")
+        return None
+    if identity is None or config.get("asset") != identity[0].lower() or config.get("duration") != {
+        300_000: "5m", 900_000: "15m",
+    }.get(identity[2]):
+        raise ValueError("cryptoMarketConfig disagrees with market identity")
+    lookback = _strict_int(config.get("twapLookbackSeconds"), "twapLookbackSeconds")
+    if lookback not in {30, 60}:
+        raise ValueError("unsupported oracle TWAP lookback")
+    return lookback
 
 
 def _market_rows(payload: object) -> list[object]:

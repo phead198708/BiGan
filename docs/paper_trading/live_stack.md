@@ -142,6 +142,12 @@ it through a proxy, tunnel or port forward. No new UI controls or write routes.
 
 ## Options and troubleshooting
 
+Declared Chainlink TWAP markets now fetch a window-bound opening reference and
+use the matching official 30/60-second RTDS TWAP stream and pricing model. See
+[source, persistence and model contract](opening_twap_reference.md). A missing
+opening reference still blocks Session creation; fresh Binance depth/OFI is also
+required. This does not bypass HTTP 451 or make an unavailable feed live-ready.
+
 Times use positive integer `s`, `m`, `h` units, maximum seven days. Defaults:
 `--startup-timeout 60s`, `--poll-interval 2s`, `--request-timeout 3s`,
 `--shutdown-grace 15s`, `--unreadable-timeout 30s`, `--stale-timeout 30s`,

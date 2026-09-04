@@ -75,6 +75,7 @@ class RollingPricingInputsProvider:
         volatility_min_samples: int,
         volatility_max_abs_log_return: float,
         annualization_seconds: int,
+        oracle_twap_lookback_seconds: int | None = None,
     ) -> None:
         if window_end_ts_ms <= window_start_ts_ms:
             raise ValueError("pricing window end must be after start")
@@ -105,6 +106,9 @@ class RollingPricingInputsProvider:
         self.volatility_min_samples = int(volatility_min_samples)
         self.volatility_max_abs_log_return = float(volatility_max_abs_log_return)
         self.annualization_seconds = int(annualization_seconds)
+        if oracle_twap_lookback_seconds is not None and oracle_twap_lookback_seconds not in {30, 60}:
+            raise ValueError("unsupported published TWAP lookback")
+        self.oracle_twap_lookback_seconds = oracle_twap_lookback_seconds
         self._spot_samples: deque[ReferencePriceSample] = deque(maxlen=max_samples)
         self._oracle_samples: deque[ReferencePriceSample] = deque(maxlen=max_samples)
         self._returns: deque[tuple[int, float, int]] = deque(maxlen=max_samples)
@@ -150,7 +154,10 @@ class RollingPricingInputsProvider:
             "volatility_min_samples": self.volatility_min_samples,
             "volatility_max_abs_log_return": self.volatility_max_abs_log_return,
             "annualization_seconds": self.annualization_seconds,
-            "twap_sampling": "event_time_left_continuous",
+            "twap_sampling": "event_time_left_continuous" if self.oracle_twap_lookback_seconds is None else "published_chainlink_twap",
+            "oracle_twap_lookback_seconds": self.oracle_twap_lookback_seconds,
+            "reference_model": "window_average" if self.oracle_twap_lookback_seconds is None else "published_twap",
+            "volatility_source": "spot" if self.oracle_twap_lookback_seconds is None else "published_twap",
             "volatility_returns": "irregular_log_returns_with_elapsed_time",
             "volatility_variance": "elapsed_time_demeaned_realized_variance",
             "volatility_window_policy": "complete_intervals_only_reset_after_long_gap",
@@ -164,6 +171,12 @@ class RollingPricingInputsProvider:
         if self._spot_samples and sample.timestamp_ms <= self._spot_samples[-1].timestamp_ms:
             self.out_of_order_count += 1
             return False
+        if self.oracle_twap_lookback_seconds is None and not self._ingest_volatility(sample):
+            return False
+        self._spot_samples.append(sample)
+        return True
+
+    def _ingest_volatility(self, sample: ReferencePriceSample) -> bool:
         volatility_base = self._last_volatility_sample
         if (
             volatility_base is not None
@@ -174,7 +187,6 @@ class RollingPricingInputsProvider:
                 # A return spanning a long outage cannot describe this rolling window.
                 self._returns.clear()
                 self._last_volatility_sample = sample
-                self._spot_samples.append(sample)
                 return True
             log_return = math.log(sample.price / volatility_base.price)
             if abs(log_return) > self.volatility_max_abs_log_return:
@@ -185,7 +197,6 @@ class RollingPricingInputsProvider:
             self._evict_returns(sample.timestamp_ms)
         elif volatility_base is None:
             self._last_volatility_sample = sample
-        self._spot_samples.append(sample)
         return True
 
     def ingest_oracle(self, sample: ReferencePriceSample) -> bool:
@@ -195,6 +206,8 @@ class RollingPricingInputsProvider:
             return False
         if self._oracle_samples and sample.timestamp_ms <= self._oracle_samples[-1].timestamp_ms:
             self.out_of_order_count += 1
+            return False
+        if self.oracle_twap_lookback_seconds is not None and not self._ingest_volatility(sample):
             return False
         self._oracle_samples.append(sample)
         return True
@@ -228,6 +241,14 @@ class RollingPricingInputsProvider:
         if len(self._returns) < self.volatility_min_samples:
             self.missing_input_count += 1
             return None
+        # A published rolling TWAP is the terminal reference process itself,
+        # not an already-realized fraction of the entire 5m/15m market.
+        if self.oracle_twap_lookback_seconds is not None:
+            return PricingInputs(
+                timestamp_ms=source_ts, spot_price=spot.price,
+                oracle_twap_so_far=oracle.price, twap_weight=0.0,
+                volatility_annualized=self._annualized_volatility(),
+            )
         twap = self._oracle_twap(decision_ts_ms)
         if twap is None:
             self.missing_input_count += 1

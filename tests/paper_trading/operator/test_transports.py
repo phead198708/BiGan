@@ -324,7 +324,7 @@ async def test_chainlink_transport_reuses_strict_parser() -> None:
 def test_subscription_contracts_are_public_and_identity_bound() -> None:
     assert binance_subscription("BTCUSDT")["params"] == ["btcusdt@depth@100ms"]
     assert chainlink_subscription("BTC/USD")["subscriptions"] == [
-        {"topic": "crypto_prices_chainlink", "type": "update", "filters": "btc/usd"}
+        {"topic": "crypto_prices_chainlink", "type": "update", "filters": '{"symbol":"btc/usd"}'}
     ]
 
 

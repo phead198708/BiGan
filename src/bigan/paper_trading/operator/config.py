@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .opening_reference import OPENING_REFERENCE_ENDPOINT
+
 DEFAULT_GAMMA_MARKETS_ENDPOINT = "https://gamma-api.polymarket.com/markets"
 DEFAULT_BINANCE_DEPTH_ENDPOINT = "https://api.binance.com/api/v3/depth"
 DEFAULT_BINANCE_WS_URL = "wss://stream.binance.com:9443/ws"
@@ -44,6 +46,7 @@ _WRITE_PATH_FRAGMENTS = (
     "wallet",
 )
 _ALLOWED_ENDPOINTS = {
+    "opening_reference_endpoint": ({"https"}, {"polymarket.com"}, {"/api/crypto/crypto-price"}),
     "gamma_markets_endpoint": (
         {"https"},
         {"gamma-api.polymarket.com"},
@@ -94,6 +97,7 @@ class OperatorConfig:
     max_preopen_ms: int = 1_800_000
     gamma_markets_endpoint: str = DEFAULT_GAMMA_MARKETS_ENDPOINT
     resolution_endpoint: str = DEFAULT_GAMMA_MARKETS_ENDPOINT
+    opening_reference_endpoint: str = OPENING_REFERENCE_ENDPOINT
     binance_depth_endpoint: str = DEFAULT_BINANCE_DEPTH_ENDPOINT
     binance_ws_url: str = DEFAULT_BINANCE_WS_URL
     binance_symbol: str = "BTCUSDT"

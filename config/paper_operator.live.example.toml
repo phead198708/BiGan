@@ -17,6 +17,8 @@ max_preopen_ms = 1800000
 
 gamma_markets_endpoint = "https://gamma-api.polymarket.com/markets"
 resolution_endpoint = "https://gamma-api.polymarket.com/markets"
+# Read-only website API; window/asset/TWAP identity and response hash are persisted.
+opening_reference_endpoint = "https://polymarket.com/api/crypto/crypto-price"
 binance_depth_endpoint = "https://api.binance.com/api/v3/depth"
 binance_ws_url = "wss://stream.binance.com:9443/ws"
 binance_symbol = "BTCUSDT"

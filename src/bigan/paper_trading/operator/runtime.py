@@ -25,6 +25,7 @@ from bigan.strategies.polymarket_pricing import (
     PolymarketPricingEngine,
 )
 
+from .chainlink_twap import oracle_source
 from .checkpoint import (
     AccountCheckpoint,
     AccountCheckpointStore,
@@ -731,7 +732,9 @@ class PaperTradingOperator:
         self._publish_status(force=True)
 
     def _activate_market(self, market: DiscoveredMarket, *, bankroll: float | None) -> None:
-        if market.reference_price_at_start is None:
+        if market.reference_price_at_start is None or (
+            market.oracle_twap_lookback_seconds is not None and market.opening_reference is None
+        ):
             raise AuthoritativeReferenceUnavailable(
                 "market discovery lacks authoritative reference price at start"
             )
@@ -899,7 +902,7 @@ class PaperTradingOperator:
             window_start_ts_ms=market.start_ts_ms,
             window_end_ts_ms=market.end_ts_ms,
             spot_source=self._spot_source,
-            oracle_source=self._oracle_source,
+            oracle_source=oracle_source(self.config.chainlink_symbol, market.oracle_twap_lookback_seconds),
             max_age_ms=self.config.max_pricing_age_ms,
             max_samples=self.config.pricing_sample_buffer_size,
             twap_window_ms=self.config.twap_window_ms,
@@ -908,6 +911,7 @@ class PaperTradingOperator:
             volatility_min_samples=self.config.volatility_min_samples,
             volatility_max_abs_log_return=self.config.volatility_max_abs_log_return,
             annualization_seconds=self.config.annualization_seconds,
+            oracle_twap_lookback_seconds=market.oracle_twap_lookback_seconds,
         )
         provider_identity = hashlib.sha256(
             json.dumps(
@@ -960,6 +964,7 @@ class PaperTradingOperator:
                 min_edge_15m=self.config.pricing_min_edge_15m,
                 kelly_fraction=self.config.pricing_kelly_fraction,
                 tail_cutoff_ms=self.config.pricing_tail_cutoff_ms,
+                reference_model="window_average" if market.oracle_twap_lookback_seconds is None else "published_twap",
             ),
             oms=oms,
             feed_handler=feed_handler,
@@ -996,7 +1001,8 @@ class PaperTradingOperator:
 
     @property
     def _oracle_source(self) -> str:
-        return f"polymarket_rtds_chainlink:{self.config.chainlink_symbol.lower()}"
+        return oracle_source(self.config.chainlink_symbol, None if self.active_market is None
+                             else self.active_market.oracle_twap_lookback_seconds)
 
     def _load_account_checkpoint(self) -> AccountCheckpoint | None:
         checkpoint = self.checkpoint_store.load(config_sha256=self.config.config_sha256)
@@ -1154,6 +1160,8 @@ class PaperTradingOperator:
                 "resolution_source": market.resolution_source,
                 "resolution_identity": market.resolution_identity,
                 "reference_price_at_start": market.reference_price_at_start,
+                "oracle_twap_lookback_seconds": market.oracle_twap_lookback_seconds,
+                "opening_reference": market.provenance()["opening_reference"],
             },
         }
 

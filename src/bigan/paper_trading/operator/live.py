@@ -7,6 +7,7 @@ import json
 from collections.abc import Mapping
 from contextlib import suppress
 
+from .chainlink_twap import oracle_source
 from .pricing_inputs import ReferencePriceSample
 from .read_model import OperatorState
 from .runtime import PaperTradingOperator
@@ -130,8 +131,9 @@ class LiveFeedSupervisor:
 
         chainlink = ChainlinkReadonlyFeed(
             expected_symbol=config.chainlink_symbol,
-            source=f"polymarket_rtds_chainlink:{config.chainlink_symbol.lower()}",
+            source=oracle_source(config.chainlink_symbol, market.oracle_twap_lookback_seconds),
             on_sample=oracle_sample,
+            lookback_seconds=market.oracle_twap_lookback_seconds,
         )
 
         async def chainlink_payload(
@@ -183,7 +185,7 @@ class LiveFeedSupervisor:
         )
         chainlink_transport = PublicWebSocketTransport(
             endpoint=config.chainlink_ws_url,
-            subscription=chainlink_subscription(config.chainlink_symbol),
+            subscription=chainlink_subscription(config.chainlink_symbol, market.oracle_twap_lookback_seconds),
             queue_size=config.binance_queue_size,
             on_payload=chainlink_payload,
             on_generation=lambda connection_generation: self.operator.begin_oracle_connection(
@@ -195,7 +197,7 @@ class LiveFeedSupervisor:
             ),
             reconnect_min_seconds=config.reconnect_min_seconds,
             reconnect_max_seconds=config.reconnect_max_seconds,
-            heartbeat_interval_seconds=config.heartbeat_interval_seconds,
+            heartbeat_interval_seconds=min(5.0, config.heartbeat_interval_seconds),
             clock_ms=self.operator.clock_ms,
             application_heartbeat="PING",
         )

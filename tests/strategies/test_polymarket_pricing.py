@@ -96,6 +96,33 @@ def test_probability_bounds_and_monotonicity() -> None:
     assert len(set(probs)) == len(probs)
 
 
+@pytest.mark.parametrize("kind", ["5m", "15m"])
+def test_published_twap_forecast_keeps_opening_strike_and_uses_published_reference(kind):
+    engine = PolymarketPricingEngine(reference_model="published_twap", tail_cutoff_ms=0)
+    window = _window(kind)
+    a = _signal(engine, window, current_ts_ms=100000, spot_price=50000,
+                oracle_twap_so_far=100010, volatility_annualized=.5)
+    b = _signal(engine, window, current_ts_ms=100000, spot_price=200000,
+                oracle_twap_so_far=100010, volatility_annualized=.5)
+    expected_yes = engine.calculate_probability(spot_price=100010, effective_strike=window.strike_price,
+                                                time_to_expiry_sec=(window.end_ts_ms - 100000) / 1000,
+                                                volatility_annualized=.5, z_ofi=0)
+    assert a.model_prob == b.model_prob
+    assert a.model_prob == pytest.approx(1 - expected_yes if a.direction is SignalDirection.BUY_NO else expected_yes)
+    assert a.effective_strike == b.effective_strike == window.strike_price
+    assert a.spot_price == 50000 and b.spot_price == 200000  # Audit is not mislabeled as Binance spot.
+    with pytest.raises(ValueError, match="cumulative-window"):
+        _signal(engine, window, current_ts_ms=100000, spot_price=100000, twap_weight=.8)
+
+
+def test_reference_model_is_part_of_stable_configuration_identity():
+    legacy = PolymarketPricingEngine()
+    twap = PolymarketPricingEngine(reference_model="published_twap")
+    assert legacy.config_identity() != twap.config_identity()
+    with pytest.raises(ValueError, match="reference model"):
+        PolymarketPricingEngine(reference_model="automatic-fallback")
+
+
 def test_twap_effective_strike_magnification() -> None:
     engine = PolymarketPricingEngine()
     strike = 100_000.0

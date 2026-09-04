@@ -6,9 +6,10 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -22,6 +23,7 @@ from bigan.v8.polymarket.recorder.chainlink_rtds import (
     parse_chainlink_rtds_message,
 )
 
+from .chainlink_twap import TWAP_TOPICS, parse_twap_sample
 from .discovery import (
     DiscoveryFilters,
     DiscoverySelection,
@@ -29,6 +31,7 @@ from .discovery import (
     select_market_windows,
 )
 from .feeds import BinanceDepthSynchronizer, BoundedEventQueue, PolymarketBookSynchronizer
+from .opening_reference import OPENING_REFERENCE_ENDPOINT, fetch_opening_reference
 from .pricing_inputs import ReferencePriceSample
 
 logger = logging.getLogger(__name__)
@@ -79,11 +82,18 @@ class AiohttpPublicJSONClient:
         _require_public_read_url(endpoint)
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
         async with (
-            aiohttp.ClientSession(timeout=timeout) as session,
-            session.get(endpoint, params=dict(params or {})) as response,
+            aiohttp.ClientSession(timeout=timeout, max_field_size=32768) as session,
+            session.get(endpoint, params=dict(params or {}), allow_redirects=False) as response,
         ):
             response.raise_for_status()
-            return await response.json()
+            if response.status != 200:
+                raise ValueError("unexpected public HTTP status")
+            body = bytearray()
+            async for chunk in response.content.iter_chunked(16384):
+                body.extend(chunk)
+                if len(body) > 2_000_000:
+                    raise ValueError("public JSON response exceeds memory bound")
+            return json.loads(body)
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,10 +258,11 @@ class PublicWebSocketTransport:
         generation: int,
         stop_event: asyncio.Event,
     ) -> None:
+        heartbeat_due = time.monotonic() + self.heartbeat_interval_seconds
         while not stop_event.is_set():
             try:
                 raw = await asyncio.wait_for(
-                    socket.recv(), timeout=self.heartbeat_interval_seconds
+                    socket.recv(), timeout=max(0.001, heartbeat_due - time.monotonic())
                 )
             except TimeoutError:
                 if self.application_heartbeat is not None:
@@ -262,7 +273,12 @@ class PublicWebSocketTransport:
                         pong,
                         timeout=self.heartbeat_interval_seconds,
                     )
+                heartbeat_due = time.monotonic() + self.heartbeat_interval_seconds
                 continue
+            if time.monotonic() >= heartbeat_due:
+                if self.application_heartbeat is not None:
+                    await socket.send(self.application_heartbeat)
+                heartbeat_due = time.monotonic() + self.heartbeat_interval_seconds
             received = self.clock_ms()
             self.last_message_received_ms = received
             for payload in _decode_payloads(raw):
@@ -308,9 +324,11 @@ class PublicWebSocketTransport:
 
 
 class GammaDiscoveryClient:
-    def __init__(self, *, endpoint: str, http: PublicJSONClient) -> None:
+    def __init__(self, *, endpoint: str, http: PublicJSONClient,
+                 opening_reference_endpoint: str = OPENING_REFERENCE_ENDPOINT) -> None:
         self.endpoint = endpoint
         self.http = http
+        self.opening_reference_endpoint = opening_reference_endpoint
 
     async def discover(
         self,
@@ -339,7 +357,14 @@ class GammaDiscoveryClient:
             source_endpoint=self.endpoint,
             discovered_at_ms=now_ms,
         )
-        return select_market_windows(candidates, filters=filters, now_ms=now_ms)
+        selection = select_market_windows(candidates, filters=filters, now_ms=now_ms)
+        current = selection.current
+        if current is not None and current.oracle_twap_lookback_seconds is not None:
+            current = await fetch_opening_reference(
+                current, http=self.http, endpoint=self.opening_reference_endpoint,
+            )
+            selection = replace(selection, current=current)
+        return selection
 
 
 class BinanceReadonlyFeed:
@@ -430,14 +455,26 @@ class ChainlinkReadonlyFeed:
         expected_symbol: str,
         source: str,
         on_sample: Callable[[ReferencePriceSample, int], object],
+        lookback_seconds: int | None = None,
     ) -> None:
         self.expected_symbol = expected_symbol.lower()
         self.source = source
         self.on_sample = on_sample
+        self.lookback_seconds = lookback_seconds
         self.parse_error_count = 0
         self.symbol_mismatch_count = 0
 
     async def on_raw(self, raw: str | bytes, *, generation: int, received_at_ms: int) -> None:
+        if self.lookback_seconds is not None:
+            try:
+                sample = parse_twap_sample(json.loads(raw), symbol=self.expected_symbol,
+                                           lookback_seconds=self.lookback_seconds, received_at_ms=received_at_ms)
+            except (ValueError, TypeError):
+                self.parse_error_count += 1
+                return
+            if sample is not None:
+                await _maybe_await(self.on_sample(sample, generation))
+            return
         try:
             rows = parse_chainlink_rtds_message(raw, received_at_ts=received_at_ms)
         except ChainlinkRTDSMessageError:
@@ -464,11 +501,12 @@ def binance_subscription(symbol: str) -> dict[str, object]:
     }
 
 
-def chainlink_subscription(symbol: str) -> dict[str, object]:
+def chainlink_subscription(symbol: str, lookback_seconds: int | None = None) -> dict[str, object]:
     return {
         "action": "subscribe",
         "subscriptions": [
-            {"topic": "crypto_prices_chainlink", "type": "update", "filters": symbol.lower()}
+            {"topic": "crypto_prices_chainlink" if lookback_seconds is None else TWAP_TOPICS[lookback_seconds],
+             "type": "update", "filters": json.dumps({"symbol": symbol.lower()}, separators=(",", ":"))}
         ],
     }
 

@@ -368,11 +368,11 @@ contain a listing date from the preceding day. Missing/conflicting authoritative
 window identity fails closed. Gamma lists `eventStartTime` separately in its
 [market response schema](https://docs.polymarket.com/api-reference/markets/list-markets).
 
-- Gamma does not consistently publish the authoritative price-to-beat for an
-  already-running up/down window. The operator accepts an explicit
-  `referencePriceAtStart`/`priceToBeat`; when it is absent it stays degraded
-  rather than substituting current spot or CLOB mid. A later integration can
-  add a separately proven historical Chainlink start-price lookup.
+- For declared Chainlink TWAP markets, opening price comes from Polymarket's
+  window-bound public website price service, with immutable provenance and no
+  current-price fallback. This endpoint is not a versioned Gamma API; missing or
+  changed responses stop activation. See [opening reference and TWAP model](opening_twap_reference.md)
+  for source identity, RTDS topics, resume behavior and approximation limitations.
 - The process is single strategy, single paper account, and one active window.
 - Metrics are bounded in-memory counters projected to JSON; no new monitoring
   service or large database is introduced.
