@@ -18,6 +18,8 @@ const fs = require("node:fs/promises");
     page.on("pageerror", error => errors.push(error.message));
     await page.goto(url);
     await page.waitForFunction(() => document.querySelectorAll(".kpi").length === 8);
+    assert.equal(await page.locator(".price-card").count(), 5);
+    assert.match(await page.locator("#price-up").innerText(), /Ask.*USDC \/ share/);
     assert(await page.locator(".paper-banner").isVisible());
     assert.match(await page.locator(".paper-banner").innerText(), /PAPER \/ SIMULATED — NO REAL FUNDS/);
     assert.equal(await page.locator("#account-kpis").innerText().then(t => t.includes("NaN")), false);
@@ -31,11 +33,51 @@ const fs = require("node:fs/promises");
     await page.route("**/api/v1/dashboard*", route => route.fulfill({status: 503, contentType: "application/json", body: "{}"}));
     await page.waitForFunction(() => document.getElementById("error-banner").textContent.includes("Refresh failed"));
     assert.equal(await page.locator("#account-kpis").innerText(), before);
+    assert.equal(await page.locator(".price-card .badge.good").count(), 0);
     await page.unroute("**/api/v1/dashboard*");
     await page.waitForFunction(() => !document.getElementById("error-banner").textContent.includes("Refresh failed"));
 
     const response = await page.request.get(url + "/api/v1/dashboard");
     const view = await response.json();
+    // Independent observations: no decision, no Binance, but Oracle and both
+    // contracts are inspectable. Explicit injected fixture, never a live feed.
+    view.stale = false; view.status_age_ms = 0; view.stale_after_ms = 60_000;
+    view.status.state = "SYNCING";
+    view.status.last_decision = null;
+    view.active_market.reference_price_at_start = 100_000.125;
+    view.active_market.oracle_twap_lookback_seconds = 60;
+    const observation = {value: 100_010.25, fresh: true, connected: true, timestamp_ms: view.generated_at_ms,
+      age_ms: 0, max_age_ms: 60_000, received_at_ms: view.generated_at_ms,
+      source: '<img src=x onerror="window.xss=true">', symbol: "btc/usd", quote_currency: "USD",
+      kind: "published_twap", lookback_seconds: 60};
+    const quote = {bid: 0.38, ask: 0.4, bid_size: 80, ask_size: 120, confirmed: true, ...observation};
+    view.status.market_data = {window_id: view.active_market.window_id, market_id: view.active_market.market_id,
+      spot: {value: null}, oracle: observation,
+      up: {...quote, token_id: view.active_market.yes_token_id},
+      down: {...quote, bid: 0.58, ask: 0.6, token_id: view.active_market.no_token_id}};
+    await page.route("**/api/v1/dashboard*", route => route.fulfill({status: 200, contentType: "application/json", body: JSON.stringify(view)}));
+    await page.waitForFunction(() => document.querySelector("#price-opening .price-value").textContent === "$100,000.1250");
+    assert.equal(await page.locator("#price-oracle .price-value").innerText(), "$100,010.2500");
+    assert.match(await page.locator("#price-oracle").innerText(), /60s published TWAP/);
+    assert.equal(await page.locator("#price-spot .price-value").innerText(), "—");
+    assert.equal(await page.locator("#price-up .price-value").innerText(), "$0.400000");
+    assert.equal(await page.locator("#price-down .price-value").innerText(), "$0.600000");
+    assert.equal(await page.locator(".price-card img").count(), 0);
+    assert.equal(await page.evaluate(() => window.xss), undefined);
+    // Age advances between successful fetches, not just when new data arrives.
+    observation.max_age_ms = 200;
+    await page.waitForFunction(() => document.querySelector("#price-oracle .badge").textContent.includes("Stale"));
+    // A rollover must not combine a new opening with old token quotes.
+    view.active_market.window_id = "next-window";
+    view.active_market.reference_price_at_start = 100_020;
+    await page.waitForFunction(() => document.querySelector("#price-opening .price-value").textContent === "$100,020.0000");
+    assert.equal(await page.locator("#price-up .price-value").innerText(), "—");
+    assert.equal(await page.locator("#price-oracle .price-value").innerText(), "—");
+    delete view.status.market_data;
+    view.active_market.reference_price_at_start = null;
+    await page.waitForFunction(() => document.querySelector("#price-opening .price-value").textContent === "—");
+    assert.equal(await page.locator(".price-card .badge.good").count(), 0);
+    await page.unroute("**/api/v1/dashboard*");
     view.active_market.title = '<img src=x onerror="window.xss=true">';
     view.account = null; view.positions = null;
     view.status.last_decision = null;
@@ -50,7 +92,7 @@ const fs = require("node:fs/promises");
     await page.locator("#latest").focus();
     await page.keyboard.press("Enter");
     assert.deepEqual(errors, []);
-    console.log("Browser acceptance passed: desktop/mobile, no horizontal overflow, failure retention/recovery, null values, XSS-safe text, keyboard control.");
+    console.log("Browser acceptance passed: desktop/mobile, prices without decisions, per-source missing/stale data, rollover fencing, legacy status, no overflow, failure retention/recovery, XSS-safe text, keyboard control.");
   } finally {
     await browser.close();
   }

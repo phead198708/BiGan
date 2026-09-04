@@ -145,6 +145,18 @@ paths, SQL, tracebacks, or configuration. The service has no outbound requests.
 
 - **Operator:** state/reason, operator/strategy/run IDs, source commit, explicit
   paper-only/write-disabled safety, update time, age, and stale status.
+- **Market data (top of page):** fixed opening / price-to-beat reference and its
+  metadata or public-endpoint proof; latest accepted Chainlink reference (explicit
+  30s/60s published TWAP where applicable); Binance spot bid/ask midpoint; separate
+  UP/YES and DOWN/NO best ask (buy) and bid (sell), each with available shares,
+  token identity and event time. These observations come from the operator's
+  bounded feed state, **not** from `last_decision` or position marks. No decision,
+  Binance outage or insufficient volatility samples do not hide other sources.
+  Each source has independent connection/age/freshness; unreconciled CLOB depth
+  remains unavailable. Rollover clears the old observations. The additive
+  `status.market_data` projection is optional when reading older status files;
+  no fallback prices are fabricated. Opening proof is public JSON identity/hash
+  binding, **not a signed oracle report**.
 - **Account:** canonical lifetime initial bankroll, cash, equity, total/realized/
   unrealized PnL and fees. **Drawdown is the current run's canonical ledger
   drawdown**, not a newly computed lifetime statistic.
@@ -156,14 +168,15 @@ paths, SQL, tracebacks, or configuration. The service has no outbound requests.
   timestamps, ages, counters, OFI Z and available sample counts. Missing fields
   remain unavailable, never silently zero.
 - **Latest decision inputs:** recorded Spot, oracle TWAP, TWAP weight and
-  annualized volatility from `last_decision` only. No current raw Oracle price
-  or unrecorded per-component freshness is fabricated; the provider exposes
-  aggregate pricing health, and Oracle connection/freshness is in Chainlink.
+  annualized volatility from `last_decision` only; historical decision inputs
+  are deliberately separate from the current source observations above.
 - **History:** decision signal/probability/edge/EV/size and execution/cash;
   fills with fee/order/signal-event identity; settlement payouts/proceeds/PnL;
   runs with opening cash, settled state and predecessor.
 
-All times explicitly use UTC. Numbers use USDC. All external content is inserted
+All times explicitly use UTC. Account and contract quotes use USDC (contract prices
+are per share, before fees); Binance spot uses USDT and Chainlink/opening references
+use USD. Missing prices render as an em dash, not zero. All external content is inserted
 as text nodes, never executable HTML. The top banner always says
 **PAPER / SIMULATED — NO REAL FUNDS**. States use text/symbols as well as color.
 Tables scroll horizontally within responsive panels and support keyboard focus.
@@ -172,6 +185,8 @@ Polling occurs every two seconds after the preceding request completes (no
 overlap). Failures retain the last successful render and show a warning. Status
 is stale after `max(3 * status_interval_ms, 5000)` milliseconds; an ahead-of-reader
 timestamp is also warned. Browser age/countdown continues between polls.
+Individual quote ages also advance between polls. A failed refresh, stale status,
+stopped operator or expired window prevents any quote from being labelled fresh.
 
 ## Troubleshooting
 

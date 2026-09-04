@@ -10,7 +10,7 @@
 </head>
 <body>
   <div class="paper-banner">PAPER / SIMULATED — NO REAL FUNDS <span>LOCAL · READ ONLY</span></div>
-  <a class="skip-link" href="#main">Skip to account</a>
+  <a class="skip-link" href="#main">Skip to market data</a>
   <header class="page-header">
     <div><p class="eyebrow">BiGan / Operator observatory</p><h1>Paper Monitor</h1></div>
     <div class="connection"><span id="state-badge" class="badge">— unavailable</span><p id="poll-status">Connecting to local reader…</p></div>
@@ -18,6 +18,13 @@
   <div id="error-banner" class="notice" role="status" aria-live="polite" hidden></div>
   <div id="warnings" class="notices" role="status" aria-live="polite"></div>
   <main id="main">
+    <section class="market-data-section" aria-labelledby="market-data-title">
+      <div class="section-heading"><h2 id="market-data-title">基础行情 · Market data</h2><span>Accepted feed observations · independent of trading decisions</span></div>
+      <p id="price-market" class="hint">Waiting for an active market…</p>
+      <div id="reference-prices" class="reference-grid"></div>
+      <div id="contract-prices" class="contract-grid"></div>
+      <p class="hint">UP / DOWN 显示原始盘口：买入看 Ask，卖出看 Bid。每股报价，不含手续费；不是成交价或模型概率。Missing data is never replaced with zero.</p>
+    </section>
     <section aria-labelledby="account-title" class="account-section">
       <div class="section-heading"><h2 id="account-title">Account</h2><span>USDC · lifetime totals / run-local drawdown</span></div>
       <div id="account-kpis" class="kpi-grid"><p>Account unavailable until a valid run is readable.</p></div>

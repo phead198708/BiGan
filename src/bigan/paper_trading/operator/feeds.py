@@ -718,6 +718,31 @@ class PolymarketBookSynchronizer:
             }
         return output
 
+    def quote_observations(self, *, now_ms: int) -> dict[str, dict[str, object]]:
+        """Bounded per-token quotes; never expose unreconciled candidate depth."""
+        output = self.token_health(now_ms=now_ms)
+        for observation in output.values():
+            token_id = str(observation["token_id"])
+            depth = self._depth.get(token_id)
+            confirmed = bool(
+                depth is not None
+                and token_id in self._full_books
+                and token_id not in self._pending_tops
+            )
+            bid, ask = depth.top() if confirmed and depth is not None else (None, None)
+            observation.update({
+                "source": "polymarket_clob",
+                "bid": bid,
+                "ask": ask,
+                "bid_size": None if bid is None or depth is None else depth.bids[bid],
+                "ask_size": None if ask is None or depth is None else depth.asks[ask],
+                "confirmed": confirmed,
+                "connected": self.connected,
+                "fresh": bool(self.connected and confirmed and observation["fresh"]),
+                "max_age_ms": self.max_age_ms,
+            })
+        return output
+
     def _tokens_fresh(self, *, now_ms: int) -> bool:
         expected = (self.yes_token_id, self.no_token_id)
         return all(

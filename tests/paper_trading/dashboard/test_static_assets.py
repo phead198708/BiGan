@@ -8,7 +8,7 @@ def test_assets_are_packaged_and_required_sections_exist():
     root = files("bigan.paper_trading.dashboard")
     html = root.joinpath("static/index.html").read_text()
     assert "PAPER / SIMULATED — NO REAL FUNDS" in html
-    for section in ("account", "market", "operator", "positions", "feeds", "alpha", "inputs", "decisions", "fills", "settlements", "runs"):
+    for section in ("market-data", "account", "market", "operator", "positions", "feeds", "alpha", "inputs", "decisions", "fills", "settlements", "runs"):
         assert f'id="{section}-title"' in html
     assert '<script src="/static/app.js" defer>' in html
     assert "Load older" in html and "UTC" in html

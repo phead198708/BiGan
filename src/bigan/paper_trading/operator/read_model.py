@@ -6,7 +6,7 @@ import json
 import math
 import os
 from collections.abc import Iterator
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
@@ -57,6 +57,7 @@ class OperatorStatus:
     last_decision: dict[str, object] | None
     last_fill: dict[str, object] | None
     settlement: dict[str, object]
+    market_data: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.schema_version != OPERATOR_STATUS_SCHEMA_VERSION:
@@ -80,6 +81,7 @@ class OperatorStatus:
             "account",
             "counters",
             "settlement",
+            "market_data",
         ):
             if not isinstance(getattr(self, name), dict):
                 raise ValueError(f"{name} must be an object")
@@ -104,7 +106,8 @@ class OperatorStatus:
         if not isinstance(payload, dict):
             raise ValueError("operator status must be an object")
         expected = set(cls.__dataclass_fields__)
-        if set(payload) != expected:
+        # Additive projection: old status files have no raw quote observations.
+        if set(payload) not in (expected, expected - {"market_data"}):
             raise ValueError("operator status fields do not match schema")
         values = dict(payload)
         values["state"] = OperatorState(str(values["state"]))

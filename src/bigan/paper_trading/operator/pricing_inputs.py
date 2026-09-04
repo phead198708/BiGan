@@ -140,6 +140,15 @@ class RollingPricingInputsProvider:
     def last_oracle_timestamp_ms(self) -> int | None:
         return None if not self._oracle_samples else self._oracle_samples[-1].timestamp_ms
 
+    @property
+    def last_spot_sample(self) -> ReferencePriceSample | None:
+        """Latest accepted immutable observation, independent of pricing readiness."""
+        return self._spot_samples[-1] if self._spot_samples else None
+
+    @property
+    def last_oracle_sample(self) -> ReferencePriceSample | None:
+        return self._oracle_samples[-1] if self._oracle_samples else None
+
     def config_identity(self) -> dict[str, object]:
         return {
             "window_start_ts_ms": self.window_start_ts_ms,

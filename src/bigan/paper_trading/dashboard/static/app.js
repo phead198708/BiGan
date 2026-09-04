@@ -41,6 +41,55 @@ function table(id, rows, columns, empty) {
 }
 
 let last = null, receivedAt = 0, cursor = null, olderCursor = null, failed = false, busy = false, timer;
+let priceClocks = [];
+const price = (v, digits = 4) => typeof v === "number" && Number.isFinite(v) ? "$" + number(v, digits) : "—";
+function priceCard(target, key, label, value, unit, rows, observation) {
+  const card = el("article", undefined, "price-card " + key);
+  card.id = "price-" + key;
+  const badge = el("span", "— unavailable", "badge warn"), dl = el("dl", undefined, "fields");
+  card.append(el("h3", label), el("span", value, "price-value"), el("span", unit, "price-unit"), el("br"), badge, dl);
+  for (const [name, v] of rows) dl.append(el("dt", name), el("dd", v));
+  if (observation) {
+    const ageNode = el("dd", age(observation.age_ms));
+    dl.append(el("dt", "数据年龄 / Age"), ageNode);
+    priceClocks.push({badge, ageNode, observation});
+  } else {
+    badge.textContent = value === "—" ? "不可用 · Unavailable" : "固定开盘参考 · Fixed at window start";
+  }
+  $(target).append(card);
+}
+function renderPrices(view) {
+  priceClocks = [];
+  $("reference-prices").replaceChildren(); $("contract-prices").replaceChildren();
+  const market = view.active_market, data = view.status.market_data;
+  // Do not mix a previous window's observations with the new opening reference.
+  const current = market && data?.window_id === market.window_id && data?.market_id === market.market_id ? data : {};
+  $("price-market").textContent = market ? text(market.slug) + " · " + when(market.window_start_ts_ms) + " → " + when(market.window_end_ts_ms) : "No active market · 暂无市场";
+  const proof = market?.opening_reference;
+  const lookback = market?.oracle_twap_lookback_seconds;
+  priceCard("reference-prices", "opening", "开盘价 · Price to beat", price(market?.reference_price_at_start),
+    lookback ? "USD · 开盘 " + lookback + "s TWAP" : "USD · 窗口开盘参考价", [
+      ["Source", proof?.source_endpoint || market?.source_endpoint],
+      ["开窗 (UTC)", when(market?.window_start_ts_ms)],
+      ["来源时间 (UTC)", when(proof?.source_ts_ms ?? market?.discovered_at_ms)],
+      ["来源校验", proof ? "Public endpoint · identity / payload hash (not a signed oracle report)" : "Market metadata · no separate opening proof"],
+    ]);
+  for (const [key, label] of [["oracle", "当前参考价 · Chainlink"], ["spot", "当前现货价 · Binance"]]) {
+    const o = current[key] || {};
+    const model = key === "spot" ? "bid/ask midpoint" : o.kind === "published_twap" ? text(o.lookback_seconds) + "s published TWAP" : "Oracle price";
+    priceCard("reference-prices", key, label, price(o.value), text(o.symbol) + " · " + text(o.quote_currency) + " · " + model, [
+      ["Source", o.source], ["事件 (UTC)", when(o.timestamp_ms)], ["接收 (UTC)", when(o.received_at_ms)],
+    ], {...o, available: typeof o.value === "number"});
+  }
+  for (const [key, label, token] of [["up", "UP / YES · 上涨", market?.yes_token_id], ["down", "DOWN / NO · 下跌", market?.no_token_id]]) {
+    const candidate = current[key];
+    const o = token && candidate?.token_id === token ? candidate : {};
+    priceCard("contract-prices", key, label, price(o.ask, 6), "买入 Ask · USDC / share", [
+      ["卖出 Bid", price(o.bid, 6)], ["Ask 数量 / shares", number(o.ask_size, 4)], ["Bid 数量 / shares", number(o.bid_size, 4)],
+      ["Source", o.source], ["Token", token], ["事件 (UTC)", when(o.timestamp_ms)],
+    ], {...o, available: typeof o.ask === "number" && typeof o.bid === "number"});
+  }
+}
 function clocks() {
   if (!last) return;
   const elapsed = performance.now() - receivedAt;
@@ -57,11 +106,22 @@ function clocks() {
     const remaining = Math.max(0, Math.floor((end - last.generated_at_ms - elapsed) / 1000));
     $("countdown").textContent = remaining === 0 ? "Window ended" : Math.floor(remaining / 60) + "m " + remaining % 60 + "s remaining";
   } else $("countdown").textContent = "—";
+  for (const {badge, ageNode, observation: o} of priceClocks) {
+    const currentAge = typeof o.age_ms === "number" ? o.age_ms + statusAge : null;
+    ageNode.textContent = age(currentAge);
+    const stopped = ["STOPPING", "STOPPED", "FAILED", "EXHAUSTED"].includes(last.status.state);
+    const expired = typeof end === "number" && last.generated_at_ms + elapsed >= end;
+    const fresh = o.fresh === true && !failed && !stale && !stopped && !expired && currentAge !== null && currentAge >= 0 && currentAge <= o.max_age_ms;
+    badge.textContent = !o.available ? (o.connected === true && o.confirmed === false ? "待确认 · Syncing" : "不可用 · Unavailable")
+      : stopped || o.connected === false ? "已断开 · Disconnected" : fresh ? "新鲜 · Fresh" : "已过期 / 未确认 · Stale";
+    badge.className = "badge " + (fresh && o.available ? "good" : "warn");
+  }
 }
 
 function render(view) {
   const status = view.status, account = view.account, market = view.active_market;
   last = view; receivedAt = performance.now();
+  renderPrices(view);
   const badge = $("state-badge");
   const state = status.state;
   badge.textContent = (state === "RUNNING" ? "✓ " : state === "FAILED" ? "× " : "◷ ") + text(state);
@@ -115,7 +175,7 @@ function render(view) {
     ["Pricing ready / fresh", flag(pricing?.ready) + " / " + flag(pricing?.fresh)], ["Pricing time (UTC)", when(pricing?.timestamp_ms)], ["Pricing age", age(pricing?.age_ms)],
     ["Spot samples", pricing?.spot_sample_count], ["Oracle / TWAP samples", pricing?.oracle_sample_count], ["Volatility return samples", pricing?.return_sample_count],
     ["Oracle feed fresh", flag(status.feeds?.chainlink?.fresh)],
-    ["Spot / TWAP / volatility freshness", "— individually unavailable; see aggregate pricing health"],
+    ["Spot / Oracle observations", "See Market data above; volatility readiness is reported separately"],
   ]);
   const input = status.last_decision;
   fields("inputs-fields", [

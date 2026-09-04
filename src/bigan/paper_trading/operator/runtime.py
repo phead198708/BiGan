@@ -36,6 +36,7 @@ from .checkpoint import (
 from .config import OperatorConfig
 from .discovery import DiscoveredMarket, DiscoveryFilters, DiscoverySelection
 from .feeds import BinanceDepthSynchronizer, FeedHealth, PolymarketBookSynchronizer
+from .market_data import reference_observation
 from .ownership import AccountProcessLock
 from .pricing_inputs import ReferencePriceSample, RollingPricingInputsProvider
 from .read_model import (
@@ -647,7 +648,53 @@ class PaperTradingOperator:
                 "status": settlement_status,
                 "source_reference": settlement_reference,
             },
+            market_data=self._market_data(now_ms=now_ms),
         )
+
+    def _market_data(self, *, now_ms: int) -> dict[str, object]:
+        """Project accepted feed data even when another feed blocks decisions."""
+        market, provider = self.active_market, self.pricing_provider
+        if market is None:
+            return {}
+        active = self.state not in {
+            OperatorState.STOPPING, OperatorState.STOPPED, OperatorState.FAILED,
+            OperatorState.EXHAUSTED,
+        }
+        quotes = {} if self.market_sync is None else self.market_sync.quote_observations(now_ms=now_ms)
+        if not active:
+            for quote in quotes.values():
+                quote.update(connected=False, fresh=False)
+        lookback = market.oracle_twap_lookback_seconds
+        spot = reference_observation(
+            None if provider is None else provider.last_spot_sample,
+            source=self._spot_source, symbol=self.config.binance_symbol,
+            kind="midpoint", currency="USDT", now_ms=now_ms,
+            max_age_ms=self.config.max_pricing_age_ms,
+            connected=bool(active and self.binance_sync is not None and self.binance_sync.connected),
+        )
+        spot["fresh"] = bool(
+            spot["fresh"] and self.binance_sync is not None
+            and self.binance_sync.health(now_ms=now_ms).fresh
+        )
+        return {
+            "window_id": market.window_id,
+            "market_id": market.market_id,
+            "underlying": self.config.underlying,
+            "spot": spot,
+            "oracle": {
+                **reference_observation(
+                    None if provider is None else provider.last_oracle_sample,
+                    source=self._oracle_source, symbol=self.config.chainlink_symbol,
+                    kind="published_twap" if lookback is not None else "oracle_price",
+                    currency="USD", now_ms=now_ms,
+                    max_age_ms=self.config.max_pricing_age_ms,
+                    connected=active and self._oracle_connected,
+                ),
+                "lookback_seconds": lookback,
+            },
+            "up": quotes.get("yes", {}),
+            "down": quotes.get("no", {}),
+        }
 
     async def _process_snapshot_locked(
         self,
